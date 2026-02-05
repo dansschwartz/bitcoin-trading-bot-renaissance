@@ -91,7 +91,7 @@ class MetaLearner(nn.Module):
 
         # Meta-learning network
         self.meta_net = nn.Sequential(
-            nn.Linear(n_models + feature_dim, 256),
+            nn.Linear(n_models + 32, 256), # Use 32 to match encoded_context
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(256, 128),

@@ -1,0 +1,29 @@
+{
+  "coinbase": {
+    "enabled": true,
+    "sandbox": true,
+    "product_id": "BTC-USD",
+    "api_key_env": "COINBASE_API_KEY",
+    "api_secret_env": "COINBASE_API_SECRET",
+    "api_passphrase_env": "COINBASE_API_PASSPHRASE",
+    "order_book_depth": 10
+  },
+  "twitter": {
+    "enabled": true,
+    "bearer_token_env": "TWITTER_BEARER_TOKEN",
+    "query": "(bitcoin OR BTC OR cryptocurrency) -is:retweet lang:en",
+    "max_tweets": 100
+  },
+  "fear_greed": {
+    "enabled": true,
+    "api_url": "https://api.alternative.me/fng/"
+  },
+  "data_quality": {
+    "max_age_seconds": 300,
+    "min_confidence_threshold": 0.7
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/data_pipeline.log"
+  }
+}

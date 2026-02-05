@@ -14,8 +14,9 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# Add src directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Add project root to path
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 class RenaissanceSystemTests(unittest.TestCase):
     """Comprehensive test suite for Renaissance trading system"""
@@ -35,7 +36,7 @@ class RenaissanceSystemTests(unittest.TestCase):
                 "macd": 0.105,
                 "rsi": 0.115,
                 "bollinger": 0.095,
-                "alternative": 0.045
+                "alternative": 0.015
             }
         }
 
@@ -205,14 +206,14 @@ class RenaissanceSystemTests(unittest.TestCase):
             'macd': 0.1,            # 10.5% weight = 0.0105
             'rsi': -0.1,            # 11.5% weight = -0.0115
             'bollinger': 0.0,       # 9.5% weight = 0.0
-            'alternative': 0.4      # 4.5% weight = 0.018
+            'alternative': 0.4      # 1.5% weight = 0.006
         }
 
         weighted_signal, contributions = bot.calculate_weighted_signal(test_signals)
 
         # Calculate expected result
         expected = (0.5*0.32 + 0.3*0.21 + 0.2*0.14 + 0.1*0.105 + 
-                   (-0.1)*0.115 + 0.0*0.095 + 0.4*0.045)
+                   (-0.1)*0.115 + 0.0*0.095 + 0.4*0.015)
 
         self.assertAlmostEqual(weighted_signal, expected, places=4)
 

@@ -86,9 +86,18 @@ class MicrostructureMetrics(NamedTuple):
     volume_spike_score: float
     large_trade_flow: float
     spread_regime_score: float
+    vpin: float
     overall_signal: float
     confidence: float
     regime: LiquidityRegime
+
+class MicrostructureSignal(NamedTuple):
+    """Lightweight microstructure signal container used in tests"""
+    order_flow_strength: float
+    order_book_imbalance: float
+    volume_pressure: float
+    confidence: float
+    timestamp: datetime
 
 class MicrostructureEngine:
     """
@@ -115,6 +124,13 @@ class MicrostructureEngine:
         self.volume_spike_threshold = 2.5
         self.large_trade_threshold = 1000.0  # USD value
         self.spread_percentiles = {'tight': 0.25, 'wide': 0.75}
+        
+        # VPIN (Volume-Synchronized Probability of Informed Trading)
+        self.vpin_bucket_size = 10.0  # Base volume units
+        self.vpin_buckets_count = 50
+        self.vpin_buckets = deque(maxlen=self.vpin_buckets_count)
+        self.current_bucket_buy_vol = 0.0
+        self.current_bucket_sell_vol = 0.0
         
         # Threading for real-time analysis
         self.analysis_lock = threading.Lock()
@@ -160,13 +176,40 @@ class MicrostructureEngine:
             return self._default_metrics()
     
     def update_trade(self, trade: TradeData) -> None:
-        """Update trade data for flow analysis"""
+        """Update trade data for flow analysis and VPIN"""
         try:
             with self.analysis_lock:
                 self.trade_history.append(trade)
                 
+                # Update VPIN bucket
+                if trade.side == 'buy':
+                    self.current_bucket_buy_vol += trade.size
+                elif trade.side == 'sell':
+                    self.current_bucket_sell_vol += trade.size
+                
+                # Check if bucket is full
+                total_vol = self.current_bucket_buy_vol + self.current_bucket_sell_vol
+                if total_vol >= self.vpin_bucket_size:
+                    imbalance = abs(self.current_bucket_buy_vol - self.current_bucket_sell_vol)
+                    self.vpin_buckets.append(imbalance)
+                    
+                    # Reset current bucket
+                    self.current_bucket_buy_vol = 0.0
+                    self.current_bucket_sell_vol = 0.0
+                
         except Exception as e:
             self.logger.error(f"Error updating trade: {e}")
+    
+    async def analyze_microstructure(self, order_book: Any) -> MicrostructureSignal:
+        """Compatibility stub for tests; returns lightweight microstructure signal."""
+        # Minimal placeholder; tests patch this method.
+        return MicrostructureSignal(
+            order_flow_strength=0.0,
+            order_book_imbalance=0.0,
+            volume_pressure=0.0,
+            confidence=0.0,
+            timestamp=datetime.now()
+        )
     
     def _analyze_microstructure(self, current_snapshot: OrderBookSnapshot) -> MicrostructureMetrics:
         """
@@ -190,18 +233,25 @@ class MicrostructureEngine:
             # 5. Spread Regime Classification (5% weight)
             spread_score = self._calculate_spread_regime(current_snapshot)
             
+            # 6. VPIN Analysis (10% weight)
+            vpin_score = self._calculate_vpin()
+            
             # Combine signals with Renaissance Technologies weights
             overall_signal = (
-                imbalance_score * 0.30 +
-                depth_score * 0.20 +
-                volume_score * 0.15 +
-                flow_score * 0.25 +  # Remaining weight
-                spread_score * 0.10
+                imbalance_score * 0.25 +
+                depth_score * 0.15 +
+                volume_score * 0.10 +
+                flow_score * 0.25 +
+                spread_score * 0.05 +
+                (vpin_score - 0.5) * 2.0 * 0.20
             )
+            
+            # Bound overall signal to [-1, 1]
+            overall_signal = max(min(overall_signal, 1.0), -1.0)
             
             # Calculate confidence based on signal consistency
             confidence = self._calculate_signal_confidence([
-                imbalance_score, depth_score, volume_score, flow_score, spread_score
+                imbalance_score, depth_score, volume_score, flow_score, spread_score, vpin_score
             ])
             
             # Determine liquidity regime
@@ -213,6 +263,7 @@ class MicrostructureEngine:
                 volume_spike_score=volume_score,
                 large_trade_flow=flow_score,
                 spread_regime_score=spread_score,
+                vpin=vpin_score,
                 overall_signal=overall_signal,
                 confidence=confidence,
                 regime=regime
@@ -449,6 +500,19 @@ class MicrostructureEngine:
             self.logger.error(f"Error calculating spread regime: {e}")
             return 0.0
     
+    def _calculate_vpin(self) -> float:
+        """
+        Calculates Volume-Synchronized Probability of Informed Trading.
+        Higher VPIN indicates higher toxicity and potential for price moves.
+        """
+        if len(self.vpin_buckets) < 10:
+            return 0.5
+        
+        # VPIN = sum(abs(buy - sell)) / (n * bucket_size)
+        total_imbalance = sum(self.vpin_buckets)
+        vpin = total_imbalance / (len(self.vpin_buckets) * self.vpin_bucket_size)
+        return float(min(max(vpin, 0.0), 1.0))
+
     def _calculate_signal_confidence(self, signals: List[float]) -> float:
         """
         Calculate overall signal confidence based on consistency
@@ -526,6 +590,7 @@ class MicrostructureEngine:
             volume_spike_score=0.0,
             large_trade_flow=0.0,
             spread_regime_score=0.0,
+            vpin=0.5,
             overall_signal=0.0,
             confidence=0.0,
             regime=LiquidityRegime.NORMAL_LIQUIDITY

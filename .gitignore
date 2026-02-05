@@ -1,0 +1,12 @@
+.env
+logs/
+data/
+output/
+__pycache__/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.pyc
+.DS_Store
+.idea/

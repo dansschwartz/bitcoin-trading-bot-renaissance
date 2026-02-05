@@ -10,11 +10,13 @@ import logging
 import threading
 import time
 import warnings
+import json
+import secrets
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Tuple, Callable
 
 # Handle optional requests import
 try:
@@ -91,7 +93,7 @@ class CoinbaseCredentials:
     """Coinbase API credentials"""
     api_key: str
     api_secret: str
-    api_passphrase: str
+    api_passphrase: str = ""
     sandbox: bool = True
 
 
@@ -307,6 +309,17 @@ class EnhancedCoinbaseClient:
         # Paper trading simulator
         self.paper_trader = PaperTradingSimulator() if paper_trading else None
 
+        # Initialize ccxt for v3 Cloud API if detected
+        self.ccxt_exchange = None
+        if credentials.api_key.startswith("organizations/"):
+            import ccxt
+            self.ccxt_exchange = ccxt.coinbase({
+                'apiKey': credentials.api_key,
+                'secret': credentials.api_secret.strip("'").strip('"').replace('\\n', '\n'),
+                'enableRateLimit': True
+            })
+            self.logger.info("Initialized ccxt.coinbase for v3 Cloud API")
+
         # Request session setup
         if REQUESTS_AVAILABLE:
             self.session = requests.Session()
@@ -332,7 +345,11 @@ class EnhancedCoinbaseClient:
             f"Coinbase client initialized - Paper trading: {paper_trading}, Sandbox: {credentials.sandbox}")
 
     def _generate_signature(self, timestamp: str, method: str, path: str, body: str = "") -> str:
-        """Generate CB-ACCESS-SIGN header"""
+        """Generate CB-ACCESS-SIGN header (Legacy HMAC or v3 JWT)"""
+        # Detect v3 Cloud API Key
+        if self.credentials.api_key.startswith("organizations/"):
+            return self._generate_v3_jwt(method, path)
+            
         message = timestamp + method + path + body
         signature = hmac.new(
             base64.b64decode(self.credentials.api_secret),
@@ -341,18 +358,124 @@ class EnhancedCoinbaseClient:
         ).digest()
         return base64.b64encode(signature).decode('utf-8')
 
+    def _generate_v3_jwt(self, method: str, path: str) -> str:
+        """
+        Generate JWT for Coinbase Advanced Trade v3 (Cloud API Keys).
+        Uses ES256 algorithm.
+        """
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives import hashes
+            import secrets
+            import json
+            import base64
+            import time
+
+            # Strip possible quotes and fix newlines in secret
+            secret = self.credentials.api_secret.strip("'").strip('"').replace('\\n', '\n')
+            
+            # 1. Prepare Header
+            header = {"alg": "ES256", "typ": "JWT", "kid": self.credentials.api_key}
+            
+            # 2. Prepare Payload
+            # v3 expects 'uri' in the format "METHOD {path}" without query params usually, 
+            # but officially it's "METHOD hostname path"
+            # Actually for Advanced Trade v3 Cloud API keys:
+            # { "iss": "coinbase", "nbf": ..., "exp": ..., "sub": "key_id", "uri": "METHOD hostname path" }
+            
+            # hostname is usually api.coinbase.com
+            hostname = "api.coinbase.com"
+            
+            # For some v3 implementations, the 'uri' should just be the path without hostname
+            # But officially for Cloud API keys it includes it.
+            # Let's try WITHOUT hostname if the previous failed (already tried with)
+            # Actually, standard is "METHOD hostname path"
+            base_path = path.split('?')[0]
+            if not base_path.startswith('/'):
+                base_path = '/' + base_path
+            
+            uri = f"{method.upper()} {hostname}{base_path}"
+            
+            # Log URI for debugging (carefully)
+            # self.logger.debug(f"JWT URI: {uri}")
+            
+            now = int(time.time())
+            payload = {
+                "iss": "coinbase",
+                "nbf": now - 10,
+                "exp": now + 60,
+                "sub": self.credentials.api_key,
+                "uri": uri,
+                "aud": ["brokerage"]
+            }
+            
+            def b64_encode(data: dict) -> str:
+                return base64.urlsafe_b64encode(json.dumps(data, separators=(',', ':')).encode()).decode().rstrip("=")
+
+            # 3. Create unsigned JWT
+            unsigned_jwt = f"{b64_encode(header)}.{b64_encode(payload)}"
+            
+            # 4. Sign with EC private key
+            private_key = serialization.load_pem_private_key(
+                secret.encode(),
+                password=None
+            )
+            
+            signature = private_key.sign(
+                unsigned_jwt.encode(),
+                ec.ECDSA(hashes.SHA256())
+            )
+            
+            # 5. Convert DER signature to Raw R|S for JWT ES256
+            # ES256 signatures are exactly 64 bytes (32 for R, 32 for S)
+            from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+            r, s = decode_dss_signature(signature)
+            
+            def int_to_bytes(i: int) -> bytes:
+                # Ensure exactly 32 bytes
+                return i.to_bytes(32, byteorder='big')
+            
+            raw_signature = int_to_bytes(r) + int_to_bytes(s)
+            
+            # Use base64.urlsafe_b64encode and remove padding
+            encoded_signature = base64.urlsafe_b64encode(raw_signature).decode('utf-8').rstrip('=')
+            
+            return f"{unsigned_jwt}.{encoded_signature}"
+            
+        except ImportError:
+            self.logger.error("Cryptography library missing. Required for v3 JWT.")
+            return ""
+        except Exception as e:
+            self.logger.error(f"Failed to generate v3 JWT: {e}")
+            return ""
+
     def _get_headers(self, method: str, path: str, body: str = "") -> Dict[str, str]:
         """Generate authentication headers"""
         timestamp = str(int(time.time()))
+        
+        # v3 Cloud API Keys use JWT in Authorization header
+        if self.credentials.api_key.startswith("organizations/"):
+            jwt_token = self._generate_v3_jwt(method, path)
+            return {
+                "Authorization": f"Bearer {jwt_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "Enhanced-Trading-Bot/1.0"
+            }
 
-        return {
+        headers = {
             "CB-ACCESS-KEY": self.credentials.api_key,
             "CB-ACCESS-SIGN": self._generate_signature(timestamp, method, path, body),
             "CB-ACCESS-TIMESTAMP": timestamp,
-            "CB-ACCESS-PASSPHRASE": self.credentials.api_passphrase,
             "Content-Type": "application/json",
             "User-Agent": "Enhanced-Trading-Bot/1.0"
         }
+        
+        # Include passphrase only if provided (legacy keys)
+        if self.credentials.api_passphrase:
+            headers["CB-ACCESS-PASSPHRASE"] = self.credentials.api_passphrase
+            
+        return headers
 
     def _update_stats(self, stat_name: str, increment: int = 1):
         """Update statistics"""
@@ -380,6 +503,35 @@ class EnhancedCoinbaseClient:
 
         if not REQUESTS_AVAILABLE or not self.session:
             raise RuntimeError("Requests library not available")
+
+        # Use ccxt for v3 Cloud API if available
+        if self.ccxt_exchange:
+            try:
+                self._update_stats("requests_made")
+                # Remove leading slash if present for ccxt
+                path = endpoint[1:] if endpoint.startswith('/') else endpoint
+                # Convert /api/v3/brokerage/... to brokerage/...
+                if path.startswith('api/v3/'):
+                    path = path[7:]
+                
+                # Split path to get api part (brokerage) and endpoint part
+                parts = path.split('/', 1)
+                api = parts[0]
+                inner_path = parts[1] if len(parts) > 1 else ""
+                
+                # ccxt doesn't always have a direct method for every endpoint, 
+                # so we use its lower-level fetch/request if needed
+                # But fetch_accounts etc are better.
+                # For custom endpoints, use sign() + requests or exchange.fetch()
+                
+                # Use ccxt's internal request handling which generates the JWT
+                # Use 'request' instead of 'fetch' for more reliable generic calls
+                response = self.ccxt_exchange.request(inner_path, api, method, data or {})
+                return response
+            except Exception as e:
+                self._update_stats("requests_failed")
+                self.logger.error(f"ccxt request failed: {e}")
+                raise e
 
         url = f"{self.base_url}{endpoint}"
         body = ""
@@ -458,6 +610,14 @@ class EnhancedCoinbaseClient:
         """Get account information"""
         if self.paper_trading and self.paper_trader:
             return self.paper_trader.get_accounts()
+
+        if self.ccxt_exchange:
+            try:
+                accounts = self.ccxt_exchange.fetch_accounts()
+                return {"accounts": accounts}
+            except Exception as e:
+                self.logger.error(f"ccxt fetch_accounts failed: {e}")
+                return {"error": str(e), "accounts": []}
 
         try:
             return self._make_request("GET", "/api/v3/brokerage/accounts")
@@ -572,9 +732,76 @@ class EnhancedCoinbaseClient:
             self.logger.error(f"Failed to get product {product_id}: {product_error}")
             return {"error": str(product_error)}
 
+    def get_product_book(self, product_id: str, limit: int = 10) -> Dict[str, Any]:
+        """Get product order book (best-effort)."""
+        if self.ccxt_exchange:
+            try:
+                book = self.ccxt_exchange.fetch_order_book(product_id, limit=limit)
+                return {
+                    "bids": [[str(l[0]), str(l[1])] for l in book.get("bids", [])],
+                    "asks": [[str(l[0]), str(l[1])] for l in book.get("asks", [])]
+                }
+            except Exception as e:
+                self.logger.error(f"ccxt fetch_order_book failed: {e}")
+                return {"error": str(e), "bids": [], "asks": []}
+
+        try:
+            params = {"product_id": product_id, "limit": limit}
+            return self._make_request("GET", "/api/v3/brokerage/product_book", params)
+        except Exception as book_error:
+            self.logger.error(f"Failed to get product book for {product_id}: {book_error}")
+            return {"error": str(book_error), "bids": [], "asks": []}
+
     def get_product_candles(self, product_id: str, start: Optional[str] = None,
                             end: Optional[str] = None, granularity: str = "ONE_HOUR") -> Dict[str, Any]:
         """Get historical candle data"""
+        if self.ccxt_exchange:
+            try:
+                # Map granularity
+                gran_map = {
+                    "ONE_MINUTE": "1m",
+                    "FIVE_MINUTE": "5m",
+                    "FIFTEEN_MINUTE": "15m",
+                    "ONE_HOUR": "1h",
+                    "SIX_HOUR": "6h",
+                    "ONE_DAY": "1d"
+                }
+                ccxt_gran = gran_map.get(granularity, "1h")
+                
+                # fetch_ohlcv returns [timestamp, open, high, low, close, volume]
+                ohlcv = self.ccxt_exchange.fetch_ohlcv(product_id, timeframe=ccxt_gran)
+                
+                candles = []
+                for c in ohlcv:
+                    candles.append({
+                        "start": str(int(c[0] / 1000)),
+                        "open": str(c[1]),
+                        "high": str(c[2]),
+                        "low": str(c[3]),
+                        "close": str(c[4]),
+                        "volume": str(c[5])
+                    })
+                
+                response = {"candles": candles}
+                # Convert to DataFrame if pandas is available
+                if PANDAS_AVAILABLE and pd is not None:
+                    candles_data = []
+                    for candle in candles:
+                        candles_data.append({
+                            "timestamp": datetime.fromtimestamp(int(candle["start"])),
+                            "open": float(candle["open"]),
+                            "high": float(candle["high"]),
+                            "low": float(candle["low"]),
+                            "close": float(candle["close"]),
+                            "volume": float(candle["volume"])
+                        })
+                    response["dataframe"] = pd.DataFrame(candles_data)
+                
+                return response
+            except Exception as e:
+                self.logger.error(f"ccxt fetch_ohlcv failed: {e}")
+                return {"error": str(e), "candles": []}
+
         try:
             params = {
                 "product_id": product_id,
@@ -611,6 +838,21 @@ class EnhancedCoinbaseClient:
 
     def get_market_trades(self, product_id: str, limit: int = 100) -> Dict[str, Any]:
         """Get recent market trades"""
+        if self.ccxt_exchange:
+            try:
+                ticker = self.ccxt_exchange.fetch_ticker(product_id)
+                # Format to match expected bot structure
+                return {
+                    "price": str(ticker.get("last", 0)),
+                    "best_bid": str(ticker.get("bid", 0)),
+                    "best_ask": str(ticker.get("ask", 0)),
+                    "volume_24h": str(ticker.get("quoteVolume", 0)),
+                    "trades": [] # CCXT fetch_ticker doesn't return full trade list
+                }
+            except Exception as e:
+                self.logger.error(f"ccxt fetch_ticker failed: {e}")
+                return {"error": str(e), "trades": []}
+
         try:
             params = {"product_id": product_id, "limit": limit}
             return self._make_request("GET", "/api/v3/brokerage/products/{}/ticker".format(product_id), params)

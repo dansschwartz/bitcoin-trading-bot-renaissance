@@ -1,0 +1,652 @@
+diff --git a/README.md b/README.md
+index ab93361..bdc5c75 100644
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,33 @@
+ # bitcoin-trading-bot-renaissance
+-trade bot
++
++Renaissance-inspired BTC-USD trading bot with a single, stabilized golden path. The project is currently paper-trading only and wired for live market data.
++
++**Golden Path**
++- Entrypoint: `run_renaissance_bot.py`
++- Config: `config/config.json`
++- Live market data: Coinbase Advanced Trade (credentials via `.env`)
++- Alternative data: Fear & Greed + optional Twitter sentiment
++
++**Quickstart**
++1. Copy `.env.example` to `.env` and fill in your credentials.
++2. Review `config/config.json` and adjust trading parameters.
++3. Run a single test cycle:
++
++```bash
++python run_renaissance_bot.py --test
++```
++
++**Replay/Backtest**
++Use `replay_backtest.py` with a CSV containing `timestamp, open, high, low, close, volume`:
++
++```bash
++python replay_backtest.py --csv path/to/bars.csv
++```
++
++**Configuration**
++- `config/config.json` is the canonical config used by the golden path.
++- `config/config.example.json` is a safe template.
++- `config/data_pipeline_config.json` is reserved for pipeline experiments.
++
++**Experimental Modules**
++See `EXPERIMENTAL.md` for everything not included in the golden path.
+diff --git a/alternative_data_engine.py b/alternative_data_engine.py
+index 7ff1491..6f60275 100644
+--- a/alternative_data_engine.py
++++ b/alternative_data_engine.py
+@@ -1,40 +1,198 @@
+ """
+-Alternative Data Engine - Simplified Version
++Alternative Data Engine - Live Fear & Greed + Social Sentiment
++Provides a lightweight, production-friendly alternative data signal stream.
+ """
+ 
+ import asyncio
+-import numpy as np
+-from datetime import datetime
+-from typing import Dict, Optional
++import logging
++import os
+ from dataclasses import dataclass
++from datetime import datetime
++from typing import Dict, Optional, Any, List
++
++try:
++    import requests
++    REQUESTS_AVAILABLE = True
++except ImportError:
++    REQUESTS_AVAILABLE = False
++    requests = None
++
++try:
++    import tweepy
++    TWEEPY_AVAILABLE = True
++except ImportError:
++    TWEEPY_AVAILABLE = False
++    tweepy = None
++
++try:
++    from textblob import TextBlob
++    SENTIMENT_BACKEND = "textblob"
++except ImportError:
++    TextBlob = None
++    SENTIMENT_BACKEND = "vader"
++
++try:
++    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
++    VADER_AVAILABLE = True
++except ImportError:
++    SentimentIntensityAnalyzer = None
++    VADER_AVAILABLE = False
++
+ 
+ @dataclass
+ class AlternativeSignal:
+     """Container for alternative data signals"""
+     social_sentiment: float  # -1 to 1
+-    on_chain_strength: float  # 0 to 1
+-    market_psychology: float  # 0 to 1
++    on_chain_strength: float  # -1 to 1 (0 if unavailable)
++    market_psychology: float  # -1 to 1
+     confidence: float  # 0 to 1
+     timestamp: datetime
+ 
++
++class FearGreedClient:
++    """Fetches the Fear & Greed index."""
++
++    def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None):
++        self.logger = logger or logging.getLogger(__name__)
++        self.api_url = config.get("api_url", "https://api.alternative.me/fng/")
++
++    def fetch(self) -> Optional[Dict[str, Any]]:
++        if not REQUESTS_AVAILABLE:
++            self.logger.warning("requests not available; skipping Fear & Greed fetch")
++            return None
++        try:
++            response = requests.get(self.api_url, timeout=10)
++            response.raise_for_status()
++            payload = response.json()
++            data = payload.get("data", []) if isinstance(payload, dict) else []
++            if not data:
++                return None
++            value = int(data[0].get("value", 50))
++            return {
++                "value": value,
++                "timestamp": data[0].get("timestamp")
++            }
++        except Exception as exc:
++            self.logger.warning("Fear & Greed fetch failed: %s", exc)
++            return None
++
++
++class TwitterSentimentClient:
++    """Fetches recent Twitter sentiment using the v2 API."""
++
++    def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None):
++        self.logger = logger or logging.getLogger(__name__)
++        bearer_env = config.get("twitter_bearer_env", "TWITTER_BEARER_TOKEN")
++        self.bearer_token = config.get("bearer_token") or os.getenv(bearer_env, "").strip()
++        self.query = config.get("twitter_query", "(bitcoin OR BTC) -is:retweet lang:en")
++        self.max_tweets = int(config.get("max_tweets", 100))
++
++        self.client = None
++        if self.bearer_token and TWEEPY_AVAILABLE:
++            try:
++                self.client = tweepy.Client(bearer_token=self.bearer_token, wait_on_rate_limit=True)
++            except Exception as exc:
++                self.logger.warning("Failed to initialize Tweepy: %s", exc)
++                self.client = None
++        elif self.bearer_token:
++            self.logger.warning("tweepy not available; Twitter sentiment disabled")
++
++    def fetch(self) -> Optional[Dict[str, Any]]:
++        if not self.client:
++            return None
++        try:
++            max_results = min(max(self.max_tweets, 10), 100)
++            response = self.client.search_recent_tweets(
++                query=self.query,
++                max_results=max_results,
++                tweet_fields=["created_at", "public_metrics"]
++            )
++            tweets = response.data or []
++            if not tweets:
++                return None
++
++            scores: List[float] = []
++            for tweet in tweets:
++                score = _score_text(tweet.text)
++                if score is not None:
++                    scores.append(score)
++
++            if not scores:
++                return None
++
++            avg_score = sum(scores) / len(scores)
++            confidence = min(len(scores) / max_results, 1.0)
++            return {
++                "sentiment": max(min(avg_score, 1.0), -1.0),
++                "tweet_count": len(scores),
++                "confidence": confidence
++            }
++        except Exception as exc:
++            self.logger.warning("Twitter sentiment fetch failed: %s", exc)
++            return None
++
++
+ class AlternativeDataEngine:
+-    """Simplified alternative data engine"""
+-    
+-    def __init__(self):
+-        self.sentiment_history = []
+-        
++    """Collects alternative data signals with graceful fallbacks."""
++
++    def __init__(self, config: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
++        self.logger = logger or logging.getLogger(__name__)
++        self.config = config or {}
++
++        self.fear_greed_client = FearGreedClient(self.config.get("fear_greed", {}), logger=self.logger)
++        self.twitter_client = TwitterSentimentClient(self.config.get("sentiment", {}), logger=self.logger)
++
+     async def get_alternative_signals(self) -> AlternativeSignal:
+-        """Get alternative data signals"""
+-        # Simulate alternative data (replace with real data in production)
+-        social_sentiment = np.random.uniform(-0.5, 0.5)
+-        on_chain_strength = np.random.uniform(0.3, 0.7)
+-        market_psychology = np.random.uniform(0.4, 0.8)
+-        confidence = 0.6
+-        
++        """Get alternative data signals asynchronously."""
++        fear_task = asyncio.to_thread(self.fear_greed_client.fetch)
++        twitter_task = asyncio.to_thread(self.twitter_client.fetch)
++
++        fear_result, twitter_result = await asyncio.gather(fear_task, twitter_task)
++
++        social_sentiment = 0.0
++        market_psychology = 0.0
++        on_chain_strength = 0.0
++        confidence = 0.2
++
++        confidences = []
++
++        if twitter_result:
++            social_sentiment = float(twitter_result.get("sentiment", 0.0))
++            confidences.append(float(twitter_result.get("confidence", 0.0)))
++
++        if fear_result:
++            market_psychology = _normalize_fear_greed(fear_result.get("value", 50))
++            confidences.append(0.7)
++
++        if confidences:
++            confidence = sum(confidences) / len(confidences)
++
+         return AlternativeSignal(
+             social_sentiment=social_sentiment,
+             on_chain_strength=on_chain_strength,
+             market_psychology=market_psychology,
+             confidence=confidence,
+-            timestamp=datetime.now()
++            timestamp=datetime.utcnow()
+         )
++
++
++def _score_text(text: str) -> Optional[float]:
++    if not text:
++        return None
++
++    if SENTIMENT_BACKEND == "textblob" and TextBlob is not None:
++        return float(TextBlob(text).sentiment.polarity)
++
++    if VADER_AVAILABLE and SentimentIntensityAnalyzer is not None:
++        analyzer = SentimentIntensityAnalyzer()
++        return float(analyzer.polarity_scores(text).get("compound", 0.0))
++
++    return None
++
++
++def _normalize_fear_greed(value: Any) -> float:
++    try:
++        numeric = float(value)
++    except (TypeError, ValueError):
++        numeric = 50.0
++    return max(min((numeric - 50.0) / 50.0, 1.0), -1.0)
+diff --git a/coinbase_client.py b/coinbase_client.py
+index 418c7f2..9cb5b78 100644
+--- a/coinbase_client.py
++++ b/coinbase_client.py
+@@ -572,6 +572,15 @@ class EnhancedCoinbaseClient:
+             self.logger.error(f"Failed to get product {product_id}: {product_error}")
+             return {"error": str(product_error)}
+ 
++    def get_product_book(self, product_id: str, limit: int = 10) -> Dict[str, Any]:
++        """Get product order book (best-effort)."""
++        try:
++            params = {"product_id": product_id, "limit": limit}
++            return self._make_request("GET", "/api/v3/brokerage/product_book", params)
++        except Exception as book_error:
++            self.logger.error(f"Failed to get product book for {product_id}: {book_error}")
++            return {"error": str(book_error), "bids": [], "asks": []}
++
+     def get_product_candles(self, product_id: str, start: Optional[str] = None,
+                             end: Optional[str] = None, granularity: str = "ONE_HOUR") -> Dict[str, Any]:
+         """Get historical candle data"""
+diff --git a/renaissance_trading_bot.py b/renaissance_trading_bot.py
+index aafa092..f6cbb4c 100644
+--- a/renaissance_trading_bot.py
++++ b/renaissance_trading_bot.py
+@@ -9,6 +9,7 @@ import json
+ import numpy as np
+ import pandas as pd
+ from datetime import datetime, timedelta
++from pathlib import Path
+ from typing import Dict, List, Optional, Tuple, Any
+ from dataclasses import dataclass, asdict
+ import time
+@@ -17,8 +18,7 @@ import time
+ from enhanced_config_manager import EnhancedConfigManager
+ from microstructure_engine import MicrostructureEngine, MicrostructureMetrics
+ from enhanced_technical_indicators import EnhancedTechnicalIndicators, TechnicalSignal
+-from order_book_collector import OrderBookCollector
+-from price_data_collector import PriceDataCollector
++from market_data_provider import LiveMarketDataProvider
+ from renaissance_signal_fusion import RenaissanceSignalFusion
+ from alternative_data_engine import AlternativeDataEngine, AlternativeSignal
+ 
+@@ -120,7 +120,12 @@ class RenaissanceTradingBot:
+ 
+     def __init__(self, config_path: str = "config/config.json"):
+         """Initialize the Renaissance trading bot"""
+-        self.logger = self._setup_logging()
++        self.config_path = Path(config_path)
++        if not self.config_path.is_absolute():
++            self.config_path = Path(__file__).resolve().parent / self.config_path
++
++        self.config = self._load_config(self.config_path)
++        self.logger = self._setup_logging(self.config)
+ 
+         # Initialize configuration manager
+         self.config_manager = EnhancedConfigManager("config")
+@@ -128,13 +133,12 @@ class RenaissanceTradingBot:
+         # Initialize all components
+         self.microstructure_engine = MicrostructureEngine()
+         self.technical_indicators = EnhancedTechnicalIndicators()
+-        self.order_book_collector = OrderBookCollector()
+-        self.price_data_collector = PriceDataCollector()
++        self.market_data_provider = LiveMarketDataProvider(self.config, logger=self.logger)
+         self.signal_fusion = RenaissanceSignalFusion()
+-        self.alternative_data_engine = AlternativeDataEngine()
++        self.alternative_data_engine = AlternativeDataEngine(self.config, logger=self.logger)
+ 
+         # Renaissance Research-Optimized Signal Weights
+-        self.signal_weights = {
++        self.signal_weights = self.config.get("signal_weights", {
+             'order_flow': 0.32,      # 30-34% - Dominant signal
+             'order_book': 0.21,      # 18-24% - Market microstructure
+             'volume': 0.14,          # 10-18% - Volume analysis
+@@ -142,7 +146,7 @@ class RenaissanceTradingBot:
+             'rsi': 0.115,            # 5-18% - Mean reversion
+             'bollinger': 0.095,      # 5-18% - Volatility
+             'alternative': 0.045     # 2-7% - Alternative data
+-        }
++        })
+ 
+         # Trading state
+         self.current_position = 0.0
+@@ -151,39 +155,94 @@ class RenaissanceTradingBot:
+         self.decision_history = []
+ 
+         # Risk management (from original bot)
+-        self.daily_loss_limit = 500  # $500 daily loss limit
+-        self.position_limit = 1000   # $1000 position limit
+-        self.min_confidence = 0.65   # Minimum confidence for trades
++        risk_cfg = self.config.get("risk_management", {})
++        self.daily_loss_limit = float(risk_cfg.get("daily_loss_limit", 500))
++        self.position_limit = float(risk_cfg.get("position_limit", 1000))
++        self.min_confidence = float(risk_cfg.get("min_confidence", 0.65))
+ 
+         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
+         self.logger.info(f"Signal weights: {self.signal_weights}")
+ 
+-    def _setup_logging(self) -> logging.Logger:
++    def _setup_logging(self, config: Dict[str, Any]) -> logging.Logger:
+         """Setup comprehensive logging"""
++        log_cfg = config.get("logging", {})
++        log_file = log_cfg.get("file", "logs/renaissance_bot.log")
++        log_level = log_cfg.get("level", "INFO")
++
++        log_path = (Path(__file__).resolve().parent / log_file).resolve()
++        log_path.parent.mkdir(parents=True, exist_ok=True)
++
+         logging.basicConfig(
+-            level=logging.INFO,
++            level=getattr(logging, str(log_level).upper(), logging.INFO),
+             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+             handlers=[
+-                logging.FileHandler('../archive/renaissance_bot.log'),
++                logging.FileHandler(log_path),
+                 logging.StreamHandler()
+             ]
+         )
+         return logging.getLogger(__name__)
+ 
++    def _load_config(self, config_path: Path) -> Dict[str, Any]:
++        """Load bot configuration from JSON file."""
++        default_config = {
++            "trading": {
++                "product_id": "BTC-USD",
++                "cycle_interval_seconds": 300,
++                "paper_trading": True,
++                "sandbox": True
++            },
++            "risk_management": {
++                "daily_loss_limit": 500,
++                "position_limit": 1000,
++                "min_confidence": 0.65
++            },
++            "signal_weights": {
++                "order_flow": 0.32,
++                "order_book": 0.21,
++                "volume": 0.14,
++                "macd": 0.105,
++                "rsi": 0.115,
++                "bollinger": 0.095,
++                "alternative": 0.045
++            },
++            "data": {
++                "candle_granularity": "ONE_MINUTE",
++                "candle_lookback_minutes": 120,
++                "order_book_depth": 10
++            },
++            "logging": {
++                "file": "logs/renaissance_bot.log",
++                "level": "INFO"
++            }
++        }
++
++        if not config_path.exists():
++            return default_config
++
++        try:
++            with config_path.open("r", encoding="utf-8") as handle:
++                loaded = json.load(handle)
++                return {**default_config, **loaded}
++        except Exception as exc:
++            print(f"Warning: failed to load config at {config_path}: {exc}")
++            return default_config
++
+     async def collect_all_data(self) -> Dict[str, Any]:
+         """Collect data from all sources"""
+         try:
+-            # Collect synchronous data
+-            order_book = self.order_book_collector.get_latest_microstructure_data()
+-            price_data = self.price_data_collector.get_latest_technical_data()
++            snapshot = await asyncio.to_thread(self.market_data_provider.fetch_snapshot)
++            if snapshot.price_data:
++                self.technical_indicators.update_price_data(snapshot.price_data)
+ 
+-            # Collect async data
++            technical_signals = self.technical_indicators.get_latest_signals()
+             alt_signals = await self.alternative_data_engine.get_alternative_signals()
+ 
+             return {
+-                'order_book': order_book,
+-                'price_data': price_data,
++                'order_book_snapshot': snapshot.order_book_snapshot,
++                'price_data': snapshot.price_data,
++                'technical_signals': technical_signals,
+                 'alternative_signals': alt_signals,
++                'ticker': snapshot.ticker,
+                 'timestamp': datetime.now()
+             }
+         except Exception as e:
+@@ -196,36 +255,22 @@ class RenaissanceTradingBot:
+ 
+         try:
+             # 1. Microstructure signals (Order Flow + Order Book = 53% total weight)
+-            if market_data.get('order_book'):
+-                # Generate fresh order book snapshot and analyze with OUR engine
+-                order_book_snapshot = self.order_book_collector._generate_order_book_snapshot()
+-                microstructure_signal = self.microstructure_engine._analyze_microstructure(order_book_snapshot)
+-
+-                if microstructure_signal:
+-                    signals['order_flow'] = microstructure_signal.large_trade_flow  # Use large_trade_flow for order flow
+-                    signals['order_book'] = microstructure_signal.order_book_imbalance  # This one is correct
+-                else:
+-                    signals['order_flow'] = 0.0
+-                    signals['order_book'] = 0.0
++            order_book_snapshot = market_data.get('order_book_snapshot')
++            if order_book_snapshot:
++                microstructure_signal = self.microstructure_engine.update_order_book(order_book_snapshot)
++                signals['order_flow'] = microstructure_signal.large_trade_flow
++                signals['order_book'] = microstructure_signal.order_book_imbalance
+             else:
+                 signals['order_flow'] = 0.0
+                 signals['order_book'] = 0.0
+ 
+             # 2. Technical indicators (38% total weight)
+-            if market_data.get('price_data'):
+-                technical_signal = self.technical_indicators.get_latest_signals()
+-
+-                if technical_signal:
+-                    # Use the actual attributes from MultiTimeframeSignals
+-                    signals['volume'] = technical_signal.volume_signal.strength  # or whatever the actual attribute is
+-                    signals['macd'] = technical_signal.macd_signal.strength
+-                    signals['rsi'] = technical_signal.rsi_signal.strength
+-                    signals['bollinger'] = technical_signal.bollinger_signal.strength
+-                else:
+-                    signals['volume'] = 0.0
+-                    signals['macd'] = 0.0
+-                    signals['rsi'] = 0.0
+-                    signals['bollinger'] = 0.0
++            technical_signal = market_data.get('technical_signals') or self.technical_indicators.get_latest_signals()
++            if technical_signal:
++                signals['volume'] = _signed_strength(technical_signal.obv_momentum)
++                signals['macd'] = _signed_strength(technical_signal.quick_macd)
++                signals['rsi'] = _signed_strength(technical_signal.fast_rsi)
++                signals['bollinger'] = _signed_strength(technical_signal.dynamic_bollinger)
+             else:
+                 signals['volume'] = 0.0
+                 signals['macd'] = 0.0
+@@ -356,7 +401,20 @@ class RenaissanceTradingBot:
+             cycle_time = time.time() - cycle_start
+             self.logger.info(f"Trading cycle completed in {cycle_time:.2f}s")
+ 
+-            return decision
++        return decision
++
++
++def _signed_strength(signal: TechnicalSignal) -> float:
++    """Convert a TechnicalSignal into a signed strength value."""
++    if not signal:
++        return 0.0
++    direction = str(signal.signal).upper()
++    strength = abs(float(signal.strength))
++    if direction == "SELL":
++        return -strength
++    if direction == "BUY":
++        return strength
++    return 0.0
+ 
+         except Exception as e:
+             self.logger.error(f"Trading cycle failed: {e}")
+diff --git a/run_renaissance_bot.py b/run_renaissance_bot.py
+index 9038528..118d192 100644
+--- a/run_renaissance_bot.py
++++ b/run_renaissance_bot.py
+@@ -12,9 +12,19 @@ import os
+ from pathlib import Path
+ from datetime import datetime
+ import logging
++import shutil
+ 
+-# Add src directory to path for imports
+-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
++# Load environment variables if python-dotenv is available
++try:
++    from dotenv import load_dotenv
++
++    load_dotenv()
++except ImportError:
++    pass
++
++# Add project root to path for imports
++PROJECT_ROOT = Path(__file__).resolve().parent
++sys.path.insert(0, str(PROJECT_ROOT))
+ 
+ from renaissance_trading_bot import RenaissanceTradingBot
+ 
+@@ -23,50 +33,55 @@ def setup_environment():
+ 
+     # Create required directories
+     directories = [
+-        'src',
+-        'logs', 
+-        'data',
+-        'config',
+-        'output'
++        PROJECT_ROOT / 'logs',
++        PROJECT_ROOT / 'data',
++        PROJECT_ROOT / 'config',
++        PROJECT_ROOT / 'output'
+     ]
+ 
+     for directory in directories:
+-        Path(directory).mkdir(exist_ok=True)
++        Path(directory).mkdir(parents=True, exist_ok=True)
+ 
+     # Create default config if it doesn't exist
+-    config_path = Path('config/config.json')
+-    if False:  # Config exists, skip creation
+-        default_config = {
+-            "risk_management": {
+-                "daily_loss_limit": 500,
+-                "position_limit": 1000,
+-                "min_confidence": 0.65,
+-                "max_position_size": 0.3
+-            },
+-            "signal_weights": {
+-                "order_flow": 0.32,
+-                "order_book": 0.21,
+-                "volume": 0.14,
+-                "macd": 0.105,
+-                "rsi": 0.115,
+-                "bollinger": 0.095,
+-                "alternative": 0.045
+-            },
+-            "trading": {
+-                "cycle_interval": 300,
+-                "paper_trading": True,
+-                "symbol": "BTC/USD"
+-            },
+-            "logging": {
+-                "level": "INFO",
+-                "file": "logs/renaissance_bot.log"
++    config_path = PROJECT_ROOT / 'config' / 'config.json'
++    example_path = PROJECT_ROOT / 'config' / 'config.example.json'
++
++    if not config_path.exists():
++        if example_path.exists():
++            shutil.copy(example_path, config_path)
++            print(f"✅ Created config from template: {config_path}")
++        else:
++            default_config = {
++                "trading": {
++                    "product_id": "BTC-USD",
++                    "cycle_interval_seconds": 300,
++                    "paper_trading": True,
++                    "sandbox": True
++                },
++                "risk_management": {
++                    "daily_loss_limit": 500,
++                    "position_limit": 1000,
++                    "min_confidence": 0.65
++                },
++                "signal_weights": {
++                    "order_flow": 0.32,
++                    "order_book": 0.21,
++                    "volume": 0.14,
++                    "macd": 0.105,
++                    "rsi": 0.115,
++                    "bollinger": 0.095,
++                    "alternative": 0.045
++                },
++                "logging": {
++                    "level": "INFO",
++                    "file": "logs/renaissance_bot.log"
++                }
+             }
+-        }
+ 
+-        with open(config_path, 'w') as f:
+-            json.dump(default_config, f, indent=2)
++            with open(config_path, 'w', encoding='utf-8') as f:
++                json.dump(default_config, f, indent=2)
+ 
+-        print(f"✅ Created default configuration: {config_path}")
++            print(f"✅ Created default configuration: {config_path}")
+ 
+     return str(config_path)
+ 
+@@ -166,10 +181,10 @@ def validate_system():
+         'enhanced_config_manager.py',
+         'microstructure_engine.py', 
+         'enhanced_technical_indicators.py',
+-        'order_book_collector.py',
+-        'price_data_collector.py',
+-        'renaissance_signal_fusion.py',
++        'market_data_provider.py',
++        'coinbase_client.py',
+         'alternative_data_engine.py',
++        'renaissance_signal_fusion.py',
+         'renaissance_trading_bot.py'
+     ]
+ 
