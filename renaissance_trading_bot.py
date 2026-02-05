@@ -47,6 +47,10 @@ from quantum_oscillator_engine import QuantumOscillatorEngine
 from ghost_runner import GhostRunner
 from self_reinforcing_learning import SelfReinforcingLearningEngine
 from confluence_engine import ConfluenceEngine
+from basis_trading_engine import BasisTradingEngine
+from deep_nlp_bridge import DeepNLPBridge
+from market_making_engine import MarketMakingEngine
+from institutional_dashboard import InstitutionalDashboard
 
 from enum import Enum
 
@@ -224,6 +228,19 @@ class RenaissanceTradingBot:
         from confluence_engine import ConfluenceEngine
         self.confluence_engine = ConfluenceEngine(logger=self.logger)
         
+        # 🏛️ Basis Trading Engine
+        self.basis_engine = BasisTradingEngine(logger=self.logger)
+        
+        # 🧠 Deep NLP Bridge
+        self.nlp_bridge = DeepNLPBridge(self.config.get("nlp", {}), logger=self.logger)
+        
+        # ⚖️ Market Making Engine
+        self.market_making = MarketMakingEngine(self.config.get("market_making", {}), logger=self.logger)
+        
+        # 📊 Institutional Dashboard
+        self.dashboard = InstitutionalDashboard(self, host="0.0.0.0", port=5000)
+        self.dashboard.run()
+        
         # Initialize Feature Pipeline (Step 16)
         from feature_pipeline import FractalFeaturePipeline
         self.feature_pipeline = FractalFeaturePipeline(
@@ -391,14 +408,21 @@ class RenaissanceTradingBot:
                 whale_data = await self.whale_monitor.get_whale_signals()
                 whale_pressure = whale_data.get("whale_pressure", 0.0)
                 
+                # 🧠 Deep NLP Reasoning (New)
+                news_text = " ".join([str(n) for n in market_data.get('news', [])])
+                nlp_result = await self.nlp_bridge.analyze_sentiment_with_reasoning(news_text)
+                nlp_sentiment = nlp_result.get('sentiment', 0.0)
+                market_data['nlp_reasoning'] = nlp_result.get('reasoning', 'No deep context')
+                
                 # Combine all alternative signals into one composite score
-                # 30% Reddit, 20% News, 20% Twitter, 20% Fear/Greed, 10% Whale
+                # 20% Reddit, 15% News, 15% Twitter, 15% Fear/Greed, 10% Whale, 25% Deep NLP
                 alternative_composite = (
-                    alt_signal.reddit_sentiment * 0.3 +
-                    alt_signal.news_sentiment * 0.2 +
-                    alt_signal.social_sentiment * 0.2 +
-                    alt_signal.market_psychology * 0.2 +
-                    whale_pressure * 0.1
+                    alt_signal.reddit_sentiment * 0.20 +
+                    alt_signal.news_sentiment * 0.15 +
+                    alt_signal.social_sentiment * 0.15 +
+                    alt_signal.market_psychology * 0.15 +
+                    whale_pressure * 0.10 +
+                    nlp_sentiment * 0.25
                 )
                 signals['alternative'] = alternative_composite
                 market_data['whale_signals'] = whale_data # Pass along for dashboard
@@ -923,6 +947,10 @@ class RenaissanceTradingBot:
                 current_price = market_data.get('ticker', {}).get('price', 0.0)
                 self.stat_arb_engine.update_price(product_id, current_price)
                 
+                # 🏛️ Basis Trading Signal
+                basis_signal = self.basis_engine.get_basis_signal(market_data)
+                signals['basis'] = basis_signal
+                
                 stat_arb_data = {}
                 if len(self.product_ids) > 1:
                     base = "BTC-USD"
@@ -987,7 +1015,18 @@ class RenaissanceTradingBot:
 
                 # 6. Smart Execution (Step 10)
                 if decision.action != 'HOLD':
-                    await self._execute_smart_order(decision, market_data)
+                    if self.config.get("market_making", {}).get("enabled", False):
+                        # ⚖️ Market Making Mode (Liquidity Provider)
+                        quotes = self.market_making.calculate_quotes(
+                            current_price, 
+                            market_data.get('volatility', 0.02),
+                            signals.get('order_book', 0.0)
+                        )
+                        self.logger.info(f"⚖️ MARKET MAKING QUOTES: Bid {quotes['bid']:.2f} | Ask {quotes['ask']:.2f} (Skew: {quotes['skew']:.4f})")
+                        # In production, send limit orders here
+                    else:
+                        # Standard Sniper/TWAP/VWAP Taker execution
+                        await self._execute_smart_order(decision, market_data)
 
                 # 7. Consciousness Dashboard (The "Inner Thoughts")
                 self._log_consciousness_dashboard(product_id, decision, rt_result)

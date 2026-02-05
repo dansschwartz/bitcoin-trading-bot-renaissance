@@ -47,6 +47,10 @@ The file contains:
 - `global_intelligence`: **Deep Alternative Data** (Reddit, News, Twitter, Whale Alert) and **High-Dimensional Discovery** (Fractal DTW, Market Entropy, Quantum Oscillator).
 - `evolutionary_ai`: **Genetic Weight Optimizer** evolves signal weights based on **Realized PnL** and market regime feedback.
 - `confluence_engine`: (New) **Non-Linear Meta-Learning**. Identifies a "Confluence of Edges" where combined signals (e.g., Order Flow + Technicals, or Fractal + Quantum) receive a non-linear boost based on institutional confluence rules. Includes divergence detection (VPIN + Bollinger) for mean reversion.
+- `basis_trading`: **Arbitrage & Carry**. Exploits the price difference between Spot and Futures markets and harvests funding rates for low-risk yield.
+- `deep_nlp`: **LLM Reasoning**. Connects a local Llama or GPT model to perform deep reasoning on news and social media, extracting institutional-grade context.
+- `market_making`: **Liquidity Provision**. Transitions from taker to maker, providing two-sided quotes, managing inventory skew, and capturing the bid-ask spread.
+- `institutional_dashboard`: **Consciousness UI**. Real-time web interface to visualize bot performance, market regimes, and the "Inner Thoughts" of the AI engine.
 
 **Self-Reinforcing Loop**
 The bot now implements a closed feedback loop:
