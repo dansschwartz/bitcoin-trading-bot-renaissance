@@ -7,7 +7,7 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional
-from renaissance_technical_indicators import RenaissanceTechnicalIndicators
+from enhanced_technical_indicators import EnhancedTechnicalIndicators as RenaissanceTechnicalIndicators
 from medallion_regime_predictor import MedallionRegimePredictor
 
 class RegimeOverlay:
@@ -22,10 +22,7 @@ class RegimeOverlay:
         self.consciousness_boost = config.get("consciousness_boost", 0.142)
         
         # Initialize the experimental regime detector
-        self.detector = RenaissanceTechnicalIndicators(
-            consciousness_boost=self.consciousness_boost,
-            enable_regime_detection=True
-        )
+        self.detector = RenaissanceTechnicalIndicators()
         
         # Initialize Step 17 HMM Predictor
         self.hmm_predictor = MedallionRegimePredictor(n_regimes=3, logger=self.logger)
@@ -50,8 +47,15 @@ class RegimeOverlay:
                 'volume': price_df['volume'].values
             }
             
-            # Detect base regime
-            self.current_regime = self.detector.detect_market_regime(market_data)
+            # Detect base regime using signals summary
+            signals = self.detector.get_signals_summary()
+            
+            self.current_regime = {
+                'trend': signals.get('trend', 'unknown'),
+                'volatility': signals.get('volatility', 'unknown'),
+                'combined_signal': signals.get('combined_signal', 0.0),
+                'confidence': signals.get('confidence', 0.0)
+            }
             
             if self.current_regime:
                 # 1. HMM Regime Transition Prediction (Step 17)

@@ -3,6 +3,7 @@ import sqlite3
 import json
 import logging
 import os
+import numpy as np
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -104,7 +105,7 @@ class DatabaseManager:
             )
         ''')
 
-        # Create decisions table
+        # Create decisions table (Expanded with feature_vector)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,7 +115,10 @@ class DatabaseManager:
                 confidence REAL NOT NULL,
                 position_size REAL NOT NULL,
                 weighted_signal REAL NOT NULL,
-                reasoning TEXT NOT NULL
+                reasoning TEXT NOT NULL,
+                feature_vector TEXT,
+                vae_loss REAL,
+                hmm_regime TEXT
             )
         ''')
 
@@ -147,7 +151,7 @@ class DatabaseManager:
 
         conn.commit()
         conn.close()
-        self.logger.info("Database initialized successfully")
+        self.logger.info("Database initialized successfully with expanded metrics support")
 
     async def store_market_data(self, data: MarketData):
         """Store market data"""
@@ -256,7 +260,7 @@ class DatabaseManager:
             self.logger.error(f"Error cleaning up data: {e}")
 
     async def store_decision(self, decision_data: Dict[str, Any]):
-        """Store trading decision"""
+        """Store trading decision with expanded metrics"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -273,11 +277,23 @@ class DatabaseManager:
             def json_serial(obj):
                 if isinstance(obj, datetime):
                     return obj.isoformat()
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
                 raise TypeError(f"Type {type(obj)} not serializable")
 
+            # Extract expanded metrics
+            feature_vector = decision_data.get('feature_vector')
+            if isinstance(feature_vector, np.ndarray):
+                feature_vector = json.dumps(feature_vector.tolist())
+            elif feature_vector is not None:
+                feature_vector = str(feature_vector)
+
+            vae_loss = decision_data.get('vae_loss')
+            hmm_regime = decision_data.get('hmm_regime')
+
             cursor.execute('''
-                INSERT INTO decisions (timestamp, product_id, action, confidence, position_size, weighted_signal, reasoning)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO decisions (timestamp, product_id, action, confidence, position_size, weighted_signal, reasoning, feature_vector, vae_loss, hmm_regime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 ts,
                 decision_data.get('product_id'),
@@ -285,7 +301,10 @@ class DatabaseManager:
                 decision_data.get('confidence'),
                 decision_data.get('position_size'),
                 decision_data.get('weighted_signal'),
-                json.dumps(reasoning, default=json_serial)
+                json.dumps(reasoning, default=json_serial),
+                feature_vector,
+                vae_loss,
+                hmm_regime
             ))
 
             conn.commit()

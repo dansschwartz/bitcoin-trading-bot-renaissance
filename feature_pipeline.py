@@ -1329,7 +1329,16 @@ class FractalFeaturePipeline:
 
             self.logger.info(f"Feature extraction completed: {scaled_features.shape[1]} features")
 
-            return scaled_features.flatten()
+            # Final check to ensure consistency with models
+            result = scaled_features.flatten()
+            if len(result) != 128:
+                # Pad or truncate to exactly 128
+                if len(result) < 128:
+                    result = np.pad(result, (0, 128 - len(result)), 'constant')
+                else:
+                    result = result[:128]
+            
+            return result
 
         except Exception as e:
             self.logger.error(f"Error in fit_transform: {e}")

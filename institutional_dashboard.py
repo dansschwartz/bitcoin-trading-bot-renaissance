@@ -32,22 +32,28 @@ class InstitutionalDashboard:
             # Extract alpha decay alerts
             alpha_decay = {}
             if hasattr(self.bot, 'learning_engine'):
-                alpha_decay = self.bot.learning_engine._latest_alpha_corrs
+                alpha_decay = getattr(self.bot.learning_engine, '_latest_alpha_corrs', {})
 
-            # Basis and NLP Metrics (Step 11/13 Enhancement)
+            # Basis and NLP Metrics
             basis_metrics = {}
             if hasattr(self.bot, 'basis_engine'):
                 basis_metrics = {"status": "ACTIVE"}
 
-            # Meta-Strategy and Attribution (Step 11/13)
+            # Meta-Strategy and Attribution
             strategy_metrics = {
                 "current_mode": getattr(self.bot.strategy_selector, 'current_mode', 'TAKER'),
                 "vpin": getattr(self.bot, 'last_vpin', 0.5)
             }
 
+            # Advanced Risk Fortress Metrics
+            risk_metrics = {}
+            if hasattr(self.bot, 'risk_gateway'):
+                risk_metrics = self.bot.risk_gateway.get_risk_metrics()
+                # Inject VAE Anomaly score if available from last assessment
+                risk_metrics['vae_anomaly_score'] = getattr(self.bot.risk_gateway, '_last_vae_loss', 0.0)
+
             attribution_summary = {}
             if hasattr(self.bot, 'attribution_engine'):
-                # Get the last attribution result if available
                 attribution_summary = {"status": "READY"}
                 
             return jsonify({
@@ -56,6 +62,7 @@ class InstitutionalDashboard:
                 "alpha_decay": alpha_decay,
                 "basis": basis_metrics,
                 "strategy": strategy_metrics,
+                "risk_fortress": risk_metrics,
                 "attribution": attribution_summary,
                 "status": "OPERATIONAL"
             })

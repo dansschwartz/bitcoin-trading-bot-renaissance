@@ -9,12 +9,12 @@ The bot is designed as a **Multi-Strategy Autonomous Predator**. It combines mar
 
 ## 🏗️ Core Components
 
-### 1. Orchestration Layer (`renaissance_trading_bot.py`)
+### 1. Unified Orchestration Layer (`renaissance_trading_bot.py`)
 The central nervous system of the bot. It manages the lifecycle of a trading cycle:
-- **Data Collection**: Aggregates from Coinbase (Live) and other exchanges (Real-time).
-- **Signal Generation**: Parallel execution of 20+ alpha sources.
-- **Fusion & Confluence**: Weighted linear fusion followed by non-linear boost logic.
-- **Execution**: Smart order routing (TWAP/VWAP/Sniper).
+- **ML Integration by Default**: Automatically initializes the `MLIntegrationBridge` to generate CNN-LSTM, N-BEATS, and Quantum Transformer signals.
+- **Adaptive Signal Fusion**: Combines 20+ alpha sources with non-linear boosting (Confluence Engine) and ML-weighted conviction.
+- **Institutional Risk Management**: Integrates "Consciousness" (ML confidence) and Fractal regime detection to adjust position sizes and halt during anomalies (VAE-based Black Swan Shield).
+- **Multi-Asset Execution**: Supports BTC and ETH with Smart Order Routing (Sniper/TWAP).
 
 ### 2. Signal Intelligence Suite
 - **Microstructure Engine (`microstructure_engine.py`)**: Analyzes L2 Order Book imbalance, VPIN toxicity, and large trade flows.

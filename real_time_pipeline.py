@@ -197,11 +197,10 @@ class FeatureFanOutProcessor:
             # Step 12/16 Bridge: Use real feature vector if provided, else fallback to random noise
             real_vector = features.get('feature_vector')
             if real_vector is not None:
-                # Ensure it's the right shape (1, dim)
-                if len(real_vector.shape) == 1:
-                    feature_vector = real_vector.reshape(1, -1).astype(np.float32)
-                else:
-                    feature_vector = real_vector.astype(np.float32)
+                # Standardize to 128 dimensions for model compatibility
+                feature_vector = np.zeros((1, 128), dtype=np.float32)
+                vec_len = min(len(real_vector), 128)
+                feature_vector[0, :vec_len] = real_vector[:vec_len]
             else:
                 # 1. Ensemble (PyTorch) input fallback
                 feature_vector = np.random.randn(1, 128).astype(np.float32)

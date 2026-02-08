@@ -18,7 +18,7 @@ warnings.filterwarnings('ignore')
 
 # Import ML components
 try:
-    from ml_config import MLPatternConfig as MLConfig, ModelType, TimeFrame
+    from ml_config import MLPatternConfig as MLConfig
     from ml_pattern_engine import MLPatternEngine, PatternSignal, MLPrediction
     from cnn_lstm_model import CNNLSTMModel
     from nbeats_forecaster import NBEATSForecaster
@@ -27,19 +27,8 @@ except ImportError as e:
     print(f"Warning: Some ML components not available: {e}")
     HAS_ML_COMPONENTS = False
 
-# Import Renaissance bot components
-from renaissance_trading_bot import TradingDecision as TradingSignal, SignalType, RenaissanceTradingBot
-
-@dataclass
-class MLSignalPackage:
-    """Package of ML-generated signals"""
-    primary_signals: List[TradingSignal]
-    ml_predictions: List[Any]  # ML-specific predictions
-    ensemble_score: float  # Combined ensemble score
-    confidence_score: float  # Meta-confidence from consciousness engine
-    fractal_insights: Dict[str, Any]  # Fractal pattern insights
-    timestamp: datetime
-    processing_time_ms: float
+# Import Renaissance types
+from renaissance_types import TradingDecision as TradingSignal, SignalType, MLSignalPackage
 
 @dataclass
 class MLModelStatus:

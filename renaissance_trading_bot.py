@@ -27,7 +27,7 @@ from risk_gateway import RiskGateway
 from real_time_pipeline import RealTimePipeline
 
 # Step 10 Experimental Suite
-from renaissance_portfolio_optimizer import RenaissancePortfolioOptimizer
+# from renaissance_portfolio_optimizer import RenaissancePortfolioOptimizer
 from execution_algorithm_suite import ExecutionAlgorithmSuite
 from slippage_protection_system import SlippageProtectionSystem
 
@@ -53,95 +53,16 @@ from market_making_engine import MarketMakingEngine
 from meta_strategy_selector import MetaStrategySelector
 from institutional_dashboard import InstitutionalDashboard
 
-from enum import Enum
+from renaissance_types import SignalType, OrderType, MLSignalPackage, TradingDecision
+from ml_integration_bridge import MLIntegrationBridge
 
 
-class SignalType(Enum):
-    """Types of trading signals"""
-    BUY = "BUY"
-    SELL = "SELL"
-    HOLD = "HOLD"
-    STRONG_BUY = "STRONG_BUY"
-    STRONG_SELL = "STRONG_SELL"
-    MICROSTRUCTURE = "MICROSTRUCTURE"
-    TECHNICAL = "TECHNICAL"
-    ALTERNATIVE = "ALTERNATIVE"
-    RSI = "RSI"
-    MACD = "MACD"
-    BOLLINGER = "BOLLINGER"
-    ORDER_FLOW = "ORDER_FLOW"
-    VOLUME = "VOLUME"
-    MOMENTUM = "MOMENTUM"
-    MEAN_REVERSION = "MEAN_REVERSION"
-    TREND = "TREND"
-    VOLATILITY = "VOLATILITY"
-    SENTIMENT = "SENTIMENT"
-    FRACTAL = "FRACTAL"
-    QUANTUM = "QUANTUM"
-    CONSCIOUSNESS = "CONSCIOUSNESS"
+# Types moved to renaissance_types.py
 
 
-class OrderType(Enum):
-    """Types of trading orders"""
-    MARKET = "MARKET"
-    LIMIT = "LIMIT"
-    STOP = "STOP"
-    STOP_LIMIT = "STOP_LIMIT"
+from renaissance_engine_core import SignalFusion, RiskManager
 
-
-class SignalFusion:
-    """Signal fusion results"""
-
-    def __init__(self):
-        self.combined_signal = 0.0
-        self.confidence = 0.0
-        self.contributing_signals = {}
-        self.weights = {}
-
-    def fuse_signals(self, signals: Dict[str, float], weights: Dict[str, float]) -> Dict[str, float]:
-        """Fuse multiple signals with weights"""
-        combined = sum(signals[k] * weights.get(k, 0) for k in signals.keys())
-        return {
-            'combined_signal': combined,
-            'confidence': min(abs(combined), 1.0),
-            'contributing_signals': signals,
-            'weights': weights
-        }
-
-
-class RiskManager:
-    """Risk management component"""
-    def __init__(self, daily_loss_limit=500.0, position_limit=1000.0, *args, **kwargs):
-        self.max_position_size = position_limit
-        self.current_risk = 0.0
-        self.daily_pnl = 0.0
-        self.daily_loss_limit = daily_loss_limit
-        self.position_limit = position_limit
-        self.risk_limits = {
-            'daily_loss': daily_loss_limit,
-            'position_limit': position_limit
-        }
-        # Accept any additional arguments without error
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-@dataclass
-class TradingDecision:
-    """Final trading decision with Renaissance methodology"""
-    action: str  # 'BUY', 'SELL', 'HOLD'
-    confidence: float  # 0 to 1
-    position_size: float  # Percentage of available capital
-    reasoning: Dict[str, Any]
-    timestamp: datetime
-
-    def to_dict(self) -> Dict:
-        return {
-            'action': self.action,
-            'confidence': self.confidence,
-            'position_size': self.position_size,
-            'reasoning': self.reasoning,
-            'timestamp': self.timestamp.isoformat()
-        }
+# Types moved to renaissance_types.py
 
 def _signed_strength(signal: IndicatorOutput) -> float:
     """Convert a IndicatorOutput into a signed strength value."""
@@ -161,6 +82,24 @@ class RenaissanceTradingBot:
     Integrates all components with research-optimized weights
     """
 
+    def _force_float(self, val: Any) -> float:
+        """Recursive unpacking and float casting for paranoid scalar hardening."""
+        try:
+            temp = val
+            if temp is None:
+                return 0.0
+            while hasattr(temp, '__iter__') and not isinstance(temp, (str, bytes, dict)):
+                if hasattr(temp, '__len__') and len(temp) > 0:
+                    temp = temp[0]
+                else:
+                    temp = 0.0
+                    break
+            if hasattr(temp, 'item'): 
+                temp = temp.item()
+            return float(temp)
+        except Exception:
+            return 0.0
+
     def __init__(self, config_path: str = "config/config.json"):
         """Initialize the Renaissance trading bot"""
         self.config_path = Path(config_path)
@@ -178,16 +117,25 @@ class RenaissanceTradingBot:
         self.microstructure_engine = MicrostructureEngine()
         self.technical_indicators = EnhancedTechnicalIndicators()
         self.market_data_provider = LiveMarketDataProvider(self.config, logger=self.logger)
-        self.signal_fusion = RenaissanceSignalFusion()
+        
+        # Unified Signal Fusion (Step 16+)
+        self.signal_fusion = SignalFusion()
+        
         self.alternative_data_engine = AlternativeDataEngine(self.config, logger=self.logger)
 
         # Initialize Advanced Adapters (Step 7 & 9)
         self.regime_overlay = RegimeOverlay(self.config.get("regime_overlay", {}), logger=self.logger)
         self.risk_gateway = RiskGateway(self.config.get("risk_gateway", {}), logger=self.logger)
+        
+        # Initialize the core risk manager (moved from gateway integration logic)
+        self.risk_manager = RiskManager(
+            position_limit=self.config.get("risk_management", {}).get("position_limit", 1000.0)
+        )
+        
         self.real_time_pipeline = RealTimePipeline(self.config.get("real_time_pipeline", {}), logger=self.logger)
 
         # Initialize Step 10 Components
-        self.portfolio_optimizer = RenaissancePortfolioOptimizer()
+        # self.portfolio_optimizer = RenaissancePortfolioOptimizer()
         self.execution_suite = ExecutionAlgorithmSuite()
         self.slippage_protection = SlippageProtectionSystem()
 
@@ -241,21 +189,39 @@ class RenaissanceTradingBot:
         # 🚀 Meta-Strategy Selector (Step 11/13 Refinement)
         self.strategy_selector = MetaStrategySelector(self.config.get("meta_strategy", {}), logger=self.logger)
         
+        # 🤖 ML Integration Bridge (Unified from Enhanced Bot)
+        self.ml_enabled = self.config.get("ml_integration", {}).get("enabled", True)
+        self.ml_bridge = MLIntegrationBridge(self.config)
+        if self.ml_enabled:
+            self.ml_bridge.initialize()
+        
+        # Performance Tracking
+        self.ml_performance_metrics = {
+            'total_trades': 0,
+            'ml_enhanced_trades': 0,
+            'avg_ml_processing_time': 0.0,
+            'ml_success_rate': 0.0
+        }
+
         # State tracking for Dashboard
         self.last_vpin = 0.5
         
         # 📊 Institutional Dashboard
         self.dashboard_enabled = self.config.get("institutional_dashboard", {}).get("enabled", True)
         if self.dashboard_enabled:
-            self.dashboard = InstitutionalDashboard(self, host="0.0.0.0", port=5000)
-            self.dashboard.run()
+            try:
+                self.dashboard = InstitutionalDashboard(self, host="0.0.0.0", port=5000)
+                self.dashboard.run()
+            except Exception as e:
+                self.logger.warning(f"Failed to start dashboard (likely port conflict): {e}")
+                self.dashboard = None
         else:
             self.dashboard = None
         
         # Initialize Feature Pipeline (Step 16)
         from feature_pipeline import FractalFeaturePipeline
         self.feature_pipeline = FractalFeaturePipeline(
-            hd_dimension=128 # Match RealTimePipeline expected vector size
+            hd_dimension=100  # Ensure stable feature vector size
         )
         self.pipeline_fitted = False
         
@@ -270,7 +236,7 @@ class RenaissanceTradingBot:
             asyncio.create_task(self.db_manager.init_database())
 
         # Renaissance Research-Optimized Signal Weights
-        self.signal_weights = self.config.get("signal_weights", {
+        raw_weights = self.config.get("signal_weights", {
             'order_flow': 0.28,      # Institutional Flow
             'order_book': 0.18,      # Microstructure
             'volume': 0.12,          # Volume
@@ -280,6 +246,7 @@ class RenaissanceTradingBot:
             'alternative': 0.03,     # Sentiment/Whales
             'stat_arb': 0.15         # Statistical Arbitrage
         })
+        self.signal_weights = {str(k): float(self._force_float(v)) for k, v in raw_weights.items()}
 
         # Trading state
         self.current_position = 0.0
@@ -539,76 +506,37 @@ class RenaissanceTradingBot:
             return {key: 0.0 for key in self.signal_weights.keys()}
 
     def calculate_weighted_signal(self, signals: Dict[str, float]) -> Tuple[float, Dict[str, float]]:
-        """Calculate final weighted signal using Renaissance weights"""
-        weighted_signal = 0.0
-        signal_contributions = {}
-
-        # Use regime-adjusted weights if available
-        current_weights = self.regime_overlay.get_adjusted_weights(self.signal_weights)
-
-        for signal_type, weight in current_weights.items():
-            # 1. Capture raw weight and force to float primitive
+        """Calculate final weighted signal using Renaissance weights (Institutional hardening)"""
+        
+        # We redirect to the new ML-enhanced fusion if possible, or use standard
+        # For backward compatibility with tests/backtests that call this directly
+        ml_package = signals.get('ml_package') # Might be injected in some contexts
+        
+        # 🛡️ PURE SCALAR TYPE GUARD for all signal inputs
+        processed_signals = {}
+        for k, v in signals.items():
+            if k == 'ml_package':
+                processed_signals[k] = v
+                continue
             try:
-                w_prim = float(weight)
+                processed_signals[k] = self._force_float(v)
             except:
-                w_prim = 0.0
-
-            # 2. Capture raw signal value
-            raw_v = signals.get(signal_type, 0.0)
-            
-            # 3. Aggressive Scalar Extraction
-            # We must end up with a standard Python float, not a list, array, or numpy scalar.
-            s_prim = 0.0
+                processed_signals[k] = 0.0
+        
+        weighted_signal, confidence, fusion_metadata = self.signal_fusion.fuse_signals_with_ml(
+            processed_signals, self.signal_weights, ml_package
+        )
+        
+        # Ensure contributions are also hardened
+        contributions = fusion_metadata.get('contributions', {})
+        hardened_contribs = {}
+        for k, v in contributions.items():
             try:
-                temp = raw_v
-                # Deep extraction loop to peel off any container layers
-                for _ in range(10):
-                    # Handle numpy items (scalars or 0-d arrays)
-                    if hasattr(temp, 'item'):
-                        try:
-                            temp = temp.item()
-                        except:
-                            break
-                    # Handle any iterable sequence (list, tuple, ndarray)
-                    if hasattr(temp, '__iter__') and not isinstance(temp, (str, bytes, dict)):
-                        try:
-                            # Use next(iter()) to safely get the first element of any sequence
-                            temp = next(iter(temp))
-                        except (StopIteration, TypeError):
-                            temp = 0.0
-                            break
-                    else:
-                        # Not an iterable container
-                        break
-                
-                # Final safeguard: Force to standard Python primitive float
-                s_prim = float(temp)
+                hardened_contribs[k] = self._force_float(v)
             except:
-                s_prim = 0.0
-                
-            # 4. Binary Multiplication of PRIMITIVES
-            # This is the single binary operation that was causing the failure.
-            # By performing it inside a localized try-except and casting both 
-            # operands to float() at the exact point of multiplication, we 
-            # bypass any hidden operator overloading or sequence container behavior.
-            try:
-                multiplication_result = float(s_prim) * float(w_prim)
-                contrib_f = float(multiplication_result)
-            except:
-                contrib_f = 0.0
-            
-            # 5. Accumulation
-            try:
-                weighted_signal = float(weighted_signal) + float(contrib_f)
-            except:
-                weighted_signal = float(contrib_f)
-                
-            signal_contributions[signal_type] = float(contrib_f)
+                hardened_contribs[k] = 0.0
 
-        # Normalize to [-1, 1] range
-        weighted_signal = float(np.clip(weighted_signal, -1.0, 1.0))
-
-        return weighted_signal, signal_contributions
+        return float(self._force_float(weighted_signal)), hardened_contribs
 
     def _calculate_dynamic_position_size(self, product_id: str, confidence: float, weighted_signal: float, current_price: float) -> float:
         """Calculate dynamic position size using Step 10 Portfolio Optimizer"""
@@ -644,7 +572,7 @@ class RenaissanceTradingBot:
 
     def make_trading_decision(self, weighted_signal: float, signal_contributions: Dict[str, float], 
                               current_price: float = 0.0, real_time_result: Optional[Dict[str, Any]] = None,
-                              product_id: str = "BTC-USD") -> TradingDecision:
+                              product_id: str = "BTC-USD", ml_package: Optional[MLSignalPackage] = None) -> TradingDecision:
         """Make final trading decision with Renaissance methodology"""
 
         # Calculate confidence based on signal strength and consensus
@@ -655,26 +583,14 @@ class RenaissanceTradingBot:
         # Apply regime-derived confidence boost (max +/-5%)
         confidence = float(np.clip(confidence + self.regime_overlay.get_confidence_boost(), 0.0, 1.0))
 
-        # Apply Step 12 Real-Time Pipeline confidence overlay (if enabled and applicable)
-        rt_pipeline_cfg = self.config.get("real_time_pipeline", {})
-        if rt_pipeline_cfg.get("apply_to_confidence", False) and real_time_result:
-            predictions = real_time_result.get("predictions", {})
-            if predictions:
-                # Calculate mean prediction from all models (-1 to 1)
-                model_values = list(predictions.values())
-                mean_model_prediction = sum(model_values) / len(model_values)
-                
-                # Apply small overlay: if models agree with signal direction, boost confidence
-                # Max +/- 5% adjustment
-                direction_match = np.sign(weighted_signal) == np.sign(mean_model_prediction)
-                overlay = 0.05 if direction_match else -0.05
-                
-                # Weight by model consensus (how much models agree with each other)
-                model_consensus = 1.0 - np.std(model_values) if len(model_values) > 1 else 1.0
-                adjustment = overlay * model_consensus * abs(mean_model_prediction)
-                
-                confidence = float(np.clip(confidence + adjustment, 0.0, 1.0))
-                self.logger.info(f"Step 12 confidence adjustment: {adjustment:+.4f} (Consensus: {model_consensus:.2f})")
+        # 🤖 ML Enhanced Confidence (Unified from Enhanced Bot)
+        if ml_package:
+            # If models agree with signal direction, boost confidence
+            direction_match = np.sign(weighted_signal) == np.sign(ml_package.ensemble_score)
+            overlay = 0.05 if direction_match else -0.05
+            consciousness_factor = ml_package.confidence_score
+            confidence = float(np.clip(confidence + (overlay * consciousness_factor), 0.0, 1.0))
+            self.logger.info(f"ML confidence adjustment: {(overlay * consciousness_factor):+.4f} (Consciousness: {consciousness_factor:.2f})")
 
         # Determine action
         if confidence < self.min_confidence:
@@ -682,10 +598,15 @@ class RenaissanceTradingBot:
             position_size = 0.0
         elif weighted_signal > self.buy_threshold:
             action = 'BUY'
-            position_size = self._calculate_dynamic_position_size(product_id, confidence, weighted_signal, current_price)
+            # 🛡️ ML Enhanced Sizing
+            position_size = self.risk_manager.calculate_ml_enhanced_position_size(
+                weighted_signal, confidence, current_price, ml_package
+            )
         elif weighted_signal < self.sell_threshold:
             action = 'SELL'
-            position_size = self._calculate_dynamic_position_size(product_id, confidence, weighted_signal, current_price)
+            position_size = self.risk_manager.calculate_ml_enhanced_position_size(
+                weighted_signal, confidence, current_price, ml_package
+            )
         else:
             action = 'HOLD'
             position_size = 0.0
@@ -694,28 +615,30 @@ class RenaissanceTradingBot:
         if action != 'HOLD':
             self.logger.info(f"🎯 TURNOVER DETECTED: {action} {product_id} | Signal: {weighted_signal:+.4f} | Conf: {confidence:.3f}")
 
-        # Apply risk management
+        # ML-Enhanced Risk Assessment (Regime Gate)
+        risk_assessment = self.risk_manager.assess_risk_regime(ml_package)
+        if risk_assessment['recommended_action'] == 'fallback_mode':
+            self.logger.warning("ML Risk assessment triggered FALLBACK MODE - halting trades")
+            action = 'HOLD'
+            position_size = 0.0
+
+        # Apply basic risk limits
         if abs(self.daily_pnl) >= self.daily_loss_limit:
             action = 'HOLD'
             position_size = 0.0
             self.logger.warning(f"Daily loss limit reached: ${self.daily_pnl}")
 
-        # Gate decision through Advanced Risk Gateway (Step 9)
+        # Gate decision through Advanced Risk Gateway (Step 9) - VAE Anomaly Detection
         if action != 'HOLD':
-            # Create minimal portfolio data for the risk manager
             portfolio_data = {
-                'total_value': self.position_limit, # Assumption for limits
+                'total_value': self.position_limit,
                 'daily_pnl': self.daily_pnl,
                 'positions': {'BTC': self.current_position},
                 'current_price': current_price
             }
             
-            # Pass feature vector to Risk Gateway for VAE Anomaly Detection
-            feature_vector = None
-            if hasattr(self, 'feature_pipeline') and self.pipeline_fitted:
-                price_df = self.technical_indicators._to_dataframe()
-                if not price_df.empty:
-                    feature_vector = self.feature_pipeline.transform(price_df)
+            # Use ML package feature vector for VAE if available
+            feature_vector = ml_package.feature_vector if ml_package else None
 
             is_allowed = self.risk_gateway.assess_trade(
                 action=action,
@@ -726,7 +649,7 @@ class RenaissanceTradingBot:
             )
             
             if not is_allowed:
-                self.logger.warning(f"Risk Gateway BLOCKED {action} order")
+                self.logger.warning(f"Risk Gateway BLOCKED {action} order (VAE Anomaly or Risk limit)")
                 action = 'HOLD'
                 position_size = 0.0
 
@@ -735,8 +658,7 @@ class RenaissanceTradingBot:
             'confidence': confidence,
             'signal_contributions': signal_contributions,
             'current_price': current_price,
-            'volume_profile_signal': signal_contributions.get('volume_profile', 0.0),
-            'volume_profile_status': self._last_vp_status.get(product_id, 'Unknown'),
+            'ml_risk_assessment': risk_assessment,
             'risk_check': {
                 'daily_pnl': self.daily_pnl,
                 'daily_limit': self.daily_loss_limit,
@@ -994,6 +916,15 @@ class RenaissanceTradingBot:
                 # 2. Generate signals from all components
                 signals = await self.generate_signals(market_data)
                 
+                # HARDENING: Ensure all signals are floats
+                signals = {k: self._force_float(v) for k, v in signals.items()}
+                
+                # 2.1 ML Enhanced Signal Fusion (Unified from Enhanced Bot)
+                ml_package = None
+                if self.ml_enabled:
+                    # ML Bridge generates parallel model predictions (CNN-LSTM, N-BEATS, etc.)
+                    ml_package = await self.ml_bridge.generate_ml_signals(market_data, signals)
+                
                 # 2.2 Volume Profile Intelligence (Institutional)
                 price_df = self.technical_indicators._to_dataframe()
                 vp_signal = 0.0
@@ -1011,31 +942,25 @@ class RenaissanceTradingBot:
                 # 3. Calculate Renaissance weighted signal
                 weighted_signal, contributions = self.calculate_weighted_signal(signals)
                 
-                # PARANOID SCALAR HARDENING: Resolve 'can't multiply sequence by non-int'
-                # This ensures weighted_signal is a standard Python float BEFORE the boost.
-                try:
-                    # Explicit recursive unpacking
-                    t_ws_in = weighted_signal
-                    if hasattr(t_ws_in, 'tolist'): t_ws_in = t_ws_in.tolist()
-                    while isinstance(t_ws_in, (list, tuple)) and len(t_ws_in) > 0:
-                        t_ws_in = t_ws_in[0]
-                    if hasattr(t_ws_in, 'item'): t_ws_in = t_ws_in.item()
-                    weighted_signal = float(t_ws_in)
-                except:
-                    weighted_signal = 0.0
+                # PARANOID SCALAR HARDENING: Ensure results are primitive floats
+                weighted_signal = float(self._force_float(weighted_signal))
+                contributions = {str(k): float(self._force_float(v)) for k, v in contributions.items()}
+
+                # EXTRA HARDENING: Ensure signals dictionary is all floats for boost calculation
+                signals = {str(k): float(self._force_float(v)) for k, v in signals.items()}
+                self.logger.info(f"HARDENED SIGNALS: {[(k, type(v)) for k, v in signals.items()]}")
+
+                market_data['ml_package'] = ml_package
                 
                 # 3.1 Non-linear Confluence Boost (Step 20)
                 confluence_data = self.confluence_engine.calculate_confluence_boost(signals)
+                self.logger.info(f"CONFLUENCE DATA TYPE: {type(confluence_data.get('total_confluence_boost'))}")
                 
                 # Extract boost scalar with hardening
                 boost_scalar_final = 0.0
                 try:
                     raw_b_v_f = confluence_data.get('total_confluence_boost', 0.0)
-                    if hasattr(raw_b_v_f, 'tolist'): raw_b_v_f = raw_b_v_f.tolist()
-                    while isinstance(raw_b_v_f, (list, tuple)) and len(raw_b_v_f) > 0:
-                        raw_b_v_f = raw_b_v_f[0]
-                    if hasattr(raw_b_v_f, 'item'): raw_b_v_f = raw_b_v_f.item()
-                    boost_scalar_final = float(raw_b_v_f)
+                    boost_scalar_final = self._force_float(raw_b_v_f)
                 except:
                     boost_scalar_final = 0.0
 
@@ -1043,13 +968,16 @@ class RenaissanceTradingBot:
                     try:
                         # PURE SCALAR MULTIPLICATION TYPE GUARD
                         b_sig_f = float(weighted_signal)
-                        b_factor_f = 1.0 + float(boost_scalar_final)
+                        b_factor_f = float(1.0 + boost_scalar_final)
+                        self.logger.info(f"BOOST DEBUG: b_sig_f={type(b_sig_f)}, b_factor_f={type(b_factor_f)}")
                         # Binary operation on standard floats
                         boosted_val_f = b_sig_f * b_factor_f
                         weighted_signal = float(np.clip(boosted_val_f, -1.0, 1.0))
-                        self.logger.info(f"🏛️ CONFLUENCE BOOST: {b_sig_f:+.4f} -> {weighted_signal:+.4f}")
+                        self.logger.info(f"🏛️ CONFLUENCE BOOST: {b_sig_f:+.4f} -> {weighted_signal:+.4f} (Factor: {b_factor_f})")
                     except Exception as e:
                         self.logger.warning(f"Confluence boost application failed: {e}")
+                else:
+                    weighted_signal = self._force_float(weighted_signal)
                 
                 # Final check to ensure it's not a sequence before decision
                 weighted_signal = float(weighted_signal)
@@ -1072,14 +1000,25 @@ class RenaissanceTradingBot:
                 rt_result = None
                 if self.real_time_pipeline.enabled:
                     await self.real_time_pipeline.start()
-                    rt_result = await self.real_time_pipeline.run_cycle()
-
+                    raw_rt = await self.real_time_pipeline.run_cycle()
+                    if raw_rt:
+                        # Hardening real-time pipeline outputs
+                        rt_result = {}
+                        for k, v in raw_rt.items():
+                            if k == 'predictions':
+                                rt_result[k] = {mk: self._force_float(mv) for mk, mv in v.items()}
+                            else:
+                                try:
+                                    rt_result[k] = self._force_float(v)
+                                except:
+                                    rt_result[k] = v
+                
                 # 4.5 Statistical Arbitrage & Fractal Intelligence
                 current_price = market_data.get('ticker', {}).get('price', 0.0)
                 self.stat_arb_engine.update_price(product_id, current_price)
                 
                 # 🏛️ Basis Trading Signal
-                basis_signal = self.basis_engine.get_basis_signal(market_data)
+                basis_signal = self._force_float(self.basis_engine.get_basis_signal(market_data))
                 signals['basis'] = basis_signal
                 
                 stat_arb_data = {}
@@ -1092,16 +1031,16 @@ class RenaissanceTradingBot:
                         # Inverse for ETH if BTC is base
                         stat_arb_data = self.stat_arb_engine.calculate_pair_signal(base, product_id)
                         if 'signal' in stat_arb_data:
-                            stat_arb_data['signal'] = -stat_arb_data['signal']
+                            stat_arb_data['signal'] = -self._force_float(stat_arb_data['signal'])
                 
                 if stat_arb_data.get('status') == 'active':
-                    signals['stat_arb'] = stat_arb_data['signal']
+                    signals['stat_arb'] = self._force_float(stat_arb_data['signal'])
                 else:
                     signals['stat_arb'] = 0.0
 
                 # 5. Make trading decision
                 ticker = market_data.get('ticker', {})
-                current_price = ticker.get('price', 0.0)
+                current_price = self._force_float(ticker.get('price', 0.0))
                 
                 # 5.1 Meta-Strategy Selection
                 regime_data = self.regime_overlay.current_regime or {}
@@ -1112,7 +1051,8 @@ class RenaissanceTradingBot:
                 decision = self.make_trading_decision(weighted_signal, contributions, 
                                                     current_price=current_price, 
                                                     real_time_result=rt_result,
-                                                    product_id=product_id)
+                                                    product_id=product_id,
+                                                    ml_package=ml_package)
                 
                 # Inject Meta-Strategy Execution Mode (Step 11/13)
                 decision.reasoning['execution_mode'] = market_data.get('execution_mode', 'TAKER')
@@ -1211,7 +1151,9 @@ class RenaissanceTradingBot:
             return decisions[0] if decisions else TradingDecision('HOLD', 0.0, 0.0, {}, datetime.now())
 
         except Exception as e:
+            import traceback
             self.logger.error(f"Trading cycle failed: {e}")
+            self.logger.error(traceback.format_exc())
             return TradingDecision('HOLD', 0.0, 0.0, {'error': str(e)}, datetime.now())
 
     def _log_consciousness_dashboard(self, product_id: str, decision: TradingDecision, rt_result: Optional[Dict[str, Any]]):

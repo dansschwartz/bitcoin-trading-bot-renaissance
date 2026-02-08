@@ -30,7 +30,11 @@ A **Variational AutoEncoder (VAE)** is trained on historical "normal" market fea
 The bot features a high-performance PyTorch backend running multiple model architectures in parallel:
 - **CNN-LSTM**: Captures both spatial (technical indicator patterns) and temporal (time-series) features.
 - **N-BEATS**: A deep neural architecture for univariate time-series forecasting, optimized for trend/seasonality decomposition.
-- **Quantum Transformer**: Implements multi-head attention to identify long-range dependencies in market microstructure.
+- **Consciousness Layer**: Implements a meta-cognitive attention mechanism:
+  $$C(x) = x \cdot \tanh(W_a x + b_a) \cdot \sigma(W_c x + b_c) + x$$
+  where $W_a$ is the attention weight and $W_c$ is the consciousness gate.
+- **Quantum Superposition Layer**: Maps inputs to multiple potential future states $\psi_i$ and collapses them based on probabilistic weights $\alpha_i$:
+  $$\Psi = \sum_{i=1}^{n} \alpha_i \psi_i, \quad \sum \alpha_i = 1$$
 - **Ensemble Meta-Learner**: A specialized layer that weights the predictions of all base models based on their recent real-world accuracy.
 
 ---

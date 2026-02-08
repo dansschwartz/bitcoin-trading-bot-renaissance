@@ -57,7 +57,21 @@ class BasisTradingEngine:
         """Returns a normalized signal for the main fusion engine."""
         # This would ideally pull from a Futures exchange client (e.g. Coinbase Advanced Futures)
         # Mocking values for the architecture skeleton
-        spot = market_data.get('ticker', {}).get('price', 0.0)
+        ticker = market_data.get('ticker', {})
+        spot = ticker.get('price', 0.0)
+        
+        # Hardening spot to float
+        try:
+            while hasattr(spot, '__iter__') and not isinstance(spot, (str, bytes, dict)):
+                spot = spot[0] if len(spot) > 0 else 0.0
+            if hasattr(spot, 'item'): spot = spot.item()
+            spot = float(spot)
+        except:
+            spot = 0.0
+
+        if spot <= 0:
+            return 0.0
+
         futures = spot * 1.0002 # 2bps premium mock
         funding = 0.0001 # 0.01% mock
         

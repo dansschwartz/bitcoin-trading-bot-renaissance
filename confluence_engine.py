@@ -54,10 +54,18 @@ class ConfluenceEngine:
         for k, v in signals.items():
             try:
                 temp_v = v
+                if temp_v is None:
+                    hardened_signals[k] = 0.0
+                    continue
                 # Standard numpy/sequence unpacking
-                if hasattr(temp_v, 'item'): temp_v = temp_v.item()
-                while hasattr(temp_v, '__len__') and not isinstance(temp_v, (str, bytes, dict)):
-                    temp_v = temp_v[0] if len(temp_v) > 0 else 0.0
+                while hasattr(temp_v, '__iter__') and not isinstance(temp_v, (str, bytes, dict)):
+                    if hasattr(temp_v, '__len__') and len(temp_v) > 0:
+                        temp_v = temp_v[0]
+                    else:
+                        temp_v = 0.0
+                        break
+                if hasattr(temp_v, 'item'): 
+                    temp_v = temp_v.item()
                 hardened_signals[k] = float(temp_v)
             except:
                 hardened_signals[k] = 0.0

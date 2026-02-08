@@ -21,6 +21,24 @@ from typing import Dict, List, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore')
 
+class CNNLSTMConfig:
+    """Configuration for CNN-LSTM model"""
+    def __init__(self):
+        self.sequence_length = 30
+        self.feature_count = 10
+        self.cnn_filters = 128
+        self.lstm_units = 64
+        self.learning_rate = 0.001
+        self.dropout = 0.2
+
+class NBEATSConfig:
+    """Configuration for N-BEATS model"""
+    def __init__(self):
+        self.backcast_length = 60
+        self.forecast_length = 12
+        self.nb_blocks = 9
+        self.units = 512
+
 class MLPatternConfig:
     """Fixed ML configuration class - resolves MLConfig import error"""
     def __init__(self):

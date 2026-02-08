@@ -2,11 +2,13 @@
 
 Renaissance-inspired BTC-USD trading bot with a single, stabilized golden path. The project is currently paper-trading only and wired for live market data.
 
-**Golden Path**
+**Golden Path (Unified Architecture)**
 - Entrypoint: `run_renaissance_bot.py`
+- Core Engine: `renaissance_trading_bot.py` (Now includes all "Enhanced" ML and Risk capabilities by default)
 - Config: `config/config.json`
-- Live market data: Coinbase Advanced Trade (credentials via `.env`)
-- Alternative data: Guavy Crypto API (primary), Fear & Greed, and fallback support for Reddit, News, Twitter, and Whale Alert sentiment
+- Live market data: Coinbase Advanced Trade
+- Multi-Exchange: Parallel feeds from Kraken, KuCoin, Bitfinex for global volume profile.
+- ML Backend: PyTorch-powered (CNN-LSTM, N-BEATS, Transformer, VAE).
 
 **Quickstart**
 1. Copy `.env.example` to `.env` and fill in your credentials.
@@ -54,6 +56,29 @@ The file contains:
 - `institutional_dashboard`: **Consciousness UI**. Real-time web interface to visualize bot performance, market regimes, and the "Inner Thoughts" of the AI engine.
 - `meta_strategy`: **Adaptive Execution Mode**. Dynamically switches between **Taker (Renaissance)** and **Maker (Citadel)** modes based on VPIN toxicity and market regime.
 - `performance_attribution`: **Factor Analysis**. Decomposes P&L into Alpha, Beta, and specific factor exposures (Microstructure, Technical, Alternative) using realized outcome labeling.
+
+## 🛠️ Troubleshooting & Environment
+
+If you see "No Python Interpreter" in your IDE (PyCharm/VS Code):
+
+### 1. PyCharm Fix
+1. Go to **Settings** (Cmd + , on Mac).
+2. Navigate to **Project: bitcoin-trading-bot-renaissance** > **Python Interpreter**.
+3. Click **Add Interpreter** > **Add Local Interpreter**.
+4. Select **System Interpreter** and point it to your Python path (usually `/Users/danielschwartz/miniconda3/bin/python` or run `which python` in terminal to find it).
+
+### 2. VS Code Fix
+1. Open the Command Palette (`Cmd + Shift + P`).
+2. Type `Python: Select Interpreter`.
+3. Select the recommended version (e.g., Python 3.13.x).
+
+### 3. Verify via Terminal
+You can always run the bot directly from the terminal, which bypasses IDE configuration issues:
+```bash
+python run_renaissance_bot.py --test
+```
+
+---
 
 ## 📚 Documentation
 For deep dives into the bot's design and logic, see:

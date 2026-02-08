@@ -115,6 +115,41 @@ def check_database_integrity(db_path):
         print(f"  ❌ Database Check Failed: {e}")
         return False
 
+def check_ml_environment():
+    print("\n🤖 Checking ML Environment...")
+    
+    components = {
+        "PyTorch": "torch",
+        "NumPy": "numpy",
+        "Pandas": "pandas",
+        "Scipy": "scipy",
+        "Sklearn": "sklearn"
+    }
+    
+    all_good = True
+    for name, module in components.items():
+        try:
+            import importlib
+            importlib.import_module(module)
+            print(f"  ✅ {name:16}: INSTALLED")
+        except ImportError:
+            print(f"  ❌ {name:16}: MISSING")
+            all_good = False
+            
+    # Check for model weights (simulated check for common paths)
+    model_paths = [
+        "models/cnn_lstm_weights.pt",
+        "models/vae_anomaly_weights.pt"
+    ]
+    
+    for path in model_paths:
+        if Path(path).exists():
+            print(f"  ✅ Model Weights   : {path} FOUND")
+        else:
+            print(f"  ℹ️  Model Weights   : {path} NOT FOUND (Will use default/cold start)")
+            
+    return all_good
+
 async def main():
     print("🏛️  RENAISSANCE BOT: PRE-FLIGHT COMBAT READINESS CHECK")
     print("=" * 60)
@@ -134,7 +169,8 @@ async def main():
     results = {
         "API Keys": check_api_keys(config),
         "Network": await check_network_latency(),
-        "Database": check_database_integrity(db_path)
+        "Database": check_database_integrity(db_path),
+        "ML Env": check_ml_environment()
     }
     
     print("\n" + "=" * 60)
