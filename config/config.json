@@ -76,6 +76,11 @@
     "query": "bitcoin,crypto,blockchain",
     "language": "en"
   },
+  "guavy": {
+    "enabled": true,
+    "api_key_env": "GUAVY_API_KEY",
+    "base_url": "https://data.guavy.com/api/v1"
+  },
     "logging": {
     "file": "logs/renaissance_bot.log",
     "level": "INFO"
@@ -87,5 +92,9 @@
   "database": {
     "path": "data/renaissance_bot.db",
     "enabled": true
+  },
+  "institutional_dashboard": {
+    "enabled": true,
+    "port": 5000
   }
 }

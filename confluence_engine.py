@@ -45,22 +45,37 @@ class ConfluenceEngine:
         """
         Analyzes signal interactions and returns a non-linear boost factor.
         """
-        boosts = []
         active_rules = []
         total_boost = 0.0
 
+        # Create a hardened copy of signals to ensure all values are standard floats
+        # This is critical to prevent sequence-multiplication errors in fusion
+        hardened_signals = {}
+        for k, v in signals.items():
+            try:
+                temp_v = v
+                # Standard numpy/sequence unpacking
+                if hasattr(temp_v, 'item'): temp_v = temp_v.item()
+                while hasattr(temp_v, '__len__') and not isinstance(temp_v, (str, bytes, dict)):
+                    temp_v = temp_v[0] if len(temp_v) > 0 else 0.0
+                hardened_signals[k] = float(temp_v)
+            except:
+                hardened_signals[k] = 0.0
+
         for rule in self.rules:
-            boost_val = self._evaluate_rule(rule, signals)
-            if boost_val > 0:
-                boosts.append(boost_val)
-                active_rules.append(rule['name'])
-                total_boost += boost_val
+            try:
+                boost_val = self._evaluate_rule(rule, hardened_signals)
+                if boost_val > 0:
+                    active_rules.append(rule['name'])
+                    total_boost += float(boost_val)
+            except Exception as e:
+                self.logger.warning(f"Error evaluating rule {rule.get('name')}: {e}")
 
         # Cap total confluence boost at 30% to prevent overfitting
-        total_boost = min(total_boost, 0.30)
+        total_boost = min(float(total_boost), 0.30)
 
         return {
-            'total_confluence_boost': total_boost,
+            'total_confluence_boost': float(total_boost),
             'active_rules': active_rules,
             'timestamp': datetime.now().isoformat()
         }

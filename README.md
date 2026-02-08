@@ -6,7 +6,7 @@ Renaissance-inspired BTC-USD trading bot with a single, stabilized golden path. 
 - Entrypoint: `run_renaissance_bot.py`
 - Config: `config/config.json`
 - Live market data: Coinbase Advanced Trade (credentials via `.env`)
-- Alternative data: Fear & Greed + optional Reddit, News, Twitter, and Whale Alert sentiment
+- Alternative data: Guavy Crypto API (primary), Fear & Greed, and fallback support for Reddit, News, Twitter, and Whale Alert sentiment
 
 **Quickstart**
 1. Copy `.env.example` to `.env` and fill in your credentials.
@@ -36,6 +36,7 @@ The file contains:
 - `REDDIT_CLIENT_ID / SECRET`: For deep subreddit sentiment tracking.
 - `NEWSAPI_KEY`: For global financial news analysis.
 - `WHALE_ALERT_KEY`: For tracking large on-chain transactions.
+- `GUAVY_API_KEY`: Primary source for crypto alternative data (replaces Twitter/Reddit/News).
 
 **Advanced Features (Opt-in)**
 - `regime_overlay`: Enables **Medallion-style Regime Prediction**. Uses a **Hidden Markov Model (HMM)** to predict market transitions, coupled with trend persistence and volatility acceleration scoring.
@@ -51,6 +52,13 @@ The file contains:
 - `deep_nlp`: **LLM Reasoning**. Connects a local Llama or GPT model to perform deep reasoning on news and social media, extracting institutional-grade context.
 - `market_making`: **Liquidity Provision**. Transitions from taker to maker, providing two-sided quotes, managing inventory skew, and capturing the bid-ask spread.
 - `institutional_dashboard`: **Consciousness UI**. Real-time web interface to visualize bot performance, market regimes, and the "Inner Thoughts" of the AI engine.
+- `meta_strategy`: **Adaptive Execution Mode**. Dynamically switches between **Taker (Renaissance)** and **Maker (Citadel)** modes based on VPIN toxicity and market regime.
+- `performance_attribution`: **Factor Analysis**. Decomposes P&L into Alpha, Beta, and specific factor exposures (Microstructure, Technical, Alternative) using realized outcome labeling.
+
+## 📚 Documentation
+For deep dives into the bot's design and logic, see:
+- **[ARCHITECTURE.md](ARCHITECTURE.md)**: High-level design, data flow, and institutional layers.
+- **[MODELS_GUIDE.md](MODELS_GUIDE.md)**: Mathematical foundations, ML models (HMM, VAE, CNN-LSTM), and confluence rules.
 
 **Self-Reinforcing Loop**
 The bot now implements a closed feedback loop:

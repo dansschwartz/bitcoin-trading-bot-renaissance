@@ -99,28 +99,32 @@ class RegimeOverlay:
 
         try:
             regime_weights = self.current_regime.get('regime_weights', {})
-            vol_w = regime_weights.get('volatility_weight', 1.0)
-            trend_w = regime_weights.get('trend_weight', 1.0)
-            liq_w = regime_weights.get('liquidity_weight', 1.0)
+            vol_w = float(regime_weights.get('volatility_weight', 1.0))
+            trend_w = float(regime_weights.get('trend_weight', 1.0))
+            liq_w = float(regime_weights.get('liquidity_weight', 1.0))
 
             adjusted = base_weights.copy()
             
             # Apply trend weights to technical indicators
-            if 'macd' in adjusted: adjusted['macd'] *= trend_w
-            if 'rsi' in adjusted: adjusted['rsi'] *= trend_w
+            if 'macd' in adjusted: adjusted['macd'] = float(adjusted['macd']) * float(trend_w)
+            if 'rsi' in adjusted: adjusted['rsi'] = float(adjusted['rsi']) * float(trend_w)
             
             # Apply volatility weights to Bollinger
-            if 'bollinger' in adjusted: adjusted['bollinger'] *= vol_w
+            if 'bollinger' in adjusted: adjusted['bollinger'] = float(adjusted['bollinger']) * float(vol_w)
             
             # Apply liquidity weights to microstructure
-            if 'order_flow' in adjusted: adjusted['order_flow'] *= liq_w
-            if 'order_book' in adjusted: adjusted['order_book'] *= liq_w
-            if 'volume' in adjusted: adjusted['volume'] *= liq_w
+            if 'order_flow' in adjusted: adjusted['order_flow'] = float(adjusted['order_flow']) * float(liq_w)
+            if 'order_book' in adjusted: adjusted['order_book'] = float(adjusted['order_book']) * float(liq_w)
+            if 'volume' in adjusted: adjusted['volume'] = float(adjusted['volume']) * float(liq_w)
 
-            # Re-normalize weights to sum to 1.0
-            total = sum(adjusted.values())
+            # Re-normalize weights to sum to 1.0 and ensure standard floats
+            total = float(sum(adjusted.values()))
             if total > 0:
-                adjusted = {k: v / total for k, v in adjusted.items()}
+                adjusted = {k: float(v) / total for k, v in adjusted.items()}
+            else:
+                # Fallback to standard weights cast to float
+                total_base = float(sum(base_weights.values()))
+                adjusted = {k: float(v) / total_base for k, v in base_weights.items()}
             
             return adjusted
             

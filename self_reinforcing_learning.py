@@ -16,6 +16,7 @@ class SelfReinforcingLearningEngine:
         self.db_path = db_path
         self.logger = logger or logging.getLogger(__name__)
         self.lookforward_minutes = 60 # How far to look for realized PnL
+        self._latest_alpha_corrs = {}
         
     async def run_learning_cycle(self, models: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -188,7 +189,7 @@ class SelfReinforcingLearningEngine:
                 return {}
                 
             df = pd.DataFrame(labeled_data)
-            outcomes = df['price_change_pct'].values
+            outcomes = df['ret_pct'].values
             
             # Extract signal contributions
             feature_keys = set()
@@ -197,13 +198,19 @@ class SelfReinforcingLearningEngine:
                 
             for key in feature_keys:
                 signals = [f.get(key, 0.0) for f in df['features']]
-                corr = np.corrcoef(signals, outcomes)[0, 1]
-                correlations[key] = float(corr) if not np.isnan(corr) else 0.0
+                if len(signals) > 1:
+                    corr = np.corrcoef(signals, outcomes)[0, 1]
+                    correlations[key] = float(corr) if not np.isnan(corr) else 0.0
+                else:
+                    correlations[key] = 0.0
                 
             # Log significant decay
             for key, corr in correlations.items():
                 if abs(corr) < 0.05:
                     self.logger.info(f"⚠️ Low correlation detected for {key}: {corr:.4f} (Potential Alpha Decay)")
+            
+            # Save latest correlations for dashboard
+            self._latest_alpha_corrs = correlations
                     
         except Exception as e:
             self.logger.error(f"Alpha decay analysis failed: {e}")

@@ -26,17 +26,20 @@ class BasisTradingEngine:
         basis_raw = futures_price - spot_price
         basis_pct = basis_raw / spot_price
         
-        # Funding rate is usually 8-hourly. Annualize it: (Rate * 3 * 365)
+        # Funding rate is usually 8-hourly (0.01% = 0.0001). Annualize it: (Rate * 3 * 365)
+        # 3 funding payments per day, 365 days a year.
         annualized_funding = funding_rate * 3 * 365
         
         # Total Carry = Basis (if we hold to expiry) + Funding
-        total_carry_annualized = annualized_funding # Simplified for Perps
+        # For perpetuals, basis is theoretical; we mostly harvest funding.
+        total_carry_annualized = annualized_funding + (basis_pct * 365) # Simple approximation
         
         signal = "NONE"
-        if basis_pct > 0.005: # > 0.5% premium
-            signal = "CASH_AND_CARRY" # Buy Spot, Sell Futures
-        elif basis_pct < -0.005: # > 0.5% discount
-            signal = "REVERSE_CARRY" # Sell Spot, Buy Futures
+        # Thresholds: 10% annualized yield for engagement
+        if total_carry_annualized > 0.10: 
+            signal = "CASH_AND_CARRY" # Buy Spot, Sell Futures (Harvest Positive Funding)
+        elif total_carry_annualized < -0.10:
+            signal = "REVERSE_CARRY" # Sell Spot, Buy Futures (Harvest Negative Funding)
             
         return {
             "spot_price": spot_price,

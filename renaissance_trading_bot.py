@@ -50,6 +50,7 @@ from confluence_engine import ConfluenceEngine
 from basis_trading_engine import BasisTradingEngine
 from deep_nlp_bridge import DeepNLPBridge
 from market_making_engine import MarketMakingEngine
+from meta_strategy_selector import MetaStrategySelector
 from institutional_dashboard import InstitutionalDashboard
 
 from enum import Enum
@@ -236,10 +237,20 @@ class RenaissanceTradingBot:
         
         # ⚖️ Market Making Engine
         self.market_making = MarketMakingEngine(self.config.get("market_making", {}), logger=self.logger)
+
+        # 🚀 Meta-Strategy Selector (Step 11/13 Refinement)
+        self.strategy_selector = MetaStrategySelector(self.config.get("meta_strategy", {}), logger=self.logger)
+        
+        # State tracking for Dashboard
+        self.last_vpin = 0.5
         
         # 📊 Institutional Dashboard
-        self.dashboard = InstitutionalDashboard(self, host="0.0.0.0", port=5000)
-        self.dashboard.run()
+        self.dashboard_enabled = self.config.get("institutional_dashboard", {}).get("enabled", True)
+        if self.dashboard_enabled:
+            self.dashboard = InstitutionalDashboard(self, host="0.0.0.0", port=5000)
+            self.dashboard.run()
+        else:
+            self.dashboard = None
         
         # Initialize Feature Pipeline (Step 16)
         from feature_pipeline import FractalFeaturePipeline
@@ -400,31 +411,35 @@ class RenaissanceTradingBot:
                 signals['rsi'] = 0.0
                 signals['bollinger'] = 0.0
 
-            # 3. Alternative data signals (4.5% total weight)
+                # 3. Alternative data signals (4.5% total weight)
             if market_data.get('alternative_signals'):
                 alt_signal = market_data['alternative_signals']
                 
                 # Fetch whale signal
                 whale_data = await self.whale_monitor.get_whale_signals()
-                whale_pressure = whale_data.get("whale_pressure", 0.0)
+                whale_pressure = float(whale_data.get("whale_pressure", 0.0))
                 
                 # 🧠 Deep NLP Reasoning (New)
                 news_text = " ".join([str(n) for n in market_data.get('news', [])])
-                nlp_result = await self.nlp_bridge.analyze_sentiment_with_reasoning(news_text)
-                nlp_sentiment = nlp_result.get('sentiment', 0.0)
-                market_data['nlp_reasoning'] = nlp_result.get('reasoning', 'No deep context')
+                if news_text.strip():
+                    nlp_result = await self.nlp_bridge.analyze_sentiment_with_reasoning(news_text)
+                    nlp_sentiment = float(nlp_result.get('sentiment', 0.0))
+                    market_data['nlp_reasoning'] = nlp_result.get('reasoning', 'No deep context')
+                else:
+                    nlp_sentiment = 0.0
+                    market_data['nlp_reasoning'] = 'No news data available'
                 
                 # Combine all alternative signals into one composite score
                 # 20% Reddit, 15% News, 15% Twitter, 15% Fear/Greed, 10% Whale, 25% Deep NLP
                 alternative_composite = (
-                    alt_signal.reddit_sentiment * 0.20 +
-                    alt_signal.news_sentiment * 0.15 +
-                    alt_signal.social_sentiment * 0.15 +
-                    alt_signal.market_psychology * 0.15 +
+                    float(alt_signal.reddit_sentiment or 0.0) * 0.20 +
+                    float(alt_signal.news_sentiment or 0.0) * 0.15 +
+                    float(alt_signal.social_sentiment or 0.0) * 0.15 +
+                    float(alt_signal.market_psychology or 0.0) * 0.15 +
                     whale_pressure * 0.10 +
                     nlp_sentiment * 0.25
                 )
-                signals['alternative'] = alternative_composite
+                signals['alternative'] = float(alternative_composite)
                 market_data['whale_signals'] = whale_data # Pass along for dashboard
             else:
                 signals['alternative'] = 0.0
@@ -532,13 +547,66 @@ class RenaissanceTradingBot:
         current_weights = self.regime_overlay.get_adjusted_weights(self.signal_weights)
 
         for signal_type, weight in current_weights.items():
-            signal_value = signals.get(signal_type, 0.0)
-            contribution = signal_value * weight
-            weighted_signal += contribution
-            signal_contributions[signal_type] = contribution
+            # 1. Capture raw weight and force to float primitive
+            try:
+                w_prim = float(weight)
+            except:
+                w_prim = 0.0
+
+            # 2. Capture raw signal value
+            raw_v = signals.get(signal_type, 0.0)
+            
+            # 3. Aggressive Scalar Extraction
+            # We must end up with a standard Python float, not a list, array, or numpy scalar.
+            s_prim = 0.0
+            try:
+                temp = raw_v
+                # Deep extraction loop to peel off any container layers
+                for _ in range(10):
+                    # Handle numpy items (scalars or 0-d arrays)
+                    if hasattr(temp, 'item'):
+                        try:
+                            temp = temp.item()
+                        except:
+                            break
+                    # Handle any iterable sequence (list, tuple, ndarray)
+                    if hasattr(temp, '__iter__') and not isinstance(temp, (str, bytes, dict)):
+                        try:
+                            # Use next(iter()) to safely get the first element of any sequence
+                            temp = next(iter(temp))
+                        except (StopIteration, TypeError):
+                            temp = 0.0
+                            break
+                    else:
+                        # Not an iterable container
+                        break
+                
+                # Final safeguard: Force to standard Python primitive float
+                s_prim = float(temp)
+            except:
+                s_prim = 0.0
+                
+            # 4. Binary Multiplication of PRIMITIVES
+            # This is the single binary operation that was causing the failure.
+            # By performing it inside a localized try-except and casting both 
+            # operands to float() at the exact point of multiplication, we 
+            # bypass any hidden operator overloading or sequence container behavior.
+            try:
+                multiplication_result = float(s_prim) * float(w_prim)
+                contrib_f = float(multiplication_result)
+            except:
+                contrib_f = 0.0
+            
+            # 5. Accumulation
+            try:
+                weighted_signal = float(weighted_signal) + float(contrib_f)
+            except:
+                weighted_signal = float(contrib_f)
+                
+            signal_contributions[signal_type] = float(contrib_f)
 
         # Normalize to [-1, 1] range
-        weighted_signal = np.clip(weighted_signal, -1.0, 1.0)
+        weighted_signal = float(np.clip(weighted_signal, -1.0, 1.0))
 
         return weighted_signal, signal_contributions
 
@@ -810,47 +878,76 @@ class RenaissanceTradingBot:
             self.logger.error(f"Failed to persist optimized weights: {e}")
 
     async def _perform_attribution_analysis(self):
-        """Step 11/13: Comprehensive performance attribution"""
+        """Step 11/13: Comprehensive performance attribution with Factor Analysis"""
         if not self.db_enabled:
             return
 
         try:
-            # Fetch recent decisions and trades
-            decisions = await self.db_manager.get_recent_data('decisions', hours=48)
-            trades = await self.db_manager.get_recent_data('trades', hours=48)
-            
-            if not decisions:
+            # 1. Fetch labels (Realized outcomes) from DB
+            # This uses the ground truth created in Step 19
+            labels = await self.db_manager.get_recent_data('labels', hours=72)
+            if not labels:
+                self.logger.info("Attribution Analysis: No recent labels available yet.")
                 return
 
-            self.logger.info(f"Running Performance Attribution: Analyzing {len(decisions)} decisions and {len(trades)} trades.")
+            self.logger.info(f"🏛️ RENAISSANCE ATTRIBUTION: Analyzing {len(labels)} realized outcomes.")
+
+            # 2. Prepare Factor Exposures from signal contributions
+            # We use the signal_contributions stored in the decisions table (via reasoning JSON)
+            decisions = await self.db_manager.get_recent_data('decisions', hours=72)
+            if not decisions:
+                self.logger.info("Attribution Analysis: No recent decisions available.")
+                return
             
-            # Simplified returns calculation
-            # In production, we'd use realized PnL. Here we'll simulate attribution factors.
-            portfolio_returns = pd.Series([0.001 * (1 if d['action'] == 'BUY' else -1 if d['action'] == 'SELL' else 0) for d in decisions])
-            benchmark_returns = pd.Series([0.0005 for _ in range(len(decisions))])
+            # Map labels to decisions
+            label_map = {l['decision_id']: l for l in labels}
             
-            factor_exposures = {
-                'microstructure': [0.5 for _ in range(len(decisions))],
-                'technical': [0.3 for _ in range(len(decisions))],
-                'alternative': [0.1 for _ in range(len(decisions))],
-                'ml': [0.1 for _ in range(len(decisions))]
-            }
+            portfolio_returns = []
+            benchmark_returns = []
             
-            market_data = {'factor_returns': pd.DataFrame()}
+            # Use current signal weights to define factors
+            current_factors = list(self.signal_weights.keys())
+            factor_exposures = {k: [] for k in current_factors}
             
+            for d in decisions:
+                if d['id'] in label_map:
+                    l = label_map[d['id']]
+                    # Portfolio return is based on decision and actual price change
+                    side_mult = 1.0 if d['action'] == 'BUY' else -1.0 if d['action'] == 'SELL' else 0.0
+                    portfolio_returns.append(l['ret_pct'] * side_mult)
+                    
+                    # Benchmark (Buy and Hold)
+                    benchmark_returns.append(l['ret_pct'])
+                    
+                    # Factors (Normalized contributions)
+                    reasoning = json.loads(d['reasoning'])
+                    contributions = reasoning.get('signal_contributions', {})
+                    for k in factor_exposures.keys():
+                        factor_exposures[k].append(contributions.get(k, 0.0))
+
+            if len(portfolio_returns) < 5:
+                self.logger.info("Attribution Analysis: Insufficient data samples for factor regression.")
+                return
+
             # Execute Attribution
             attribution = self.attribution_engine.analyze_performance_attribution(
-                portfolio_returns, benchmark_returns, factor_exposures, market_data
+                pd.Series(portfolio_returns),
+                pd.Series(benchmark_returns),
+                factor_exposures,
+                {'factor_returns': pd.DataFrame()} # Market data can be enhanced later
             )
             
             if 'error' not in attribution:
                 summary = attribution.get('performance_summary', {})
-                self.logger.info(f"Attribution Summary: Alpha: {summary.get('alpha', 0):.4f}, Beta: {summary.get('beta', 0):.4f}")
+                self.logger.info(f"✅ ATTRIBUTION COMPLETE: Alpha: {summary.get('alpha', 0):+.4f} | Beta: {summary.get('beta', 0):.4f}")
                 
-                # Nudge consciousness boost based on timing selection effect
-                timing_effect = attribution.get('timing_selection_effects', {}).get('market_timing', 0)
-                if timing_effect > 0:
-                    self.logger.info("Market timing positive: bot is correctly entering regimes.")
+                # Identify Top Alpha Drivers
+                factor_attr = attribution.get('factor_attribution', {})
+                if factor_attr:
+                    # Sort factors by their contribution to return
+                    drivers = sorted(factor_attr.items(), key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
+                    top_driver = drivers[0][0] if drivers else "None"
+                    self.logger.info(f"🚀 TOP ALPHA DRIVER: {top_driver}")
             
         except Exception as e:
             self.logger.error(f"Performance attribution failed: {e}")
@@ -872,9 +969,10 @@ class RenaissanceTradingBot:
                     continue
                 
                 # Standardize price key
-                current_price = market_data.get('ticker', {}).get('price', 0.0)
+                ticker = market_data.get('ticker', {})
+                current_price = float(ticker.get('price', 0.0))
                 if current_price == 0:
-                    current_price = market_data.get('ticker', {}).get('last', 0.0)
+                    current_price = float(ticker.get('last', 0.0))
                     market_data['ticker']['price'] = current_price # Standardize
                 
                 # 1.5 Persist Market Data for Step 19 feedback loop
@@ -913,15 +1011,48 @@ class RenaissanceTradingBot:
                 # 3. Calculate Renaissance weighted signal
                 weighted_signal, contributions = self.calculate_weighted_signal(signals)
                 
+                # PARANOID SCALAR HARDENING: Resolve 'can't multiply sequence by non-int'
+                # This ensures weighted_signal is a standard Python float BEFORE the boost.
+                try:
+                    # Explicit recursive unpacking
+                    t_ws_in = weighted_signal
+                    if hasattr(t_ws_in, 'tolist'): t_ws_in = t_ws_in.tolist()
+                    while isinstance(t_ws_in, (list, tuple)) and len(t_ws_in) > 0:
+                        t_ws_in = t_ws_in[0]
+                    if hasattr(t_ws_in, 'item'): t_ws_in = t_ws_in.item()
+                    weighted_signal = float(t_ws_in)
+                except:
+                    weighted_signal = 0.0
+                
                 # 3.1 Non-linear Confluence Boost (Step 20)
                 confluence_data = self.confluence_engine.calculate_confluence_boost(signals)
-                boost = confluence_data.get('total_confluence_boost', 0.0)
-                if boost > 0:
-                    old_signal = weighted_signal
-                    # Boost moves signal further in its existing direction
-                    weighted_signal = weighted_signal * (1.0 + boost)
-                    weighted_signal = float(np.clip(weighted_signal, -1.0, 1.0))
-                    self.logger.info(f"🏛️ CONFLUENCE BOOST: {old_signal:+.4f} -> {weighted_signal:+.4f} (Active: {confluence_data['active_rules']})")
+                
+                # Extract boost scalar with hardening
+                boost_scalar_final = 0.0
+                try:
+                    raw_b_v_f = confluence_data.get('total_confluence_boost', 0.0)
+                    if hasattr(raw_b_v_f, 'tolist'): raw_b_v_f = raw_b_v_f.tolist()
+                    while isinstance(raw_b_v_f, (list, tuple)) and len(raw_b_v_f) > 0:
+                        raw_b_v_f = raw_b_v_f[0]
+                    if hasattr(raw_b_v_f, 'item'): raw_b_v_f = raw_b_v_f.item()
+                    boost_scalar_final = float(raw_b_v_f)
+                except:
+                    boost_scalar_final = 0.0
+
+                if boost_scalar_final > 0:
+                    try:
+                        # PURE SCALAR MULTIPLICATION TYPE GUARD
+                        b_sig_f = float(weighted_signal)
+                        b_factor_f = 1.0 + float(boost_scalar_final)
+                        # Binary operation on standard floats
+                        boosted_val_f = b_sig_f * b_factor_f
+                        weighted_signal = float(np.clip(boosted_val_f, -1.0, 1.0))
+                        self.logger.info(f"🏛️ CONFLUENCE BOOST: {b_sig_f:+.4f} -> {weighted_signal:+.4f}")
+                    except Exception as e:
+                        self.logger.warning(f"Confluence boost application failed: {e}")
+                
+                # Final check to ensure it's not a sequence before decision
+                weighted_signal = float(weighted_signal)
                 market_data['confluence_data'] = confluence_data
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
@@ -972,10 +1103,19 @@ class RenaissanceTradingBot:
                 ticker = market_data.get('ticker', {})
                 current_price = ticker.get('price', 0.0)
                 
+                # 5.1 Meta-Strategy Selection
+                regime_data = self.regime_overlay.current_regime or {}
+                self.last_vpin = market_data.get('vpin', 0.5)
+                execution_mode = self.strategy_selector.select_mode(market_data, regime_data)
+                market_data['execution_mode'] = execution_mode
+                
                 decision = self.make_trading_decision(weighted_signal, contributions, 
                                                     current_price=current_price, 
                                                     real_time_result=rt_result,
                                                     product_id=product_id)
+                
+                # Inject Meta-Strategy Execution Mode (Step 11/13)
+                decision.reasoning['execution_mode'] = market_data.get('execution_mode', 'TAKER')
                 
                 decision.reasoning['product_id'] = product_id
                 if rt_result:
@@ -1020,7 +1160,8 @@ class RenaissanceTradingBot:
                         quotes = self.market_making.calculate_quotes(
                             current_price, 
                             market_data.get('volatility', 0.02),
-                            signals.get('order_book', 0.0)
+                            signals.get('order_book', 0.0),
+                            vpin=market_data.get('vpin', 0.5)
                         )
                         self.logger.info(f"⚖️ MARKET MAKING QUOTES: Bid {quotes['bid']:.2f} | Ask {quotes['ask']:.2f} (Skew: {quotes['skew']:.4f})")
                         # In production, send limit orders here
@@ -1079,7 +1220,8 @@ class RenaissanceTradingBot:
         
         # 1. Decision Summary
         action_emoji = "🚀" if decision.action == "BUY" else "🔻" if decision.action == "SELL" else "⚖️"
-        self.logger.info(f"ACTION: {action_emoji} {decision.action} | CONFIDENCE: {decision.confidence:.2%} | SIZE: {decision.position_size:.2%}")
+        mode = decision.reasoning.get('execution_mode', 'TAKER')
+        self.logger.info(f"ACTION: {action_emoji} {decision.action} | MODE: {mode} | CONFIDENCE: {decision.confidence:.2%} | SIZE: {decision.position_size:.2%}")
         
         # 2. Market Regime & Global Intelligence
         regime = self.regime_overlay.get_current_regime() if hasattr(self.regime_overlay, 'get_current_regime') else "NORMAL"
