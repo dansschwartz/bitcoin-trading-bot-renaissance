@@ -67,6 +67,12 @@ from institutional_dashboard import InstitutionalDashboard
 from renaissance_types import SignalType, OrderType, MLSignalPackage, TradingDecision
 from ml_integration_bridge import MLIntegrationBridge
 
+# Renaissance Medallion-Style Engines
+from advanced_mean_reversion_engine import AdvancedMeanReversionEngine
+from correlation_network_engine import CorrelationNetworkEngine
+from garch_volatility_engine import GARCHVolatilityEngine
+from historical_data_cache import HistoricalDataCache
+
 # Production Orchestrator (optional)
 try:
     from production_trading_orchestrator import ProductionTradingOrchestrator, ProductionConfig
@@ -220,6 +226,22 @@ class RenaissanceTradingBot:
         self.stat_arb_engine = StatisticalArbitrageEngine(logger=self.logger)
         self.whale_monitor = WhaleActivityMonitor(self.config.get("whale_monitor", {}), logger=self.logger)
 
+        # Renaissance Medallion-Style Engines
+        mr_cfg = self.config.get("mean_reversion", {})
+        self.mean_reversion_engine = AdvancedMeanReversionEngine(mr_cfg, logger=self.logger)
+
+        corr_net_cfg = self.config.get("correlation_network", {})
+        self.correlation_network = CorrelationNetworkEngine(corr_net_cfg, logger=self.logger)
+
+        garch_cfg = self.config.get("garch_volatility", {})
+        self.garch_engine = GARCHVolatilityEngine(garch_cfg, logger=self.logger)
+
+        hist_cfg = self.config.get("historical_data_cache", {})
+        hist_cfg.setdefault("db_path", db_cfg.get("path", "data/renaissance_bot.db"))
+        self.historical_cache = HistoricalDataCache(hist_cfg, logger=self.logger)
+        if hist_cfg.get("enabled", False):
+            self.historical_cache.init_tables()
+
         # Initialize Breakout Scanner (Step 16+)
         scanner_cfg = self.config.get("breakout_scanner", {"enabled": True, "top_n": 30})
         self.breakout_scanner = BreakoutScanner(
@@ -303,16 +325,23 @@ class RenaissanceTradingBot:
         if self.db_enabled:
             self._track_task(self.db_manager.init_database())
 
-        # Renaissance Research-Optimized Signal Weights
+        # Renaissance Research-Optimized Signal Weights (15 signals)
         raw_weights = self.config.get("signal_weights", {
-            'order_flow': 0.28,      # Institutional Flow
-            'order_book': 0.18,      # Microstructure
-            'volume': 0.12,          # Volume
-            'macd': 0.08,            # Momentum
-            'rsi': 0.08,             # Mean Reversion
-            'bollinger': 0.08,       # Volatility
-            'alternative': 0.03,     # Sentiment/Whales
-            'stat_arb': 0.15         # Statistical Arbitrage
+            'order_flow': 0.18,               # Institutional Flow
+            'order_book': 0.12,               # Microstructure
+            'volume': 0.08,                   # Volume
+            'macd': 0.05,                     # Momentum
+            'rsi': 0.05,                      # Mean Reversion (technical)
+            'bollinger': 0.05,                # Volatility Bands
+            'alternative': 0.03,              # Sentiment/Whales
+            'stat_arb': 0.12,                 # Multi-pair Mean Reversion
+            'volume_profile': 0.04,           # Volume Profile
+            'fractal': 0.05,                  # Fractal Intelligence
+            'entropy': 0.04,                  # Market Entropy
+            'quantum': 0.04,                  # Quantum Oscillator
+            'lead_lag': 0.03,                 # Cross-Asset Lead-Lag
+            'correlation_divergence': 0.06,   # Correlation Network Divergence
+            'garch_vol': 0.06,                # GARCH Volatility Signal
         })
         self.signal_weights = {str(k): float(self._force_float(v)) for k, v in raw_weights.items()}
 
@@ -671,6 +700,24 @@ class RenaissanceTradingBot:
                     quantum_result = self.quantum_oscillator.calculate_quantum_levels(prices)
                     signals['quantum'] = quantum_result['signal']
                     market_data['quantum_oscillator'] = quantum_result
+
+                # Correlation Network Divergence Signal
+                if self.correlation_network.enabled:
+                    div_signal = self.correlation_network.get_correlation_divergence_signal(p_id)
+                    signals['correlation_divergence'] = div_signal
+
+                # GARCH Volatility Signal (vol_ratio as directional bias)
+                if self.garch_engine.is_available:
+                    forecast = self.garch_engine.forecast_volatility(p_id)
+                    vol_ratio = forecast.get('vol_ratio', 1.0)
+                    # Contracting vol -> bullish bias, expanding -> bearish bias
+                    if vol_ratio < 0.8:
+                        signals['garch_vol'] = min((1.0 - vol_ratio) * 0.5, 0.5)
+                    elif vol_ratio > 1.2:
+                        signals['garch_vol'] = max(-(vol_ratio - 1.0) * 0.5, -0.5)
+                    else:
+                        signals['garch_vol'] = 0.0
+                    market_data['garch_forecast'] = forecast
 
             except Exception as e:
                 self.logger.warning(f"Advanced signal generation skipped: {e}")
@@ -1117,6 +1164,29 @@ class RenaissanceTradingBot:
                     )
                     self._track_task(self.db_manager.store_market_data(md_persist))
 
+                # 1.6 Update Medallion-style engines with current price
+                if current_price > 0:
+                    self.mean_reversion_engine.update_price(product_id, current_price)
+                    self.correlation_network.update_price(product_id, current_price)
+                    self.garch_engine.update_returns(product_id, current_price)
+
+                    # Update correlation network for all tracked products
+                    all_prices = {}
+                    for pid in self.product_ids:
+                        t = market_data.get('ticker', {})
+                        p = float(t.get('price', 0.0)) if pid == product_id else 0.0
+                        if p > 0:
+                            all_prices[pid] = p
+                    if all_prices:
+                        self.correlation_network.update_prices(all_prices)
+
+                    # GARCH model refit check
+                    if self.garch_engine.should_refit(product_id):
+                        self.garch_engine.fit_model(product_id)
+
+                    # Correlation network full update
+                    self.correlation_network.run_full_update(self.scan_cycle_count)
+
                 # 2. Generate signals from all components
                 signals = await self.generate_signals(market_data)
                 
@@ -1143,9 +1213,50 @@ class RenaissanceTradingBot:
                 signals['volume_profile'] = vp_signal
                 self._last_vp_status[product_id] = vp_status
 
-                # 3. Calculate Renaissance weighted signal
+                # 2.5 Update regime overlay BEFORE signal fusion (so regime weights apply)
+                try:
+                    if self.regime_overlay.enabled and hasattr(self.technical_indicators, 'price_history') \
+                       and len(self.technical_indicators.price_history) > 0:
+                        price_df = self.technical_indicators._to_dataframe()
+                        if not price_df.empty:
+                            self.regime_overlay.update(price_df)
+                except Exception as _e:
+                    self.logger.debug(f"Regime overlay skipped: {_e}")
+
+                # 2.6 Multi-pair mean reversion signal
+                if len(self.product_ids) > 1:
+                    mr_portfolio = self.mean_reversion_engine.generate_portfolio_signal(
+                        self.product_ids, self.scan_cycle_count
+                    )
+                    if mr_portfolio.composite_signal != 0.0:
+                        signals['stat_arb'] = self._force_float(mr_portfolio.composite_signal)
+                        market_data['mean_reversion_portfolio'] = {
+                            'composite_signal': mr_portfolio.composite_signal,
+                            'n_active_pairs': mr_portfolio.n_active_pairs,
+                            'best_pair': (mr_portfolio.best_pair.base_id + '/' + mr_portfolio.best_pair.target_id)
+                                if mr_portfolio.best_pair else None,
+                        }
+
+                # 2.7 Apply regime-adjusted weights (transient per cycle, does not modify self.signal_weights)
+                cycle_weights = self.signal_weights.copy()
+                if self.regime_overlay.enabled and self.regime_overlay.current_regime:
+                    cycle_weights = self.regime_overlay.get_regime_adjusted_weights(cycle_weights)
+
+                # 2.8 Apply GARCH position-size multiplier to dynamic thresholds
+                garch_pos_mult = 1.0
+                if self.garch_engine.is_available:
+                    garch_pos_mult = self.garch_engine.get_position_size_multiplier(product_id)
+                    buy_delta, sell_delta = self.garch_engine.get_dynamic_threshold_adjustment(product_id)
+                    self.buy_threshold += buy_delta
+                    self.sell_threshold += sell_delta
+
+                # 3. Calculate Renaissance weighted signal with regime-adjusted weights
+                # Temporarily swap weights for this cycle
+                original_weights = self.signal_weights
+                self.signal_weights = cycle_weights
                 weighted_signal, contributions = self.calculate_weighted_signal(signals)
-                
+                self.signal_weights = original_weights
+
                 # PARANOID SCALAR HARDENING: Ensure results are primitive floats
                 weighted_signal = float(self._force_float(weighted_signal))
                 contributions = {str(k): float(self._force_float(v)) for k, v in contributions.items()}
@@ -1155,11 +1266,10 @@ class RenaissanceTradingBot:
                 self.logger.info(f"HARDENED SIGNALS: {[(k, type(v)) for k, v in signals.items()]}")
 
                 market_data['ml_package'] = ml_package
-                
+
                 # 3.1 Non-linear Confluence Boost (Step 20)
                 confluence_data = self.confluence_engine.calculate_confluence_boost(signals)
-                self.logger.info(f"CONFLUENCE DATA TYPE: {type(confluence_data.get('total_confluence_boost'))}")
-                
+
                 # Extract boost scalar with hardening
                 boost_scalar_final = 0.0
                 try:
@@ -1170,35 +1280,23 @@ class RenaissanceTradingBot:
 
                 if boost_scalar_final > 0:
                     try:
-                        # PURE SCALAR MULTIPLICATION TYPE GUARD
                         b_sig_f = float(weighted_signal)
                         b_factor_f = float(1.0 + boost_scalar_final)
-                        self.logger.info(f"BOOST DEBUG: b_sig_f={type(b_sig_f)}, b_factor_f={type(b_factor_f)}")
-                        # Binary operation on standard floats
                         boosted_val_f = b_sig_f * b_factor_f
                         weighted_signal = float(np.clip(boosted_val_f, -1.0, 1.0))
-                        self.logger.info(f"🏛️ CONFLUENCE BOOST: {b_sig_f:+.4f} -> {weighted_signal:+.4f} (Factor: {b_factor_f})")
                     except Exception as e:
                         self.logger.warning(f"Confluence boost application failed: {e}")
                 else:
                     weighted_signal = self._force_float(weighted_signal)
-                
+
                 # Final check to ensure it's not a sequence before decision
                 weighted_signal = float(weighted_signal)
                 market_data['confluence_data'] = confluence_data
+                market_data['garch_position_multiplier'] = garch_pos_mult
+                market_data['regime_adjusted_weights'] = cycle_weights
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
                 self._update_dynamic_thresholds(product_id, market_data)
-
-                # Update regime overlay
-                try:
-                    if self.regime_overlay.enabled and hasattr(self.technical_indicators, 'price_history') \
-                       and len(self.technical_indicators.price_history) > 0:
-                        price_df = self.technical_indicators._to_dataframe()
-                        if not price_df.empty:
-                            self.regime_overlay.update(price_df)
-                except Exception as _e:
-                    self.logger.debug(f"Regime overlay skipped: {_e}")
 
                 # 4. Real-time pipeline cycle (Step 12)
                 rt_result = None
@@ -1283,18 +1381,30 @@ class RenaissanceTradingBot:
                     decision.reasoning['stat_arb'] = stat_arb_data
                 if 'whale_signals' in market_data:
                     decision.reasoning['whale_signals'] = market_data['whale_signals']
+                if 'garch_forecast' in market_data:
+                    decision.reasoning['garch_forecast'] = market_data['garch_forecast']
+                if 'mean_reversion_portfolio' in market_data:
+                    decision.reasoning['mean_reversion_portfolio'] = market_data['mean_reversion_portfolio']
+
+                # Apply GARCH position-size multiplier
+                if garch_pos_mult != 1.0 and decision.action != 'HOLD':
+                    decision.position_size = float(np.clip(
+                        decision.position_size * garch_pos_mult, 0.0, 0.5
+                    ))
 
                 # 5.1 Persist Decision & ML Predictions
                 if self.db_enabled:
-                    # Store decision
+                    # Store decision with HMM regime
+                    hmm_regime_label = self.regime_overlay.get_hmm_regime_label()
                     decision_persist = {
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
                         'product_id': product_id,
                         'action': decision.action,
                         'confidence': decision.confidence,
                         'position_size': decision.position_size,
                         'weighted_signal': weighted_signal,
-                        'reasoning': decision.reasoning
+                        'reasoning': decision.reasoning,
+                        'hmm_regime': hmm_regime_label,
                     }
                     self._track_task(self.db_manager.store_decision(decision_persist))
                     

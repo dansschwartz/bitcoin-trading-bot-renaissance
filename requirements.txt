@@ -99,3 +99,9 @@ scikit-learn
 cvxpy
 ollama
 networkx
+hmmlearn>=0.3.0
+statsmodels>=0.14.0
+arch>=6.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+pyarrow>=12.0.0

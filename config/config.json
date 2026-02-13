@@ -13,7 +13,11 @@
     "regime_overlay": {
     "enabled": true,
     "consciousness_boost": 0.0,
-    "hmm_regimes": 3
+    "hmm_regimes": 5,
+    "hmm_refit_interval": 50,
+    "hmm_min_samples": 200,
+    "hmm_covariance_type": "full",
+    "hmm_n_iter": 150
   },
   "risk_gateway": {
     "enabled": false,
@@ -27,19 +31,62 @@
         "models": ["QuantumTransformer", "Bi-LSTM", "CNN", "VAE", "Ensemble"]
     },
     "signal_weights": {
-    "order_flow": 0.25,
-    "order_book": 0.15,
-    "volume": 0.10,
+    "order_flow": 0.18,
+    "order_book": 0.12,
+    "volume": 0.08,
     "macd": 0.05,
     "rsi": 0.05,
     "bollinger": 0.05,
     "alternative": 0.03,
-    "stat_arb": 0.10,
+    "stat_arb": 0.12,
     "volume_profile": 0.04,
     "fractal": 0.05,
-    "entropy": 0.05,
-    "quantum": 0.05,
-    "lead_lag": 0.03
+    "entropy": 0.04,
+    "quantum": 0.04,
+    "lead_lag": 0.03,
+    "correlation_divergence": 0.06,
+    "garch_vol": 0.06
+  },
+  "mean_reversion": {
+    "window_size": 240,
+    "min_history": 60,
+    "coint_pvalue": 0.05,
+    "retest_interval": 100,
+    "entry_z": 2.0,
+    "exit_z": 0.5,
+    "max_half_life": 120,
+    "min_half_life": 5,
+    "max_pairs": 10,
+    "kalman_delta": 0.0001,
+    "kalman_ve": 0.001
+  },
+  "correlation_network": {
+    "enabled": true,
+    "max_assets": 30,
+    "rolling_window": 1440,
+    "update_interval_cycles": 5,
+    "min_history_length": 60,
+    "divergence_zscore_threshold": 2.0,
+    "cluster_distance_threshold": 0.5
+  },
+  "garch_volatility": {
+    "enabled": true,
+    "model_type": "GARCH",
+    "p": 1,
+    "q": 1,
+    "min_observations": 200,
+    "refit_interval_cycles": 50,
+    "historical_vol_window": 30,
+    "forecast_horizon": 1,
+    "ewma_lambda": 0.94,
+    "position_size_impact": 0.5
+  },
+  "historical_data_cache": {
+    "enabled": false,
+    "exchange": "coinbase",
+    "lookback_days": 365,
+    "refresh_interval_hours": 6,
+    "max_assets": 30
   },
   "data": {
     "candle_granularity": "ONE_MINUTE",

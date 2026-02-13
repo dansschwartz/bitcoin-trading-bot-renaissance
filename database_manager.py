@@ -177,6 +177,7 @@ class DatabaseManager:
     ALLOWED_TABLES = frozenset({
         "market_data", "labels", "sentiment_data", "onchain_data",
         "decisions", "trades", "ml_predictions", "open_positions",
+        "daily_candles", "data_refresh_log",
     })
 
     async def get_recent_data(self, table: str, hours: int = 24) -> List[Dict]:

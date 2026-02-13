@@ -67,7 +67,8 @@ class TestSQLInjectionPrevention(unittest.TestCase):
 
     def test_allowed_tables_contains_expected(self):
         expected = {"market_data", "labels", "sentiment_data", "onchain_data",
-                    "decisions", "trades", "ml_predictions", "open_positions"}
+                    "decisions", "trades", "ml_predictions", "open_positions",
+                    "daily_candles", "data_refresh_log"}
         self.assertEqual(DatabaseManager.ALLOWED_TABLES, expected)
 
 
