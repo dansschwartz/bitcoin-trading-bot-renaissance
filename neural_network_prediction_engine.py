@@ -2845,12 +2845,56 @@ class BitcoinDataGenerator:
         self.consciousness_factor = 1.0  # Neutralized (was 1.125)
         self.scaler = StandardScaler()  # Initialize scaler
 
+    def _try_fetch_real_candles(self) -> Optional[pd.DataFrame]:
+        """Try to fetch real historical candle data from Coinbase API"""
+        try:
+            from coinbase_client import EnhancedCoinbaseClient
+            import json, os
+
+            config_path = os.path.join(os.path.dirname(__file__), 'config', 'config.json')
+            if not os.path.exists(config_path):
+                return None
+
+            with open(config_path) as f:
+                config = json.load(f)
+
+            cb_config = config.get('coinbase', {})
+            api_key = os.environ.get(cb_config.get('api_key_env', ''), '')
+            api_secret = os.environ.get(cb_config.get('api_secret_env', ''), '')
+
+            if not api_key or not api_secret:
+                return None
+
+            client = EnhancedCoinbaseClient(api_key=api_key, api_secret=api_secret)
+            candles = client.get_product_candles(
+                product_id='BTC-USD',
+                granularity='ONE_HOUR',
+                limit=min(self.num_samples, 300)
+            )
+
+            if candles and len(candles) >= 100:
+                df = pd.DataFrame(candles)
+                required = {'open', 'high', 'low', 'close', 'volume'}
+                if required.issubset(df.columns):
+                    df = df.sort_index()
+                    print(f"Fetched {len(df)} real candles from Coinbase API")
+                    return df
+
+        except Exception as e:
+            logging.getLogger(__name__).debug(f"Real candle fetch unavailable: {e}")
+
+        return None
+
     def generate_realistic_data(self) -> pd.DataFrame:
-        """Generate realistic Bitcoin OHLCV data with enhanced volatility modeling"""
+        """Generate Bitcoin OHLCV data - tries real API first, falls back to synthetic"""
 
-        print(f"📊 Generating {self.num_samples} samples of realistic Bitcoin data...")
+        # Try real data first
+        real_data = self._try_fetch_real_candles()
+        if real_data is not None:
+            return real_data
 
-        # TODO: Replace synthetic data with real market data feed
+        print(f"Generating {self.num_samples} samples of synthetic Bitcoin data (no API keys available)...")
+
         np.random.seed(42)
         base_price = 50000
 

@@ -27,18 +27,19 @@ try:
         DynamicSpreadOptimizer, SpreadConfig, MarketState, OptimizationResult,
         SpreadRegime, OptimizationMethod
     )
-    # These modules may not be available in flat layout
-    try:
-        from order_book_collector import RealTimeOrderBookAnalyzer, OrderBookSnapshot, OrderBookMetrics, LiquidityRegime, BookImbalance
-    except ImportError:
-        RealTimeOrderBookAnalyzer = None  # TODO: order_book_analyzer not yet ported
-        OrderBookSnapshot = OrderBookMetrics = LiquidityRegime = BookImbalance = None
+    from order_book_collector import (
+        RealTimeOrderBookAnalyzer, OrderBookSnapshot, OrderBookMetrics,
+        LiquidityRegime, BookImbalance
+    )
+    from inventory_manager import (
+        AdvancedInventoryManager, InventoryConfig, InventoryState,
+        RiskMetrics, RebalanceAction
+    )
     IMPORTS_SUCCESSFUL = True
 except ImportError as e:
     print(f"Import error: {e}")
     IMPORTS_SUCCESSFUL = False
 
-@unittest.skipUnless(IMPORTS_SUCCESSFUL and 'MarketMakingConfig' in dir(), "Market making modules not fully available")
 class TestMarketMakingEngine(unittest.TestCase):
     """Test suite for Market Making Engine with consciousness enhancement"""
 
@@ -152,7 +153,6 @@ class TestMarketMakingEngine(unittest.TestCase):
 
         self.assertEqual(report["consciousness_boost"], 1.142)
 
-@unittest.skipUnless(IMPORTS_SUCCESSFUL and 'MarketMakingConfig' in dir(), "Market making modules not fully available")
 class TestInventoryManager(unittest.TestCase):
     """Test suite for Advanced Inventory Manager"""
 
@@ -256,7 +256,6 @@ class TestInventoryManager(unittest.TestCase):
         self.assertTrue(signal['consciousness_enhanced'])
         self.assertIsInstance(signal['action'], RebalanceAction)
 
-@unittest.skipUnless(IMPORTS_SUCCESSFUL and 'MarketMakingConfig' in dir(), "Market making modules not fully available")
 class TestOrderBookAnalyzer(unittest.TestCase):
     """Test suite for Real-time Order Book Analyzer"""
 
@@ -346,7 +345,6 @@ class TestOrderBookAnalyzer(unittest.TestCase):
         self.assertTrue(prediction['consciousness_enhanced'])
         self.assertIn(prediction['prediction'], ['UP', 'DOWN', 'NEUTRAL'])
 
-@unittest.skipUnless(IMPORTS_SUCCESSFUL and 'MarketMakingConfig' in dir(), "Market making modules not fully available")
 class TestSpreadOptimizer(unittest.TestCase):
     """Test suite for Dynamic Spread Optimizer"""
 
@@ -454,7 +452,6 @@ class TestSpreadOptimizer(unittest.TestCase):
         self.assertGreater(report['performance_metrics']['avg_computation_time_ms'], 0)
         self.assertGreaterEqual(report['performance_metrics']['consciousness_effectiveness'], 0)
 
-@unittest.skipUnless(IMPORTS_SUCCESSFUL and 'MarketMakingConfig' in dir(), "Market making modules not fully available")
 class TestSystemIntegration(unittest.TestCase):
     """Integration tests for the complete market making system"""
 

@@ -955,10 +955,28 @@ class TailRiskProtector:
 
     def _get_volatility_regime_multiplier(self) -> float:
         """Get volatility regime multiplier for Monte Carlo simulations"""
-        # This would integrate with Step 7 regime detection in production
-        # TODO: Replace synthetic data with real market data feed
-        # For now, return a reasonable default with some randomness
-        return np.random.uniform(0.8, 1.5)
+        # Use stored price history if available for regime-based multiplier
+        try:
+            if hasattr(self, 'price_history') and len(self.price_history) >= 20:
+                prices = np.array(self.price_history[-20:])
+                returns = np.diff(prices) / prices[:-1]
+                recent_vol = np.std(returns[-5:]) if len(returns) >= 5 else np.std(returns)
+                baseline_vol = np.std(returns)
+                if baseline_vol > 0:
+                    ratio = recent_vol / baseline_vol
+                    return float(np.clip(ratio, 0.5, 3.0))
+
+            if hasattr(self, 'current_regime'):
+                regime_map = {
+                    'low_vol': 0.8, 'normal': 1.0, 'high_vol': 1.5,
+                    'crisis': 2.5, 'trending': 1.2
+                }
+                regime = self.current_regime if isinstance(self.current_regime, str) else 'normal'
+                return regime_map.get(regime, 1.0)
+        except Exception:
+            pass
+
+        return 1.0  # neutral default
 
     def _get_black_swan_action(self, risk_level: TailRiskLevel) -> str:
         """Get recommended action for black swan risk level"""

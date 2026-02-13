@@ -378,52 +378,196 @@ class MLPatternEngine:
             return {}
 
     def _extract_price_momentum(self, market_data: Dict[str, Any]) -> np.ndarray:
-        """Extract price momentum features"""
+        """Extract price momentum features from real market data"""
         try:
-            # TODO: Replace synthetic data with real market data feed
-            # Simulate price momentum extraction
-            # In production, this would extract real momentum features
-            return np.random.randn(10)  # Placeholder
+            price_df = market_data.get('price_df')
+            if price_df is not None and hasattr(price_df, 'empty') and not price_df.empty and 'close' in price_df.columns:
+                close = price_df['close'].values
+                if len(close) >= 20:
+                    returns = np.diff(close) / close[:-1]
+                    features = np.array([
+                        returns[-1] if len(returns) > 0 else 0.0,                  # latest return
+                        np.mean(returns[-5:]) if len(returns) >= 5 else 0.0,        # 5-period avg return
+                        np.mean(returns[-10:]) if len(returns) >= 10 else 0.0,      # 10-period avg return
+                        np.mean(returns[-20:]) if len(returns) >= 20 else 0.0,      # 20-period avg return
+                        close[-1] / np.mean(close[-5:]) - 1.0,                     # price vs 5-SMA
+                        close[-1] / np.mean(close[-10:]) - 1.0,                    # price vs 10-SMA
+                        close[-1] / np.mean(close[-20:]) - 1.0,                    # price vs 20-SMA
+                        np.max(close[-10:]) / close[-1] - 1.0,                     # distance from 10-high
+                        close[-1] / np.min(close[-10:]) - 1.0,                     # distance from 10-low
+                        np.sum(returns[-5:] > 0) / 5.0,                            # up-day ratio
+                    ])
+                    return features
+            return np.zeros(10)
         except Exception as e:
             self.logger.error(f"Error extracting price momentum: {e}")
             return np.zeros(10)
 
     def _extract_volatility_features(self, market_data: Dict[str, Any]) -> np.ndarray:
-        """Extract volatility features"""
+        """Extract volatility features from real market data"""
         try:
-            # TODO: Replace synthetic data with real market data feed
-            # Simulate volatility feature extraction
-            return np.random.randn(5)  # Placeholder
+            price_df = market_data.get('price_df')
+            if price_df is not None and hasattr(price_df, 'empty') and not price_df.empty and 'close' in price_df.columns:
+                close = price_df['close'].values
+                if len(close) >= 20:
+                    returns = np.diff(close) / close[:-1]
+                    features = np.array([
+                        np.std(returns[-5:]) if len(returns) >= 5 else 0.0,      # 5-period realized vol
+                        np.std(returns[-10:]) if len(returns) >= 10 else 0.0,    # 10-period realized vol
+                        np.std(returns[-20:]) if len(returns) >= 20 else 0.0,    # 20-period realized vol
+                        np.std(returns[-5:]) / max(np.std(returns[-20:]), 1e-8) - 1.0,  # vol ratio (short/long)
+                        np.max(np.abs(returns[-10:])) if len(returns) >= 10 else 0.0,   # max abs return
+                    ])
+                    return features
+            return np.zeros(5)
         except Exception as e:
             self.logger.error(f"Error extracting volatility features: {e}")
             return np.zeros(5)
 
     def _extract_technical_indicators(self, market_data: Dict[str, Any]) -> np.ndarray:
-        """Extract technical indicator features"""
+        """Extract technical indicator features from real market data"""
         try:
-            # TODO: Replace synthetic data with real market data feed
-            # Simulate technical indicator extraction
-            return np.random.randn(15)  # Placeholder
+            price_df = market_data.get('price_df')
+            if price_df is not None and hasattr(price_df, 'empty') and not price_df.empty and 'close' in price_df.columns:
+                close = price_df['close'].values
+                if len(close) >= 26:
+                    # SMA crossovers
+                    sma5 = np.mean(close[-5:])
+                    sma10 = np.mean(close[-10:])
+                    sma20 = np.mean(close[-20:])
+
+                    # EMA (approximate)
+                    ema12 = close[-1]  # simplified
+                    ema26 = close[-1]
+                    alpha12 = 2.0 / 13.0
+                    alpha26 = 2.0 / 27.0
+                    for p in close[-26:]:
+                        ema26 = alpha26 * p + (1 - alpha26) * ema26
+                    for p in close[-12:]:
+                        ema12 = alpha12 * p + (1 - alpha12) * ema12
+                    macd = ema12 - ema26
+
+                    # RSI (14-period)
+                    returns = np.diff(close[-15:])
+                    gains = np.maximum(returns, 0)
+                    losses = np.maximum(-returns, 0)
+                    avg_gain = np.mean(gains) if len(gains) > 0 else 0.0
+                    avg_loss = np.mean(losses) if len(losses) > 0 else 1e-8
+                    rs = avg_gain / max(avg_loss, 1e-8)
+                    rsi = 100.0 - (100.0 / (1.0 + rs))
+
+                    # Bollinger Bands
+                    bb_mean = np.mean(close[-20:])
+                    bb_std = np.std(close[-20:])
+                    bb_upper = bb_mean + 2.0 * bb_std
+                    bb_lower = bb_mean - 2.0 * bb_std
+                    bb_position = (close[-1] - bb_lower) / max(bb_upper - bb_lower, 1e-8)
+
+                    # Volume features
+                    vol = price_df['volume'].values if 'volume' in price_df.columns else np.ones(len(close))
+                    vol_sma = np.mean(vol[-10:]) if len(vol) >= 10 else 1.0
+                    vol_ratio = vol[-1] / max(vol_sma, 1e-8)
+
+                    # High/Low range
+                    high = price_df['high'].values if 'high' in price_df.columns else close
+                    low = price_df['low'].values if 'low' in price_df.columns else close
+                    atr = np.mean(high[-14:] - low[-14:]) if len(high) >= 14 else 0.0
+
+                    features = np.array([
+                        (sma5 - sma10) / max(sma10, 1.0),          # SMA5/10 crossover
+                        (sma5 - sma20) / max(sma20, 1.0),          # SMA5/20 crossover
+                        (sma10 - sma20) / max(sma20, 1.0),         # SMA10/20 crossover
+                        macd / max(close[-1], 1.0),                 # MACD normalized
+                        rsi / 100.0,                                # RSI normalized [0,1]
+                        bb_position,                                # BB position [0,1]
+                        (close[-1] - bb_mean) / max(bb_std, 1e-8), # BB z-score
+                        vol_ratio,                                  # volume ratio
+                        atr / max(close[-1], 1.0),                  # ATR normalized
+                        float(close[-1] > sma5),                    # above SMA5
+                        float(close[-1] > sma20),                   # above SMA20
+                        float(sma5 > sma20),                        # SMA5 > SMA20
+                        float(rsi > 70) - float(rsi < 30),         # RSI overbought/oversold
+                        float(close[-1] > close[-2]) if len(close) > 1 else 0.0,  # up candle
+                        np.mean(np.diff(close[-5:])) / max(close[-1], 1.0) if len(close) >= 5 else 0.0,  # trend
+                    ])
+                    return features
+            return np.zeros(15)
         except Exception as e:
             self.logger.error(f"Error extracting technical indicators: {e}")
             return np.zeros(15)
 
     def _extract_microstructure_signals(self, market_data: Dict[str, Any]) -> np.ndarray:
-        """Extract microstructure signal features"""
+        """Extract microstructure signal features from real market data"""
         try:
-            # TODO: Replace synthetic data with real market data feed
-            # Simulate microstructure feature extraction
-            return np.random.randn(8)  # Placeholder
+            features = np.zeros(8)
+            # Order book data
+            order_book = market_data.get('order_book', {})
+            ticker = market_data.get('ticker', {})
+
+            bid_price = float(ticker.get('bid', 0) or order_book.get('best_bid', 0) or 0)
+            ask_price = float(ticker.get('ask', 0) or order_book.get('best_ask', 0) or 0)
+            mid_price = (bid_price + ask_price) / 2.0 if (bid_price and ask_price) else 0.0
+
+            if mid_price > 0:
+                spread = (ask_price - bid_price) / mid_price
+                features[0] = spread  # relative spread
+
+            # Volume imbalance from order book
+            bids = order_book.get('bids', [])
+            asks = order_book.get('asks', [])
+            bid_vol = sum(float(b[1]) for b in bids[:5]) if bids else 0.0
+            ask_vol = sum(float(a[1]) for a in asks[:5]) if asks else 0.0
+            total = bid_vol + ask_vol
+            features[1] = (bid_vol - ask_vol) / max(total, 1e-8) if total > 0 else 0.0  # volume imbalance
+
+            # Depth ratio
+            features[2] = bid_vol / max(ask_vol, 1e-8) if ask_vol > 0 else 1.0
+
+            # VPIN from market_data
+            features[3] = float(market_data.get('vpin', 0.5))
+
+            # Trade flow metrics
+            features[4] = float(market_data.get('order_flow_imbalance', 0.0))
+            features[5] = float(market_data.get('microstructure_signal', 0.0))
+
+            # Liquidity score
+            features[6] = float(market_data.get('liquidity_score', 0.5))
+
+            # Volatility from market_data
+            features[7] = float(market_data.get('volatility', 0.02))
+
+            return features
         except Exception as e:
             self.logger.error(f"Error extracting microstructure signals: {e}")
             return np.zeros(8)
 
     def _extract_alternative_data(self, market_data: Dict[str, Any]) -> np.ndarray:
-        """Extract alternative data features"""
+        """Extract alternative data features from real market data"""
         try:
-            # TODO: Replace synthetic data with real market data feed
-            # Simulate alternative data extraction
-            return np.random.randn(3)  # Placeholder
+            features = np.zeros(3)
+
+            # Fear & Greed Index (normalized 0-1)
+            fear_greed = market_data.get('fear_greed_index', market_data.get('fear_greed', None))
+            if fear_greed is not None:
+                features[0] = float(fear_greed) / 100.0
+            else:
+                features[0] = 0.5  # neutral default
+
+            # Social sentiment score
+            sentiment = market_data.get('social_sentiment', market_data.get('sentiment', None))
+            if sentiment is not None:
+                features[1] = float(sentiment)
+            else:
+                features[1] = 0.0  # neutral default
+
+            # Funding rate / market premium
+            funding = market_data.get('funding_rate', market_data.get('premium', None))
+            if funding is not None:
+                features[2] = float(funding)
+            else:
+                features[2] = 0.0
+
+            return features
         except Exception as e:
             self.logger.error(f"Error extracting alternative data: {e}")
             return np.zeros(3)
