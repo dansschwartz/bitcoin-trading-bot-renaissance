@@ -5,8 +5,10 @@ Combines all components with research-optimized signal weights
 
 import asyncio
 import logging
+import logging.handlers
 import json
 import os
+import queue
 import signal
 import numpy as np
 import pandas as pd
@@ -40,6 +42,9 @@ from performance_attribution_engine import PerformanceAttributionEngine
 # Order Execution & Position Management
 from coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
 from position_manager import EnhancedPositionManager, RiskLimits
+from alert_manager import AlertManager
+from coinbase_advanced_client import CoinbaseAdvancedClient
+from logger import SecretMaskingFilter
 
 # Step 14 & 16 & Deep Alternative
 from genetic_optimizer import GeneticWeightOptimizer
@@ -120,6 +125,7 @@ class RenaissanceTradingBot:
 
         self.config = self._load_config(self.config_path)
         self.logger = self._setup_logging(self.config)
+        self._validate_config(self.config)
 
         # Multi-Asset Support
         self.product_ids = self.config.get("trading", {}).get("product_ids", ["BTC-USD"])
@@ -178,6 +184,28 @@ class RenaissanceTradingBot:
             logger=self.logger,
         )
         self._killed = False
+        self._background_tasks: list = []
+        self._weights_lock = asyncio.Lock()
+
+        # Initialize Alert Manager
+        alert_cfg = self.config.get("alerting", {})
+        self.alert_manager = AlertManager(alert_cfg, logger=self.logger)
+
+        # Initialize WebSocket feed (real-time market data)
+        self._ws_queue: queue.Queue = queue.Queue(maxsize=1000)
+        try:
+            ws_config = {
+                'api_key': os.environ.get(cb_config.get("api_key_env", "CB_API_KEY"), ""),
+                'api_secret': os.environ.get(cb_config.get("api_secret_env", "CB_API_SECRET"), ""),
+                'passphrase': os.environ.get(cb_config.get("api_passphrase_env", ""), ""),
+                'sandbox': self.config.get("trading", {}).get("sandbox", True),
+                'symbols': self.product_ids,
+                'websocket_channels': ["level2", "ticker", "matches"],
+            }
+            self._ws_client = CoinbaseAdvancedClient(ws_config)
+        except Exception as e:
+            self.logger.warning(f"WebSocket client init failed (will use REST fallback): {e}")
+            self._ws_client = None
 
         # Initialize Persistence & Attribution
         db_cfg = self.config.get("database", {"path": "data/renaissance_bot.db", "enabled": True})
@@ -273,7 +301,7 @@ class RenaissanceTradingBot:
         self.scan_cycle_count = 0
 
         if self.db_enabled:
-            asyncio.create_task(self.db_manager.init_database())
+            self._track_task(self.db_manager.init_database())
 
         # Renaissance Research-Optimized Signal Weights
         raw_weights = self.config.get("signal_weights", {
@@ -310,10 +338,18 @@ class RenaissanceTradingBot:
             level=getattr(logging, str(log_level).upper(), logging.INFO),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_path),
+                logging.handlers.RotatingFileHandler(
+                    log_path, maxBytes=50 * 1024 * 1024, backupCount=5
+                ),
                 logging.StreamHandler()
             ]
         )
+
+        # Apply secret masking to all handlers
+        masking_filter = SecretMaskingFilter()
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(masking_filter)
+
         return logging.getLogger(__name__)
 
     def _load_config(self, config_path: Path) -> Dict[str, Any]:
@@ -361,22 +397,128 @@ class RenaissanceTradingBot:
             print(f"Warning: failed to load config at {config_path}: {exc}")
             return default_config
 
+    def _validate_config(self, config: Dict[str, Any]):
+        """Validate critical config values at startup."""
+        errors = []
+
+        risk = config.get("risk_management", {})
+        dl = risk.get("daily_loss_limit", 500)
+        if not (0 < dl <= 100000):
+            errors.append(f"daily_loss_limit={dl} out of range (0, 100000]")
+        pl = risk.get("position_limit", 1000)
+        if not (0 < pl <= 1000000):
+            errors.append(f"position_limit={pl} out of range (0, 1000000]")
+        mc = risk.get("min_confidence", 0.65)
+        if not (0.0 < mc <= 1.0):
+            errors.append(f"min_confidence={mc} out of range (0, 1.0]")
+
+        trading = config.get("trading", {})
+        interval = trading.get("cycle_interval_seconds", 300)
+        if not (10 <= interval <= 3600):
+            errors.append(f"cycle_interval_seconds={interval} out of range [10, 3600]")
+
+        # Auto-normalize signal weights
+        weights = config.get("signal_weights", {})
+        if weights:
+            total = sum(float(v) for v in weights.values())
+            if total > 0 and abs(total - 1.0) > 0.01:
+                self.logger.warning(f"Signal weights sum to {total:.3f}, normalizing to 1.0")
+                for k in weights:
+                    weights[k] = float(weights[k]) / total
+
+        if errors:
+            for e in errors:
+                self.logger.error(f"CONFIG ERROR: {e}")
+            raise ValueError(f"Invalid configuration: {'; '.join(errors)}")
+
+    def _track_task(self, coro) -> asyncio.Task:
+        """Create and track an asyncio task for graceful shutdown."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.append(task)
+        return task
+
+    async def _shutdown(self):
+        """Cancel background tasks and cleanup resources."""
+        self.logger.info("Shutting down - cancelling background tasks...")
+        for task in self._background_tasks:
+            if not task.done():
+                task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
+        self.logger.info("Shutdown complete.")
+
+    HEARTBEAT_FILE = Path("logs/heartbeat.json")
+
+    def _write_heartbeat(self):
+        """Write heartbeat file for external monitoring."""
+        try:
+            self.HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            heartbeat = {
+                "alive": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "cycle_count": len(self.decision_history),
+                "killed": self._killed,
+                "paper_mode": self.coinbase_client.paper_trading,
+            }
+            with open(self.HEARTBEAT_FILE, 'w') as f:
+                json.dump(heartbeat, f)
+        except Exception:
+            pass
+
     async def collect_all_data(self, product_id: str = "BTC-USD") -> Dict[str, Any]:
         """Collect data from all sources for a specific product"""
         try:
+            # Try WebSocket data first (sub-100ms latency)
+            latest_ws = None
+            while not self._ws_queue.empty():
+                try:
+                    latest_ws = self._ws_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+            # Check WebSocket data freshness
+            MAX_DATA_AGE_SECONDS = 30
+            if latest_ws and hasattr(latest_ws, 'timestamp') and latest_ws.timestamp:
+                data_age = (datetime.now() - latest_ws.timestamp).total_seconds()
+                if data_age > MAX_DATA_AGE_SECONDS:
+                    self.logger.warning(f"WebSocket data stale ({data_age:.1f}s old), falling back to REST")
+                    latest_ws = None
+
+            if latest_ws and hasattr(latest_ws, 'price') and latest_ws.price > 0:
+                # Use real-time WebSocket data
+                ticker = {
+                    'price': latest_ws.price,
+                    'volume': latest_ws.volume,
+                    'bid': latest_ws.bid,
+                    'ask': latest_ws.ask,
+                    'bid_ask_spread': latest_ws.spread,
+                }
+                order_book_snapshot = getattr(latest_ws, 'order_book', None)
+                self.logger.debug(f"Using WebSocket data for {product_id} @ ${latest_ws.price:.2f}")
+            else:
+                ticker = None
+                order_book_snapshot = None
+
+            # Always fetch REST snapshot for candle/price history (needed for technicals)
             snapshot = await asyncio.to_thread(self.market_data_provider.fetch_snapshot, product_id)
             if snapshot.price_data:
                 self.technical_indicators.update_price_data(snapshot.price_data)
+
+            # Prefer WS ticker if available, otherwise use REST
+            if ticker is None:
+                ticker = snapshot.ticker
+                order_book_snapshot = snapshot.order_book_snapshot
 
             technical_signals = self.technical_indicators.get_latest_signals()
             alt_signals = await self.alternative_data_engine.get_alternative_signals()
 
             return {
-                'order_book_snapshot': snapshot.order_book_snapshot,
+                'order_book_snapshot': order_book_snapshot or snapshot.order_book_snapshot,
                 'price_data': snapshot.price_data,
                 'technical_signals': technical_signals,
                 'alternative_signals': alt_signals,
-                'ticker': snapshot.ticker,
+                'ticker': ticker or snapshot.ticker,
                 'product_id': product_id,
                 'timestamp': datetime.now()
             }
@@ -554,7 +696,7 @@ class RenaissanceTradingBot:
                 continue
             try:
                 processed_signals[k] = self._force_float(v)
-            except:
+            except Exception:
                 processed_signals[k] = 0.0
         
         weighted_signal, confidence, fusion_metadata = self.signal_fusion.fuse_signals_with_ml(
@@ -567,7 +709,7 @@ class RenaissanceTradingBot:
         for k, v in contributions.items():
             try:
                 hardened_contribs[k] = self._force_float(v)
-            except:
+            except Exception:
                 hardened_contribs[k] = 0.0
 
         return float(self._force_float(weighted_signal)), hardened_contribs
@@ -760,10 +902,10 @@ class RenaissanceTradingBot:
                     'slippage': slippage_risk.get('predicted_slippage', 0.0),
                     'execution_time': 0.0,
                 }
-                asyncio.create_task(self.db_manager.store_trade(trade_data))
+                self._track_task(self.db_manager.store_trade(trade_data))
                 # Persist position to DB for state recovery
                 if position:
-                    asyncio.create_task(self.db_manager.save_position({
+                    self._track_task(self.db_manager.save_position({
                         'position_id': position.position_id,
                         'product_id': product_id,
                         'side': side,
@@ -812,15 +954,16 @@ class RenaissanceTradingBot:
             
             if optimized_weights != self.signal_weights:
                 self.logger.info("New optimized weights discovered via Evolution!")
-                old_weights = self.signal_weights.copy()
-                self.signal_weights = optimized_weights
-                
+                async with self._weights_lock:
+                    old_weights = self.signal_weights.copy()
+                    self.signal_weights = optimized_weights
+
                 # Log the change
                 for k, v in optimized_weights.items():
                     diff = v - old_weights.get(k, 0)
                     if abs(diff) > 0.001:
                         self.logger.info(f"  {k}: {old_weights.get(k,0):.3f} -> {v:.3f} ({diff:+.3f})")
-                
+
                 # 3. Persist to config.json to close the loop
                 self._save_optimized_weights(optimized_weights)
             
@@ -972,7 +1115,7 @@ class RenaissanceTradingBot:
                         source="Coinbase",
                         product_id=product_id
                     )
-                    asyncio.create_task(self.db_manager.store_market_data(md_persist))
+                    self._track_task(self.db_manager.store_market_data(md_persist))
 
                 # 2. Generate signals from all components
                 signals = await self.generate_signals(market_data)
@@ -1022,7 +1165,7 @@ class RenaissanceTradingBot:
                 try:
                     raw_b_v_f = confluence_data.get('total_confluence_boost', 0.0)
                     boost_scalar_final = self._force_float(raw_b_v_f)
-                except:
+                except Exception:
                     boost_scalar_final = 0.0
 
                 if boost_scalar_final > 0:
@@ -1071,7 +1214,7 @@ class RenaissanceTradingBot:
                             else:
                                 try:
                                     rt_result[k] = self._force_float(v)
-                                except:
+                                except Exception:
                                     rt_result[k] = v
                 
                 # 4.5 Statistical Arbitrage & Fractal Intelligence
@@ -1103,12 +1246,22 @@ class RenaissanceTradingBot:
                 ticker = market_data.get('ticker', {})
                 current_price = self._force_float(ticker.get('price', 0.0))
                 
+                # Check for stale market data before deciding
+                data_ts = market_data.get('timestamp')
+                if data_ts:
+                    if isinstance(data_ts, str):
+                        data_ts = datetime.fromisoformat(data_ts)
+                    data_age = (datetime.now() - data_ts).total_seconds()
+                    if data_age > 60:
+                        self.logger.warning(f"Market data {data_age:.0f}s old - holding")
+                        return TradingDecision('HOLD', 0.0, 0.0, {'reason': 'stale_data'}, datetime.now())
+
                 # 5.1 Meta-Strategy Selection
                 regime_data = self.regime_overlay.current_regime or {}
                 self.last_vpin = market_data.get('vpin', 0.5)
                 execution_mode = self.strategy_selector.select_mode(market_data, regime_data)
                 market_data['execution_mode'] = execution_mode
-                
+
                 decision = self.make_trading_decision(weighted_signal, contributions, 
                                                     current_price=current_price, 
                                                     real_time_result=rt_result,
@@ -1143,12 +1296,12 @@ class RenaissanceTradingBot:
                         'weighted_signal': weighted_signal,
                         'reasoning': decision.reasoning
                     }
-                    asyncio.create_task(self.db_manager.store_decision(decision_persist))
+                    self._track_task(self.db_manager.store_decision(decision_persist))
                     
                     # Store ML predictions
                     if rt_result and 'predictions' in rt_result:
                         for model_name, pred in rt_result['predictions'].items():
-                            asyncio.create_task(self.db_manager.store_ml_prediction({
+                            self._track_task(self.db_manager.store_ml_prediction({
                                 'product_id': product_id,
                                 'model_name': model_name,
                                 'prediction': pred
@@ -1177,12 +1330,20 @@ class RenaissanceTradingBot:
                 # Periodically calibrate models (e.g., every 10 cycles)
                 self.decision_history.append(decision)
                 if len(self.decision_history) % 10 == 0:
-                    asyncio.create_task(self._run_adaptive_learning_cycle())
-                    asyncio.create_task(self._perform_attribution_analysis())
+                    self._track_task(self._run_adaptive_learning_cycle())
+                    self._track_task(self._perform_attribution_analysis())
+
+                    # Periodic position reconciliation
+                    recon = self.position_manager.reconcile_with_exchange()
+                    if recon.get("status") == "MISMATCH":
+                        self._track_task(
+                            self.alert_manager.send_alert("CRITICAL", "Position Mismatch",
+                                f"{len(recon['discrepancies'])} discrepancies detected")
+                        )
                     
                     # Run Self-Reinforcing Learning (Step 19)
                     if self.real_time_pipeline.enabled:
-                        asyncio.create_task(self.learning_engine.run_learning_cycle(
+                        self._track_task(self.learning_engine.run_learning_cycle(
                             self.real_time_pipeline.processor.models
                         ))
                     
@@ -1191,14 +1352,15 @@ class RenaissanceTradingBot:
                         new_weights = await self.genetic_optimizer.run_optimization_cycle(self.signal_weights)
                         if new_weights != self.signal_weights:
                             self.logger.info("Evolutionary Step (Step 14): Weights updated.")
-                            self.signal_weights = new_weights
+                            async with self._weights_lock:
+                                self.signal_weights = new_weights
                     
-                    asyncio.create_task(run_evo())
+                    self._track_task(run_evo())
 
                 # Run Breakout Scan (Step 16+)
                 self.scan_cycle_count += 1
                 if self.scan_cycle_count % 10 == 0:
-                    asyncio.create_task(self._run_breakout_scan())
+                    self._track_task(self._run_breakout_scan())
                 
                 decisions.append(decision)
                 
@@ -1357,12 +1519,34 @@ class RenaissanceTradingBot:
             self.position_manager.set_emergency_stop(True, reason)
         except Exception as e:
             self.logger.error(f"Emergency stop failed: {e}")
+        # Fire alert asynchronously (best-effort)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(
+                    self.alert_manager.send_alert("CRITICAL", "Kill Switch", reason)
+                )
+        except Exception:
+            pass
 
     def _check_kill_file(self):
         """Check for file-based kill switch (touch KILL_SWITCH to halt)."""
         if self.KILL_FILE.exists():
             reason = self.KILL_FILE.read_text().strip() or "Kill file detected"
             self.trigger_kill_switch(reason)
+
+    # ──────────────────────────────────────────────
+    #  WebSocket Feed
+    # ──────────────────────────────────────────────
+    async def _run_websocket_feed(self):
+        """Background WebSocket feed for real-time market data."""
+        while not self._killed:
+            try:
+                await self._ws_client.connect_websocket()
+                await self._ws_client.listen_for_messages(self._ws_queue)
+            except Exception as e:
+                self.logger.warning(f"WebSocket reconnecting: {e}")
+                await asyncio.sleep(5)
 
     # ──────────────────────────────────────────────
     #  State Recovery
@@ -1405,6 +1589,14 @@ class RenaissanceTradingBot:
                     f"State restored: {restored} open positions, "
                     f"net_position={net_position:.6f}, daily_pnl=${daily_pnl:.2f}"
                 )
+
+            # Reconcile with exchange after restoring state
+            recon = self.position_manager.reconcile_with_exchange()
+            if recon.get("status") == "MISMATCH":
+                asyncio.ensure_future(
+                    self.alert_manager.send_alert("CRITICAL", "Position Mismatch",
+                        f"{len(recon['discrepancies'])} discrepancies found on startup")
+                )
         except Exception as e:
             self.logger.warning(f"State recovery skipped: {e}")
 
@@ -1426,7 +1618,11 @@ class RenaissanceTradingBot:
             await self.real_time_pipeline.start()
 
         # Start Ghost Runner Loop (Step 18)
-        asyncio.create_task(self.ghost_runner.start_ghost_loop(interval=cycle_interval * 2))
+        self._track_task(self.ghost_runner.start_ghost_loop(interval=cycle_interval * 2))
+
+        # Start WebSocket feed for real-time data
+        if self._ws_client:
+            self._track_task(self._run_websocket_feed())
 
         while not self._killed:
             try:
@@ -1443,6 +1639,9 @@ class RenaissanceTradingBot:
                                f"Confidence: {decision.confidence:.3f} - "
                                f"Position Size: {decision.position_size:.3f}")
 
+                # Write heartbeat after each successful cycle
+                self._write_heartbeat()
+
                 # Wait for next cycle
                 await asyncio.sleep(cycle_interval)
 
@@ -1453,7 +1652,8 @@ class RenaissanceTradingBot:
                 self.logger.error(f"Unexpected error in trading loop: {e}")
                 await asyncio.sleep(60)
 
-        self.logger.info("Trading loop exited.")
+        self.logger.info("Trading loop exited. Shutting down background tasks...")
+        await self._shutdown()
 
     def _update_dynamic_thresholds(self, product_id: str, market_data: Dict[str, Any]):
         """Adjusts BUY/SELL thresholds based on volatility and confidence (Step 8)"""

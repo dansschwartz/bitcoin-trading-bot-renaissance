@@ -310,9 +310,14 @@ class AlternativeDataEngine:
         news_task = asyncio.to_thread(self.news_client.fetch)
         guavy_task = asyncio.to_thread(self.guavy_client.fetch_sentiment)
 
-        fear_result, twitter_result, reddit_result, news_result, guavy_result = await asyncio.gather(
-            fear_task, twitter_task, reddit_task, news_task, guavy_task
+        results = await asyncio.gather(
+            fear_task, twitter_task, reddit_task, news_task, guavy_task,
+            return_exceptions=True
         )
+        # Replace exceptions with None so downstream code handles gracefully
+        fear_result, twitter_result, reddit_result, news_result, guavy_result = [
+            r if not isinstance(r, BaseException) else None for r in results
+        ]
 
         social_sentiment = 0.0
         reddit_sentiment = 0.0

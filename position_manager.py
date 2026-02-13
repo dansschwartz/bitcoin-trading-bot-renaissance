@@ -4,6 +4,7 @@ Handles position management with actual stop losses and comprehensive risk contr
 """
 
 import logging
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
@@ -425,11 +426,12 @@ class EnhancedPositionManager:
             # Determine order side for API
             order_side = "BUY" if pos.side == PositionSide.LONG else "SELL"
 
-            # Place a market order for immediate execution
+            # Place a market order for immediate execution (idempotent)
             order_result = self.client.create_market_order(
                 product_id=pos.product_id,
                 side=order_side,
-                size=pos.size
+                size=pos.size,
+                client_order_id=str(uuid.uuid4())
             )
 
             if "error" in order_result:
@@ -484,13 +486,14 @@ class EnhancedPositionManager:
             # Determine order side (opposite of position)
             order_side = "SELL" if pos.side == PositionSide.LONG else "BUY"
 
-            # Place stop limit order
+            # Place stop limit order (idempotent)
             order_result = self.client.create_limit_order(
                 product_id=pos.product_id,
                 side=order_side,
                 size=pos.size,
                 price=pos.stop_loss_price,
-                post_only=False
+                post_only=False,
+                client_order_id=str(uuid.uuid4())
             )
 
             if "error" in order_result:
@@ -518,13 +521,14 @@ class EnhancedPositionManager:
             # Determine order side (opposite of position)
             order_side = "SELL" if pos.side == PositionSide.LONG else "BUY"
 
-            # Place limit order
+            # Place limit order (idempotent)
             order_result = self.client.create_limit_order(
                 product_id=pos.product_id,
                 side=order_side,
                 size=pos.size,
                 price=pos.take_profit_price,
-                post_only=True  # Take profit can be post-only
+                post_only=True,
+                client_order_id=str(uuid.uuid4())
             )
 
             if "error" in order_result:
@@ -628,11 +632,12 @@ class EnhancedPositionManager:
             # Determine order side (opposite of position)
             order_side = "SELL" if pos.side == PositionSide.LONG else "BUY"
 
-            # Place a market order for immediate execution
+            # Place a market order for immediate execution (idempotent)
             order_result = self.client.create_market_order(
                 product_id=pos.product_id,
                 side=order_side,
-                size=pos.size
+                size=pos.size,
+                client_order_id=str(uuid.uuid4())
             )
 
             if "error" in order_result:
@@ -653,6 +658,29 @@ class EnhancedPositionManager:
 
         except Exception as close_order_error:
             return {"success": False, "error": str(close_order_error)}
+
+    def _check_stale_orders(self, max_age_minutes: int = 5):
+        """Cancel orders that have been pending longer than max_age_minutes."""
+        try:
+            orders_resp = self.client.list_orders(order_status=["PENDING", "OPEN"])
+            orders = orders_resp.get("orders", [])
+            now = datetime.now()
+            for order in orders:
+                created = order.get("created_time") or order.get("created_at")
+                if not created:
+                    continue
+                try:
+                    order_time = datetime.fromisoformat(created.replace("Z", "+00:00")).replace(tzinfo=None)
+                except (ValueError, AttributeError):
+                    continue
+                age_minutes = (now - order_time).total_seconds() / 60
+                if age_minutes > max_age_minutes:
+                    order_id = order.get("order_id")
+                    if order_id:
+                        self.logger.warning(f"Cancelling stale order {order_id} (age: {age_minutes:.1f}m)")
+                        self.client.cancel_order(order_id)
+        except Exception as e:
+            self.logger.error(f"Error checking stale orders: {e}")
 
     def update_positions(self, price_data: Dict[str, float]):
         """
@@ -701,6 +729,9 @@ class EnhancedPositionManager:
                     self.logger.info(f"Auto-closed position: {close_message}")
                 else:
                     self.logger.error(f"Failed to auto-close position: {close_message}")
+
+            # Check for stale/orphaned orders
+            self._check_stale_orders()
 
         except Exception as update_error:
             self.logger.error(f"Error updating positions: {update_error}", exc_info=True)
@@ -819,6 +850,55 @@ class EnhancedPositionManager:
         else:
             self.logger.info("Emergency stop deactivated")
 
+    def reconcile_with_exchange(self) -> Dict[str, Any]:
+        """Compare tracked positions against actual exchange state."""
+        report = {"status": "OK", "discrepancies": [], "exchange_balances": {}}
+
+        try:
+            # 1. Get exchange balances
+            accounts = self.client.get_accounts()
+            for acct in accounts.get("accounts", []):
+                currency = acct.get("currency", "")
+                bal = acct.get("available_balance", {})
+                available = float(bal.get("value", 0) if isinstance(bal, dict) else bal)
+                report["exchange_balances"][currency] = available
+
+            # 2. Get open orders on exchange
+            open_orders = self.client.list_orders(order_status=["OPEN"])
+            report["exchange_open_orders"] = len(open_orders.get("orders", []))
+
+            # 3. Compare tracked positions against exchange balances
+            for pos_id, pos in self.positions.items():
+                base_currency = pos.product_id.split("-")[0]  # "BTC" from "BTC-USD"
+                exchange_balance = report["exchange_balances"].get(base_currency, 0.0)
+
+                if pos.side == PositionSide.LONG and exchange_balance < pos.size * 0.95:
+                    report["discrepancies"].append({
+                        "position_id": pos_id,
+                        "type": "BALANCE_MISMATCH",
+                        "expected": pos.size,
+                        "actual": exchange_balance,
+                    })
+
+            if report["discrepancies"]:
+                report["status"] = "MISMATCH"
+                self.logger.critical(
+                    f"POSITION RECONCILIATION FAILED: {len(report['discrepancies'])} discrepancies"
+                )
+                for d in report["discrepancies"]:
+                    self.logger.critical(
+                        f"  {d['position_id']}: expected {d['expected']}, exchange has {d['actual']}"
+                    )
+            else:
+                self.logger.info("Position reconciliation OK")
+
+        except Exception as e:
+            report["status"] = "ERROR"
+            report["error"] = str(e)
+            self.logger.error(f"Position reconciliation failed: {e}")
+
+        return report
+
     def get_risk_metrics(self) -> Dict[str, Any]:
         """Get comprehensive risk metrics"""
         pos_summary = self.get_position_summary()
@@ -911,8 +991,12 @@ class EnhancedPositionManager:
         try:
             positions_data = []
 
+            with self._lock:
+                open_positions = list(self.positions.values())
+                closed_positions = list(self.closed_positions)
+
             # Add open positions
-            for pos in self.positions.values():
+            for pos in open_positions:
                 positions_data.append({
                     "position_id": pos.position_id,
                     "product_id": pos.product_id,
@@ -934,7 +1018,7 @@ class EnhancedPositionManager:
                 })
 
             # Add closed positions
-            for pos in self.closed_positions:
+            for pos in closed_positions:
                 positions_data.append({
                     "position_id": pos.position_id,
                     "product_id": pos.product_id,
@@ -964,12 +1048,18 @@ class EnhancedPositionManager:
     def save_positions_to_file(self, filename: str):
         """Save positions to JSON file"""
         try:
+            with self._lock:
+                positions_snapshot = list(self.positions.values())
+                closed_snapshot = list(self.closed_positions)
+                stats_snapshot = self.stats.copy()
+                daily_pnl_snapshot = self.daily_pnl
+
             export_data = {
                 "timestamp": datetime.now().isoformat(),
                 "positions": [],
                 "closed_positions": [],
-                "stats": self.stats.copy(),
-                "daily_pnl": self.daily_pnl,
+                "stats": stats_snapshot,
+                "daily_pnl": daily_pnl_snapshot,
                 "risk_limits": {
                     "max_position_size_usd": self.risk_limits.max_position_size_usd,
                     "max_daily_loss_usd": self.risk_limits.max_daily_loss_usd,
@@ -980,7 +1070,7 @@ class EnhancedPositionManager:
             }
 
             # Add position data
-            for pos in self.positions.values():
+            for pos in positions_snapshot:
                 export_data["positions"].append({
                     "position_id": pos.position_id,
                     "product_id": pos.product_id,
@@ -1000,7 +1090,7 @@ class EnhancedPositionManager:
                     "metadata": pos.metadata
                 })
 
-            for pos in self.closed_positions:
+            for pos in closed_snapshot:
                 export_data["closed_positions"].append({
                     "position_id": pos.position_id,
                     "product_id": pos.product_id,

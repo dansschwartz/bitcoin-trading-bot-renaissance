@@ -7,8 +7,10 @@ import base64
 import hashlib
 import hmac
 import logging
+import random
 import threading
 import time
+import uuid
 import warnings
 import json
 import secrets
@@ -554,11 +556,14 @@ class EnhancedCoinbaseClient:
                     else:
                         raise ValueError(f"Unsupported HTTP method: {method}")
 
-                    # Handle rate limiting
+                    # Handle rate limiting — sleep and let outer retry loop re-attempt
                     if response.status_code == 429:
                         self._update_stats("rate_limit_hits")
-                        retry_after = int(response.headers.get("Retry-After", 60))
-                        raise RateLimitExceededError(f"Rate limited, retry after {retry_after} seconds")
+                        retry_after = int(response.headers.get("Retry-After", 5))
+                        retry_after = min(retry_after, 120)  # Cap at 2 minutes
+                        self.logger.warning(f"Rate limited (429). Sleeping {retry_after}s before retry.")
+                        time.sleep(retry_after)
+                        raise RateLimitExceededError(f"Rate limited, retried after {retry_after} seconds")
 
                     # Check for HTTP errors
                     response.raise_for_status()
@@ -586,7 +591,9 @@ class EnhancedCoinbaseClient:
 
                 # Check if we should retry this error
                 should_retry = False
-                if hasattr(attempt_error, 'response') and attempt_error.response:
+                if isinstance(attempt_error, RateLimitExceededError):
+                    should_retry = True  # Already slept in handler; retry immediately
+                elif hasattr(attempt_error, 'response') and attempt_error.response:
                     should_retry = attempt_error.response.status_code in self.retry_config.retry_on_status
                 elif isinstance(attempt_error, (ConnectionError, TimeoutError)):
                     should_retry = True
@@ -594,11 +601,12 @@ class EnhancedCoinbaseClient:
                 if not should_retry:
                     raise attempt_error
 
-                # Calculate delay
+                # Calculate delay with jitter to prevent thundering herd
                 delay = min(
                     self.retry_config.base_delay * (self.retry_config.backoff_multiplier ** attempt),
                     self.retry_config.max_delay
                 )
+                delay *= random.uniform(0.5, 1.5)
 
                 self.logger.warning(
                     f"Request failed (attempt {attempt + 1}), retrying in {delay:.2f}s: {attempt_error}")
@@ -693,7 +701,7 @@ class EnhancedCoinbaseClient:
             return {"error": "Order configuration is required"}
 
         order_data = {
-            "client_order_id": client_order_id or f"bot_order_{int(time.time())}",
+            "client_order_id": client_order_id or str(uuid.uuid4()),
             "product_id": product_id,
             "side": side,
             "order_configuration": order_configuration
@@ -861,7 +869,8 @@ class EnhancedCoinbaseClient:
             return {"error": str(trades_error), "trades": []}
 
     def create_market_order(self, product_id: str, side: str, funds: Optional[float] = None,
-                            size: Optional[float] = None) -> Dict[str, Any]:
+                            size: Optional[float] = None,
+                            client_order_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a market order"""
 
         if not funds and not size:
@@ -880,10 +889,11 @@ class EnhancedCoinbaseClient:
             else:
                 return {"error": "Size must be specified for sell orders"}
 
-        return self.create_order(product_id, side, order_config)
+        return self.create_order(product_id, side, order_config, client_order_id=client_order_id)
 
     def create_limit_order(self, product_id: str, side: str, size: float,
-                           price: float, post_only: bool = False) -> Dict[str, Any]:
+                           price: float, post_only: bool = False,
+                           client_order_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a limit order"""
 
         order_config = {
@@ -894,7 +904,7 @@ class EnhancedCoinbaseClient:
             }
         }
 
-        return self.create_order(product_id, side, order_config)
+        return self.create_order(product_id, side, order_config, client_order_id=client_order_id)
 
     def get_fills(self, product_id: Optional[str] = None, order_id: Optional[str] = None) -> Dict[str, Any]:
         """Get fill history"""

@@ -42,12 +42,48 @@ logging.addLevelName(RenaissanceLogLevel.CONFIDENCE_CHANGE, 'CONFIDENCE')
 logging.addLevelName(RenaissanceLogLevel.PERFORMANCE_ATTRIBUTION, 'PERFORMANCE')
 
 
+class SecretMaskingFilter(logging.Filter):
+    """Redact API keys, secrets, and tokens from log messages."""
+
+    PATTERNS = [
+        (re.compile(
+            r'(api[_-]?key|api[_-]?secret|password|token|passphrase|secret)'
+            r'["\s:=]+["\']?([A-Za-z0-9+/=_\-]{8,})["\']?',
+            re.IGNORECASE,
+        ), r'\1=***REDACTED***'),
+        (re.compile(r'(Bearer\s+)[A-Za-z0-9+/=_\-\.]{20,}', re.IGNORECASE), r'\1***REDACTED***'),
+        (re.compile(r'(CB-ACCESS-KEY:\s*)[^\s,]+'), r'\1***REDACTED***'),
+        (re.compile(r'(CB-ACCESS-SIGN:\s*)[^\s,]+'), r'\1***REDACTED***'),
+    ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._mask(str(record.msg))
+        if record.args:
+            record.args = tuple(
+                self._mask(str(a)) if isinstance(a, str) else a for a in record.args
+            )
+        return True
+
+    def _mask(self, text: str) -> str:
+        for pattern, replacement in self.PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+
+
 class RenaissanceJSONFormatter(logging.Formatter):
     """Enhanced JSON formatter for Renaissance data"""
 
     def __init__(self):
         super().__init__()
         self.hostname = self._get_hostname()
+
+    @staticmethod
+    def _get_hostname() -> str:
+        import socket
+        try:
+            return socket.gethostname()
+        except Exception:
+            return "unknown"
 
     def format(self, record: logging.LogRecord) -> str:
         """Format with Renaissance-specific data"""
@@ -135,7 +171,6 @@ class RenaissanceAuditLogger:
 
         # Initialize logger
         self.logger = self._setup_logger()
-        self._setup_audit_logging()
 
     def _setup_logger(self) -> logging.Logger:
         """Setup Renaissance-enhanced logger"""
@@ -154,13 +189,20 @@ class RenaissanceAuditLogger:
         console_handler.setFormatter(console_formatter)
         bot_logger.addHandler(console_handler)
 
-        # JSON file handler for structured logging
+        # JSON file handler for structured logging (rotating)
         if self.audit_file:
             self.audit_file.parent.mkdir(parents=True, exist_ok=True)
-            json_handler = logging.FileHandler(self.audit_file, mode='a')
+            json_handler = logging.handlers.RotatingFileHandler(
+                self.audit_file, maxBytes=50 * 1024 * 1024, backupCount=5
+            )
             json_handler.setLevel(logging.DEBUG)
             json_handler.setFormatter(RenaissanceJSONFormatter())
             bot_logger.addHandler(json_handler)
+
+        # Apply secret masking to all handlers
+        masking_filter = SecretMaskingFilter()
+        for handler in bot_logger.handlers:
+            handler.addFilter(masking_filter)
 
         bot_logger.propagate = False
         return bot_logger

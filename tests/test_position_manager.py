@@ -21,12 +21,14 @@ class MockClient:
 
     def create_market_order(self, product_id: str, side: str,
                             size: Optional[float] = None,
-                            funds: Optional[float] = None) -> Dict[str, Any]:
+                            funds: Optional[float] = None,
+                            client_order_id: Optional[str] = None) -> Dict[str, Any]:
         self.orders.append({"type": "market", "product_id": product_id, "side": side, "size": size})
         return {"order": {"order_id": f"mock_{len(self.orders)}", "status": "FILLED"}}
 
     def create_limit_order(self, product_id: str, side: str, size: float,
-                           price: float, post_only: bool = False) -> Dict[str, Any]:
+                           price: float, post_only: bool = False,
+                           client_order_id: Optional[str] = None) -> Dict[str, Any]:
         self.orders.append({"type": "limit", "product_id": product_id, "side": side, "size": size, "price": price})
         return {"order": {"order_id": f"mock_limit_{len(self.orders)}", "status": "OPEN"}}
 

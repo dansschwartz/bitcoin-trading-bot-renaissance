@@ -96,5 +96,9 @@
   "institutional_dashboard": {
     "enabled": true,
     "port": 5000
+  },
+  "alerting": {
+    "enabled": true,
+    "slack_webhook_env": "SLACK_WEBHOOK_URL"
   }
 }

@@ -100,9 +100,12 @@ class GeneticWeightOptimizer:
             decision_ids = [str(item['id']) for item in data]
             if not decision_ids:
                 return 0.0
-                
-            query = f"SELECT * FROM labels WHERE decision_id IN ({','.join(decision_ids)})"
-            cursor.execute(query)
+
+            placeholders = ','.join('?' * len(decision_ids))
+            cursor.execute(
+                f"SELECT * FROM labels WHERE decision_id IN ({placeholders})",
+                decision_ids
+            )
             labels = {row['decision_id']: dict(row) for row in cursor.fetchall()}
             conn.close()
             
