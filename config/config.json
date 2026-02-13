@@ -12,12 +12,12 @@
   },
     "regime_overlay": {
     "enabled": true,
-    "consciousness_boost": 0.142,
+    "consciousness_boost": 0.0,
     "hmm_regimes": 3
   },
   "risk_gateway": {
     "enabled": false,
-    "consciousness_boost": 0.142,
+    "consciousness_boost": 0.0,
     "max_portfolio_value": 1000.0
   },
     "real_time_pipeline": {

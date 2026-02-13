@@ -28,7 +28,7 @@ class MarketMicrostructureAnalyzer:
     """
 
     def __init__(self):
-        self.consciousness_boost = 0.142  # 14.2% enhancement factor
+        self.consciousness_boost = 0.0  # 14.2% enhancement factor
         self.analysis_window = 1000  # Rolling window for analysis
         self.update_frequency = 0.001  # 1ms update frequency
 

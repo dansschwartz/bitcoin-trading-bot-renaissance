@@ -72,7 +72,7 @@ class LiquidityRiskManager:
     """
 
     def __init__(self, 
-                 consciousness_boost: float = 0.142,  # +14.2% Renaissance edge
+                 consciousness_boost: float = 0.0,  # +14.2% Renaissance edge
                  max_position_size: float = 1000000,  # $1M max position
                  emergency_exit_threshold: float = 0.05,  # 5% slippage threshold
                  venue_weights: Optional[Dict[str, float]] = None):

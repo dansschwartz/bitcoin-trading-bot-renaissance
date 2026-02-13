@@ -34,7 +34,7 @@ class ExecutionAlgorithmSuite:
     """
 
     def __init__(self):
-        self.consciousness_boost = 0.142  # 14.2% enhancement factor
+        self.consciousness_boost = 0.0  # 14.2% enhancement factor
         self.target_execution_time = 0.001  # 1ms target execution time
         self.max_market_impact = 0.005  # 0.5% maximum market impact
         self.algorithms = ['TWAP', 'VWAP', 'IS', 'POV', 'SMART']

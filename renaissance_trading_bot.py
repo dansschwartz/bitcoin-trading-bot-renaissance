@@ -56,6 +56,12 @@ from institutional_dashboard import InstitutionalDashboard
 from renaissance_types import SignalType, OrderType, MLSignalPackage, TradingDecision
 from ml_integration_bridge import MLIntegrationBridge
 
+# Production Orchestrator (optional)
+try:
+    from production_trading_orchestrator import ProductionTradingOrchestrator, ProductionConfig
+    ORCHESTRATOR_AVAILABLE = True
+except ImportError:
+    ORCHESTRATOR_AVAILABLE = False
 
 # Types moved to renaissance_types.py
 

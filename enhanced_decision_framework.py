@@ -110,7 +110,7 @@ class EnhancedDecisionFramework:
                  confidence_threshold: float = 0.65,
                  max_position_size: float = 0.25,
                  risk_tolerance: float = 0.02,
-                 consciousness_boost: float = 0.142):
+                 consciousness_boost: float = 0.0):
         """
         Initialize Enhanced Decision Framework
 

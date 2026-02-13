@@ -52,7 +52,7 @@ class ConfidenceCalculator:
     """
 
     def __init__(self,
-                 consciousness_boost: float = 0.142,
+                 consciousness_boost: float = 0.0,
                  min_confidence: float = 0.1,
                  max_confidence: float = 0.95):
         """

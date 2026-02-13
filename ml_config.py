@@ -338,7 +338,7 @@ class EnhancedMLBridge:
         adjusted_prediction = base_prediction * regime_adjustment.get(regime, 1.0)
 
         # Consciousness-weighted confidence
-        consciousness_boost = 1.0 + (consciousness['consciousness_level'] * 0.3)
+        consciousness_boost = 1.0  # Neutralized
         final_confidence = min(quantum['confidence'] * consciousness_boost, 0.95)
 
         return {

@@ -11,7 +11,7 @@ from risk_gateway import RiskGateway
 class TestAdapters(unittest.TestCase):
     def setUp(self):
         self.config = {
-            "regime_overlay": {"enabled": True, "consciousness_boost": 0.142},
+            "regime_overlay": {"enabled": True, "consciousness_boost": 0.0},
             "risk_gateway": {"enabled": True, "fail_open": True, "max_portfolio_value": 1000.0}
         }
 

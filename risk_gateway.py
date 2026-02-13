@@ -20,7 +20,7 @@ class RiskGateway:
     def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
         self.enabled = config.get("enabled", False)
-        self.consciousness_boost = config.get("consciousness_boost", 0.142)
+        self.consciousness_boost = config.get("consciousness_boost", 0.0)
         self.fail_open = config.get("fail_open", True) # Default to True for paper trading
         
         # Initialize state for dashboard visibility

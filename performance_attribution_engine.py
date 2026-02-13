@@ -26,7 +26,7 @@ class PerformanceAttributionEngine:
     """
 
     def __init__(self):
-        self.consciousness_boost = 0.142  # 14.2% enhancement factor
+        self.consciousness_boost = 0.0  # 14.2% enhancement factor
         self.attribution_factors = ['market', 'size', 'value', 'momentum', 'quality', 'volatility']
         self.risk_factors = ['systematic', 'idiosyncratic', 'tail', 'correlation']
         self.time_horizons = ['daily', 'weekly', 'monthly', 'quarterly']
@@ -236,6 +236,7 @@ class PerformanceAttributionEngine:
             benchmark_returns = analysis_data['benchmark_returns']
 
             # Style factors (Growth vs Value, Large vs Small Cap, etc.)
+            # TODO: Replace synthetic data with real market data feed
             style_factors = {
                 'growth_vs_value': np.random.normal(0, 0.02, len(portfolio_returns)),
                 'large_vs_small': np.random.normal(0, 0.015, len(portfolio_returns)),
@@ -306,6 +307,7 @@ class PerformanceAttributionEngine:
             benchmark_returns = analysis_data['benchmark_returns']
 
             # Mock asset-level data (in real implementation, this would come from actual holdings)
+            # TODO: Replace synthetic data with real market data feed
             n_assets = 10
             asset_weights_portfolio = np.random.dirichlet(np.ones(n_assets))
             asset_weights_benchmark = np.random.dirichlet(np.ones(n_assets))

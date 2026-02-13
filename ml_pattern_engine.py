@@ -380,6 +380,7 @@ class MLPatternEngine:
     def _extract_price_momentum(self, market_data: Dict[str, Any]) -> np.ndarray:
         """Extract price momentum features"""
         try:
+            # TODO: Replace synthetic data with real market data feed
             # Simulate price momentum extraction
             # In production, this would extract real momentum features
             return np.random.randn(10)  # Placeholder
@@ -390,6 +391,7 @@ class MLPatternEngine:
     def _extract_volatility_features(self, market_data: Dict[str, Any]) -> np.ndarray:
         """Extract volatility features"""
         try:
+            # TODO: Replace synthetic data with real market data feed
             # Simulate volatility feature extraction
             return np.random.randn(5)  # Placeholder
         except Exception as e:
@@ -399,6 +401,7 @@ class MLPatternEngine:
     def _extract_technical_indicators(self, market_data: Dict[str, Any]) -> np.ndarray:
         """Extract technical indicator features"""
         try:
+            # TODO: Replace synthetic data with real market data feed
             # Simulate technical indicator extraction
             return np.random.randn(15)  # Placeholder
         except Exception as e:
@@ -408,6 +411,7 @@ class MLPatternEngine:
     def _extract_microstructure_signals(self, market_data: Dict[str, Any]) -> np.ndarray:
         """Extract microstructure signal features"""
         try:
+            # TODO: Replace synthetic data with real market data feed
             # Simulate microstructure feature extraction
             return np.random.randn(8)  # Placeholder
         except Exception as e:
@@ -417,6 +421,7 @@ class MLPatternEngine:
     def _extract_alternative_data(self, market_data: Dict[str, Any]) -> np.ndarray:
         """Extract alternative data features"""
         try:
+            # TODO: Replace synthetic data with real market data feed
             # Simulate alternative data extraction
             return np.random.randn(3)  # Placeholder
         except Exception as e:
@@ -527,6 +532,7 @@ class MLPatternEngine:
                 ensemble_pred = np.mean(predictions)
                 ensemble_conf = np.mean(confidences)
             else:
+                # TODO: Replace synthetic data with real market data feed
                 # Fallback simulation
                 ensemble_pred = np.random.randn() * 0.5
                 ensemble_conf = 0.4
@@ -680,6 +686,7 @@ class MLPatternEngine:
     def _prepare_training_data(self, training_data: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
         """Prepare training data for ML models"""
         try:
+            # TODO: Replace synthetic data with real market data feed
             # Simulate training data preparation
             # In production, this would process real market data
             n_samples = training_data.get('n_samples', 1000)
@@ -837,6 +844,7 @@ class MLPatternEngine:
             model_info = self.models['confidence']
             model = model_info['model']
 
+            # TODO: Replace synthetic data with real market data feed
             # Create confidence targets (simulate)
             y_conf_train = np.random.rand(len(y_train))
             y_conf_test = np.random.rand(len(y_test))
