@@ -9,7 +9,7 @@ import logging
 import math
 import numpy as np
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 import threading

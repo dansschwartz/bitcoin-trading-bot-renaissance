@@ -149,6 +149,21 @@ class DatabaseManager:
             )
         ''')
 
+        # Create open_positions table for state recovery
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS open_positions (
+                position_id TEXT PRIMARY KEY,
+                product_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                size REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                stop_loss_price REAL,
+                take_profit_price REAL,
+                opened_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN'
+            )
+        ''')
+
         conn.commit()
         conn.close()
         self.logger.info("Database initialized successfully with expanded metrics support")
@@ -370,3 +385,84 @@ class DatabaseManager:
             conn.close()
         except Exception as e:
             self.logger.error(f"Error storing ML prediction: {e}")
+
+    # ──────────────────────────────────────────────
+    #  Position State Recovery
+    # ──────────────────────────────────────────────
+
+    async def save_position(self, position_data: Dict[str, Any]):
+        """Upsert an open position for state recovery."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO open_positions
+                    (position_id, product_id, side, size, entry_price,
+                     stop_loss_price, take_profit_price, opened_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                position_data['position_id'],
+                position_data['product_id'],
+                position_data['side'],
+                position_data['size'],
+                position_data['entry_price'],
+                position_data.get('stop_loss_price'),
+                position_data.get('take_profit_price'),
+                position_data.get('opened_at', datetime.now(timezone.utc).isoformat()),
+                position_data.get('status', 'OPEN'),
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.logger.error(f"Error saving position: {e}")
+
+    async def close_position_record(self, position_id: str):
+        """Mark a position as CLOSED in the database."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE open_positions SET status = 'CLOSED' WHERE position_id = ?",
+                (position_id,)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.logger.error(f"Error closing position record: {e}")
+
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Retrieve all OPEN positions for state recovery on restart."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM open_positions WHERE status = 'OPEN'")
+            rows = cursor.fetchall()
+            columns = [d[0] for d in cursor.description]
+            conn.close()
+            return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            self.logger.error(f"Error getting open positions: {e}")
+            return []
+
+    async def get_daily_pnl(self, date_str: str) -> float:
+        """Sum realized PnL from today's trades (approximated from trade records)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # Sum trade values for today as a rough PnL proxy
+            # Positive for sells, negative for buys  (realized when closing)
+            cursor.execute('''
+                SELECT COALESCE(SUM(
+                    CASE WHEN side = 'SELL' THEN size * price
+                         WHEN side = 'BUY'  THEN -size * price
+                         ELSE 0 END
+                ), 0.0)
+                FROM trades
+                WHERE date(timestamp) = ?
+            ''', (date_str,))
+            result = cursor.fetchone()
+            conn.close()
+            return float(result[0]) if result else 0.0
+        except Exception as e:
+            self.logger.error(f"Error getting daily PnL: {e}")
+            return 0.0

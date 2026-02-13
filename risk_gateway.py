@@ -21,7 +21,7 @@ class RiskGateway:
         self.logger = logger or logging.getLogger(__name__)
         self.enabled = config.get("enabled", False)
         self.consciousness_boost = config.get("consciousness_boost", 0.0)
-        self.fail_open = config.get("fail_open", True) # Default to True for paper trading
+        self.fail_open = config.get("fail_open", False)  # Fail-closed: block trade on error
         
         # Initialize state for dashboard visibility
         self._last_vae_loss = 0.0
@@ -62,15 +62,12 @@ class RiskGateway:
                     self.logger.warning(f"⚠️ ANOMALY DETECTED (Score: {score:.2f}). Blocking {action} for Black Swan protection.")
                     return False
 
-            # 2. Update metrics first (RiskManager in renaissance_trading_bot is simpler)
-            # metrics = self.risk_manager.calculate_portfolio_risk_metrics(portfolio_data)
-            
-            # 3. Check limits compliance (returns list of alerts)
-            # alerts = self.risk_manager.assess_risk_limits_compliance(metrics)
-            
-            # if alerts:
-            #     self.logger.warning(f"Risk limit breaches detected for {action}: {[a.message for a in alerts]}")
-            #     return False
+            # 2. Basic portfolio risk checks
+            daily_pnl = portfolio_data.get('daily_pnl', 0.0)
+            total_value = portfolio_data.get('total_value', 0.0)
+            if total_value > 0 and abs(daily_pnl) / total_value > 0.15:
+                self.logger.warning(f"Risk check: daily drawdown {abs(daily_pnl)/total_value:.1%} exceeds 15%")
+                return False
                 
             return True
             

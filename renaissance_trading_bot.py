@@ -6,6 +6,8 @@ Combines all components with research-optimized signal weights
 import asyncio
 import logging
 import json
+import os
+import signal
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta, timezone
@@ -34,6 +36,10 @@ from slippage_protection_system import SlippageProtectionSystem
 # Persistence & Attribution
 from database_manager import DatabaseManager
 from performance_attribution_engine import PerformanceAttributionEngine
+
+# Order Execution & Position Management
+from coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
+from position_manager import EnhancedPositionManager, RiskLimits
 
 # Step 14 & 16 & Deep Alternative
 from genetic_optimizer import GeneticWeightOptimizer
@@ -144,6 +150,34 @@ class RenaissanceTradingBot:
         # self.portfolio_optimizer = RenaissancePortfolioOptimizer()
         self.execution_suite = ExecutionAlgorithmSuite()
         self.slippage_protection = SlippageProtectionSystem()
+
+        # Risk management (from original bot) - needed before position_manager init
+        risk_cfg = self.config.get("risk_management", {})
+        self.daily_loss_limit = float(risk_cfg.get("daily_loss_limit", 500))
+        self.position_limit = float(risk_cfg.get("position_limit", 1000))
+        self.min_confidence = float(risk_cfg.get("min_confidence", 0.65))
+
+        # Initialize Coinbase Client & Position Manager
+        cb_config = self.config.get("coinbase", {})
+        paper_mode = self.config.get("trading", {}).get("paper_trading", True)
+        self.coinbase_client = EnhancedCoinbaseClient(
+            credentials=CoinbaseCredentials(
+                api_key=os.environ.get(cb_config.get("api_key_env", "CB_API_KEY"), ""),
+                api_secret=os.environ.get(cb_config.get("api_secret_env", "CB_API_SECRET"), ""),
+                sandbox=self.config.get("trading", {}).get("sandbox", True),
+            ),
+            paper_trading=paper_mode,
+            logger=self.logger,
+        )
+        self.position_manager = EnhancedPositionManager(
+            coinbase_client=self.coinbase_client,
+            risk_limits=RiskLimits(
+                max_position_size_usd=self.position_limit,
+                max_daily_loss_usd=self.daily_loss_limit,
+            ),
+            logger=self.logger,
+        )
+        self._killed = False
 
         # Initialize Persistence & Attribution
         db_cfg = self.config.get("database", {"path": "data/renaissance_bot.db", "enabled": True})
@@ -259,12 +293,6 @@ class RenaissanceTradingBot:
         self.daily_pnl = 0.0
         self.last_trade_time = None
         self.decision_history = []
-
-        # Risk management (from original bot)
-        risk_cfg = self.config.get("risk_management", {})
-        self.daily_loss_limit = float(risk_cfg.get("daily_loss_limit", 500))
-        self.position_limit = float(risk_cfg.get("position_limit", 1000))
-        self.min_confidence = float(risk_cfg.get("min_confidence", 0.65))
 
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
@@ -683,11 +711,11 @@ class RenaissanceTradingBot:
         return decision
 
     async def _execute_smart_order(self, decision: TradingDecision, market_data: Dict[str, Any]):
-        """Execute order using Step 10 Smart Execution Suite"""
+        """Execute order through position manager (real or paper) with slippage analysis"""
         try:
             product_id = market_data.get('product_id', 'BTC-USD')
             current_price = decision.reasoning.get('current_price', 0.0)
-            
+
             order_details = {
                 'product_id': product_id,
                 'side': decision.action,
@@ -695,42 +723,69 @@ class RenaissanceTradingBot:
                 'price': current_price,
                 'type': 'MARKET'
             }
-            
+
             # 1. Analyze Slippage Risk
             slippage_risk = self.slippage_protection.analyze_slippage_risk(order_details, market_data)
             self.logger.info(f"Slippage risk for {product_id}: {slippage_risk.get('risk_level', 'UNKNOWN')}")
-            
-            # 2. Select Algorithm
-            algo = 'SMART'
-            if slippage_risk.get('predicted_slippage', 0) > 0.005: # > 0.5%
-                algo = 'TWAP'
-                self.logger.info(f"High slippage risk detected, switching to {algo}")
-            
-            # 3. Execute via Suite
-            exec_result = self.execution_suite.execute_order(order_details, market_data, algorithm=algo)
-            
+
+            # 2. Map action to position side
+            side = "LONG" if decision.action == "BUY" else "SHORT"
+
+            # 3. Execute through position manager (risk checks -> API call -> position tracking)
+            success, message, position = self.position_manager.open_position(
+                product_id=product_id,
+                side=side,
+                size=decision.position_size,
+                entry_price=current_price,
+            )
+
+            exec_result = {
+                'status': 'EXECUTED' if success else 'REJECTED',
+                'message': message,
+                'position_id': position.position_id if position else None,
+                'execution_price': current_price,
+                'slippage': slippage_risk.get('predicted_slippage', 0.0),
+            }
+
             # 4. Persist Trade
-            if self.db_enabled:
+            if success and self.db_enabled:
                 trade_data = {
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'product_id': product_id,
                     'side': decision.action,
                     'size': decision.position_size,
-                    'price': exec_result.get('execution_price', current_price),
-                    'status': exec_result.get('status', 'EXECUTED'),
-                    'algo_used': algo,
-                    'slippage': exec_result.get('slippage', 0.0),
-                    'execution_time': exec_result.get('execution_time', 0.0)
+                    'price': current_price,
+                    'status': 'EXECUTED',
+                    'algo_used': 'POSITION_MANAGER',
+                    'slippage': slippage_risk.get('predicted_slippage', 0.0),
+                    'execution_time': 0.0,
                 }
                 asyncio.create_task(self.db_manager.store_trade(trade_data))
+                # Persist position to DB for state recovery
+                if position:
+                    asyncio.create_task(self.db_manager.save_position({
+                        'position_id': position.position_id,
+                        'product_id': product_id,
+                        'side': side,
+                        'size': decision.position_size,
+                        'entry_price': current_price,
+                        'stop_loss_price': position.stop_loss_price,
+                        'take_profit_price': position.take_profit_price,
+                        'opened_at': position.entry_time.isoformat(),
+                        'status': 'OPEN',
+                    }))
 
-            self.logger.info(f"Smart execution complete: {exec_result.get('status', 'EXECUTED')} via {algo}")
+            # 5. Check daily loss after trade
+            if self.position_manager.daily_pnl < -self.daily_loss_limit:
+                self.trigger_kill_switch(
+                    f"Daily loss limit breached: ${abs(self.position_manager.daily_pnl):.2f}"
+                )
+
+            self.logger.info(f"Smart execution complete: {exec_result['status']} | {message}")
             return exec_result
-            
+
         except Exception as e:
             self.logger.error(f"Smart execution failed: {e}")
-            # Fallback to simple paper trade log
-            self.logger.info(f"PAPER TRADE (Fallback): {decision.action} {decision.position_size}")
             return {'status': 'FAILED', 'error': str(e)}
 
     async def _run_adaptive_learning_cycle(self):
@@ -1289,9 +1344,82 @@ class RenaissanceTradingBot:
         except Exception as e:
             self.logger.error(f"Breakout scan failed: {e}")
 
+    # ──────────────────────────────────────────────
+    #  Kill Switch
+    # ──────────────────────────────────────────────
+    KILL_FILE = Path("KILL_SWITCH")
+
+    def trigger_kill_switch(self, reason: str):
+        """Activate kill switch: close all positions, halt trading loop."""
+        self.logger.critical(f"KILL SWITCH ACTIVATED: {reason}")
+        self._killed = True
+        try:
+            self.position_manager.set_emergency_stop(True, reason)
+        except Exception as e:
+            self.logger.error(f"Emergency stop failed: {e}")
+
+    def _check_kill_file(self):
+        """Check for file-based kill switch (touch KILL_SWITCH to halt)."""
+        if self.KILL_FILE.exists():
+            reason = self.KILL_FILE.read_text().strip() or "Kill file detected"
+            self.trigger_kill_switch(reason)
+
+    # ──────────────────────────────────────────────
+    #  State Recovery
+    # ──────────────────────────────────────────────
+    async def _restore_state(self):
+        """Restore positions and daily PnL from the database after restart."""
+        try:
+            # Restore open positions
+            open_positions = await self.db_manager.get_open_positions()
+            restored = 0
+            net_position = 0.0
+            for row in open_positions:
+                from position_manager import Position, PositionSide, PositionStatus
+                pos = Position(
+                    position_id=row['position_id'],
+                    product_id=row['product_id'],
+                    side=PositionSide(row['side']),
+                    size=row['size'],
+                    entry_price=row['entry_price'],
+                    current_price=row['entry_price'],
+                    stop_loss_price=row.get('stop_loss_price'),
+                    take_profit_price=row.get('take_profit_price'),
+                    status=PositionStatus.OPEN,
+                    entry_time=datetime.fromisoformat(row['opened_at']),
+                )
+                self.position_manager.positions[pos.position_id] = pos
+                sign = 1.0 if pos.side == PositionSide.LONG else -1.0
+                net_position += sign * pos.size
+                restored += 1
+
+            # Restore daily PnL from today's trades
+            today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            daily_pnl = await self.db_manager.get_daily_pnl(today)
+            self.position_manager.daily_pnl = daily_pnl
+            self.daily_pnl = daily_pnl
+            self.current_position = net_position
+
+            if restored > 0 or daily_pnl != 0:
+                self.logger.info(
+                    f"State restored: {restored} open positions, "
+                    f"net_position={net_position:.6f}, daily_pnl=${daily_pnl:.2f}"
+                )
+        except Exception as e:
+            self.logger.warning(f"State recovery skipped: {e}")
+
     async def run_continuous_trading(self, cycle_interval: int = 300):
         """Run continuous Renaissance trading (default 5-minute cycles)"""
         self.logger.info(f"Starting continuous Renaissance trading with {cycle_interval}s cycles")
+
+        # Install signal handlers for graceful shutdown
+        def _handle_shutdown(signum, frame):
+            self.trigger_kill_switch(f"Signal {signum} received")
+        signal.signal(signal.SIGINT, _handle_shutdown)
+        signal.signal(signal.SIGTERM, _handle_shutdown)
+
+        # Restore state from DB
+        await self._restore_state()
 
         # Start real-time pipeline if enabled
         if self.real_time_pipeline.enabled:
@@ -1300,14 +1428,18 @@ class RenaissanceTradingBot:
         # Start Ghost Runner Loop (Step 18)
         asyncio.create_task(self.ghost_runner.start_ghost_loop(interval=cycle_interval * 2))
 
-        while True:
+        while not self._killed:
             try:
+                # Check file-based kill switch
+                self._check_kill_file()
+                if self._killed:
+                    break
+
                 # Execute trading cycle
                 decision = await self.execute_trading_cycle()
 
-                # In production, this would execute the actual trade
-                # For now, we'll just log the paper trading decision
-                self.logger.info(f"PAPER TRADE: {decision.action} - "
+                self.logger.info(f"{'LIVE' if not self.coinbase_client.paper_trading else 'PAPER'} TRADE: "
+                               f"{decision.action} - "
                                f"Confidence: {decision.confidence:.3f} - "
                                f"Position Size: {decision.position_size:.3f}")
 
@@ -1315,11 +1447,13 @@ class RenaissanceTradingBot:
                 await asyncio.sleep(cycle_interval)
 
             except KeyboardInterrupt:
-                self.logger.info("Trading stopped by user")
+                self.trigger_kill_switch("KeyboardInterrupt")
                 break
             except Exception as e:
                 self.logger.error(f"Unexpected error in trading loop: {e}")
-                await asyncio.sleep(60)  # Wait 1 minute before retrying
+                await asyncio.sleep(60)
+
+        self.logger.info("Trading loop exited.")
 
     def _update_dynamic_thresholds(self, product_id: str, market_data: Dict[str, Any]):
         """Adjusts BUY/SELL thresholds based on volatility and confidence (Step 8)"""
