@@ -118,7 +118,7 @@ class StressTestEngine:
     """
 
     def __init__(self,
-                 consciousness_boost: float = 0.142,
+                 consciousness_boost: float = 0.0,
                  monte_carlo_simulations: int = 100000,
                  confidence_levels: List[float] = [0.95, 0.99, 0.999],
                  max_correlation_breakdown: float = 0.95):

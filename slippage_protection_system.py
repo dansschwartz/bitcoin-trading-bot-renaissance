@@ -20,7 +20,7 @@ import logging
 # Import Step 9 and Step 10 components
 try:
     from real_time_risk_monitor import RealTimeRiskMonitor
-    from market_microstructure_analyzer import MarketMicrostructureAnalyzer
+    from market_mictostructure_analyzer import MarketMicrostructureAnalyzer
     from execution_algorithm_suite import ExecutionAlgorithmSuite
 except ImportError:
     logging.warning("Step 9/10 components not found - running in standalone mode")
@@ -35,7 +35,7 @@ class SlippageProtectionSystem:
     """
 
     def __init__(self):
-        self.consciousness_boost = 0.142  # 14.2% enhancement factor
+        self.consciousness_boost = 0.0  # 14.2% enhancement factor
         self.target_slippage_reduction = 0.30  # 30% slippage reduction target
         self.max_acceptable_slippage = 0.005  # 0.5% maximum acceptable slippage
         self.protection_mechanisms = ['predictive', 'adaptive', 'emergency']

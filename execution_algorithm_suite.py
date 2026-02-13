@@ -34,7 +34,7 @@ class ExecutionAlgorithmSuite:
     """
 
     def __init__(self):
-        self.consciousness_boost = 0.142  # 14.2% enhancement factor
+        self.consciousness_boost = 0.0  # 14.2% enhancement factor
         self.target_execution_time = 0.001  # 1ms target execution time
         self.max_market_impact = 0.005  # 0.5% maximum market impact
         self.algorithms = ['TWAP', 'VWAP', 'IS', 'POV', 'SMART']
@@ -61,16 +61,21 @@ class ExecutionAlgorithmSuite:
     def execute_order(self, order_details, market_data, algorithm='SMART'):
         """
         Execute order using specified algorithm with consciousness enhancement
-
-        Args:
-            order_details: dict with size, symbol, side, urgency
-            market_data: Real-time market data
-            algorithm: Execution algorithm to use
-
-        Returns:
-            dict: Execution results and performance metrics
+        Now includes Transaction Cost Optimizer (TCO) with VPIN and spread awareness.
         """
         start_time = time.time()
+        # Arrival price for Implementation Shortfall calculation
+        arrival_price = market_data.get('mid_price', market_data.get('price', 0.0))
+        
+        # 0. Transaction Cost Optimization (TCO) - Step 20
+        vpin = market_data.get('vpin', 0.5)
+        spread = market_data.get('bid_ask_spread', 0.001)
+        
+        # If toxicity (VPIN) is extreme, or spread is too wide, delay the order
+        if vpin > 0.8:
+            return {'status': 'DELAYED', 'reason': f'High VPIN toxicity ({vpin:.4f}) detected. Waiting for liquidity stability.'}
+        if spread > 0.01: # > 1% spread
+            return {'status': 'DELAYED', 'reason': f'Wide spread ({spread:.2%}) detected. Delaying for better execution.'}
 
         try:
             # Validate Step 9 risk constraints
@@ -94,10 +99,20 @@ class ExecutionAlgorithmSuite:
             )
 
             execution_time = time.time() - start_time
+            
+            # ENHANCEMENT: Post-Trade Execution Quality Analyzer (Implementation Shortfall)
+            execution_price = enhanced_result['price']
+            is_bps = 0.0
+            if arrival_price > 0:
+                # IS in basis points
+                side_mult = 1 if order_details.get('side', 'buy').lower() == 'buy' else -1
+                is_bps = side_mult * (execution_price - arrival_price) / arrival_price * 10000
 
             result = {
                 'algorithm_used': algorithm,
-                'execution_price': enhanced_result['price'],
+                'execution_price': execution_price,
+                'arrival_price': arrival_price,
+                'implementation_shortfall_bps': is_bps,
                 'market_impact': enhanced_result['market_impact'],
                 'execution_time': execution_time,
                 'slippage': enhanced_result['slippage'],

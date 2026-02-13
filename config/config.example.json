@@ -1,0 +1,82 @@
+{
+  "trading": {
+    "product_id": "BTC-USD",
+    "cycle_interval_seconds": 300,
+    "paper_trading": true,
+    "sandbox": true
+  },
+  "risk_management": {
+    "daily_loss_limit": 500,
+    "position_limit": 1000,
+    "min_confidence": 0.65
+  },
+  "regime_overlay": {
+    "enabled": false,
+    "consciousness_boost": 0.0
+  },
+  "risk_gateway": {
+    "enabled": false,
+    "fail_open": true,
+    "consciousness_boost": 0.0,
+    "max_portfolio_value": 1000.0
+  },
+  "real_time_pipeline": {
+    "enabled": false,
+    "apply_to_confidence": true,
+    "exchanges": ["Coinbase", "Binance", "Kraken", "KuCoin", "Bitfinex"],
+    "models": ["QuantumTransformer", "Bi-LSTM", "CNN", "VAE", "Ensemble"]
+  },
+  "signal_weights": {
+    "order_flow": 0.25,
+    "order_book": 0.15,
+    "volume": 0.10,
+    "macd": 0.06,
+    "rsi": 0.05,
+    "bollinger": 0.05,
+    "alternative": 0.03,
+    "stat_arb": 0.12,
+    "volume_profile": 0.04,
+    "fractal": 0.05,
+    "entropy": 0.05,
+    "quantum": 0.05
+  },
+  "data": {
+    "candle_granularity": "ONE_MINUTE",
+    "candle_lookback_minutes": 120,
+    "order_book_depth": 10
+  },
+  "coinbase": {
+    "api_key_env": "COINBASE_API_KEY",
+    "api_secret_env": "COINBASE_API_SECRET",
+    "api_passphrase_env": "COINBASE_API_PASSPHRASE"
+  },
+  "sentiment": {
+    "twitter_bearer_env": "TWITTER_BEARER_TOKEN",
+    "twitter_query": "(bitcoin OR BTC OR cryptocurrency) -is:retweet lang:en",
+    "max_tweets": 100
+  },
+  "fear_greed": {
+    "api_url": "https://api.alternative.me/fng/"
+  },
+  "whale_monitor": {
+    "enabled": true,
+    "whale_min_value": 500000
+  },
+  "breakout_scanner": {
+    "enabled": true,
+    "exchanges": ["coinbase", "kraken"],
+    "top_n": 30
+  },
+  "reddit": {
+    "subreddits": "bitcoin,cryptocurrency,ethdev",
+    "user_agent": "RenaissanceBot/1.0"
+  },
+  "newsapi": {
+    "query": "bitcoin,crypto,blockchain",
+    "language": "en"
+  },
+  "logging": {
+    "file": "logs/renaissance_bot.log",
+    "level": "INFO"
+  }
+}

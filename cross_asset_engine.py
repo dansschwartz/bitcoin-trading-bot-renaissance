@@ -1,0 +1,79 @@
+"""
+Step 16: Cross-Asset Correlation & Lead-Lag Engine
+Analyzes relationships between BTC and ETH to detect early entry signals.
+"""
+
+import numpy as np
+import pandas as pd
+import logging
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
+
+class CrossAssetCorrelationEngine:
+    def __init__(self, logger: Optional[logging.Logger] = None):
+        self.logger = logger or logging.getLogger(__name__)
+        self.history = {} # product_id -> prices
+        self.window_size = 60 # 1-hour of 1-min candles
+        
+    def update_price(self, product_id: str, price: float):
+        if product_id not in self.history:
+            self.history[product_id] = []
+        self.history[product_id].append(price)
+        if len(self.history[product_id]) > self.window_size:
+            self.history[product_id].pop(0)
+            
+    def calculate_lead_lag(self, base_id: str, target_id: str) -> Dict[str, Any]:
+        """
+        Calculates if base_id is leading or lagging target_id.
+        Positive lag = base leads target.
+        """
+        if base_id not in self.history or target_id not in self.history:
+            return {"correlation": 0.0, "lag_seconds": 0, "status": "insufficient_data"}
+            
+        base_prices = self.history[base_id]
+        target_prices = self.history[target_id]
+        
+        if len(base_prices) < 10 or len(target_prices) < 10:
+            return {"correlation": 0.0, "lag_seconds": 0, "status": "insufficient_data"}
+            
+        # Synchronize lengths
+        min_len = min(len(base_prices), len(target_prices))
+        b = np.array(base_prices[-min_len:])
+        t = np.array(target_prices[-min_len:])
+        
+        # Calculate returns
+        b_ret = np.diff(np.log(b))
+        t_ret = np.diff(np.log(t))
+        
+        # Simple cross-correlation
+        correlation = np.corrcoef(b_ret, t_ret)[0, 1]
+        if np.isnan(correlation):
+            correlation = 0.0
+            
+        # Detect lead-lag using shifted correlation
+        # We try shifting base_id returns by -1, 0, 1 to see which has highest correlation
+        lags = [-2, -1, 0, 1, 2]
+        corrs = []
+        for lag in lags:
+            if lag == 0:
+                corrs.append(correlation)
+            elif lag > 0:
+                # b leads t
+                c = np.corrcoef(b_ret[:-lag], t_ret[lag:])[0, 1]
+                corrs.append(c)
+            else:
+                # t leads b
+                c = np.corrcoef(b_ret[-lag:], t_ret[:lag])[0, 1]
+                corrs.append(c)
+                
+        best_lag_idx = np.argmax([abs(c) if not np.isnan(c) else 0 for c in corrs])
+        best_lag = lags[best_lag_idx]
+        best_corr = corrs[best_lag_idx]
+        
+        return {
+            "correlation": float(correlation),
+            "lead_lag_score": float(best_corr),
+            "lag_periods": int(best_lag),
+            "is_leading": best_lag > 0 and abs(best_corr) > 0.6,
+            "timestamp": datetime.now(timezone.utc)
+        }

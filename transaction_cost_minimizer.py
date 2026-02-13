@@ -27,7 +27,7 @@ class TransactionCostMinimizer:
     """
 
     def __init__(self):
-        self.consciousness_boost = 0.142  # 14.2% enhancement factor
+        self.consciousness_boost = 0.0  # 14.2% enhancement factor
         self.target_cost_reduction = 0.25  # 25% cost reduction target
         self.cost_components = ['spread', 'impact', 'timing', 'opportunity']
 

@@ -12,9 +12,19 @@ import os
 from pathlib import Path
 from datetime import datetime
 import logging
+import shutil
 
-# Add src directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Load environment variables if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
+# Add project root to path for imports
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from renaissance_trading_bot import RenaissanceTradingBot
 
@@ -23,50 +33,55 @@ def setup_environment():
 
     # Create required directories
     directories = [
-        'src',
-        'logs', 
-        'data',
-        'config',
-        'output'
+        PROJECT_ROOT / 'logs',
+        PROJECT_ROOT / 'data',
+        PROJECT_ROOT / 'config',
+        PROJECT_ROOT / 'output'
     ]
 
     for directory in directories:
-        Path(directory).mkdir(exist_ok=True)
+        Path(directory).mkdir(parents=True, exist_ok=True)
 
     # Create default config if it doesn't exist
-    config_path = Path('config/config.json')
-    if False:  # Config exists, skip creation
-        default_config = {
-            "risk_management": {
-                "daily_loss_limit": 500,
-                "position_limit": 1000,
-                "min_confidence": 0.65,
-                "max_position_size": 0.3
-            },
-            "signal_weights": {
-                "order_flow": 0.32,
-                "order_book": 0.21,
-                "volume": 0.14,
-                "macd": 0.105,
-                "rsi": 0.115,
-                "bollinger": 0.095,
-                "alternative": 0.045
-            },
-            "trading": {
-                "cycle_interval": 300,
-                "paper_trading": True,
-                "symbol": "BTC/USD"
-            },
-            "logging": {
-                "level": "INFO",
-                "file": "logs/renaissance_bot.log"
+    config_path = PROJECT_ROOT / 'config' / 'config.json'
+    example_path = PROJECT_ROOT / 'config' / 'config.example.json'
+
+    if not config_path.exists():
+        if example_path.exists():
+            shutil.copy(example_path, config_path)
+            print(f"✅ Created config from template: {config_path}")
+        else:
+            default_config = {
+                "trading": {
+                    "product_id": "BTC-USD",
+                    "cycle_interval_seconds": 300,
+                    "paper_trading": True,
+                    "sandbox": True
+                },
+                "risk_management": {
+                    "daily_loss_limit": 500,
+                    "position_limit": 1000,
+                    "min_confidence": 0.65
+                },
+                "signal_weights": {
+                    "order_flow": 0.32,
+                    "order_book": 0.21,
+                    "volume": 0.14,
+                    "macd": 0.105,
+                    "rsi": 0.115,
+                    "bollinger": 0.095,
+                    "alternative": 0.045
+                },
+                "logging": {
+                    "level": "INFO",
+                    "file": "logs/renaissance_bot.log"
+                }
             }
-        }
 
-        with open(config_path, 'w') as f:
-            json.dump(default_config, f, indent=2)
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=2)
 
-        print(f"✅ Created default configuration: {config_path}")
+            print(f"✅ Created default configuration: {config_path}")
 
     return str(config_path)
 
@@ -166,10 +181,10 @@ def validate_system():
         'enhanced_config_manager.py',
         'microstructure_engine.py', 
         'enhanced_technical_indicators.py',
-        'order_book_collector.py',
-        'price_data_collector.py',
-        'renaissance_signal_fusion.py',
+        'market_data_provider.py',
+        'coinbase_client.py',
         'alternative_data_engine.py',
+        'renaissance_signal_fusion.py',
         'renaissance_trading_bot.py'
     ]
 

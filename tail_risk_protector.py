@@ -136,7 +136,7 @@ class TailRiskProtector:
     """
 
     def __init__(self,
-                 consciousness_boost: float = 0.142,
+                 consciousness_boost: float = 0.0,
                  default_confidence_levels: List[float] = None,
                  monte_carlo_simulations: int = 10000,
                  tail_threshold: float = 0.05):
@@ -956,6 +956,7 @@ class TailRiskProtector:
     def _get_volatility_regime_multiplier(self) -> float:
         """Get volatility regime multiplier for Monte Carlo simulations"""
         # This would integrate with Step 7 regime detection in production
+        # TODO: Replace synthetic data with real market data feed
         # For now, return a reasonable default with some randomness
         return np.random.uniform(0.8, 1.5)
 

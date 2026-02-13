@@ -13,11 +13,11 @@ import os
 # Import our components
 from database_manager import DatabaseManager
 from data_validator import DataValidator, DataPipelineMonitor
-from clients.coinbase_advanced_client import CoinbaseAdvancedClient
-from clients.twitter_client import TwitterClient
-from clients.reddit_client import RedditClient
-from clients.glassnode_client import GlassnodeClient
-from clients.fear_greed_client import FearGreedClient
+from coinbase_advanced_client import CoinbaseAdvancedClient
+from twitter_client import TwitterClient
+from reddit_client import RedditClient
+from glassnode_client import GlassnodeClient
+from fear_greed_client import FearGreedClient
 
 
 class DataSource(Enum):

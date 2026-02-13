@@ -10,24 +10,14 @@ import warnings
 import subprocess
 import sys
 
-# Auto-install Boruta in Colab if needed
-def ensure_boruta():
-    try:
-        from boruta import BorutaPy
-        return True
-    except ImportError:
-        print("🔧 Installing Boruta in Colab...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "boruta-py"])
-        try:
-            from boruta import BorutaPy
-            print("✅ Boruta auto-installation successful!")
-            return True
-        except ImportError:
-            print("❌ Boruta auto-installation failed")
-            return False
-
-# Install Boruta first
-ensure_boruta()
+# Boruta is an optional dependency
+try:
+    from boruta import BorutaPy
+    BORUTA_AVAILABLE = True
+except ImportError:
+    import warnings
+    warnings.warn("boruta-py not installed. Feature selection will use fallback method.", stacklevel=2)
+    BORUTA_AVAILABLE = False
 
 # Core imports
 import numpy as np
@@ -279,7 +269,7 @@ class PredictionConfig:
     validation_split: float = 0.2
 
     # CONSCIOUSNESS ENHANCEMENT
-    consciousness_factor: float = 1.125
+    consciousness_factor: float = 1.0
 
     # FEATURE OPTIMIZATION
     feature_scaling: str = "standard"
@@ -304,7 +294,7 @@ class PredictionConfig:
         assert self.max_epochs >= self.num_epochs, "max_epochs must be >= num_epochs"
         assert self.lr_scheduler_factor < 1.0, "LR scheduler factor must be < 1.0"
         assert self.min_learning_rate < self.learning_rate, "min_learning_rate must be < learning_rate"
-        assert self.consciousness_factor > 1.0, "Consciousness factor must be > 1.0"
+        assert self.consciousness_factor >= 1.0, "Consciousness factor must be >= 1.0"
 
         # Directional accuracy validations
         assert self.directional_loss_weight > 0, "Directional loss weight must be positive"
@@ -1716,15 +1706,16 @@ class LegendaryNeuralPredictionEngine:
         """Check if trained models exist and return their info"""
         model_info = {}
         model_files = {
-            'quantum_transformer': 'models/quantum_transformer.pth',
-            'bidirectional_lstm': 'models/bidirectional_lstm.pth',
-            'dilated_cnn': 'models/dilated_cnn.pth',
-            'meta_ensemble': 'models/meta_ensemble.pth',
-            'anomaly_detector': 'models/anomaly_detector.pth'
+            'quantum_transformer': 'models/trained/best_quantum_transformer_model.pth',
+            'bidirectional_lstm': 'models/trained/best_bidirectional_lstm_model.pth',
+            'dilated_cnn': 'models/trained/best_dilated_cnn_model.pth',
+            'gru': 'models/trained/best_gru_model.pth',
+            'cnn': 'models/trained/best_cnn_model.pth',
+            'meta_ensemble': 'models/trained/best_meta_ensemble_model.pth',
         }
 
         # Create models directory if it doesn't exist
-        os.makedirs('models', exist_ok=True)
+        os.makedirs('models/trained', exist_ok=True)
         os.makedirs('models/backups', exist_ok=True)
 
         for model_name, model_path in model_files.items():
@@ -1746,7 +1737,7 @@ class LegendaryNeuralPredictionEngine:
 
         return model_info
 
-    def save_model_with_verification(self, model, model_name, training_history, consciousness_factor=1.125):
+    def save_model_with_verification(self, model, model_name, training_history, consciousness_factor=1.0):
         """Save model with comprehensive verification and backup"""
         try:
             # Ensure directories exist
@@ -1772,7 +1763,7 @@ class LegendaryNeuralPredictionEngine:
             }
 
             # Primary save
-            primary_path = f'models/{model_name}.pth'
+            primary_path = f'models/trained/best_{model_name}_model.pth'
             torch.save(save_data, primary_path)
 
             # Verify primary save
@@ -2089,7 +2080,7 @@ class LegendaryNeuralPredictionEngine:
         """🔥 PHASE 2: Enhanced training with advanced strategies and consciousness"""
 
         # 🧠 CONSCIOUSNESS ENHANCEMENT FACTOR (use config value)
-        consciousness_factor = getattr(self.config, 'consciousness_factor', 1.125)
+        consciousness_factor = getattr(self.config, 'consciousness_factor', 1.0)
 
         # 🔥 FIXED: Enhanced loss function defined at method scope
         def enhanced_compute_loss(predictions, targets, epoch_num=0):
@@ -2521,10 +2512,10 @@ class LegendaryNeuralPredictionEngine:
             }
 
             # Save model
-            os.makedirs('models', exist_ok=True)
+            os.makedirs('models/trained', exist_ok=True)
             os.makedirs('models/backups', exist_ok=True)
 
-            save_path = f'models/{model_name}.pth'
+            save_path = f'models/trained/best_{model_name}_model.pth'
             backup_path = f'models/backups/{model_name}_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pth'
 
             torch.save(save_data, save_path)
@@ -2626,7 +2617,7 @@ class LegendaryNeuralPredictionEngine:
         loading_errors = []
 
         for model_name, model_class in model_architectures.items():
-            model_path = f'models/{model_name}.pth'
+            model_path = f'models/trained/best_{model_name}_model.pth'
 
             if os.path.exists(model_path):
                 try:
@@ -2640,7 +2631,7 @@ class LegendaryNeuralPredictionEngine:
                     model = model_class(
                         input_features=saved_data.get('input_features', 115),
                         sequence_length=saved_data.get('sequence_length', 168),
-                        consciousness_factor=saved_data.get('consciousness_factor', 1.125)
+                        consciousness_factor=saved_data.get('consciousness_factor', 1.0)
                     )
 
                     # Load state dict
@@ -2851,7 +2842,7 @@ class BitcoinDataGenerator:
     def __init__(self, num_samples: int = 10000, sequence_length: int = 168):
         self.num_samples = num_samples
         self.sequence_length = sequence_length
-        self.consciousness_factor = 1.125  # Renaissance enhancement
+        self.consciousness_factor = 1.0  # Neutralized (was 1.125)
         self.scaler = StandardScaler()  # Initialize scaler
 
     def generate_realistic_data(self) -> pd.DataFrame:
@@ -2859,6 +2850,7 @@ class BitcoinDataGenerator:
 
         print(f"📊 Generating {self.num_samples} samples of realistic Bitcoin data...")
 
+        # TODO: Replace synthetic data with real market data feed
         np.random.seed(42)
         base_price = 50000
 
@@ -2926,7 +2918,7 @@ class BitcoinDataGenerator:
         print("✅ Realistic Bitcoin data generated successfully!")
         return df
 
-    def check_saved_models(self='models'):
+    def check_saved_models(self='models/trained'):
         """
         Verify which models have been successfully saved to disk
 
@@ -2934,7 +2926,7 @@ class BitcoinDataGenerator:
             list: List of successfully saved model names
         """
         saved_models = []
-        model_names = ['quantum_transformer', 'bidirectional_lstm', 'dilated_cnn', 'meta_ensemble', 'anomaly_detector']
+        model_names = ['quantum_transformer', 'bidirectional_lstm', 'dilated_cnn', 'gru', 'cnn', 'meta_ensemble']
 
         try:
             # Ensure models directory exists
@@ -2944,7 +2936,7 @@ class BitcoinDataGenerator:
 
             # Check each model file
             for model_name in model_names:
-                model_path = os.path.join(self, f"{model_name}.pth")
+                model_path = os.path.join(self, f"best_{model_name}_model.pth")
 
                 if os.path.exists(model_path):
                     # Check if the file is not empty
@@ -3149,7 +3141,7 @@ class BitcoinDataGenerator:
         return df
 
     @staticmethod
-    def convert_targets_to_dict(y_list, consciousness_factor=1.125):
+    def convert_targets_to_dict(y_list, consciousness_factor=1.0):
         """
         Convert list of target dictionaries to dictionary of lists
 
@@ -3228,16 +3220,16 @@ def ensure_model_directories():
 def check_saved_models():
     """Check if trained models exist and return their info"""
     model_info = {}
-    models_dir = 'models'
+    models_dir = 'models/trained'
 
     if not os.path.exists(models_dir):
         os.makedirs(models_dir, exist_ok=True)
 
     model_names = ['quantum_transformer', 'bidirectional_lstm', 'dilated_cnn',
-                   'meta_ensemble', 'anomaly_detector']
+                   'gru', 'cnn', 'meta_ensemble']
 
     for model_name in model_names:
-        model_path = f'{models_dir}/{model_name}.pth'
+        model_path = f'{models_dir}/best_{model_name}_model.pth'
         if os.path.exists(model_path):
             file_size = get_file_size(model_path)
             model_info[model_name] = {
@@ -3319,7 +3311,7 @@ def main():
         print(f"🔍 Missing models: {missing_models}")
 
     # Define consciousness factor for later use
-    consciousness_factor = 1.125
+    consciousness_factor = 1.0
 
     # Generate realistic Bitcoin data
     data_generator = BitcoinDataGenerator(num_samples=5000, sequence_length=config.sequence_length)
@@ -3415,7 +3407,7 @@ def main():
 
     # Convert list of dictionaries to dictionary of lists
     print("🚨 Converting list of dictionaries to dictionary of lists...")
-    y_dict = data_generator.convert_targets_to_dict(y, consciousness_factor=1.125)
+    y_dict = data_generator.convert_targets_to_dict(y, consciousness_factor=1.0)
     print(f"✅ Converted targets - available horizons: {list(y_dict.keys())}")
 
     # Split data
