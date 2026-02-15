@@ -25,6 +25,10 @@ try:
 except ImportError as e:
     print(f"Warning: ML libraries not available: {e}")
     HAS_ML_LIBS = False
+    # Provide a stub base class so class definitions don't fail at import time
+    class _StubModule:
+        class Layer: pass
+    layers = _StubModule()
 
 # Import configuration
 from ml_config import NBEATSConfig, TimeFrame

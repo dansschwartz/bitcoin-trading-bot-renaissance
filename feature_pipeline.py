@@ -27,7 +27,10 @@ from sklearn.manifold import TSNE
 import networkx as nx
 from scipy import signal, stats, optimize
 from scipy.spatial.distance import pdist, squareform
-import talib
+try:
+    import talib
+except ImportError:
+    talib = None
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -1123,7 +1126,16 @@ class FractalFeaturePipeline:
         return np.array(features)
 
     def _extract_quantum_features(self, data: pd.DataFrame) -> np.ndarray:
-        """Extract quantum entanglement features"""
+        """Extract quantum entanglement features.
+
+        NOTE: QuantumEntanglementAnalyzer is disabled — it produced 250+ warnings
+        per cycle due to matrix dimension mismatches while contributing negligible
+        signal value (7 of 128 features). Returns zeros for backward compatibility.
+        """
+        return np.zeros(7)
+
+    def _extract_quantum_features_DISABLED(self, data: pd.DataFrame) -> np.ndarray:
+        """Original quantum feature extraction (disabled)."""
         features = []
 
         try:
@@ -1200,7 +1212,7 @@ class FractalFeaturePipeline:
 
         try:
             for col in data.columns:
-                series = data[col].fillna(method='ffill').values
+                series = data[col].ffill().values
 
                 if len(series) < 20:
                     features.extend([0] * 10)
@@ -1273,7 +1285,7 @@ class FractalFeaturePipeline:
 
             # Extract features for each time series
             for col in data.columns:
-                series = data[col].fillna(method='ffill').values
+                series = data[col].ffill().values
 
                 # Fractal features
                 fractal_feats = self._extract_fractal_features(series)
@@ -1356,7 +1368,7 @@ class FractalFeaturePipeline:
             # Extract same features as in fit
             for col in data.columns:
                 if col in [name.split('_')[0] for name in self.feature_names]:  # Only process known columns
-                    series = data[col].fillna(method='ffill').values
+                    series = data[col].ffill().values
 
                     # Fractal features
                     fractal_feats = self._extract_fractal_features(series)

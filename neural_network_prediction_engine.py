@@ -1510,7 +1510,7 @@ class AdvancedFeatureEngineering:
             print(f"⚠️ Found {nan_counts.sum()} total NaN values across {(nan_counts > 0).sum()} columns")
 
         # Forward fill then backward fill, then zero fill
-        df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        df = df.ffill().bfill().fillna(0)
 
         # Drop columns with too many remaining issues (conservative threshold)
         threshold = len(df) * 0.9  # Only drop if >90% problematic
@@ -3078,7 +3078,7 @@ class BitcoinDataGenerator:
         if nan_count > 0:
             print(f"⚠️  Found {nan_count} NaN values (unexpected with robust engineering)")
             df_temp = pd.DataFrame(features, columns=feature_columns)
-            df_temp = df_temp.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            df_temp = df_temp.ffill().bfill().fillna(0)
             features = df_temp.values * self.consciousness_factor
             print(f"✅ NaN cleaning complete")
         else:

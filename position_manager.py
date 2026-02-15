@@ -400,9 +400,12 @@ class EnhancedPositionManager:
 
             new_position.orders.append(entry_order_result["order"])
 
-            # Place protective orders
-            protective_order_results = self._place_protective_orders(new_position)
-            new_position.orders.extend(protective_order_results)
+            # Place protective orders (skip in paper mode — exit engine handles exits,
+            # and paper trader would instantly fill limit orders at wrong prices)
+            is_paper = getattr(self.client, 'paper_trading', False)
+            if not is_paper:
+                protective_order_results = self._place_protective_orders(new_position)
+                new_position.orders.extend(protective_order_results)
 
             # Store position
             with self._lock:

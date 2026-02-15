@@ -1,0 +1,364 @@
+"""
+Arbitrage Orchestrator — coordinates all three strategies and modules.
+
+This is the main entry point for the arbitrage system.
+It initializes all components, starts the data feeds, runs the
+detectors, routes signals to the execution engine, and logs everything.
+
+Usage:
+    python -m arbitrage.orchestrator [--paper] [--config path/to/config.yaml]
+"""
+import asyncio
+import logging
+import os
+import signal as sig
+import sys
+import time
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Optional
+
+import yaml
+
+# Add parent dir to path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from arbitrage.exchanges.mexc_client import MEXCClient
+from arbitrage.exchanges.binance_client import BinanceClient
+from arbitrage.orderbook.unified_book import UnifiedBookManager
+from arbitrage.costs.model import ArbitrageCostModel
+from arbitrage.detector.cross_exchange import CrossExchangeDetector
+from arbitrage.execution.engine import ArbitrageExecutor
+from arbitrage.funding.funding_rate_arb import FundingRateArbitrage
+from arbitrage.triangular.triangle_arb import TriangularArbitrage
+from arbitrage.risk.arb_risk import ArbitrageRiskEngine
+from arbitrage.inventory.manager import InventoryManager
+from arbitrage.tracking.performance import PerformanceTracker
+
+logger = logging.getLogger("arb.orchestrator")
+
+
+class ArbitrageOrchestrator:
+    """
+    Main coordinator for all arbitrage strategies.
+    Manages lifecycle, data flow, and monitoring.
+    """
+
+    def __init__(self, config_path: str = "arbitrage/config/arbitrage.yaml"):
+        self.config = self._load_config(config_path)
+        self._setup_logging()
+
+        paper = self.config.get('paper_trading', {}).get('enabled', True)
+        logger.info(f"{'PAPER' if paper else 'LIVE'} TRADING MODE")
+
+        # Exchange clients
+        self.mexc = MEXCClient(
+            api_key=os.getenv('MEXC_API_KEY', ''),
+            api_secret=os.getenv('MEXC_API_SECRET', ''),
+            paper_trading=paper,
+        )
+        self.binance = BinanceClient(
+            api_key=os.getenv('BINANCE_API_KEY', ''),
+            api_secret=os.getenv('BINANCE_API_SECRET', ''),
+            paper_trading=paper,
+        )
+
+        # Core modules
+        pairs = self.config.get('pairs', {}).get('phase_1', [])
+        self.book_manager = UnifiedBookManager(self.mexc, self.binance, pairs=pairs)
+        self.cost_model = ArbitrageCostModel()
+        self.risk_engine = ArbitrageRiskEngine(self.config.get('risk', {}))
+
+        # Signal queue: detector → executor
+        self.signal_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+
+        # Strategies
+        self.cross_exchange_detector = CrossExchangeDetector(
+            self.book_manager, self.cost_model, self.risk_engine, self.signal_queue,
+        )
+        self.executor = ArbitrageExecutor(
+            self.mexc, self.binance, self.cost_model, self.risk_engine,
+        )
+        self.funding_arb = FundingRateArbitrage(
+            self.mexc, self.binance, self.risk_engine,
+        )
+        self.triangular_arb = TriangularArbitrage(
+            self.mexc, self.cost_model, self.risk_engine, self.signal_queue,
+        )
+
+        # Support modules
+        self.inventory = InventoryManager(self.mexc, self.binance)
+        self.tracker = PerformanceTracker()
+
+        self._running = False
+        self._start_time: Optional[datetime] = None
+
+    def _load_config(self, path: str) -> dict:
+        config_file = Path(path)
+        if not config_file.exists():
+            # Look relative to this file
+            config_file = Path(__file__).parent / "config" / "arbitrage.yaml"
+        if config_file.exists():
+            with open(config_file) as f:
+                return yaml.safe_load(f)
+        logger.warning(f"Config not found at {path}, using defaults")
+        return {}
+
+    def _setup_logging(self):
+        log_cfg = self.config.get('logging', {})
+        log_level = log_cfg.get('level', 'INFO')
+        log_file = log_cfg.get('file', 'logs/arbitrage.log')
+
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Configure arbitrage loggers
+        arb_logger = logging.getLogger("arb")
+        arb_logger.setLevel(getattr(logging, log_level, logging.INFO))
+
+        if not arb_logger.handlers:
+            # File handler
+            fh = logging.FileHandler(log_path)
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter(
+                '%(asctime)s | %(name)-20s | %(levelname)-5s | %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S',
+            ))
+            arb_logger.addHandler(fh)
+
+            # Console handler
+            ch = logging.StreamHandler()
+            ch.setLevel(getattr(logging, log_level, logging.INFO))
+            ch.setFormatter(logging.Formatter(
+                '%(asctime)s | %(name)-20s | %(levelname)-5s | %(message)s',
+                datefmt='%H:%M:%S',
+            ))
+            arb_logger.addHandler(ch)
+
+    async def start(self):
+        """Initialize all components and start the arbitrage system."""
+        self._running = True
+        self._start_time = datetime.utcnow()
+
+        logger.info("=" * 60)
+        logger.info("  ARBITRAGE ENGINE — Renaissance of One")
+        logger.info("  Three Uncorrelated Revenue Streams")
+        logger.info("=" * 60)
+
+        # Connect exchanges
+        logger.info("Connecting to exchanges...")
+        await asyncio.gather(
+            self.mexc.connect(),
+            self.binance.connect(),
+        )
+
+        # Initial inventory check
+        try:
+            snapshot = await self.inventory.check_inventory()
+            logger.info(f"Inventory check: {len(snapshot.imbalances)} currencies tracked")
+        except Exception as e:
+            logger.warning(f"Initial inventory check failed: {e}")
+
+        # Start all async tasks
+        tasks = [
+            asyncio.create_task(self._run_book_manager(), name="book_manager"),
+            asyncio.create_task(self._run_cross_exchange(), name="cross_exchange"),
+            asyncio.create_task(self._run_execution_loop(), name="executor"),
+            asyncio.create_task(self._run_funding_arb(), name="funding_arb"),
+            asyncio.create_task(self._run_triangular_arb(), name="triangular_arb"),
+            asyncio.create_task(self._run_monitoring(), name="monitoring"),
+            asyncio.create_task(self._run_inventory_checks(), name="inventory"),
+        ]
+
+        logger.info(f"All {len(tasks)} subsystems launched")
+
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            logger.info("Orchestrator shutting down...")
+        finally:
+            await self.stop()
+
+    async def stop(self):
+        self._running = False
+        self.cross_exchange_detector.stop()
+        self.funding_arb.stop()
+        self.triangular_arb.stop()
+        await self.book_manager.stop()
+        await asyncio.gather(
+            self.mexc.disconnect(),
+            self.binance.disconnect(),
+            return_exceptions=True,
+        )
+        logger.info("Arbitrage engine stopped")
+        self._log_final_summary()
+
+    # --- Subsystem runners ---
+
+    async def _run_book_manager(self):
+        """Start order book feeds."""
+        try:
+            await self.book_manager.start()
+        except Exception as e:
+            logger.error(f"Book manager error: {e}")
+
+    async def _run_cross_exchange(self):
+        """Run cross-exchange arbitrage detector."""
+        # Wait for books to populate
+        await asyncio.sleep(5)
+        try:
+            await self.cross_exchange_detector.run()
+        except Exception as e:
+            logger.error(f"Cross-exchange detector error: {e}")
+
+    async def _run_execution_loop(self):
+        """Consume signals from queue and execute trades."""
+        await asyncio.sleep(6)  # Wait for detector to start
+        logger.info("Execution loop started")
+
+        while self._running:
+            try:
+                signal = await asyncio.wait_for(
+                    self.signal_queue.get(), timeout=1.0
+                )
+
+                # Check signal expiry
+                if datetime.utcnow() > signal.expires_at:
+                    continue
+
+                # Execute
+                result = await self.executor.execute_arbitrage(signal)
+
+                # Track
+                self.tracker.record_trade(result)
+
+                # Update risk engine
+                if result.status == "filled":
+                    self.risk_engine.record_trade_result(result.actual_profit_usd)
+                elif "one_sided" in result.status:
+                    self.risk_engine.record_trade_result(Decimal('0'), one_sided=True)
+
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"Execution loop error: {e}")
+                await asyncio.sleep(1)
+
+    async def _run_funding_arb(self):
+        """Run funding rate arbitrage scanner."""
+        await asyncio.sleep(10)  # Let order books stabilize
+        try:
+            await self.funding_arb.run()
+        except Exception as e:
+            logger.error(f"Funding arb error: {e}")
+
+    async def _run_triangular_arb(self):
+        """Run triangular arbitrage scanner."""
+        await asyncio.sleep(8)
+        try:
+            await self.triangular_arb.run()
+        except Exception as e:
+            logger.error(f"Triangular arb error: {e}")
+
+    async def _run_monitoring(self):
+        """Periodic status logging."""
+        await asyncio.sleep(15)
+
+        while self._running:
+            try:
+                self._log_status()
+            except Exception as e:
+                logger.debug(f"Monitoring error: {e}")
+            await asyncio.sleep(60)  # Every 60 seconds
+
+    async def _run_inventory_checks(self):
+        """Periodic inventory checks."""
+        await asyncio.sleep(30)
+        interval = self.config.get('inventory', {}).get('check_interval_minutes', 15) * 60
+
+        while self._running:
+            try:
+                snapshot = await self.inventory.check_inventory()
+                rebalance_plan = self.inventory.generate_rebalance_plan(snapshot)
+                if rebalance_plan:
+                    logger.warning(f"Rebalance needed: {len(rebalance_plan)} currencies")
+            except Exception as e:
+                logger.debug(f"Inventory check error: {e}")
+            await asyncio.sleep(interval)
+
+    # --- Reporting ---
+
+    def _log_status(self):
+        uptime = (datetime.utcnow() - self._start_time).total_seconds() / 60 if self._start_time else 0
+        book_status = self.book_manager.get_status()
+        detector_stats = self.cross_exchange_detector.get_stats()
+        executor_stats = self.executor.get_stats()
+        risk_status = self.risk_engine.get_status()
+        funding_stats = self.funding_arb.get_stats()
+        tri_stats = self.triangular_arb.get_stats()
+
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info(f"  ARBITRAGE STATUS — Uptime: {uptime:.0f}min")
+        logger.info("=" * 60)
+        logger.info(f"  Books: {book_status['tradeable_pairs']}/{book_status['total_pairs']} tradeable | "
+                    f"Updates: {book_status['total_updates']}")
+        logger.info(f"  Detector: {detector_stats['scan_count']} scans | "
+                    f"{detector_stats['signals_generated']} signals | "
+                    f"{detector_stats['signals_approved']} approved")
+        logger.info(f"  Executor: {executor_stats['total_trades']} trades | "
+                    f"{executor_stats['total_fills']} fills | "
+                    f"Profit: ${executor_stats['total_profit_usd']:.2f} | "
+                    f"Win rate: {executor_stats['win_rate']*100:.0f}%")
+        logger.info(f"  Funding: {funding_stats['open_positions']} open positions | "
+                    f"Collected: ${funding_stats['total_funding_collected_usd']:.2f}")
+        logger.info(f"  Triangular: {tri_stats['scan_count']} scans | "
+                    f"{tri_stats['opportunities_found']} opportunities")
+        logger.info(f"  Risk: {'HALTED' if risk_status['halted'] else 'OK'} | "
+                    f"Daily PnL: ${risk_status['daily_pnl_usd']:.2f} | "
+                    f"Exposure: ${risk_status['total_exposure_usd']:.2f}")
+        logger.info("=" * 60)
+
+    def _log_final_summary(self):
+        summary = self.tracker.get_summary()
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("  FINAL SESSION SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"  Runtime: {summary['uptime_hours']:.1f} hours")
+        logger.info(f"  Total Trades: {summary['total_trades']}")
+        logger.info(f"  Total Fills: {summary['total_fills']}")
+        logger.info(f"  Total Profit: ${summary['total_profit_usd']:.2f}")
+        logger.info(f"  Win Rate: {summary['win_rate']*100:.0f}%")
+        logger.info(f"  Avg Profit/Fill: ${summary['avg_profit_per_fill']:.4f}")
+        for strategy, stats in summary['by_strategy'].items():
+            if stats['trades'] > 0:
+                logger.info(f"  {strategy}: {stats['trades']} trades, ${stats['profit_usd']:.2f} profit")
+        logger.info("=" * 60)
+
+
+async def main():
+    """Entry point for standalone arbitrage engine."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Renaissance Arbitrage Engine")
+    parser.add_argument('--config', default='arbitrage/config/arbitrage.yaml', help='Config file path')
+    parser.add_argument('--paper', action='store_true', default=True, help='Paper trading mode')
+    parser.add_argument('--live', action='store_true', help='Live trading mode (overrides --paper)')
+    args = parser.parse_args()
+
+    orchestrator = ArbitrageOrchestrator(config_path=args.config)
+
+    if args.live:
+        orchestrator.config.setdefault('paper_trading', {})['enabled'] = False
+
+    # Handle shutdown signals
+    loop = asyncio.get_event_loop()
+    for s in (sig.SIGINT, sig.SIGTERM):
+        loop.add_signal_handler(s, lambda: asyncio.create_task(orchestrator.stop()))
+
+    await orchestrator.start()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

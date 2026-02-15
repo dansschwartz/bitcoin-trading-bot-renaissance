@@ -182,9 +182,39 @@ class FeatureFanOutProcessor:
                     self.logger.warning(f"N-BEATS (PyTorch) initialization failed: {e}")
             
             self.logger.info("ML models initialized (PyTorch unified suite)")
-            
+
+            # Load trained weights from .pth files if available
+            self._load_trained_weights()
+
         except Exception as e:
             self.logger.error(f"Error initializing ML models: {e}")
+
+    def _load_trained_weights(self):
+        """Load trained .pth weights into models that have matching saved files."""
+        import os
+        model_file_map = {
+            "QuantumTransformer": "models/trained/best_quantum_transformer_model.pth",
+            "Bi-LSTM": "models/trained/best_bidirectional_lstm_model.pth",
+            "CNN": "models/trained/best_cnn_model.pth",
+        }
+        for model_name, model_path in model_file_map.items():
+            if model_name not in self.models:
+                continue
+            if not os.path.exists(model_path):
+                continue
+            try:
+                saved_data = torch.load(model_path, map_location="cpu", weights_only=False)
+                state_dict = saved_data.get("model_state_dict", saved_data)
+                # Load with strict=False to handle architecture evolution
+                result = self.models[model_name].load_state_dict(state_dict, strict=False)
+                loaded_params = len(state_dict) - len(result.unexpected_keys)
+                self.models[model_name].eval()
+                self.logger.info(
+                    f"Loaded trained weights for {model_name}: "
+                    f"{loaded_params} trained params, {len(result.missing_keys)} new params"
+                )
+            except Exception as e:
+                self.logger.warning(f"Could not load trained weights for {model_name}: {e}")
 
     async def process_all_models(self, features: Dict[str, Any]) -> Dict[str, float]:
         """
@@ -213,11 +243,15 @@ class FeatureFanOutProcessor:
                 # In production, we'd use a dedicated scaler here
                 last_30 = price_df.tail(30)
                 if len(last_30) == 30:
-                    # Select numeric columns and normalize
+                    # Select numeric columns and pad/trim to exactly 10 features
                     numeric_df = last_30.select_dtypes(include=[np.number])
-                    # Use up to 10 features
                     cols = list(numeric_df.columns)[:10]
-                    cnn_data = numeric_df[cols].values.reshape(1, 30, len(cols)).astype(np.float32)
+                    raw = numeric_df[cols].values.astype(np.float32)  # (30, n_cols)
+                    # Pad to 10 features if fewer available
+                    if raw.shape[1] < 10:
+                        pad = np.zeros((30, 10 - raw.shape[1]), dtype=np.float32)
+                        raw = np.concatenate([raw, pad], axis=1)
+                    cnn_data = raw.reshape(1, 30, 10)
                 else:
                     cnn_data = np.random.randn(1, 30, 10).astype(np.float32)
             else:

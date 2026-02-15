@@ -212,6 +212,58 @@ class RegimeOverlay:
             return self.current_regime.get('hmm_regime', 'unknown')
         return 'unknown'
 
+    def get_transition_warning(self) -> Dict[str, Any]:
+        """
+        Check for regime transition risk. Returns size adjustment and alert info.
+        Uses next_regime_probs from the HMM to detect upcoming adverse transitions.
+        """
+        result = {"size_multiplier": 1.0, "alert_level": "none", "message": ""}
+
+        if not self.enabled or not self.current_regime:
+            return result
+
+        next_probs = self.current_regime.get('next_regime_probs', {})
+        current_regime = self.current_regime.get('hmm_regime', 'unknown')
+
+        if not next_probs:
+            return result
+
+        # Define adverse transitions
+        bullish_regimes = {'bull_trending', 'bull_mean_reverting'}
+        bearish_regimes = {'bear_trending', 'bear_mean_reverting'}
+
+        # Calculate probability of transitioning to an adverse regime
+        adverse_prob = 0.0
+        if current_regime in bullish_regimes:
+            # Currently bullish — adverse = transitioning to bearish
+            adverse_prob = sum(next_probs.get(r, 0.0) for r in bearish_regimes)
+        elif current_regime in bearish_regimes:
+            # Currently bearish — adverse = transitioning to bullish (if we're short)
+            # In a long-only bot, bearish->bullish is actually good, so use neutral as adverse
+            adverse_prob = sum(next_probs.get(r, 0.0) for r in bullish_regimes)
+        else:
+            # Neutral — adverse = transitioning to trending (high vol)
+            adverse_prob = next_probs.get('bear_trending', 0.0) + next_probs.get('bull_trending', 0.0)
+
+        duration = self.current_regime.get('regime_duration', 0)
+
+        if adverse_prob >= 0.60:
+            result["size_multiplier"] = 0.5
+            result["alert_level"] = "high"
+            result["message"] = (
+                f"Regime transition risk HIGH: {adverse_prob:.0%} chance of adverse transition "
+                f"from {current_regime} (duration: {duration} cycles)"
+            )
+        elif adverse_prob >= 0.40:
+            result["size_multiplier"] = 0.75
+            result["alert_level"] = "medium"
+            result["message"] = (
+                f"Regime transition risk MEDIUM: {adverse_prob:.0%} chance of adverse transition "
+                f"from {current_regime}"
+            )
+
+        return result
+
     def get_confidence_boost(self) -> float:
         """Get confidence boost factor from regime analysis."""
         if not self.enabled or not self.current_regime:

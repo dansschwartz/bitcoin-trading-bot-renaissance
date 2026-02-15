@@ -111,6 +111,38 @@ class DatabaseManager:
                 stop_loss_price REAL, take_profit_price REAL,
                 opened_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'OPEN')''')
 
+            # Medallion Intelligence: Expanded data capture tables
+            cursor.execute('''CREATE TABLE IF NOT EXISTS funding_rate_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL, symbol TEXT NOT NULL,
+                funding_rate REAL NOT NULL, exchange TEXT,
+                predicted_rate REAL)''')
+
+            cursor.execute('''CREATE TABLE IF NOT EXISTS open_interest_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL, symbol TEXT NOT NULL,
+                open_interest REAL NOT NULL, change_24h_pct REAL)''')
+
+            cursor.execute('''CREATE TABLE IF NOT EXISTS liquidation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL, symbol TEXT NOT NULL,
+                direction TEXT NOT NULL, risk_score REAL,
+                funding_rate_percentile REAL, long_short_ratio REAL,
+                recommended_action TEXT)''')
+
+            cursor.execute('''CREATE TABLE IF NOT EXISTS ghost_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL, param_set TEXT NOT NULL,
+                product_id TEXT NOT NULL, action TEXT NOT NULL,
+                entry_price REAL NOT NULL, exit_price REAL,
+                pnl_pct REAL, exit_reason TEXT, cycles_held INTEGER)''')
+
+            cursor.execute('''CREATE TABLE IF NOT EXISTS signal_throttle_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL, action TEXT NOT NULL,
+                signal_name TEXT NOT NULL, accuracy REAL,
+                sample_count INTEGER, product_id TEXT)''')
+
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
 

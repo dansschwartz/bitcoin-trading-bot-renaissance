@@ -34,13 +34,13 @@ class StatisticalArbitrageEngine:
             b_prices = self.history[base_id]
             t_prices = self.history[target_id]
             
-            if len(b_prices) < 30 or len(t_prices) < 30:
+            if len(b_prices) < 10 or len(t_prices) < 10:
                 return {"z_score": 0.0, "signal": 0.0, "status": "insufficient_data"}
                 
             # Synchronize
             min_len = min(len(b_prices), len(t_prices))
-            b = np.log(np.array(b_prices[-min_len:]))
-            t = np.log(np.array(t_prices[-min_len:]))
+            b = np.log(np.array(b_prices[-min_len:], dtype=np.float64))
+            t = np.log(np.array(t_prices[-min_len:], dtype=np.float64))
             
             # Calculate beta (hedge ratio) using simple linear regression
             # Spread = b - beta * t

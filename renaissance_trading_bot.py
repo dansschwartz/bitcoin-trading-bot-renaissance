@@ -63,6 +63,8 @@ from deep_nlp_bridge import DeepNLPBridge
 from market_making_engine import MarketMakingEngine
 from meta_strategy_selector import MetaStrategySelector
 from institutional_dashboard import InstitutionalDashboard
+from dashboard.event_emitter import DashboardEventEmitter
+from position_sizer import RenaissancePositionSizer
 
 from renaissance_types import SignalType, OrderType, MLSignalPackage, TradingDecision
 from ml_integration_bridge import MLIntegrationBridge
@@ -85,6 +87,162 @@ except ImportError:
 
 from renaissance_engine_core import SignalFusion, RiskManager
 
+# Multi-Exchange Arbitrage Engine
+try:
+    from arbitrage.orchestrator import ArbitrageOrchestrator
+    ARBITRAGE_AVAILABLE = True
+except ImportError:
+    ARBITRAGE_AVAILABLE = False
+
+# ── Operations & Intelligence Modules ──
+try:
+    from recovery.state_manager import StateManager, SystemState
+    from recovery.shutdown import GracefulShutdownHandler
+    from recovery.database import ensure_all_tables
+    RECOVERY_AVAILABLE = True
+except ImportError:
+    RECOVERY_AVAILABLE = False
+
+try:
+    from monitoring.telegram_bot import TelegramAlerter
+    from monitoring.alert_manager import AlertManager as MonitoringAlertManager
+    MONITORING_AVAILABLE = True
+except ImportError:
+    MONITORING_AVAILABLE = False
+
+try:
+    from signals.liquidation_detector import LiquidationCascadeDetector
+    LIQUIDATION_DETECTOR_AVAILABLE = True
+except ImportError:
+    LIQUIDATION_DETECTOR_AVAILABLE = False
+
+try:
+    from signals.signal_aggregator import SignalAggregator
+    SIGNAL_AGGREGATOR_AVAILABLE = True
+except ImportError:
+    SIGNAL_AGGREGATOR_AVAILABLE = False
+
+try:
+    from signals.multi_exchange_bridge import MultiExchangeBridge
+    MULTI_EXCHANGE_BRIDGE_AVAILABLE = True
+except ImportError:
+    MULTI_EXCHANGE_BRIDGE_AVAILABLE = False
+
+try:
+    from data_validator import DataValidator
+    DATA_VALIDATOR_AVAILABLE = True
+except ImportError:
+    DATA_VALIDATOR_AVAILABLE = False
+
+try:
+    from signal_auto_throttle import SignalAutoThrottle
+    SIGNAL_THROTTLE_AVAILABLE = True
+except ImportError:
+    SIGNAL_THROTTLE_AVAILABLE = False
+
+try:
+    from signal_validation_gate import SignalValidationGate
+    SIGNAL_VALIDATION_AVAILABLE = True
+except ImportError:
+    SIGNAL_VALIDATION_AVAILABLE = False
+
+try:
+    from portfolio_health_monitor import PortfolioHealthMonitor
+    HEALTH_MONITOR_AVAILABLE = True
+except ImportError:
+    HEALTH_MONITOR_AVAILABLE = False
+
+try:
+    from medallion_signal_analogs import MedallionSignalAnalogs
+    MEDALLION_ANALOGS_AVAILABLE = True
+except ImportError:
+    MEDALLION_ANALOGS_AVAILABLE = False
+
+try:
+    from unified_portfolio_engine import UnifiedPortfolioEngine
+    PORTFOLIO_ENGINE_AVAILABLE = True
+except ImportError:
+    PORTFOLIO_ENGINE_AVAILABLE = False
+
+# ── Medallion Intelligence Modules (Phase 2 Build) ──
+try:
+    from core.devil_tracker import DevilTracker
+    DEVIL_TRACKER_AVAILABLE = True
+except ImportError:
+    DEVIL_TRACKER_AVAILABLE = False
+
+try:
+    from core.kelly_position_sizer import KellyPositionSizer
+    KELLY_SIZER_AVAILABLE = True
+except ImportError:
+    KELLY_SIZER_AVAILABLE = False
+
+try:
+    from core.signal_throttle import SignalThrottle as MedallionSignalThrottle
+    MEDALLION_THROTTLE_AVAILABLE = True
+except ImportError:
+    MEDALLION_THROTTLE_AVAILABLE = False
+
+try:
+    from core.leverage_manager import LeverageManager
+    LEVERAGE_MANAGER_AVAILABLE = True
+except ImportError:
+    LEVERAGE_MANAGER_AVAILABLE = False
+
+try:
+    from core.portfolio_engine import PortfolioEngine as MedallionPortfolioEngine
+    MEDALLION_PORTFOLIO_ENGINE_AVAILABLE = True
+except ImportError:
+    MEDALLION_PORTFOLIO_ENGINE_AVAILABLE = False
+
+try:
+    from intelligence.regime_detector import RegimeDetector as MedallionRegimeDetector
+    MEDALLION_REGIME_AVAILABLE = True
+except ImportError:
+    MEDALLION_REGIME_AVAILABLE = False
+
+try:
+    from intelligence.insurance_scanner import InsurancePremiumScanner
+    INSURANCE_SCANNER_AVAILABLE = True
+except ImportError:
+    INSURANCE_SCANNER_AVAILABLE = False
+
+try:
+    from data_module.bar_aggregator import BarAggregator
+    BAR_AGGREGATOR_AVAILABLE = True
+except ImportError:
+    BAR_AGGREGATOR_AVAILABLE = False
+
+try:
+    from execution.synchronized_executor import SynchronizedExecutor
+    SYNC_EXECUTOR_AVAILABLE = True
+except ImportError:
+    SYNC_EXECUTOR_AVAILABLE = False
+
+try:
+    from execution.trade_hider import TradeHider
+    TRADE_HIDER_AVAILABLE = True
+except ImportError:
+    TRADE_HIDER_AVAILABLE = False
+
+try:
+    from monitoring.beta_monitor import BetaMonitor
+    BETA_MONITOR_AVAILABLE = True
+except ImportError:
+    BETA_MONITOR_AVAILABLE = False
+
+try:
+    from monitoring.capacity_monitor import CapacityMonitor
+    CAPACITY_MONITOR_AVAILABLE = True
+except ImportError:
+    CAPACITY_MONITOR_AVAILABLE = False
+
+try:
+    from monitoring.sharpe_monitor import SharpeMonitor
+    SHARPE_MONITOR_AVAILABLE = True
+except ImportError:
+    SHARPE_MONITOR_AVAILABLE = False
+
 # Types moved to renaissance_types.py
 
 def _signed_strength(signal: IndicatorOutput) -> float:
@@ -98,6 +256,194 @@ def _signed_strength(signal: IndicatorOutput) -> float:
     if direction == "BUY":
         return strength
     return 0.0
+
+
+def _continuous_rsi_signal(signal: IndicatorOutput) -> float:
+    """Convert RSI to continuous signal: oversold(+1) ↔ neutral(0) ↔ overbought(-1)."""
+    if not signal:
+        return 0.0
+    rsi_value = float(signal.value) if signal.value is not None else 50.0
+    if np.isnan(rsi_value) or np.isinf(rsi_value):
+        return 0.0
+    # RSI 0→+1 (oversold=BUY), RSI 50→0, RSI 100→-1 (overbought=SELL)
+    return float(np.clip(-(rsi_value - 50.0) / 50.0, -1.0, 1.0))
+
+
+def _continuous_macd_signal(signal: IndicatorOutput) -> float:
+    """Convert MACD histogram to continuous signal using metadata."""
+    if not signal or not signal.metadata:
+        return 0.0
+    hist = signal.metadata.get('histogram', 0.0)
+    if hist is None or (hasattr(hist, '__float__') and (np.isnan(float(hist)) or np.isinf(float(hist)))):
+        return 0.0
+    hist = float(hist)
+    # Normalize histogram by a reasonable scale (price-relative)
+    # Use signal line as normalizer, fallback to raw clip
+    signal_line = abs(float(signal.metadata.get('signal_line', 1.0) or 1.0))
+    if signal_line > 0:
+        normalized = hist / signal_line
+    else:
+        normalized = hist
+    return float(np.clip(normalized, -1.0, 1.0))
+
+
+def _continuous_bollinger_signal(signal: IndicatorOutput) -> float:
+    """Convert Bollinger position to continuous signal: lower_band(+1) ↔ mid(0) ↔ upper_band(-1)."""
+    if not signal:
+        return 0.0
+    position = float(signal.value) if signal.value is not None else 0.5
+    if np.isnan(position) or np.isinf(position):
+        return 0.0
+    # position 0→+1 (at lower band=BUY), 0.5→0, 1→-1 (at upper band=SELL)
+    return float(np.clip(-(position - 0.5) * 2.0, -1.0, 1.0))
+
+
+def _continuous_obv_signal(signal: IndicatorOutput) -> float:
+    """Convert OBV momentum to continuous signal using metadata instead of binary BUY/SELL."""
+    if not signal or not signal.metadata:
+        return _signed_strength(signal)  # fallback
+    obv_momentum = signal.metadata.get('obv_momentum', 0.0)
+    obv_change = signal.metadata.get('obv_change', 0.0)
+    divergence = signal.metadata.get('divergence', 0)
+    if obv_momentum is None:
+        obv_momentum = 0.0
+    if obv_change is None:
+        obv_change = 0.0
+    try:
+        obv_momentum = float(obv_momentum)
+        obv_change = float(obv_change)
+        divergence = float(divergence)
+    except (TypeError, ValueError):
+        return 0.0
+    if np.isnan(obv_momentum) or np.isinf(obv_momentum):
+        return 0.0
+    # Blend momentum and change, boost by divergence
+    raw = obv_momentum * 3.0 + obv_change * 2.0 + divergence * 0.3
+    return float(np.clip(raw, -1.0, 1.0))
+
+
+def _convert_ws_orderbook_to_snapshot(ws_ob: dict, last_price: float = 0.0) -> 'OrderBookSnapshot':
+    """Convert WebSocket order_book dict {bids: {price: size}, asks: {price: size}} to OrderBookSnapshot."""
+    from microstructure_engine import OrderBookSnapshot, OrderBookLevel
+    bids_dict = ws_ob.get('bids', {})
+    asks_dict = ws_ob.get('asks', {})
+    bid_levels = [OrderBookLevel(price=p, size=s) for p, s in sorted(bids_dict.items(), reverse=True)[:20]]
+    ask_levels = [OrderBookLevel(price=p, size=s) for p, s in sorted(asks_dict.items())[:20]]
+    return OrderBookSnapshot(
+        timestamp=datetime.now(),
+        bids=bid_levels,
+        asks=ask_levels,
+        last_price=last_price,
+        last_size=0.0,
+    )
+
+def validate_config(config: Dict[str, Any], logger_inst: logging.Logger) -> bool:
+    """Validate config at startup: check required keys, warn on ambiguous duplicates, validate ranges."""
+    warnings = []
+    errors = []
+
+    # ── Required sections ──
+    required_sections = ["trading", "risk_management", "signal_weights", "database", "coinbase"]
+    for section in required_sections:
+        if section not in config:
+            errors.append(f"Missing required config section: '{section}'")
+
+    # ── Required keys within sections ──
+    required_keys = {
+        "trading": ["product_ids", "cycle_interval_seconds"],
+        "risk_management": ["daily_loss_limit", "position_limit", "min_confidence"],
+        "database": ["path"],
+    }
+    for section, keys in required_keys.items():
+        sec = config.get(section, {})
+        for key in keys:
+            if key not in sec:
+                errors.append(f"Missing required key: '{section}.{key}'")
+
+    # ── Ambiguous duplicate keys ──
+    # kelly_fraction in leverage_manager vs kelly_sizer
+    lm_kelly = config.get("leverage_manager", {}).get("kelly_fraction")
+    ks_kelly = config.get("kelly_sizer", {}).get("kelly_fraction")
+    if lm_kelly is not None and ks_kelly is not None and lm_kelly != ks_kelly:
+        warnings.append(
+            f"kelly_fraction differs: leverage_manager={lm_kelly} vs kelly_sizer={ks_kelly}"
+        )
+
+    # max_leverage in leverage_manager vs medallion_portfolio_engine
+    lm_lev = config.get("leverage_manager", {}).get("max_leverage")
+    pe_lev = config.get("medallion_portfolio_engine", {}).get("max_leverage")
+    if lm_lev is not None and pe_lev is not None and lm_lev != pe_lev:
+        warnings.append(
+            f"max_leverage differs: leverage_manager={lm_lev} vs medallion_portfolio_engine={pe_lev}"
+        )
+
+    # short_window/long_window in signal_throttle vs health_monitor (different semantics)
+    st_sw = config.get("signal_throttle", {}).get("short_window")
+    hm_sw = config.get("health_monitor", {}).get("short_window")
+    if st_sw is not None and hm_sw is not None:
+        warnings.append(
+            f"short_window appears in both signal_throttle ({st_sw} cycles) and "
+            f"health_monitor ({hm_sw} trades) — different semantics"
+        )
+
+    # ── Numeric range validation ──
+    range_checks = [
+        ("risk_management.daily_loss_limit", config.get("risk_management", {}).get("daily_loss_limit"), 0, 1_000_000),
+        ("risk_management.min_confidence", config.get("risk_management", {}).get("min_confidence"), 0.0, 1.0),
+        ("kelly_sizer.kelly_fraction", ks_kelly, 0.0, 1.0),
+        ("kelly_sizer.max_position_pct", config.get("kelly_sizer", {}).get("max_position_pct"), 0.0, 100.0),
+        ("portfolio_engine.max_concentration", config.get("portfolio_engine", {}).get("max_concentration"), 0.0, 1.0),
+        ("portfolio_engine.max_total_exposure_pct", config.get("portfolio_engine", {}).get("max_total_exposure_pct"), 0.0, 1.0),
+        ("medallion_portfolio_engine.drift_threshold_pct", config.get("medallion_portfolio_engine", {}).get("drift_threshold_pct"), 0.0, 100.0),
+    ]
+    for name, val, lo, hi in range_checks:
+        if val is not None:
+            if val < lo or val > hi:
+                errors.append(f"{name}={val} out of valid range [{lo}, {hi}]")
+
+    # ── Signal weight sum check ──
+    sw = config.get("signal_weights", {})
+    if sw:
+        total = sum(sw.values())
+        if abs(total - 1.0) > 0.05:
+            warnings.append(f"signal_weights sum to {total:.3f} (expected ~1.0)")
+
+    # ── Log results ──
+    for w in warnings:
+        logger_inst.warning(f"CONFIG WARNING: {w}")
+    for e in errors:
+        logger_inst.error(f"CONFIG ERROR: {e}")
+
+    # ── Active module summary ──
+    modules = [
+        ("RegimeOverlay", config.get("regime_overlay", {}).get("enabled", False)),
+        ("PortfolioEngine", config.get("portfolio_engine", {}).get("enabled", False)),
+        ("HealthMonitor", config.get("health_monitor", {}).get("enabled", False)),
+        ("SignalThrottle", config.get("signal_throttle", {}).get("enabled", False)),
+        ("MedallionAnalogs", config.get("medallion_analogs", {}).get("enabled", False)),
+        ("Arbitrage", config.get("arbitrage", {}).get("enabled", False)),
+        ("LiquidationDetector", config.get("liquidation_detector", {}).get("enabled", False)),
+        ("InsuranceScanner", config.get("insurance_scanner", {}).get("enabled", False)),
+        ("MedallionRegime", config.get("medallion_regime_detector", {}).get("enabled", False)),
+        ("BetaMonitor", config.get("beta_monitor", {}).get("enabled", False)),
+        ("SharpeMonitor", config.get("sharpe_monitor", {}).get("enabled", False)),
+        ("CapacityMonitor", config.get("capacity_monitor", {}).get("enabled", False)),
+    ]
+    active = [m for m, e in modules if e]
+    inactive = [m for m, e in modules if not e]
+    logger_inst.info(f"CONFIG SUMMARY: {len(active)} active modules: {', '.join(active) or 'none'}")
+    if inactive:
+        logger_inst.info(f"CONFIG SUMMARY: {len(inactive)} inactive: {', '.join(inactive)}")
+
+    if errors:
+        logger_inst.error(f"Config validation found {len(errors)} error(s), {len(warnings)} warning(s)")
+        return False
+    if warnings:
+        logger_inst.warning(f"Config validation passed with {len(warnings)} warning(s)")
+    else:
+        logger_inst.info("Config validation passed — no issues found")
+    return True
+
 
 class RenaissanceTradingBot:
     """
@@ -139,7 +485,10 @@ class RenaissanceTradingBot:
 
         # Initialize all components
         self.microstructure_engine = MicrostructureEngine()
-        self.technical_indicators = EnhancedTechnicalIndicators()
+        # Per-asset technical indicators — prevents signal bleed across products
+        self._tech_indicators: Dict[str, EnhancedTechnicalIndicators] = {
+            pid: EnhancedTechnicalIndicators() for pid in self.product_ids
+        }
         self.market_data_provider = LiveMarketDataProvider(self.config, logger=self.logger)
         
         # Unified Signal Fusion (Step 16+)
@@ -189,7 +538,129 @@ class RenaissanceTradingBot:
             ),
             logger=self.logger,
         )
+
+        # Renaissance-inspired position sizer (Kelly + cost gate + vol normalization)
+        # "Small bets, many times. We are the casino, not the gambler."
+        self.position_sizer = RenaissancePositionSizer(
+            config={
+                "default_balance_usd": 10000.0,    # Fallback if balance fetch fails
+                "max_position_pct": 3.0,           # Max 3% of balance per position
+                "max_total_exposure_pct": 15.0,    # Max 15% total exposure
+                "kelly_fraction": 0.50,            # Half-Kelly for drawdown control
+                "min_edge": 0.001,                 # 0.1% minimum edge
+                "min_win_prob": 0.52,              # Need > 52% to trade
+                "taker_fee_bps": 40.0,             # Coinbase Advanced taker
+                "maker_fee_bps": 25.0,             # Coinbase Advanced maker
+                "cost_gate_ratio": 0.50,           # Block if cost > 50% of expected profit
+                "target_vol": 0.02,                # Target 2% daily vol
+                "min_order_usd": 1.0,              # Coinbase min order
+            },
+            logger=self.logger,
+        )
+        self._cached_balance_usd: float = 0.0   # Updated each cycle
+        self._high_watermark_usd: float = 0.0  # Track peak balance for drawdown
+        self._current_drawdown_pct: float = 0.0 # Current drawdown from HWM
+        self._weekly_pnl: float = 0.0           # Track weekly P&L
+        self._week_start_balance: float = 0.0   # Balance at start of week
+        self._week_reset_today: bool = False     # Weekly reset flag
+
+        # ── Data Validator (Medallion: trust but verify all inputs) ──
+        self.data_validator = DataValidator(logger=self.logger) if DATA_VALIDATOR_AVAILABLE else None
+
+        # ── Signal Auto-Throttle (Medallion: kill losers fast) ──
+        throttle_cfg = self.config.get('signal_throttle', {})
+        self.signal_throttle = SignalAutoThrottle(throttle_cfg, logger=self.logger) if SIGNAL_THROTTLE_AVAILABLE else None
+
+        # ── Signal Validation Gate (Medallion: every signal earns its place) ──
+        self.signal_validation_gate = SignalValidationGate(logger=self.logger) if SIGNAL_VALIDATION_AVAILABLE else None
+
+        # ── Portfolio Health Monitor (Medallion: rolling Sharpe as health metric) ──
+        health_cfg = self.config.get('health_monitor', {})
+        self.health_monitor = PortfolioHealthMonitor(health_cfg, logger=self.logger) if HEALTH_MONITOR_AVAILABLE else None
+
+        # ── Medallion Signal Analogs (sharp move reversion, seasonality, funding timing) ──
+        analog_cfg = self.config.get('medallion_analogs', {})
+        self.medallion_analogs = MedallionSignalAnalogs(analog_cfg, logger=self.logger) if MEDALLION_ANALOGS_AVAILABLE else None
+
+        # ── Unified Portfolio Engine (Medallion: all products as one portfolio) ──
+        portfolio_cfg = self.config.get('portfolio_engine', {})
+        self.portfolio_engine = UnifiedPortfolioEngine(portfolio_cfg, logger=self.logger) if PORTFOLIO_ENGINE_AVAILABLE and portfolio_cfg.get('enabled', False) else None
+
+        # ── Medallion Intelligence Modules (Phase 2) ──
+        db_path = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+
+        self.devil_tracker = DevilTracker(db_path) if DEVIL_TRACKER_AVAILABLE else None
+        if self.devil_tracker:
+            self.logger.info("DevilTracker: ACTIVE — tracking execution quality")
+
+        self.kelly_sizer = KellyPositionSizer(self.config, db_path) if KELLY_SIZER_AVAILABLE else None
+        if self.kelly_sizer:
+            self.logger.info("KellyPositionSizer: OBSERVATION — logging Kelly stats alongside active sizer")
+
+        # Daily Signal Review — end-of-day P&L audit per signal type (distinct from intra-day signal_throttle)
+        self.daily_signal_review = MedallionSignalThrottle(self.config, db_path) if MEDALLION_THROTTLE_AVAILABLE else None
+        if self.daily_signal_review:
+            self.logger.info("DailySignalReview: ACTIVE — end-of-day P&L throttling")
+
+        self.leverage_mgr = LeverageManager(self.config, db_path) if LEVERAGE_MANAGER_AVAILABLE else None
+        if self.leverage_mgr:
+            self.logger.info("LeverageManager: ACTIVE — consistency-based leverage")
+
+        self.medallion_regime = MedallionRegimeDetector(self.config, db_path) if MEDALLION_REGIME_AVAILABLE else None
+        if self.medallion_regime:
+            self.logger.info("MedallionRegimeDetector: OBSERVATION — logging alongside RegimeOverlay")
+
+        self.insurance_scanner = InsurancePremiumScanner(self.config, db_path) if INSURANCE_SCANNER_AVAILABLE else None
+        if self.insurance_scanner:
+            self.logger.info("InsurancePremiumScanner: OBSERVATION — periodic premium scanning")
+
+        # Medallion Portfolio Engine — target/actual reconciliation in observation mode (log drift, don't execute)
+        if MEDALLION_PORTFOLIO_ENGINE_AVAILABLE:
+            pe_cfg = self.config
+            self.medallion_portfolio_engine = MedallionPortfolioEngine(
+                config=pe_cfg,
+                devil_tracker=self.devil_tracker,
+                position_manager=self.position_manager,
+            )
+            self.logger.info("MedallionPortfolioEngine: OBSERVATION — drift logging (no corrections)")
+        else:
+            self.medallion_portfolio_engine = None
+
+        self.bar_aggregator = BarAggregator(self.config, db_path) if BAR_AGGREGATOR_AVAILABLE else None
+        if self.bar_aggregator:
+            self.logger.info("BarAggregator: ACTIVE — 5-min bar aggregation")
+
+        self.sync_executor = SynchronizedExecutor(self.config, self.devil_tracker) if SYNC_EXECUTOR_AVAILABLE else None
+        if self.sync_executor:
+            self.logger.info("SynchronizedExecutor: ACTIVE — cross-exchange execution")
+
+        self.trade_hider = TradeHider(self.config) if TRADE_HIDER_AVAILABLE else None
+        if self.trade_hider:
+            self.logger.info("TradeHider: ACTIVE — execution obfuscation")
+
+        self.beta_monitor = BetaMonitor(self.config, db_path) if BETA_MONITOR_AVAILABLE else None
+        if self.beta_monitor:
+            self.logger.info("BetaMonitor: ACTIVE — portfolio beta tracking")
+
+        self.capacity_monitor = CapacityMonitor(self.config, db_path) if CAPACITY_MONITOR_AVAILABLE else None
+        if self.capacity_monitor:
+            self.logger.info("CapacityMonitor: ACTIVE — capacity wall detection")
+
+        self.sharpe_monitor_medallion = SharpeMonitor(self.config, db_path) if SHARPE_MONITOR_AVAILABLE else None
+        if self.sharpe_monitor_medallion:
+            self.logger.info("SharpeMonitor: ACTIVE — rolling Sharpe health")
+
+        # ── Signal Scorecard (Renaissance: measure everything) ──
+        # Records {product_id: {signal_name: {"correct": N, "total": N}}}
+        self._signal_scorecard: Dict[str, Dict[str, Dict[str, int]]] = {}
+        # Pending predictions: {product_id: {"price": float, "signals": {name: value}, "cycle": int}}
+        self._pending_predictions: Dict[str, Dict] = {}
+        # Adaptive weight engine: how much to blend scorecard-based weights vs config
+        self._adaptive_weight_blend = 0.0  # starts at 0 (pure config), ramps to 0.5 max
+        self._adaptive_min_samples = 15    # need this many observations before adjusting
+
         self._killed = False
+        self._start_time = datetime.now(timezone.utc)
         self._background_tasks: list = []
         self._weights_lock = asyncio.Lock()
 
@@ -296,18 +767,123 @@ class RenaissanceTradingBot:
         # State tracking for Dashboard
         self.last_vpin = 0.5
         
-        # 📊 Institutional Dashboard
+        # 📊 Dashboard Event Emitter (real-time dashboard integration)
+        self.dashboard_emitter = DashboardEventEmitter()
+
+        # ── Operations & Intelligence Modules ──────────────────────────
+        # Module A: Disaster Recovery — State Manager & Graceful Shutdown
+        self.state_manager = None
+        self.shutdown_handler = None
+        if RECOVERY_AVAILABLE:
+            try:
+                db_path = self.config.get("database", {}).get("path", "data/renaissance_bot.db")
+                # Run database migration (idempotent — adds new tables if missing)
+                ensure_all_tables(db_path)
+                self.state_manager = StateManager()
+                self.logger.info("Recovery StateManager initialized")
+            except Exception as e:
+                self.logger.warning(f"Recovery module init failed: {e}")
+
+        # Module C: Monitoring — Telegram Alerter & Enhanced Alert Manager
+        self.monitoring_alert_manager = None
+        if MONITORING_AVAILABLE:
+            try:
+                telegram_cfg = self.config.get("telegram", {})
+                telegram_alerter = TelegramAlerter(config=telegram_cfg)
+                db_path = self.config.get("database", {}).get("path", "data/renaissance_bot.db")
+                self.monitoring_alert_manager = MonitoringAlertManager(
+                    telegram_alerter=telegram_alerter,
+                    db_path=db_path,
+                )
+                self.logger.info("Monitoring AlertManager initialized (Telegram %s)",
+                    "active" if telegram_alerter._bot_token else "console-only")
+            except Exception as e:
+                self.logger.warning(f"Monitoring module init failed: {e}")
+
+        # Module D: Liquidation Cascade Detector
+        self.liquidation_detector = None
+        if LIQUIDATION_DETECTOR_AVAILABLE:
+            try:
+                liq_cfg = self.config.get("liquidation_detector", {})
+                self.liquidation_detector = LiquidationCascadeDetector(config=liq_cfg)
+                self.logger.info("Liquidation Cascade Detector initialized")
+            except Exception as e:
+                self.logger.warning(f"Liquidation detector init failed: {e}")
+
+        # Module F: Advanced Microstructure Signal Aggregator
+        self.signal_aggregator = None
+        if SIGNAL_AGGREGATOR_AVAILABLE:
+            try:
+                micro_weights = self.config.get("microstructure_signals", {}).get("weights", None)
+                self.signal_aggregator = SignalAggregator(weights=micro_weights)
+                self.logger.info("Advanced Signal Aggregator initialized")
+            except Exception as e:
+                self.logger.warning(f"Signal aggregator init failed: {e}")
+
+        # 📊 Institutional Dashboard (legacy Flask stub)
         self.dashboard_enabled = self.config.get("institutional_dashboard", {}).get("enabled", True)
         if self.dashboard_enabled:
             try:
-                self.dashboard = InstitutionalDashboard(self, host="0.0.0.0", port=5000)
+                _dash_port = int(self.config.get("institutional_dashboard", {}).get("port", 5050))
+                self.dashboard = InstitutionalDashboard(self, host="0.0.0.0", port=_dash_port)
                 self.dashboard.run()
             except Exception as e:
                 self.logger.warning(f"Failed to start dashboard (likely port conflict): {e}")
                 self.dashboard = None
         else:
             self.dashboard = None
+
+        # 📊 FastAPI Real-Time Dashboard
+        self._dashboard_server_task = None
+        dash_cfg = self.config.get("dashboard_config", {})
+        if dash_cfg.get("enabled", True):
+            try:
+                from dashboard.server import create_app
+                import threading
+                import uvicorn
+                self._dashboard_app = create_app(
+                    config_path=str(self.config_path),
+                    emitter=self.dashboard_emitter,
+                )
+                dash_port = dash_cfg.get("port", 8080)
+                dash_host = dash_cfg.get("host", "0.0.0.0")
+                def _run_dashboard():
+                    uvicorn.run(self._dashboard_app, host=dash_host, port=dash_port, log_level="warning")
+                threading.Thread(target=_run_dashboard, daemon=True).start()
+                self.logger.info(f"Real-time dashboard started on {dash_host}:{dash_port}")
+            except Exception as e:
+                self.logger.warning(f"Failed to start real-time dashboard: {e}")
         
+        # Multi-Exchange Arbitrage Engine
+        self.arbitrage_enabled = self.config.get("arbitrage", {}).get("enabled", False)
+        self.arbitrage_orchestrator = None
+        if self.arbitrage_enabled and ARBITRAGE_AVAILABLE:
+            try:
+                arb_config_path = self.config.get("arbitrage", {}).get(
+                    "config_path", "arbitrage/config/arbitrage.yaml"
+                )
+                self.arbitrage_orchestrator = ArbitrageOrchestrator(config_path=arb_config_path)
+                self.logger.info("Arbitrage engine initialized (will start with trading loop)")
+            except Exception as e:
+                self.logger.warning(f"Arbitrage engine init failed: {e}")
+                self.arbitrage_orchestrator = None
+        elif self.arbitrage_enabled and not ARBITRAGE_AVAILABLE:
+            self.logger.warning("Arbitrage enabled in config but module not available")
+
+        # ── Multi-Exchange Signal Bridge ──
+        self.multi_exchange_bridge = None
+        me_cfg = self.config.get("multi_exchange_signals", {})
+        if me_cfg.get("enabled", False) and MULTI_EXCHANGE_BRIDGE_AVAILABLE and self.arbitrage_orchestrator:
+            try:
+                self.multi_exchange_bridge = MultiExchangeBridge(
+                    book_manager=self.arbitrage_orchestrator.book_manager,
+                    mexc_client=self.arbitrage_orchestrator.mexc,
+                    binance_client=self.arbitrage_orchestrator.binance,
+                )
+                self.logger.info("Multi-exchange signal bridge initialized")
+            except Exception as e:
+                self.logger.warning(f"Multi-exchange bridge init failed: {e}")
+
         # Initialize Feature Pipeline (Step 16)
         from feature_pipeline import FractalFeaturePipeline
         self.feature_pipeline = FractalFeaturePipeline(
@@ -351,8 +927,17 @@ class RenaissanceTradingBot:
         self.last_trade_time = None
         self.decision_history = []
 
+        # ── Enhanced Config Validation (Audit 4) ──
+        validate_config(self.config, self.logger)
+
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
+
+    def _get_tech(self, product_id: str) -> 'EnhancedTechnicalIndicators':
+        """Get per-asset technical indicators instance (creates on-demand for new assets)."""
+        if product_id not in self._tech_indicators:
+            self._tech_indicators[product_id] = EnhancedTechnicalIndicators()
+        return self._tech_indicators[product_id]
 
     def _setup_logging(self, config: Dict[str, Any]) -> logging.Logger:
         """Setup comprehensive logging"""
@@ -499,12 +1084,25 @@ class RenaissanceTradingBot:
         """Collect data from all sources for a specific product"""
         try:
             # Try WebSocket data first (sub-100ms latency)
+            # Drain the queue but only use data matching this product_id
             latest_ws = None
+            requeue = []
             while not self._ws_queue.empty():
                 try:
-                    latest_ws = self._ws_queue.get_nowait()
+                    msg = self._ws_queue.get_nowait()
+                    msg_pid = getattr(msg, 'product_id', None) or getattr(msg, 'symbol', None) or ''
+                    if msg_pid == product_id:
+                        latest_ws = msg
+                    else:
+                        requeue.append(msg)
                 except queue.Empty:
                     break
+            # Put back messages for other products
+            for msg in requeue:
+                try:
+                    self._ws_queue.put_nowait(msg)
+                except queue.Full:
+                    pass
 
             # Check WebSocket data freshness
             MAX_DATA_AGE_SECONDS = 30
@@ -531,15 +1129,16 @@ class RenaissanceTradingBot:
 
             # Always fetch REST snapshot for candle/price history (needed for technicals)
             snapshot = await asyncio.to_thread(self.market_data_provider.fetch_snapshot, product_id)
+            tech = self._get_tech(product_id)
             if snapshot.price_data:
-                self.technical_indicators.update_price_data(snapshot.price_data)
+                tech.update_price_data(snapshot.price_data)
 
             # Prefer WS ticker if available, otherwise use REST
             if ticker is None:
                 ticker = snapshot.ticker
                 order_book_snapshot = snapshot.order_book_snapshot
 
-            technical_signals = self.technical_indicators.get_latest_signals()
+            technical_signals = tech.get_latest_signals()
             alt_signals = await self.alternative_data_engine.get_alternative_signals()
 
             return {
@@ -549,7 +1148,8 @@ class RenaissanceTradingBot:
                 'alternative_signals': alt_signals,
                 'ticker': ticker or snapshot.ticker,
                 'product_id': product_id,
-                'timestamp': datetime.now()
+                'timestamp': datetime.now(),
+                'recent_trades': getattr(latest_ws, 'recent_trades', []) if latest_ws else [],
             }
         except Exception as e:
             self.logger.error(f"Data collection failed: {e}")
@@ -561,7 +1161,33 @@ class RenaissanceTradingBot:
 
         try:
             # 1. Microstructure signals (Order Flow + Order Book = 53% total weight)
+            # Feed recent trades into microstructure engine for flow/VPIN analysis
+            try:
+                _recent = market_data.get('recent_trades', []) or []
+                if _recent:
+                    from microstructure_engine import TradeData as MSTradeData
+                    for t in _recent[-20:]:  # last 20 trades
+                        if isinstance(t, dict) and t.get('price', 0) > 0:
+                            self.microstructure_engine.update_trade(MSTradeData(
+                                timestamp=datetime.now(),
+                                price=float(t['price']),
+                                size=float(t.get('size', 0)),
+                                side=str(t.get('side', 'unknown')),
+                                trade_id=str(t.get('trade_id', '')),
+                            ))
+            except Exception as _tf_err:
+                self.logger.debug(f"Trade feed to microstructure failed: {_tf_err}")
+
             order_book_snapshot = market_data.get('order_book_snapshot')
+            # Convert WebSocket dict format to OrderBookSnapshot if needed
+            if order_book_snapshot and isinstance(order_book_snapshot, dict) and ('bids' in order_book_snapshot or 'asks' in order_book_snapshot):
+                try:
+                    current_px = float(market_data.get('current_price', 0) or market_data.get('ticker', {}).get('price', 0))
+                    order_book_snapshot = _convert_ws_orderbook_to_snapshot(order_book_snapshot, current_px)
+                    market_data['order_book_snapshot'] = order_book_snapshot  # update for downstream
+                except Exception as _conv_err:
+                    self.logger.debug(f"Order book conversion failed: {_conv_err}")
+                    order_book_snapshot = None
             if order_book_snapshot:
                 microstructure_signal = self.microstructure_engine.update_order_book(order_book_snapshot)
                 signals['order_flow'] = microstructure_signal.large_trade_flow
@@ -571,12 +1197,13 @@ class RenaissanceTradingBot:
                 signals['order_book'] = 0.0
 
             # 2. Technical indicators (38% total weight)
-            technical_signal = market_data.get('technical_signals') or self.technical_indicators.get_latest_signals()
+            _pid = market_data.get('product_id', 'BTC-USD')
+            technical_signal = market_data.get('technical_signals') or self._get_tech(_pid).get_latest_signals()
             if technical_signal:
-                signals['volume'] = _signed_strength(technical_signal.obv_momentum)
-                signals['macd'] = _signed_strength(technical_signal.quick_macd)
-                signals['rsi'] = _signed_strength(technical_signal.fast_rsi)
-                signals['bollinger'] = _signed_strength(technical_signal.dynamic_bollinger)
+                signals['volume'] = _continuous_obv_signal(technical_signal.obv_momentum)
+                signals['macd'] = _continuous_macd_signal(technical_signal.quick_macd)
+                signals['rsi'] = _continuous_rsi_signal(technical_signal.fast_rsi)
+                signals['bollinger'] = _continuous_bollinger_signal(technical_signal.dynamic_bollinger)
             else:
                 signals['volume'] = 0.0
                 signals['macd'] = 0.0
@@ -619,98 +1246,109 @@ class RenaissanceTradingBot:
             self.logger.info(f"Generated signals: {signals}")
 
             # 4. Institutional & High-Dimensional Intelligence (Step 16+)
+            # Each signal group is isolated so one failure doesn't kill the rest
+            p_id = market_data.get('product_id', 'Unknown')
+            df = self._get_tech(p_id)._to_dataframe()
+            cur_price = market_data.get('current_price', 0.0)
+
+            # Volume Profile
             try:
-                p_id = market_data.get('product_id', 'Unknown')
-                # Get common dataframe for high-dimensional analysis
-                df = self.technical_indicators._to_dataframe()
-                
-                # Volume Profile
-                if not df.empty:
+                if not df.empty and cur_price > 0:
                     profile = self.volume_profile_engine.calculate_profile(df)
                     if profile:
-                        vp_signal = self.volume_profile_engine.get_profile_signal(
-                            market_data.get('current_price', 0.0), 
-                            profile
-                        )
+                        vp_signal = self.volume_profile_engine.get_profile_signal(cur_price, profile)
                         signals['volume_profile'] = vp_signal['signal']
                         self._last_vp_status[p_id] = vp_signal['status']
+            except Exception as e:
+                self.logger.debug(f"Volume profile signal failed: {e}")
 
-                # Statistical Arbitrage (BTC vs ETH)
+            # Statistical Arbitrage (BTC vs ETH)
+            try:
                 if p_id in ["BTC-USD", "ETH-USD"]:
                     other_id = "ETH-USD" if p_id == "BTC-USD" else "BTC-USD"
                     sa_signal = self.stat_arb_engine.calculate_pair_signal(p_id, other_id)
                     signals['stat_arb'] = sa_signal.get('signal', 0.0)
+            except Exception as e:
+                self.logger.debug(f"Stat arb signal failed: {e}")
 
-                # Cross-Asset Lead-Lag Alpha (Step 16)
-                if len(self.product_ids) > 1:
-                    # Update Correlation Engine with current price
-                    self.correlation_engine.update_price(p_id, market_data.get('current_price', 0.0))
-                    
+            # Cross-Asset Lead-Lag Alpha (Step 16)
+            try:
+                if len(self.product_ids) > 1 and cur_price > 0:
+                    self.correlation_engine.update_price(p_id, cur_price)
                     base = self.product_ids[0]
                     target = p_id
                     if base != target:
                         ll_data = self.correlation_engine.calculate_lead_lag(base, target)
                         signals['lead_lag'] = ll_data.get('lead_lag_score', 0.0)
                         market_data['lead_lag_alpha'] = ll_data
+            except Exception as e:
+                self.logger.debug(f"Lead-lag signal failed: {e}")
 
-                # Fractal Intelligence (DTW)
-                if not df.empty:
+            # Fractal Intelligence (DTW)
+            try:
+                if not df.empty and len(df) >= 10:
                     prices = df['close'].values
                     fractal_result = self.fractal_intelligence.find_best_match(prices)
                     signals['fractal'] = fractal_result['signal']
                     market_data['fractal_intelligence'] = fractal_result
+            except Exception as e:
+                self.logger.debug(f"Fractal signal failed: {e}")
 
-                # Market Entropy (Shannon/ApEn)
-                if not df.empty:
+            # Market Entropy (Shannon/ApEn)
+            try:
+                if not df.empty and len(df) >= 20:
                     prices = df['close'].values
                     entropy_result = self.market_entropy.calculate_entropy(prices)
-                    signals['entropy'] = 0.5 * (entropy_result['predictability'] - 0.5) # Center at 0
+                    signals['entropy'] = 0.5 * (entropy_result['predictability'] - 0.5)
                     market_data['market_entropy'] = entropy_result
+            except Exception as e:
+                self.logger.debug(f"Entropy signal failed: {e}")
 
-                # ML Feature Pipeline & Real-Time Intelligence (Step 12/16 Bridge)
-                if not df.empty:
-                    try:
-                        # Extract real market features
-                        if not self.pipeline_fitted:
-                            self.feature_pipeline.fit_transform(df)
-                            self.pipeline_fitted = True
-                        
-                        feature_vector = self.feature_pipeline.transform(df)
-                        
-                        # Inject into real-time pipeline
-                        if self.real_time_pipeline.enabled:
-                            rt_result = await self.real_time_pipeline.processor.process_all_models({
-                                'feature_vector': feature_vector,
-                                'price_df': df
-                            })
-                            market_data['real_time_predictions'] = rt_result
-                            
-                            # Add ML signals to fusion (if they have enough confidence)
-                            if 'Ensemble' in rt_result:
-                                signals['ml_ensemble'] = rt_result['Ensemble']
-                            if 'CNN' in rt_result:
-                                signals['ml_cnn'] = rt_result['CNN']
-                                
-                    except Exception as e:
-                        self.logger.warning(f"ML feature bridge failed: {e}")
+            # ML Feature Pipeline & Real-Time Intelligence (Step 12/16 Bridge)
+            try:
+                if not df.empty and len(df) >= 18:
+                    if not self.pipeline_fitted:
+                        self.feature_pipeline.fit_transform(df)
+                        self.pipeline_fitted = True
 
-                # Quantum Oscillator (QHO)
-                if not df.empty:
+                    feature_vector = self.feature_pipeline.transform(df)
+
+                    if self.real_time_pipeline.enabled:
+                        rt_result = await self.real_time_pipeline.processor.process_all_models({
+                            'feature_vector': feature_vector,
+                            'price_df': df
+                        })
+                        market_data['real_time_predictions'] = rt_result
+                        if 'Ensemble' in rt_result:
+                            signals['ml_ensemble'] = rt_result['Ensemble']
+                        if 'CNN' in rt_result:
+                            signals['ml_cnn'] = rt_result['CNN']
+            except Exception as e:
+                self.logger.warning(f"ML feature bridge failed: {e}")
+
+            # Quantum Oscillator (QHO)
+            try:
+                if not df.empty and len(df) >= 30:
                     prices = df['close'].values
                     quantum_result = self.quantum_oscillator.calculate_quantum_levels(prices)
                     signals['quantum'] = quantum_result['signal']
                     market_data['quantum_oscillator'] = quantum_result
+            except Exception as e:
+                self.logger.debug(f"Quantum signal failed: {e}")
 
-                # Correlation Network Divergence Signal
+            # Correlation Network Divergence Signal
+            try:
                 if self.correlation_network.enabled:
                     div_signal = self.correlation_network.get_correlation_divergence_signal(p_id)
                     signals['correlation_divergence'] = div_signal
+            except Exception as e:
+                self.logger.debug(f"Correlation divergence signal failed: {e}")
 
-                # GARCH Volatility Signal (vol_ratio as directional bias)
+            # GARCH Volatility Signal (vol_ratio as directional bias)
+            try:
                 if self.garch_engine.is_available:
                     forecast = self.garch_engine.forecast_volatility(p_id)
                     vol_ratio = forecast.get('vol_ratio', 1.0)
-                    # Contracting vol -> bullish bias, expanding -> bearish bias
                     if vol_ratio < 0.8:
                         signals['garch_vol'] = min((1.0 - vol_ratio) * 0.5, 0.5)
                     elif vol_ratio > 1.2:
@@ -718,9 +1356,8 @@ class RenaissanceTradingBot:
                     else:
                         signals['garch_vol'] = 0.0
                     market_data['garch_forecast'] = forecast
-
             except Exception as e:
-                self.logger.warning(f"Advanced signal generation skipped: {e}")
+                self.logger.debug(f"GARCH vol signal failed: {e}")
 
             return signals
 
@@ -793,65 +1430,147 @@ class RenaissanceTradingBot:
             self.logger.error(f"Portfolio optimization sizing failed: {e}")
             return min(confidence * 0.5, 0.3)
 
-    def make_trading_decision(self, weighted_signal: float, signal_contributions: Dict[str, float], 
+    def make_trading_decision(self, weighted_signal: float, signal_contributions: Dict[str, float],
                               current_price: float = 0.0, real_time_result: Optional[Dict[str, Any]] = None,
-                              product_id: str = "BTC-USD", ml_package: Optional[MLSignalPackage] = None) -> TradingDecision:
-        """Make final trading decision with Renaissance methodology"""
+                              product_id: str = "BTC-USD", ml_package: Optional[MLSignalPackage] = None,
+                              market_data: Optional[Dict[str, Any]] = None,
+                              drawdown_pct: float = 0.0) -> TradingDecision:
+        """Make final trading decision with Renaissance methodology + Kelly position sizing"""
+
+        # ── COST PRE-SCREEN: "The edge must exceed the vig" — Medallion Principle ──
+        # Check this FIRST before spending compute on confidence/regime/ML
+        try:
+            round_trip_cost = self.position_sizer.estimate_round_trip_cost()
+            min_viable_signal = round_trip_cost * 1.0  # Need to exceed cost to justify trade
+            if abs(weighted_signal) < min_viable_signal:
+                self.logger.debug(
+                    f"COST PRE-SCREEN: {product_id} signal {weighted_signal:.4f} < "
+                    f"min viable {min_viable_signal:.4f} (2x cost {round_trip_cost:.4f})"
+                )
+                return TradingDecision(
+                    action='HOLD', confidence=0.0, position_size=0.0,
+                    reasoning={'blocked_by': 'cost_pre_screen',
+                               'signal': weighted_signal,
+                               'min_viable': min_viable_signal},
+                    timestamp=datetime.now()
+                )
+        except Exception:
+            pass  # Don't let cost pre-screen crash the decision pipeline
 
         # Calculate confidence based on signal strength and consensus
         signal_strength = abs(weighted_signal)
         signal_consensus = 1.0 - np.std(list(signal_contributions.values()))
         confidence = (signal_strength + signal_consensus) / 2.0
-        
+
         # Apply regime-derived confidence boost (max +/-5%)
         confidence = float(np.clip(confidence + self.regime_overlay.get_confidence_boost(), 0.0, 1.0))
 
-        # 🤖 ML Enhanced Confidence (Unified from Enhanced Bot)
+        # ML Enhanced Confidence
         if ml_package:
-            # If models agree with signal direction, boost confidence
             direction_match = np.sign(weighted_signal) == np.sign(ml_package.ensemble_score)
             overlay = 0.05 if direction_match else -0.05
             consciousness_factor = ml_package.confidence_score
             confidence = float(np.clip(confidence + (overlay * consciousness_factor), 0.0, 1.0))
             self.logger.info(f"ML confidence adjustment: {(overlay * consciousness_factor):+.4f} (Consciousness: {consciousness_factor:.2f})")
 
-        # Determine action
+        # Determine action direction
         if confidence < self.min_confidence:
             action = 'HOLD'
-            position_size = 0.0
         elif weighted_signal > self.buy_threshold:
             action = 'BUY'
-            # 🛡️ ML Enhanced Sizing
-            position_size = self.risk_manager.calculate_ml_enhanced_position_size(
-                weighted_signal, confidence, current_price, ml_package
-            )
         elif weighted_signal < self.sell_threshold:
             action = 'SELL'
-            position_size = self.risk_manager.calculate_ml_enhanced_position_size(
-                weighted_signal, confidence, current_price, ml_package
-            )
         else:
             action = 'HOLD'
-            position_size = 0.0
 
-        # Step 19: Log turnover and expected alpha
+        # ── Anti-Churn Gate (Renaissance: conviction before action) ──
+        if not hasattr(self, '_signal_history'):
+            self._signal_history = {}  # product_id -> list of recent actions
+            self._last_trade_cycle = {}  # product_id -> cycle number when last traded
+
+        # Track signal direction history per asset
+        hist = self._signal_history.setdefault(product_id, [])
+        hist.append(action)
+        if len(hist) > 10:
+            hist.pop(0)
+
         if action != 'HOLD':
-            self.logger.info(f"🎯 TURNOVER DETECTED: {action} {product_id} | Signal: {weighted_signal:+.4f} | Conf: {confidence:.3f}")
+            cycle_num = getattr(self, 'scan_cycle_count', 0)
+            last_trade = self._last_trade_cycle.get(product_id, -999)
+            min_hold_cycles = 5  # Must wait 5 cycles between trades on same asset
+
+            # 1. Minimum hold period — don't trade if we just traded
+            if cycle_num - last_trade < min_hold_cycles:
+                self.logger.info(
+                    f"ANTI-CHURN: {product_id} cooldown — {cycle_num - last_trade}/{min_hold_cycles} cycles since last trade"
+                )
+                action = 'HOLD'
+
+            # 2. Signal persistence — require 2 consecutive signals in same direction
+            elif len(hist) >= 2 and hist[-2] != action and hist[-2] != 'HOLD':
+                self.logger.info(
+                    f"ANTI-CHURN: {product_id} signal flip ({hist[-2]} -> {action}) — waiting for persistence"
+                )
+                action = 'HOLD'
+
+            # 3. Signal reversal on open position — close the existing position
+            # instead of blocking the signal (the old behavior trapped losing positions)
+            if action != 'HOLD':
+                try:
+                    with self.position_manager._lock:
+                        matching_positions = [
+                            pos for pos in self.position_manager.positions.values()
+                            if pos.product_id == product_id
+                        ]
+                    for pos in matching_positions:
+                        pos_side = pos.side.value.upper()
+                        if (pos_side == 'LONG' and action == 'SELL') or \
+                           (pos_side == 'SHORT' and action == 'BUY'):
+                            # Close the existing position — the signal is telling us to exit
+                            close_ok, close_msg = self.position_manager.close_position(
+                                pos.position_id, reason=f"Signal reversal: {pos_side} -> {action}"
+                            )
+                            self.logger.info(
+                                f"SIGNAL REVERSAL: {product_id} closed {pos_side} position — {close_msg}"
+                            )
+                            # Don't also open a new opposing position — just exit
+                            action = 'HOLD'
+                            break
+                except Exception:
+                    pass
+
+            # 4. Already positioned — don't stack same-direction positions
+            if action != 'HOLD':
+                try:
+                    with self.position_manager._lock:
+                        same_dir = [
+                            pos for pos in self.position_manager.positions.values()
+                            if pos.product_id == product_id and (
+                                (pos.side.value.upper() == 'LONG' and action == 'BUY') or
+                                (pos.side.value.upper() == 'SHORT' and action == 'SELL')
+                            )
+                        ]
+                    if same_dir:
+                        self.logger.info(
+                            f"ALREADY POSITIONED: {product_id} already has {len(same_dir)} "
+                            f"{same_dir[0].side.value} position(s) — holding"
+                        )
+                        action = 'HOLD'
+                except Exception:
+                    pass
 
         # ML-Enhanced Risk Assessment (Regime Gate)
         risk_assessment = self.risk_manager.assess_risk_regime(ml_package)
         if risk_assessment['recommended_action'] == 'fallback_mode':
             self.logger.warning("ML Risk assessment triggered FALLBACK MODE - halting trades")
             action = 'HOLD'
-            position_size = 0.0
 
-        # Apply basic risk limits
+        # Daily loss limit check
         if abs(self.daily_pnl) >= self.daily_loss_limit:
             action = 'HOLD'
-            position_size = 0.0
             self.logger.warning(f"Daily loss limit reached: ${self.daily_pnl}")
 
-        # Gate decision through Advanced Risk Gateway (Step 9) - VAE Anomaly Detection
+        # Gate through VAE Anomaly Detection
         if action != 'HOLD':
             portfolio_data = {
                 'total_value': self.position_limit,
@@ -859,22 +1578,226 @@ class RenaissanceTradingBot:
                 'positions': {'BTC': self.current_position},
                 'current_price': current_price
             }
-            
-            # Use ML package feature vector for VAE if available
             feature_vector = ml_package.feature_vector if ml_package else None
-
             is_allowed = self.risk_gateway.assess_trade(
                 action=action,
-                amount=position_size,
+                amount=0,  # We don't know size yet; gate on action only
                 current_price=current_price,
                 portfolio_data=portfolio_data,
                 feature_vector=feature_vector
             )
-            
             if not is_allowed:
                 self.logger.warning(f"Risk Gateway BLOCKED {action} order (VAE Anomaly or Risk limit)")
                 action = 'HOLD'
-                position_size = 0.0
+
+        # ── Renaissance Position Sizing (Kelly + cost gate + vol normalization) ──
+        position_size = 0.0
+        sizing_result = None
+        if action != 'HOLD':
+            # Gather volatility data
+            mkt = market_data or {}
+            garch_forecast = mkt.get('garch_forecast', {})
+            volatility = garch_forecast.get('forecast_vol', None)
+            vol_regime = garch_forecast.get('vol_regime', None)
+
+            # Gather regime data
+            fractal_regime = None
+            if ml_package:
+                fractal_regime = ml_package.fractal_insights.get('regime_detection', None)
+
+            # Current exposure from position manager
+            current_exposure = self.position_manager._calculate_total_exposure()
+
+            # Order book depth for liquidity constraint
+            order_book_depth = None
+            ob = mkt.get('order_book_snapshot')
+            if ob:
+                try:
+                    if hasattr(ob, 'bids'):
+                        # OrderBookSnapshot dataclass
+                        bid_depth = sum(lv.price * lv.size for lv in ob.bids[:10]) if ob.bids else 0
+                        ask_depth = sum(lv.price * lv.size for lv in ob.asks[:10]) if ob.asks else 0
+                    else:
+                        # Dict fallback
+                        bids = ob.get('bids', [])
+                        asks = ob.get('asks', [])
+                        bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10]) if bids else 0
+                        ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10]) if asks else 0
+                    order_book_depth = bid_depth + ask_depth
+                except Exception:
+                    pass
+
+            # Extract daily volume from market data if available
+            daily_volume_usd = None
+            try:
+                ticker = mkt.get('ticker', {})
+                vol_24h = ticker.get('volume_24h') or ticker.get('volume')
+                if vol_24h and current_price > 0:
+                    daily_volume_usd = float(vol_24h) * current_price
+            except Exception:
+                pass
+
+            # Use measured edge from signal scorecard when available
+            _measured_edge = self._get_measured_edge(product_id)
+
+            # ── Signal Confidence Tier — size by conviction level ──
+            # Tier 1 (Proven >55%, 100+ samples): full size (1.0x)
+            # Tier 2 (50-55% or <100 samples): half size (0.5x)
+            # Tier 3 (<50%): quarter size (0.25x)
+            _tier_multiplier = 1.0
+            # Track individual multipliers for sizing chain log (Audit 3)
+            _chain = {"regime": 1.0, "corr": 1.0, "health": 1.0, "tier": 1.0}
+
+            # ── Regime Transition Warning: reduce size on adverse transition risk ──
+            if self.regime_overlay.enabled:
+                try:
+                    transition = self.regime_overlay.get_transition_warning()
+                    if transition["alert_level"] != "none":
+                        _chain["regime"] = transition["size_multiplier"]
+                        _tier_multiplier *= transition["size_multiplier"]
+                        self.logger.info(f"REGIME TRANSITION: {transition['message']}")
+                except Exception:
+                    pass
+
+            # ── Portfolio Engine: correlation-aware sizing ──
+            if self.portfolio_engine and action != 'HOLD':
+                try:
+                    # Get current positions exposure
+                    current_positions = {}
+                    with self.position_manager._lock:
+                        for pos in self.position_manager.positions.values():
+                            pid = pos.product_id
+                            current_positions[pid] = current_positions.get(pid, 0.0) + (pos.size * pos.entry_price)
+                    # Current product signal
+                    product_signals = {product_id: (weighted_signal, confidence)}
+                    # Add other products' last known signals (approximate)
+                    for pid in self.product_ids:
+                        if pid != product_id and pid not in product_signals:
+                            product_signals[pid] = (0.0, 0.0)  # neutral for unprocessed
+
+                    port_result = self.portfolio_engine.optimize(
+                        product_signals, current_positions,
+                        self._cached_balance_usd or 10000.0,
+                        cycle_count=getattr(self, 'scan_cycle_count', 0),
+                    )
+                    port_adj = port_result.get(product_id, {})
+                    port_mult = port_adj.get("size_multiplier", 1.0)
+                    _chain["corr"] = port_mult
+                    if port_mult < 1.0:
+                        _tier_multiplier *= port_mult
+                        self.logger.info(f"PORTFOLIO ENGINE: {product_id} sized to {port_mult:.0%} — {port_adj.get('reason', '')}")
+                except Exception:
+                    pass
+
+            # ── Health Monitor: apply rolling Sharpe-based size scaling ──
+            if self.health_monitor:
+                health_mult = self.health_monitor.get_size_multiplier()
+                _chain["health"] = health_mult
+                if health_mult < 1.0:
+                    self.logger.info(f"HEALTH MONITOR: Sizing at {health_mult:.0%} (Sharpe-based)")
+                _tier_multiplier *= health_mult
+                if self.health_monitor.is_exits_only():
+                    action = 'HOLD'
+                    self.logger.warning("HEALTH MONITOR: EXITS-ONLY mode — blocking new entries")
+            sc = self._signal_scorecard.get(product_id, {})
+            if sc:
+                # Find the dominant signal contributors
+                top_signals = sorted(
+                    [(k, v) for k, v in signal_contributions.items() if abs(v) > 0.01],
+                    key=lambda x: abs(x[1]), reverse=True
+                )[:3]  # Top 3 contributors
+                tier_scores = []
+                for sig_name, _ in top_signals:
+                    stats = sc.get(sig_name, {})
+                    total = stats.get('total', 0)
+                    correct = stats.get('correct', 0)
+                    if total >= 100 and correct / total > 0.55:
+                        tier_scores.append(1.0)    # Tier 1
+                    elif total >= 100 and correct / total >= 0.50:
+                        tier_scores.append(0.5)    # Tier 2
+                    elif total < 100:
+                        tier_scores.append(0.5)    # Tier 2 (insufficient data)
+                    else:
+                        tier_scores.append(0.25)   # Tier 3
+                if tier_scores:
+                    _tier_multiplier = sum(tier_scores) / len(tier_scores)
+
+            sizing_result = self.position_sizer.calculate_size(
+                signal_strength=weighted_signal,
+                confidence=confidence,
+                current_price=current_price,
+                product_id=product_id,
+                volatility=volatility,
+                vol_regime=vol_regime,
+                fractal_regime=fractal_regime,
+                order_book_depth_usd=order_book_depth,
+                current_exposure_usd=current_exposure,
+                ml_package=ml_package,
+                account_balance_usd=self._cached_balance_usd or None,
+                daily_volume_usd=daily_volume_usd,
+                drawdown_pct=drawdown_pct,
+                measured_edge=_measured_edge,
+                tier_size_multiplier=_tier_multiplier,
+            )
+            position_size = sizing_result.asset_units
+
+            if position_size <= 0:
+                action = 'HOLD'
+                self.logger.info(f"Position sizer returned 0: {sizing_result.reasons[-1] if sizing_result.reasons else 'no edge'}")
+            else:
+                self.logger.info(
+                    f"POSITION SIZED: {action} {position_size:.8f} {product_id} "
+                    f"(${sizing_result.usd_value:.2f}) | "
+                    f"Kelly={sizing_result.kelly_fraction:.4f} -> {sizing_result.applied_fraction:.4f} | "
+                    f"Edge={sizing_result.edge:.4f} EffEdge={sizing_result.effective_edge:.4f} "
+                    f"P(w)={sizing_result.win_probability:.3f} | "
+                    f"Impact={sizing_result.market_impact_bps:.1f}bps "
+                    f"Capacity={sizing_result.capacity_used_pct:.1f}% | "
+                    f"CostRatio={sizing_result.transaction_cost_ratio:.2f} "
+                    f"VolScalar={sizing_result.volatility_scalar:.2f} "
+                    f"RegimeScalar={sizing_result.regime_scalar:.2f}"
+                )
+
+            # ── SIZING CHAIN SUMMARY (Audit 3) ──
+            _chain["tier"] = _tier_multiplier
+            kelly_f = sizing_result.kelly_fraction if sizing_result else 0.0
+            final_usd = sizing_result.usd_value if sizing_result else 0.0
+            self.logger.info(
+                f"SIZING CHAIN {product_id}: "
+                f"regime={_chain['regime']:.2f} x corr={_chain['corr']:.2f} x "
+                f"health={_chain['health']:.2f} x tier={_chain['tier']:.2f} x "
+                f"kelly={kelly_f:.4f} -> final=${final_usd:.2f}"
+            )
+
+            # ── Kelly Sizer observation (Audit 1/2: log alongside active sizer) ──
+            if self.kelly_sizer and sizing_result:
+                try:
+                    # Use dominant signal type for Kelly stats lookup
+                    dominant_sig = max(signal_contributions, key=lambda k: abs(signal_contributions[k]), default="unknown")
+                    kelly_stats = self.kelly_sizer.get_statistics(dominant_sig, product_id)
+                    if kelly_stats.get("sufficient_data"):
+                        self.logger.info(
+                            f"KELLY SIZER (obs) {product_id}: "
+                            f"f*={kelly_stats.get('fractional_kelly_pct', 0):.2f}% "
+                            f"(win={kelly_stats.get('win_rate', 0):.1%}, "
+                            f"trades={kelly_stats.get('total_trades', 0)}, "
+                            f"E={kelly_stats.get('expectancy_per_trade_bps', 0):.1f}bps)"
+                        )
+                except Exception:
+                    pass
+
+            # ── Medallion Regime observation (Audit 1/2: log alongside RegimeOverlay) ──
+            if self.medallion_regime:
+                try:
+                    med_regime = self.medallion_regime.predict_current_regime()
+                    overlay_regime = self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else "unknown"
+                    self.logger.info(
+                        f"REGIME COMPARE (obs) {product_id}: "
+                        f"overlay={overlay_regime} vs medallion={med_regime.get('regime_name', 'unknown')} "
+                        f"(conf={med_regime.get('confidence', 0):.2f})"
+                    )
+                except Exception:
+                    pass
 
         reasoning = {
             'weighted_signal': weighted_signal,
@@ -886,8 +1809,25 @@ class RenaissanceTradingBot:
                 'daily_pnl': self.daily_pnl,
                 'daily_limit': self.daily_loss_limit,
                 'position_limit': self.position_limit
-            }
+            },
         }
+        if sizing_result:
+            reasoning['position_sizing'] = {
+                'method': sizing_result.sizing_method,
+                'kelly_fraction': sizing_result.kelly_fraction,
+                'applied_fraction': sizing_result.applied_fraction,
+                'edge': sizing_result.edge,
+                'effective_edge': sizing_result.effective_edge,
+                'market_impact_bps': sizing_result.market_impact_bps,
+                'capacity_used_pct': sizing_result.capacity_used_pct,
+                'win_probability': sizing_result.win_probability,
+                'cost_ratio': sizing_result.transaction_cost_ratio,
+                'vol_scalar': sizing_result.volatility_scalar,
+                'regime_scalar': sizing_result.regime_scalar,
+                'liquidity_scalar': sizing_result.liquidity_scalar,
+                'usd_value': sizing_result.usd_value,
+                'reasons': sizing_result.reasons,
+            }
 
         decision = TradingDecision(
             action=action,
@@ -936,6 +1876,10 @@ class RenaissanceTradingBot:
                 'slippage': slippage_risk.get('predicted_slippage', 0.0),
             }
 
+            # Record trade cycle for anti-churn cooldown
+            if success:
+                self._last_trade_cycle[product_id] = getattr(self, 'scan_cycle_count', 0)
+
             # 4. Persist Trade
             if success and self.db_enabled:
                 trade_data = {
@@ -963,6 +1907,35 @@ class RenaissanceTradingBot:
                         'opened_at': position.entry_time.isoformat(),
                         'status': 'OPEN',
                     }))
+
+            # 4.3 Feed trade to BarAggregator (BUG 7 fix — was never called)
+            if success and self.bar_aggregator:
+                try:
+                    import time as _time
+                    self.bar_aggregator.on_trade(
+                        pair=product_id,
+                        exchange="coinbase",
+                        price=current_price,
+                        quantity=decision.position_size,
+                        side=decision.action.lower(),
+                        timestamp=_time.time(),
+                    )
+                except Exception:
+                    pass
+
+            # 4.5 Send monitoring alert for executed trade (Module C)
+            if success and self.monitoring_alert_manager:
+                try:
+                    self._track_task(self.monitoring_alert_manager.send_trade_alert({
+                        'product_id': product_id,
+                        'side': decision.action,
+                        'size': decision.position_size,
+                        'price': current_price,
+                        'confidence': decision.confidence,
+                        'slippage': slippage_risk.get('predicted_slippage', 0.0),
+                    }))
+                except Exception:
+                    pass
 
             # 5. Check daily loss after trade
             if self.position_manager.daily_pnl < -self.daily_loss_limit:
@@ -997,22 +1970,26 @@ class RenaissanceTradingBot:
             self.logger.info(f"Starting Adaptive Learning Cycle with {len(recent_decisions)} data points.")
 
             # 2. Run Genetic Weight Optimization (Step 14)
-            optimized_weights = await self.genetic_optimizer.run_optimization_cycle(self.signal_weights)
-            
-            if optimized_weights != self.signal_weights:
-                self.logger.info("New optimized weights discovered via Evolution!")
-                async with self._weights_lock:
-                    old_weights = self.signal_weights.copy()
-                    self.signal_weights = optimized_weights
+            # Skip genetic optimization when weights are locked
+            if self.config.get('weight_lock', False):
+                self.logger.info("Weight lock enabled — skipping genetic optimization")
+            else:
+                optimized_weights = await self.genetic_optimizer.run_optimization_cycle(self.signal_weights)
 
-                # Log the change
-                for k, v in optimized_weights.items():
-                    diff = v - old_weights.get(k, 0)
-                    if abs(diff) > 0.001:
-                        self.logger.info(f"  {k}: {old_weights.get(k,0):.3f} -> {v:.3f} ({diff:+.3f})")
+                if optimized_weights != self.signal_weights:
+                    self.logger.info("New optimized weights discovered via Evolution!")
+                    async with self._weights_lock:
+                        old_weights = self.signal_weights.copy()
+                        self.signal_weights = optimized_weights
 
-                # 3. Persist to config.json to close the loop
-                self._save_optimized_weights(optimized_weights)
+                    # Log the change
+                    for k, v in optimized_weights.items():
+                        diff = v - old_weights.get(k, 0)
+                        if abs(diff) > 0.001:
+                            self.logger.info(f"  {k}: {old_weights.get(k,0):.3f} -> {v:.3f} ({diff:+.3f})")
+
+                    # 3. Persist to config.json to close the loop
+                    self._save_optimized_weights(optimized_weights)
             
             # 4. Run Self-Reinforcing Learning Cycle (Step 19)
             if self.real_time_pipeline.enabled:
@@ -1036,17 +2013,22 @@ class RenaissanceTradingBot:
         try:
             if not self.config_path.exists():
                 return
-                
+
             with open(self.config_path, 'r') as f:
                 config_data = json.load(f)
-            
+
+            # Respect weight_lock — never overwrite locked weights
+            if config_data.get('weight_lock', False):
+                self.logger.info("Weight lock enabled — skipping weight persistence")
+                return
+
             config_data['signal_weights'] = weights
-            
+
             with open(self.config_path, 'w') as f:
                 json.dump(config_data, f, indent=4)
-                
+
             self.logger.info(f"Optimized weights persisted to {self.config_path}")
-            
+
         except Exception as e:
             self.logger.error(f"Failed to persist optimized weights: {e}")
 
@@ -1125,29 +2107,227 @@ class RenaissanceTradingBot:
         except Exception as e:
             self.logger.error(f"Performance attribution failed: {e}")
 
+    def _fetch_account_balance(self) -> float:
+        """Fetch current USD account balance from Coinbase (or paper trader)."""
+        try:
+            portfolio = self.coinbase_client.get_portfolio_breakdown()
+            if "error" not in portfolio:
+                balance = portfolio.get("total_balance_usd", 0.0)
+                if balance > 0:
+                    self._cached_balance_usd = balance
+                    return balance
+        except Exception as e:
+            self.logger.debug(f"Balance fetch failed: {e}")
+        # Return cached or default
+        return self._cached_balance_usd if self._cached_balance_usd > 0 else 10000.0
+
     async def execute_trading_cycle(self) -> TradingDecision:
         """Execute one complete trading cycle across all products"""
         cycle_start = time.time()
         decisions = []
 
         try:
+            # Fetch live account balance for dynamic position sizing
+            account_balance = self._fetch_account_balance()
+            self.logger.info(f"Account balance: ${account_balance:,.2f}")
+
+            # Dynamically update position manager limits — strict: 1 per product, 6 max
+            self.position_manager.risk_limits.max_position_size_usd = account_balance * 0.05
+            self.position_manager.risk_limits.max_total_exposure_usd = account_balance * 0.15
+            self.position_manager.risk_limits.max_total_positions = min(len(self.product_ids), 6)
+            self.position_manager.risk_limits.max_positions_per_product = 1
+
+            # ── Drawdown tracking (Renaissance discipline) ──
+            if account_balance > self._high_watermark_usd:
+                self._high_watermark_usd = account_balance
+            if self._high_watermark_usd > 0:
+                self._current_drawdown_pct = (self._high_watermark_usd - account_balance) / self._high_watermark_usd
+            else:
+                self._current_drawdown_pct = 0.0
+
+            # Weekly loss tracking — reset on Monday
+            now = datetime.now(timezone.utc)
+            if self._week_start_balance <= 0:
+                self._week_start_balance = account_balance
+            if now.weekday() == 0 and not getattr(self, '_week_reset_today', False):
+                self._week_start_balance = account_balance
+                self._weekly_pnl = 0.0
+                self._week_reset_today = True
+            elif now.weekday() != 0:
+                self._week_reset_today = False
+            self._weekly_pnl = account_balance - self._week_start_balance
+
+            if self._current_drawdown_pct >= 0.03:
+                self.logger.warning(
+                    f"DRAWDOWN ALERT: {self._current_drawdown_pct:.1%} from HWM ${self._high_watermark_usd:,.2f} | "
+                    f"Weekly P&L: ${self._weekly_pnl:,.2f}"
+                )
+
+            # ── Drawdown Circuit Breaker ──
+            self._drawdown_size_scalar = 1.0
+            self._drawdown_exits_only = False
+            if self._current_drawdown_pct >= 0.15:
+                # 15%+ drawdown: close ALL positions immediately
+                self.logger.warning("CIRCUIT BREAKER: 15% drawdown — closing all positions")
+                try:
+                    with self.position_manager._lock:
+                        all_positions = list(self.position_manager.positions.values())
+                    for pos in all_positions:
+                        self.position_manager.close_position(pos.position_id, reason="Circuit breaker: 15% drawdown")
+                except Exception as cb_err:
+                    self.logger.error(f"Circuit breaker close-all failed: {cb_err}")
+                self._drawdown_exits_only = True
+            elif self._current_drawdown_pct >= 0.10:
+                # 10%+ drawdown: exits only, no new positions
+                self.logger.warning("CIRCUIT BREAKER: 10% drawdown — exits only mode")
+                self._drawdown_exits_only = True
+            elif self._current_drawdown_pct >= 0.05:
+                # 5%+ drawdown: reduce position sizes by 50%
+                self._drawdown_size_scalar = 0.5
+                self.logger.info(f"DRAWDOWN SCALING: {self._current_drawdown_pct:.1%} — 50% position sizes")
+
+            # ── Continuous Exposure Monitor ──
+            try:
+                total_exposure = self.position_manager._calculate_total_exposure()
+                max_exposure = account_balance * 0.15
+                if total_exposure > max_exposure:
+                    self.logger.warning(
+                        f"EXPOSURE LIMIT: ${total_exposure:,.2f} > ${max_exposure:,.2f} — force-closing worst position"
+                    )
+                    with self.position_manager._lock:
+                        open_positions = list(self.position_manager.positions.values())
+                    if open_positions:
+                        # Find worst-performing position
+                        worst_pos = None
+                        worst_pnl = float('inf')
+                        for pos in open_positions:
+                            if hasattr(pos, 'unrealized_pnl'):
+                                if pos.unrealized_pnl < worst_pnl:
+                                    worst_pnl = pos.unrealized_pnl
+                                    worst_pos = pos
+                            elif hasattr(pos, 'entry_price') and pos.entry_price > 0:
+                                worst_pos = worst_pos or pos  # fallback: pick first
+                        if worst_pos:
+                            self.position_manager.close_position(
+                                worst_pos.position_id, reason="Exposure limit exceeded"
+                            )
+                            self.logger.info(f"EXPOSURE CLOSE: {worst_pos.position_id}")
+            except Exception as exp_err:
+                self.logger.debug(f"Exposure monitor error: {exp_err}")
+
+            # ── Preload candle history on first cycle (eliminates cold-start) ──
+            if not getattr(self, '_history_preloaded', False):
+                self._history_preloaded = True
+                for pid in self.product_ids:
+                    try:
+                        candles = await asyncio.to_thread(
+                            self.market_data_provider.fetch_candle_history, pid
+                        )
+                        if candles:
+                            pid_tech = self._get_tech(pid)
+                            for candle in candles:
+                                pid_tech.update_price_data(candle)
+                                # Feed GARCH engine with historical returns
+                                if candle.close > 0:
+                                    self.garch_engine.update_returns(pid, candle.close)
+                                    # Feed stat arb + correlation engines
+                                    self.stat_arb_engine.update_price(pid, candle.close)
+                                    self.correlation_network.update_price(pid, candle.close)
+                                    self.mean_reversion_engine.update_price(pid, candle.close)
+                            self.logger.info(
+                                f"Preloaded {len(candles)} candles for {pid} — "
+                                f"price_history={len(pid_tech.price_history)}, "
+                                f"GARCH returns={len(self.garch_engine._returns.get(pid, []))}"
+                            )
+                            # Try initial GARCH fit with preloaded data
+                            if self.garch_engine.should_refit(pid):
+                                self.garch_engine.fit_model(pid)
+                    except Exception as e:
+                        self.logger.warning(f"History preload failed for {pid}: {e}")
+
             for product_id in self.product_ids:
                 self.logger.info(f"Starting cycle for {product_id}...")
-                
+
                 # 1. Collect all market data
                 market_data = await self.collect_all_data(product_id)
 
                 if not market_data:
                     self.logger.warning(f"No market data for {product_id}, skipping")
                     continue
-                
+
+                # ── Data Quality Gate ──
+                if self.data_validator and not self.data_validator.validate_market_data(market_data, product_id):
+                    self.logger.warning(f"DATA QUALITY GATE: {product_id} failed validation, skipping cycle")
+                    continue
+
                 # Standardize price key
                 ticker = market_data.get('ticker', {})
                 current_price = float(ticker.get('price', 0.0))
                 if current_price == 0:
                     current_price = float(ticker.get('last', 0.0))
                     market_data['ticker']['price'] = current_price # Standardize
-                
+
+                # Wire current_price into market_data for all downstream consumers
+                market_data['current_price'] = current_price
+
+                # Feed price to portfolio engine for correlation tracking
+                if self.portfolio_engine and current_price > 0:
+                    self.portfolio_engine.update_price(product_id, current_price)
+
+                # Feed price to paper trader so fills use correct price
+                if current_price > 0 and hasattr(self.coinbase_client, 'paper_trader') and self.coinbase_client.paper_trader:
+                    self.coinbase_client.paper_trader.update_price(product_id, current_price)
+
+                # ── Signal Scorecard: evaluate last cycle's predictions ──
+                if product_id in self._pending_predictions and current_price > 0:
+                    pred = self._pending_predictions[product_id]
+                    prev_price = pred.get('price', 0)
+                    if prev_price > 0:
+                        actual_move = (current_price - prev_price) / prev_price
+                        sc = self._signal_scorecard.setdefault(product_id, {})
+                        for sig_name, sig_val in pred.get('signals', {}).items():
+                            if abs(sig_val) < 0.01:
+                                continue  # Skip near-zero signals
+                            entry = sc.setdefault(sig_name, {"correct": 0, "total": 0})
+                            entry["total"] += 1
+                            # Signal was correct if direction matches price move
+                            if (sig_val > 0 and actual_move > 0) or (sig_val < 0 and actual_move < 0):
+                                entry["correct"] += 1
+
+                    # Feed auto-throttle with performance data
+                    if self.signal_throttle and prev_price > 0:
+                        self.signal_throttle.update(product_id, pred.get('signals', {}), actual_move)
+
+                    # Log scorecard every 20 cycles
+                    cycle_num = getattr(self, 'scan_cycle_count', 0)
+                    if cycle_num > 0 and cycle_num % 20 == 0 and product_id in self._signal_scorecard:
+                        sc = self._signal_scorecard[product_id]
+                        scored = {k: f"{v['correct']}/{v['total']} ({100*v['correct']/max(v['total'],1):.0f}%)"
+                                  for k, v in sorted(sc.items(), key=lambda x: x[1]['correct']/max(x[1]['total'],1), reverse=True)
+                                  if v['total'] >= 5}
+                        if scored:
+                            self.logger.info(f"SIGNAL SCORECARD [{product_id}]: {scored}")
+                        me = self._get_measured_edge(product_id)
+                        if me is not None:
+                            self.logger.info(f"MEASURED EDGE [{product_id}]: {me:.4f} | Adaptive blend: {self._adaptive_weight_blend:.2f}")
+                    # Log throttle status
+                    if cycle_num > 0 and cycle_num % 20 == 0 and self.signal_throttle:
+                        killed = self.signal_throttle.get_killed_count()
+                        if killed > 0:
+                            status = self.signal_throttle.get_status()
+                            self.logger.info(f"SIGNAL THROTTLE: {killed} signals killed — {status['killed_signals']}")
+                    # Log health monitor metrics
+                    if cycle_num > 0 and cycle_num % 20 == 0 and self.health_monitor:
+                        hm = self.health_monitor.get_metrics()
+                        if hm.get('total_trades', 0) >= 5:
+                            self.logger.info(
+                                f"HEALTH MONITOR: Sharpe={hm.get('sharpe_medium', 0):.2f} "
+                                f"WinRate={hm.get('win_rate', 0):.1%} "
+                                f"Trades={hm['total_trades']} "
+                                f"Multiplier={hm['size_multiplier']:.2f} "
+                                f"Level={hm['alert_level']}"
+                            )
+
                 # 1.5 Persist Market Data for Step 19 feedback loop
                 if self.db_enabled:
                     ticker = market_data.get('ticker', {})
@@ -1164,11 +2344,26 @@ class RenaissanceTradingBot:
                     )
                     self._track_task(self.db_manager.store_market_data(md_persist))
 
+                # 1.55 Feed orderbook snapshot to BarAggregator (BUG 7 fix)
+                if self.bar_aggregator and ticker.get('bid', 0) > 0:
+                    try:
+                        import time as _time
+                        self.bar_aggregator.on_orderbook_snapshot(
+                            pair=product_id,
+                            exchange="coinbase",
+                            best_bid=float(ticker.get('bid', 0)),
+                            best_ask=float(ticker.get('ask', 0)),
+                            timestamp=_time.time(),
+                        )
+                    except Exception:
+                        pass
+
                 # 1.6 Update Medallion-style engines with current price
                 if current_price > 0:
                     self.mean_reversion_engine.update_price(product_id, current_price)
                     self.correlation_network.update_price(product_id, current_price)
                     self.garch_engine.update_returns(product_id, current_price)
+                    self.stat_arb_engine.update_price(product_id, current_price)
 
                     # Update correlation network for all tracked products
                     all_prices = {}
@@ -1192,7 +2387,143 @@ class RenaissanceTradingBot:
                 
                 # HARDENING: Ensure all signals are floats
                 signals = {k: self._force_float(v) for k, v in signals.items()}
-                
+
+                # 2.0a Advanced Microstructure Signals (Module F)
+                if self.signal_aggregator:
+                    try:
+                        ob_snap = market_data.get('order_book_snapshot')
+                        bids_list, asks_list = [], []
+                        if ob_snap is not None:
+                            # OrderBookSnapshot object with .bids / .asks lists of OrderBookLevel
+                            if hasattr(ob_snap, 'bids') and hasattr(ob_snap, 'asks'):
+                                bids_list = [(float(l.price), float(l.size)) for l in ob_snap.bids[:20]
+                                             if hasattr(l, 'price')]
+                                asks_list = [(float(l.price), float(l.size)) for l in ob_snap.asks[:20]
+                                             if hasattr(l, 'price')]
+                            elif isinstance(ob_snap, dict):
+                                # Raw dict format {bids: {price: size}, asks: {price: size}}
+                                bids_raw = ob_snap.get('bids', {})
+                                asks_raw = ob_snap.get('asks', {})
+                                if isinstance(bids_raw, dict):
+                                    bids_list = sorted(
+                                        [(float(p), float(s)) for p, s in bids_raw.items()],
+                                        reverse=True
+                                    )[:20]
+                                    asks_list = sorted(
+                                        [(float(p), float(s)) for p, s in asks_raw.items()]
+                                    )[:20]
+
+                        if bids_list and asks_list:
+                            self.signal_aggregator.update_book(bids_list, asks_list)
+                            micro_entry = self.signal_aggregator.get_signal_dict_entry()
+                            micro_score = self._force_float(micro_entry.get('microstructure_advanced', 0.0))
+                            if abs(micro_score) > 0.001:
+                                signals['microstructure_advanced'] = micro_score
+                    except Exception as _micro_err:
+                        self.logger.debug(f"Advanced microstructure signal failed: {_micro_err}")
+
+                # 2.0b Liquidation Cascade Signal (Module D)
+                if self.liquidation_detector:
+                    try:
+                        # Map product_id to Binance symbol (BTC-USD → BTCUSDT)
+                        binance_sym = product_id.replace("-USD", "USDT").replace("-", "")
+                        current_risk = await self.liquidation_detector.get_current_risk()
+                        sym_risk = current_risk.get(binance_sym, {})
+                        risk_score = float(sym_risk.get('risk_score', 0.0))
+                        if risk_score > 0.3:
+                            direction = sym_risk.get('direction', 'long_liquidation')
+                            direction_mult = 1.0 if direction == "short_squeeze" else -1.0
+                            signals['liquidation_cascade'] = self._force_float(
+                                direction_mult * risk_score
+                            )
+                            market_data['cascade_risk'] = {
+                                'symbol': binance_sym,
+                                'direction': direction,
+                                'risk_score': risk_score,
+                                'funding_rate': sym_risk.get('funding_rate', 0.0),
+                            }
+                    except Exception as _liq_err:
+                        self.logger.debug(f"Liquidation cascade signal failed: {_liq_err}")
+
+                # 2.0c Multi-Exchange Signal Bridge (MEXC + Binance consensus)
+                if self.multi_exchange_bridge:
+                    try:
+                        # Extract Coinbase order book volumes for aggregation
+                        cb_bid_vol = 0.0
+                        cb_ask_vol = 0.0
+                        cb_bid = 0.0
+                        cb_ask = 0.0
+                        ob_snap = market_data.get('order_book_snapshot')
+                        if ob_snap is not None:
+                            if hasattr(ob_snap, 'bids') and ob_snap.bids:
+                                cb_bid = float(ob_snap.bids[0].price) if hasattr(ob_snap.bids[0], 'price') else 0.0
+                                cb_bid_vol = sum(float(lv.size) for lv in ob_snap.bids[:10] if hasattr(lv, 'size'))
+                            if hasattr(ob_snap, 'asks') and ob_snap.asks:
+                                cb_ask = float(ob_snap.asks[0].price) if hasattr(ob_snap.asks[0], 'price') else 0.0
+                                cb_ask_vol = sum(float(lv.size) for lv in ob_snap.asks[:10] if hasattr(lv, 'size'))
+
+                        me_signals = self.multi_exchange_bridge.get_signals(
+                            product_id=product_id,
+                            coinbase_bid=cb_bid,
+                            coinbase_ask=cb_ask,
+                            coinbase_bid_vol=cb_bid_vol,
+                            coinbase_ask_vol=cb_ask_vol,
+                        )
+                        # Inject as a single weighted composite signal
+                        me_cfg = self.config.get("multi_exchange_signals", {})
+                        me_weights = me_cfg.get("weights", {})
+                        me_composite = 0.0
+                        me_weight_sum = 0.0
+                        for sig_name, sig_val in me_signals.items():
+                            w = me_weights.get(sig_name, 0.025)
+                            me_composite += sig_val * w
+                            me_weight_sum += w
+                        if me_weight_sum > 0:
+                            me_composite /= me_weight_sum
+                        signals['multi_exchange'] = self._force_float(me_composite)
+                        if abs(me_composite) > 0.01:
+                            self.logger.info(
+                                f"MULTI-EXCHANGE [{product_id}]: composite={me_composite:+.4f} "
+                                f"momentum={me_signals['cross_exchange_momentum']:+.4f} "
+                                f"dispersion={me_signals['price_dispersion']:+.4f} "
+                                f"imbalance={me_signals['aggregated_book_imbalance']:+.4f} "
+                                f"funding={me_signals['funding_rate_signal']:+.4f}"
+                            )
+                    except Exception as _me_err:
+                        self.logger.debug(f"Multi-exchange bridge error: {_me_err}")
+
+                # 2.0b Medallion Signal Analogs (sharp move reversion, seasonality, funding timing)
+                if self.medallion_analogs:
+                    try:
+                        _tech = self._get_tech(product_id)
+                        price_hist = list(_tech.price_history) if hasattr(_tech, 'price_history') else []
+                        # Get funding rate from multi-exchange bridge cache if available
+                        _funding = 0.0
+                        if hasattr(self, 'multi_exchange_bridge') and self.multi_exchange_bridge:
+                            usdt_sym = product_id.split("-")[0] + "/USDT"
+                            _funding = self.multi_exchange_bridge._funding_cache.get(usdt_sym, 0.0)
+
+                        analog_signals = self.medallion_analogs.get_signals(
+                            product_id=product_id,
+                            current_price=current_price,
+                            price_history=price_hist,
+                            funding_rate=_funding,
+                        )
+                        # Inject as weighted sub-signals
+                        analog_weights = self.config.get('medallion_analogs', {}).get('weights', {})
+                        analog_composite = 0.0
+                        analog_w_sum = 0.0
+                        for sig_name, sig_val in analog_signals.items():
+                            w = analog_weights.get(sig_name, 0.01)
+                            analog_composite += sig_val * w
+                            analog_w_sum += w
+                        if analog_w_sum > 0:
+                            analog_composite /= analog_w_sum
+                        if abs(analog_composite) > 0.001:
+                            signals['medallion_analog'] = self._force_float(analog_composite)
+                    except Exception as _ma_err:
+                        self.logger.debug(f"Medallion analogs error: {_ma_err}")
+
                 # 2.1 ML Enhanced Signal Fusion (Unified from Enhanced Bot)
                 ml_package = None
                 if self.ml_enabled:
@@ -1200,7 +2531,8 @@ class RenaissanceTradingBot:
                     ml_package = await self.ml_bridge.generate_ml_signals(market_data, signals)
                 
                 # 2.2 Volume Profile Intelligence (Institutional)
-                price_df = self.technical_indicators._to_dataframe()
+                _tech_inst = self._get_tech(product_id)
+                price_df = _tech_inst._to_dataframe()
                 vp_signal = 0.0
                 vp_status = "No Profile"
                 if not price_df.empty:
@@ -1209,15 +2541,14 @@ class RenaissanceTradingBot:
                         vp_data = self.volume_profile_engine.get_profile_signal(current_price, profile)
                         vp_signal = vp_data['signal']
                         vp_status = vp_data['status']
-                
+
                 signals['volume_profile'] = vp_signal
                 self._last_vp_status[product_id] = vp_status
 
                 # 2.5 Update regime overlay BEFORE signal fusion (so regime weights apply)
                 try:
-                    if self.regime_overlay.enabled and hasattr(self.technical_indicators, 'price_history') \
-                       and len(self.technical_indicators.price_history) > 0:
-                        price_df = self.technical_indicators._to_dataframe()
+                    if self.regime_overlay.enabled and len(_tech_inst.price_history) > 0:
+                        price_df = _tech_inst._to_dataframe()
                         if not price_df.empty:
                             self.regime_overlay.update(price_df)
                 except Exception as _e:
@@ -1242,6 +2573,14 @@ class RenaissanceTradingBot:
                 if self.regime_overlay.enabled and self.regime_overlay.current_regime:
                     cycle_weights = self.regime_overlay.get_regime_adjusted_weights(cycle_weights)
 
+                # 2.7b Adaptive Weight Engine — blend measured signal accuracy into weights
+                try:
+                    cycle_weights = self._compute_adaptive_weights(product_id, cycle_weights)
+                    if self._adaptive_weight_blend > 0.01 and self.scan_cycle_count % 50 == 0:
+                        self.logger.info(f"ADAPTIVE WEIGHTS [{product_id}]: blend={self._adaptive_weight_blend:.2f}")
+                except Exception as _aw_err:
+                    self.logger.debug(f"Adaptive weights skipped: {_aw_err}")
+
                 # 2.8 Apply GARCH position-size multiplier to dynamic thresholds
                 garch_pos_mult = 1.0
                 if self.garch_engine.is_available:
@@ -1249,6 +2588,28 @@ class RenaissanceTradingBot:
                     buy_delta, sell_delta = self.garch_engine.get_dynamic_threshold_adjustment(product_id)
                     self.buy_threshold += buy_delta
                     self.sell_threshold += sell_delta
+
+                # 2.9 Signal Validation Gate — clip anomalies, check regime consistency
+                if self.signal_validation_gate:
+                    regime_label = self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else "unknown"
+                    signals = self.signal_validation_gate.validate(signals, regime_label)
+
+                # 2.10 Signal Auto-Throttle — zero killed signals before weighting
+                if self.signal_throttle:
+                    signals = self.signal_throttle.filter(signals, product_id)
+
+                # 2.11 Daily Signal Review — apply end-of-day allocation multipliers (observation log)
+                if self.daily_signal_review:
+                    try:
+                        for sig_name in list(signals.keys()):
+                            alloc = self.daily_signal_review.get_allocation_multiplier(sig_name)
+                            if alloc < 1.0:
+                                self.logger.info(
+                                    f"DAILY REVIEW (obs): {sig_name} allocation={alloc:.1f}x "
+                                    f"(signal={signals[sig_name]:.4f})"
+                                )
+                    except Exception:
+                        pass
 
                 # 3. Calculate Renaissance weighted signal with regime-adjusted weights
                 # Temporarily swap weights for this cycle
@@ -1263,7 +2624,12 @@ class RenaissanceTradingBot:
 
                 # EXTRA HARDENING: Ensure signals dictionary is all floats for boost calculation
                 signals = {str(k): float(self._force_float(v)) for k, v in signals.items()}
-                self.logger.info(f"HARDENED SIGNALS: {[(k, type(v)) for k, v in signals.items()]}")
+                # Record signals for scorecard evaluation next cycle
+                self._pending_predictions[product_id] = {
+                    'price': current_price,
+                    'signals': {k: float(v) for k, v in signals.items()},
+                    'cycle': getattr(self, 'scan_cycle_count', 0),
+                }
 
                 market_data['ml_package'] = ml_package
 
@@ -1314,7 +2680,30 @@ class RenaissanceTradingBot:
                                     rt_result[k] = self._force_float(v)
                                 except Exception:
                                     rt_result[k] = v
-                
+
+                # 4.1 Build MLSignalPackage from real-time pipeline predictions
+                if rt_result and rt_result.get('predictions') and (ml_package is None or ml_package.ensemble_score == 0.0):
+                    preds = rt_result['predictions']
+                    pred_values = [v for v in preds.values() if isinstance(v, (int, float))]
+                    if pred_values:
+                        ensemble_score = float(np.mean(pred_values))
+                        # Confidence from model agreement: high agreement → high confidence
+                        pred_std = float(np.std(pred_values)) if len(pred_values) > 1 else 0.5
+                        agreement = max(0.0, 1.0 - pred_std / 0.1)
+                        confidence_score = float(np.clip(agreement, 0.3, 0.95))
+                        ml_package = MLSignalPackage(
+                            primary_signals=[],
+                            ml_predictions=list(preds.items()),
+                            ensemble_score=ensemble_score,
+                            confidence_score=confidence_score,
+                            fractal_insights={},
+                            processing_time_ms=0.0,
+                        )
+                        self.logger.info(
+                            f"RT→ML bridge: ensemble={ensemble_score:+.4f}, "
+                            f"confidence={confidence_score:.2f} ({len(pred_values)} models)"
+                        )
+
                 # 4.5 Statistical Arbitrage & Fractal Intelligence
                 current_price = market_data.get('ticker', {}).get('price', 0.0)
                 self.stat_arb_engine.update_price(product_id, current_price)
@@ -1325,15 +2714,26 @@ class RenaissanceTradingBot:
                 
                 stat_arb_data = {}
                 if len(self.product_ids) > 1:
+                    # Try stat arb vs BTC for all non-BTC assets
                     base = "BTC-USD"
-                    target = "ETH-USD"
                     if product_id == base:
-                        stat_arb_data = self.stat_arb_engine.calculate_pair_signal(base, target)
-                    elif product_id in ["ETH-USD"]:
-                        # Inverse for ETH if BTC is base
-                        stat_arb_data = self.stat_arb_engine.calculate_pair_signal(base, product_id)
-                        if 'signal' in stat_arb_data:
-                            stat_arb_data['signal'] = -self._force_float(stat_arb_data['signal'])
+                        # For BTC, find best pair from available assets
+                        for target in self.product_ids:
+                            if target != base:
+                                try:
+                                    pair_data = self.stat_arb_engine.calculate_pair_signal(base, target)
+                                    if pair_data.get('status') == 'active' and abs(self._force_float(pair_data.get('signal', 0))) > abs(self._force_float(stat_arb_data.get('signal', 0))):
+                                        stat_arb_data = pair_data
+                                except Exception:
+                                    pass
+                    else:
+                        # For non-BTC assets, compute pair vs BTC
+                        try:
+                            stat_arb_data = self.stat_arb_engine.calculate_pair_signal(base, product_id)
+                            if 'signal' in stat_arb_data:
+                                stat_arb_data['signal'] = -self._force_float(stat_arb_data['signal'])
+                        except Exception:
+                            pass
                 
                 if stat_arb_data.get('status') == 'active':
                     signals['stat_arb'] = self._force_float(stat_arb_data['signal'])
@@ -1344,15 +2744,51 @@ class RenaissanceTradingBot:
                 ticker = market_data.get('ticker', {})
                 current_price = self._force_float(ticker.get('price', 0.0))
                 
-                # Check for stale market data before deciding
+                # ── Market Sanity Checks (pre-trade gates) ──
+                # 1. Stale data check
                 data_ts = market_data.get('timestamp')
                 if data_ts:
                     if isinstance(data_ts, str):
                         data_ts = datetime.fromisoformat(data_ts)
                     data_age = (datetime.now() - data_ts).total_seconds()
                     if data_age > 60:
-                        self.logger.warning(f"Market data {data_age:.0f}s old - holding")
-                        return TradingDecision('HOLD', 0.0, 0.0, {'reason': 'stale_data'}, datetime.now())
+                        self.logger.warning(f"SANITY: Market data {data_age:.0f}s old - holding")
+                        continue
+
+                # 2. Flash crash / price spike detection
+                if hasattr(self, '_last_prices') and product_id in self._last_prices:
+                    last_px = self._last_prices[product_id]
+                    if last_px > 0 and current_price > 0:
+                        pct_change = abs(current_price - last_px) / last_px
+                        if pct_change > 0.05:  # 5% move in one cycle
+                            self.logger.warning(
+                                f"SANITY: Flash move {pct_change:.1%} on {product_id} "
+                                f"(${last_px:,.2f} -> ${current_price:,.2f}) — skipping cycle"
+                            )
+                            continue
+                if not hasattr(self, '_last_prices'):
+                    self._last_prices = {}
+                self._last_prices[product_id] = current_price
+
+                # 3. Abnormal spread detection
+                ticker_data = market_data.get('ticker', {})
+                bid = self._force_float(ticker_data.get('bid', 0))
+                ask = self._force_float(ticker_data.get('ask', 0))
+                if bid > 0 and ask > 0:
+                    spread_bps = ((ask - bid) / ((ask + bid) / 2)) * 10000
+                    if spread_bps > 50:  # >50bps spread = illiquid
+                        self.logger.warning(
+                            f"SANITY: Wide spread {spread_bps:.0f}bps on {product_id} — reducing confidence"
+                        )
+                        market_data['_sanity_spread_penalty'] = True
+
+                # 4. Weekly loss limit check
+                weekly_loss_limit = self._high_watermark_usd * 0.20 if self._high_watermark_usd > 0 else 2000
+                if self._weekly_pnl < -weekly_loss_limit:
+                    self.logger.warning(
+                        f"SANITY: Weekly loss ${self._weekly_pnl:,.2f} exceeds limit ${-weekly_loss_limit:,.2f} — holding"
+                    )
+                    continue
 
                 # 5.1 Meta-Strategy Selection
                 regime_data = self.regime_overlay.current_regime or {}
@@ -1360,23 +2796,56 @@ class RenaissanceTradingBot:
                 execution_mode = self.strategy_selector.select_mode(market_data, regime_data)
                 market_data['execution_mode'] = execution_mode
 
-                decision = self.make_trading_decision(weighted_signal, contributions, 
-                                                    current_price=current_price, 
+                decision = self.make_trading_decision(weighted_signal, contributions,
+                                                    current_price=current_price,
                                                     real_time_result=rt_result,
                                                     product_id=product_id,
-                                                    ml_package=ml_package)
-                
+                                                    ml_package=ml_package,
+                                                    market_data=market_data,
+                                                    drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0))
+
+                # Drawdown circuit breaker: block new positions in exits-only mode
+                if getattr(self, '_drawdown_exits_only', False) and decision.action != 'HOLD':
+                    self.logger.warning(f"CIRCUIT BREAKER: blocking {decision.action} for {product_id} — exits only mode")
+                    decision = TradingDecision(
+                        action='HOLD', confidence=decision.confidence,
+                        position_size=0.0, reasoning=decision.reasoning,
+                        timestamp=datetime.now()
+                    )
+                # Drawdown size scaling
+                elif getattr(self, '_drawdown_size_scalar', 1.0) < 1.0 and decision.action != 'HOLD':
+                    scaled_size = decision.position_size * self._drawdown_size_scalar
+                    decision = TradingDecision(
+                        action=decision.action, confidence=decision.confidence,
+                        position_size=scaled_size, reasoning=decision.reasoning,
+                        timestamp=datetime.now()
+                    )
+
                 # Inject Meta-Strategy Execution Mode (Step 11/13)
                 decision.reasoning['execution_mode'] = market_data.get('execution_mode', 'TAKER')
-                
+
                 decision.reasoning['product_id'] = product_id
                 if rt_result:
                     decision.reasoning['real_time_pipeline'] = rt_result
-                
+
+                # Feed signal to Medallion Portfolio Engine for drift tracking
+                if self.medallion_portfolio_engine and decision.action != 'HOLD':
+                    try:
+                        self.medallion_portfolio_engine.ingest_signal({
+                            "pair": product_id,
+                            "side": decision.action,
+                            "strength": abs(weighted_signal),
+                            "confidence": decision.confidence,
+                            "signal_type": "combined",
+                            "notional_usd": decision.position_size * current_price if current_price > 0 else 0,
+                        })
+                    except Exception:
+                        pass
+
                 # Retrieve lead_lag_alpha from market_data if it was calculated in generate_signals
                 if 'lead_lag_alpha' in market_data:
                     decision.reasoning['lead_lag_alpha'] = market_data['lead_lag_alpha']
-                    
+
                 if stat_arb_data:
                     decision.reasoning['stat_arb'] = stat_arb_data
                 if 'whale_signals' in market_data:
@@ -1386,11 +2855,8 @@ class RenaissanceTradingBot:
                 if 'mean_reversion_portfolio' in market_data:
                     decision.reasoning['mean_reversion_portfolio'] = market_data['mean_reversion_portfolio']
 
-                # Apply GARCH position-size multiplier
-                if garch_pos_mult != 1.0 and decision.action != 'HOLD':
-                    decision.position_size = float(np.clip(
-                        decision.position_size * garch_pos_mult, 0.0, 0.5
-                    ))
+                # Note: GARCH vol adjustment is now integrated into position_sizer
+                # (no separate garch_pos_mult needed)
 
                 # 5.1 Persist Decision & ML Predictions
                 if self.db_enabled:
@@ -1416,6 +2882,56 @@ class RenaissanceTradingBot:
                                 'model_name': model_name,
                                 'prediction': pred
                             }))
+
+                # 5.5 Exit Engine — Monitor open positions for alpha decay
+                try:
+                    with self.position_manager._lock:
+                        open_positions = list(self.position_manager.positions.values())
+                    for pos in open_positions:
+                        if pos.product_id != product_id:
+                            continue
+                        holding_periods = max(1, int(
+                            (datetime.now() - pos.entry_time).total_seconds()
+                            / max(60, self.config.get("trading", {}).get("cycle_interval_seconds", 300))
+                        ))
+                        garch_forecast = market_data.get('garch_forecast', {})
+                        exit_decision = self.position_sizer.calculate_exit_size(
+                            position_size=pos.size,
+                            entry_price=pos.entry_price,
+                            current_price=current_price,
+                            holding_periods=holding_periods,
+                            confidence=decision.confidence,
+                            volatility=garch_forecast.get('forecast_vol'),
+                            regime=self.regime_overlay.get_current_regime() if hasattr(self.regime_overlay, 'get_current_regime') else None,
+                        )
+                        if exit_decision['exit_fraction'] > 0:
+                            self.logger.info(
+                                f"EXIT ENGINE [{pos.position_id}]: {exit_decision['reason']} — "
+                                f"fraction={exit_decision['exit_fraction']:.0%}, urgency={exit_decision['urgency']}"
+                            )
+                            close_ok, close_msg = self.position_manager.close_position(
+                                pos.position_id, reason=f"Exit engine: {exit_decision['reason']}"
+                            )
+                            if close_ok:
+                                self.logger.info(f"EXIT EXECUTED: {pos.position_id} — {close_msg}")
+                                # Record trade PnL for health monitor
+                                if self.health_monitor and pos.entry_price > 0:
+                                    trade_pnl_pct = (current_price - pos.entry_price) / pos.entry_price
+                                    if pos.side.value.upper() == 'SHORT':
+                                        trade_pnl_pct = -trade_pnl_pct
+                                    self.health_monitor.record_trade(trade_pnl_pct, product_id)
+                                self._track_task(self.dashboard_emitter.emit("trade", {
+                                    "product_id": product_id,
+                                    "side": "EXIT",
+                                    "price": float(current_price),
+                                    "size": float(pos.size * exit_decision['exit_fraction']),
+                                    "reason": exit_decision['reason'],
+                                }))
+                except Exception as exit_err:
+                    self.logger.debug(f"Exit engine error: {exit_err}")
+
+                # 5.6 Position stacking is prevented in make_trading_decision()
+                # Same-direction positions are blocked; reversals close existing positions
 
                 # 6. Smart Execution (Step 10)
                 if decision.action != 'HOLD':
@@ -1443,6 +2959,10 @@ class RenaissanceTradingBot:
                     self._track_task(self._run_adaptive_learning_cycle())
                     self._track_task(self._perform_attribution_analysis())
 
+                    # Update multi-exchange funding rates (every 10 cycles)
+                    if self.multi_exchange_bridge:
+                        self._track_task(self.multi_exchange_bridge.update_funding_rates())
+
                     # Periodic position reconciliation
                     recon = self.position_manager.reconcile_with_exchange()
                     if recon.get("status") == "MISMATCH":
@@ -1457,15 +2977,16 @@ class RenaissanceTradingBot:
                             self.real_time_pipeline.processor.models
                         ))
                     
-                    # Run Genetic Weight Optimization (Step 14)
-                    async def run_evo():
-                        new_weights = await self.genetic_optimizer.run_optimization_cycle(self.signal_weights)
-                        if new_weights != self.signal_weights:
-                            self.logger.info("Evolutionary Step (Step 14): Weights updated.")
-                            async with self._weights_lock:
-                                self.signal_weights = new_weights
-                    
-                    self._track_task(run_evo())
+                    # Run Genetic Weight Optimization (Step 14) — skip if locked
+                    if not self.config.get('weight_lock', False):
+                        async def run_evo():
+                            new_weights = await self.genetic_optimizer.run_optimization_cycle(self.signal_weights)
+                            if new_weights != self.signal_weights:
+                                self.logger.info("Evolutionary Step (Step 14): Weights updated.")
+                                async with self._weights_lock:
+                                    self.signal_weights = new_weights
+
+                        self._track_task(run_evo())
 
                 # Run Breakout Scan (Step 16+)
                 self.scan_cycle_count += 1
@@ -1473,9 +2994,37 @@ class RenaissanceTradingBot:
                     self._track_task(self._run_breakout_scan())
                 
                 decisions.append(decision)
-                
+
                 self.logger.info(f"[{product_id}] Decision: {decision.action} "
                                f"(Conf: {decision.confidence:.3f}, Size: {decision.position_size:.3f})")
+
+                # 📊 Emit dashboard events
+                try:
+                    self._track_task(self.dashboard_emitter.emit("cycle", {
+                        "product_id": product_id,
+                        "action": decision.action,
+                        "confidence": float(decision.confidence),
+                        "position_size": float(decision.position_size),
+                        "weighted_signal": float(weighted_signal),
+                        "hmm_regime": self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else None,
+                        "price": float(current_price),
+                    }))
+                    if decision.action != 'HOLD':
+                        self._track_task(self.dashboard_emitter.emit("trade", {
+                            "product_id": product_id,
+                            "side": decision.action,
+                            "price": float(current_price),
+                            "size": float(decision.position_size),
+                        }))
+                    if hasattr(self, 'risk_gateway') and self.risk_gateway:
+                        self._track_task(self.dashboard_emitter.emit("risk.gateway", {
+                            "product_id": product_id,
+                            "vae_loss": float(decision.reasoning.get('vae_loss', 0.0) or 0.0),
+                        }))
+                    if market_data.get('confluence_data'):
+                        self._track_task(self.dashboard_emitter.emit("confluence", market_data['confluence_data']))
+                except Exception as _de:
+                    self.logger.debug(f"Dashboard emit error: {_de}")
 
             cycle_time = time.time() - cycle_start
             self.logger.info(f"Total cycle completed in {cycle_time:.2f}s")
@@ -1521,7 +3070,7 @@ class RenaissanceTradingBot:
         vpin = ms_metrics.vpin if ms_metrics else 0.5
         v_emoji = "⚠️" if vpin > 0.7 else "⚖️"
         
-        tech_signals = self.technical_indicators.get_latest_signals()
+        tech_signals = self._get_tech(product_id).get_latest_signals()
         hurst = tech_signals.hurst_exponent if tech_signals else 0.5
         h_emoji = "📈" if hurst > 0.6 else "📉" if hurst < 0.4 else "↔️"
         h_status = "Trending" if hurst > 0.6 else "Mean-Rev" if hurst < 0.4 else "Random"
@@ -1577,6 +3126,10 @@ class RenaissanceTradingBot:
         risk_check = decision.reasoning.get('risk_check', {})
         self.logger.info("-"*60 + f"\n🛡️ RISK GATEWAY STATUS: {'ALLOWED' if decision.action != 'HOLD' or decision.reasoning.get('weighted_signal', 0) < 0.1 else 'BLOCKED'}\n" + "-"*60)
         self.logger.info(f"Daily PnL: ${risk_check.get('daily_pnl', 0):.2f} / Limit: ${risk_check.get('daily_limit', 0):.2f}")
+        self.logger.info(
+            f"Drawdown: {self._current_drawdown_pct:.1%} from HWM ${self._high_watermark_usd:,.2f} | "
+            f"Weekly PnL: ${self._weekly_pnl:,.2f}"
+        )
         
         # 5. Persistence & Attribution (Step 13)
         if self.db_enabled:
@@ -1606,10 +3159,9 @@ class RenaissanceTradingBot:
             if results:
                 self.logger.info(f"🔥 Found {len(results)} breakout candidates!")
                 for r in results[:5]:
-                    # Renaissance Strategy: Auto-Watch high confidence breakouts
-                    if r['breakout_score'] >= 80 and r['symbol'] not in self.product_ids:
-                        self.logger.info(f"🎯 Auto-Watching high-confidence breakout: {r['symbol']}")
-                        self.product_ids.append(r['symbol'])
+                    symbol = r['symbol'].replace('/', '-')
+                    if r['breakout_score'] >= 80:
+                        self.logger.info(f"🎯 Breakout detected: {symbol} (score={r['breakout_score']}) — logged only, not auto-added")
                         
             else:
                 self.logger.info("No major breakouts detected in this cycle.")
@@ -1657,6 +3209,240 @@ class RenaissanceTradingBot:
             except Exception as e:
                 self.logger.warning(f"WebSocket reconnecting: {e}")
                 await asyncio.sleep(5)
+
+    # ──────────────────────────────────────────────
+    #  Multi-Exchange Arbitrage Engine
+    # ──────────────────────────────────────────────
+    async def _run_arbitrage_engine(self):
+        """Run the arbitrage engine as a background task."""
+        try:
+            self.logger.info("Arbitrage engine starting...")
+            await self.arbitrage_orchestrator.start()
+        except asyncio.CancelledError:
+            self.logger.info("Arbitrage engine cancelled — shutting down")
+            await self.arbitrage_orchestrator.stop()
+        except Exception as e:
+            self.logger.error(f"Arbitrage engine error: {e}")
+            try:
+                await self.arbitrage_orchestrator.stop()
+            except Exception:
+                pass
+
+    # ──────────────────────────────────────────────
+    #  Liquidation Cascade Detector (Module D)
+    # ──────────────────────────────────────────────
+    async def _run_liquidation_detector(self):
+        """Run the liquidation cascade detector as a background task."""
+        try:
+            self.logger.info("Liquidation cascade detector starting...")
+            await self.liquidation_detector.start()
+        except asyncio.CancelledError:
+            self.logger.info("Liquidation detector cancelled — shutting down")
+            await self.liquidation_detector.stop()
+        except Exception as e:
+            self.logger.error(f"Liquidation detector error: {e}")
+            try:
+                await self.liquidation_detector.stop()
+            except Exception:
+                pass
+
+    # ──────────────────────────────────────────────
+    #  Phase 2 Observation Loops
+    # ──────────────────────────────────────────────
+
+    async def _run_portfolio_drift_logger(self):
+        """Log target vs actual portfolio drift every 60s (observation mode — no corrections)."""
+        try:
+            while not self._killed:
+                try:
+                    engine = self.medallion_portfolio_engine
+                    drift = engine.compute_drift()
+                    if drift:
+                        pairs = ", ".join(f"{p}={d:+.0f}$" for p, d in drift.items())
+                        self.logger.info(f"PORTFOLIO DRIFT (obs): {pairs}")
+                except Exception as e:
+                    self.logger.debug(f"Portfolio drift logger error: {e}")
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            pass
+
+    async def _run_insurance_scanner_loop(self):
+        """Scan for insurance premiums every 30 minutes (observation mode)."""
+        try:
+            while not self._killed:
+                for pair in self.product_ids[:3]:  # Top 3 products only
+                    try:
+                        result = self.insurance_scanner.get_all_premiums(pair)
+                        if result.get("any_premium_detected"):
+                            count = result.get("total_premiums_found", 0)
+                            rec = result.get("combined_recommendation", "none")
+                            self.logger.info(
+                                f"INSURANCE PREMIUM (obs): {pair} — {count} premiums detected, rec={rec}"
+                            )
+                    except Exception as e:
+                        self.logger.debug(f"Insurance scanner error for {pair}: {e}")
+                await asyncio.sleep(1800)  # 30 minutes
+        except asyncio.CancelledError:
+            pass
+
+    async def _run_daily_signal_review_loop(self):
+        """Run daily signal P&L review at midnight UTC."""
+        try:
+            while not self._killed:
+                now = datetime.now(timezone.utc)
+                # Sleep until next midnight UTC
+                tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+                wait_seconds = (tomorrow - now).total_seconds()
+                await asyncio.sleep(wait_seconds)
+                if self._killed:
+                    break
+                try:
+                    summary = self.daily_signal_review.update_daily()
+                    if summary:
+                        for sig_type, stats in summary.items():
+                            status = stats.get("status", "active")
+                            pnl = stats.get("pnl", 0)
+                            self.logger.info(
+                                f"DAILY SIGNAL REVIEW: {sig_type} — P&L=${pnl:.2f}, status={status}"
+                            )
+                except Exception as e:
+                    self.logger.error(f"Daily signal review error: {e}")
+        except asyncio.CancelledError:
+            pass
+
+    # ──────────────────────────────────────────────
+    #  Phase 2 Monitor Loops (BUG 6 fix — orphaned monitors)
+    # ──────────────────────────────────────────────
+
+    async def _run_beta_monitor_loop(self):
+        """Periodic beta computation (every 60 min, observation mode)."""
+        try:
+            while not self._killed:
+                try:
+                    report = self.beta_monitor.get_report()
+                    beta = report.get("current_beta", 0.0)
+                    status = report.get("current_status", "ok")
+                    trend = report.get("trend", "unknown")
+                    self.logger.info(
+                        f"BETA MONITOR (obs): beta={beta:+.4f} status={status} trend={trend}"
+                    )
+                    if self.beta_monitor.should_alert() and self.monitoring_alert_manager:
+                        hedge = self.beta_monitor.get_hedge_recommendation()
+                        self._track_task(self.monitoring_alert_manager.send_warning(
+                            f"Beta alert: {hedge.get('rationale', 'high beta deviation')}"
+                        ))
+                except Exception as e:
+                    self.logger.debug(f"Beta monitor loop error: {e}")
+                await asyncio.sleep(3600)  # 60 minutes
+        except asyncio.CancelledError:
+            pass
+
+    async def _run_sharpe_monitor_loop(self):
+        """Periodic Sharpe health check (every 60 min, observation mode)."""
+        try:
+            while not self._killed:
+                try:
+                    report = self.sharpe_monitor_medallion.get_report()
+                    s7 = report.get("sharpe_7d", 0.0)
+                    s30 = report.get("sharpe_30d", 0.0)
+                    status = report.get("status", "unknown")
+                    mult = report.get("exposure_multiplier", 1.0)
+                    self.logger.info(
+                        f"SHARPE MONITOR (obs): 7d={s7:.2f} 30d={s30:.2f} "
+                        f"status={status} exposure_mult={mult:.2f}"
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Sharpe monitor loop error: {e}")
+                await asyncio.sleep(3600)  # 60 minutes
+        except asyncio.CancelledError:
+            pass
+
+    async def _run_capacity_monitor_loop(self):
+        """Periodic capacity analysis (every 60 min, observation mode)."""
+        try:
+            while not self._killed:
+                try:
+                    caps = self.capacity_monitor.get_all_capacities()
+                    constrained = [p for p, r in caps.items() if r.get("capacity_status") == "constrained"]
+                    warning = [p for p, r in caps.items() if r.get("capacity_status") == "warning"]
+                    self.logger.info(
+                        f"CAPACITY MONITOR (obs): {len(caps)} pairs analysed, "
+                        f"{len(constrained)} constrained, {len(warning)} warning"
+                    )
+                    if constrained and self.monitoring_alert_manager:
+                        self._track_task(self.monitoring_alert_manager.send_warning(
+                            f"Capacity constrained pairs: {', '.join(constrained)}"
+                        ))
+                except Exception as e:
+                    self.logger.debug(f"Capacity monitor loop error: {e}")
+                await asyncio.sleep(3600)  # 60 minutes
+        except asyncio.CancelledError:
+            pass
+
+    async def _run_regime_detector_loop(self):
+        """Periodic regime retraining + prediction (every 5 min, observation mode)."""
+        try:
+            while not self._killed:
+                try:
+                    if self.medallion_regime.needs_retrain():
+                        trained = self.medallion_regime.train()
+                        if trained:
+                            self.medallion_regime.save_model()
+                            self.logger.info("REGIME DETECTOR (obs): Model retrained and saved")
+                    pred = self.medallion_regime.predict_current_regime()
+                    regime = pred.get("regime_name", "unknown")
+                    conf = pred.get("confidence", 0.0)
+                    self.logger.info(
+                        f"REGIME DETECTOR (obs): regime={regime} confidence={conf:.2f}"
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Regime detector loop error: {e}")
+                await asyncio.sleep(300)  # 5 minutes
+        except asyncio.CancelledError:
+            pass
+
+    # ──────────────────────────────────────────────
+    #  Unified Telegram Reporting (Gap 5 fix)
+    # ──────────────────────────────────────────────
+
+    async def _run_telegram_report_loop(self):
+        """Send a consolidated hourly status report via Telegram."""
+        try:
+            await asyncio.sleep(300)  # Wait 5 min after startup before first report
+            while not self._killed:
+                try:
+                    stats = {
+                        "uptime": str(datetime.now(timezone.utc) - self._start_time).split('.')[0],
+                        "trades_1h": 0,
+                        "pnl_1h": 0.0,
+                        "open_positions": len(self.position_manager.positions),
+                        "exchanges_healthy": "coinbase",
+                    }
+                    # Count recent trades from DB
+                    if self.db_enabled:
+                        try:
+                            import sqlite3
+                            cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+                            conn = sqlite3.connect(self.db_path, timeout=5.0)
+                            row = conn.execute(
+                                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN UPPER(side)='SELL' "
+                                "THEN size*price WHEN UPPER(side)='BUY' THEN -size*price ELSE 0 END), 0) "
+                                "FROM trades WHERE timestamp >= ? AND status != 'FAILED'",
+                                (cutoff,)
+                            ).fetchone()
+                            conn.close()
+                            if row:
+                                stats["trades_1h"] = row[0] or 0
+                                stats["pnl_1h"] = float(row[1] or 0)
+                        except Exception:
+                            pass
+
+                    await self.monitoring_alert_manager._telegram.send_hourly_heartbeat(stats)
+                except Exception as e:
+                    self.logger.debug(f"Telegram report loop error: {e}")
+                await asyncio.sleep(3600)  # Every hour
+        except asyncio.CancelledError:
+            pass
 
     # ──────────────────────────────────────────────
     #  State Recovery
@@ -1714,14 +3500,59 @@ class RenaissanceTradingBot:
         """Run continuous Renaissance trading (default 5-minute cycles)"""
         self.logger.info(f"Starting continuous Renaissance trading with {cycle_interval}s cycles")
 
-        # Install signal handlers for graceful shutdown
-        def _handle_shutdown(signum, frame):
-            self.trigger_kill_switch(f"Signal {signum} received")
-        signal.signal(signal.SIGINT, _handle_shutdown)
-        signal.signal(signal.SIGTERM, _handle_shutdown)
+        # ── Module A: Graceful Shutdown Handler ──
+        if self.state_manager and RECOVERY_AVAILABLE:
+            try:
+                loop = asyncio.get_event_loop()
+                self.shutdown_handler = GracefulShutdownHandler(
+                    state_manager=self.state_manager,
+                    coinbase_client=self.coinbase_client,
+                    alert_manager=self.monitoring_alert_manager,
+                    drain_timeout_seconds=30.0,
+                )
+                self.shutdown_handler.install(loop=loop)
+                await self.state_manager.aset_system_state(SystemState.STARTING, "bot starting")
+                self.logger.info("Graceful shutdown handlers installed")
+            except Exception as e:
+                self.logger.warning(f"Graceful shutdown setup failed: {e}")
+                # Fallback to basic signal handlers
+                def _handle_shutdown(signum, frame):
+                    self.trigger_kill_switch(f"Signal {signum} received")
+                signal.signal(signal.SIGINT, _handle_shutdown)
+                signal.signal(signal.SIGTERM, _handle_shutdown)
+        else:
+            # Fallback signal handlers when recovery module is not available
+            def _handle_shutdown(signum, frame):
+                self.trigger_kill_switch(f"Signal {signum} received")
+            signal.signal(signal.SIGINT, _handle_shutdown)
+            signal.signal(signal.SIGTERM, _handle_shutdown)
 
-        # Restore state from DB
-        await self._restore_state()
+        # Restore state from DB (skip for paper mode — balances reset each start)
+        paper_mode = self.config.get("trading", {}).get("paper_trading", True)
+        if not paper_mode:
+            await self._restore_state()
+        else:
+            self.position_manager.daily_pnl = 0.0
+            self.position_manager.positions.clear()
+            self.logger.info("Paper mode: starting fresh (no state restore)")
+
+        # ── Module A: Set RUNNING state ──
+        if self.state_manager:
+            try:
+                await self.state_manager.aset_system_state(SystemState.RUNNING, "trading loop started")
+            except Exception:
+                pass
+
+        # ── Module C: Startup alert ──
+        if self.monitoring_alert_manager:
+            try:
+                await self.monitoring_alert_manager.send_system_event(
+                    "Bot Started",
+                    f"Renaissance bot starting with {len(self.product_ids)} products, "
+                    f"{'paper' if paper_mode else 'live'} mode"
+                )
+            except Exception:
+                pass
 
         # Start real-time pipeline if enabled
         if self.real_time_pipeline.enabled:
@@ -1733,6 +3564,51 @@ class RenaissanceTradingBot:
         # Start WebSocket feed for real-time data
         if self._ws_client:
             self._track_task(self._run_websocket_feed())
+
+        # Start Multi-Exchange Arbitrage Engine (runs independently alongside main loop)
+        if self.arbitrage_orchestrator:
+            self.logger.info("Launching arbitrage engine...")
+            self._track_task(self._run_arbitrage_engine())
+
+        # ── Module D: Start Liquidation Cascade Detector ──
+        if self.liquidation_detector:
+            self.logger.info("Launching liquidation cascade detector...")
+            self._track_task(self._run_liquidation_detector())
+
+        # ── Phase 2 Observation Loops ──
+        if self.medallion_portfolio_engine:
+            self.logger.info("Launching medallion portfolio drift logger (observation mode)...")
+            self._track_task(self._run_portfolio_drift_logger())
+
+        if self.insurance_scanner:
+            self.logger.info("Launching insurance premium scanner (every 30 min)...")
+            self._track_task(self._run_insurance_scanner_loop())
+
+        if self.daily_signal_review:
+            self.logger.info("Launching daily signal review (midnight UTC)...")
+            self._track_task(self._run_daily_signal_review_loop())
+
+        # ── Phase 2 Monitor Loops (BUG 6 fix) ──
+        if self.beta_monitor:
+            self.logger.info("Launching beta monitor loop (every 60 min, observation mode)...")
+            self._track_task(self._run_beta_monitor_loop())
+
+        if self.sharpe_monitor_medallion:
+            self.logger.info("Launching sharpe monitor loop (every 60 min, observation mode)...")
+            self._track_task(self._run_sharpe_monitor_loop())
+
+        if self.capacity_monitor:
+            self.logger.info("Launching capacity monitor loop (every 60 min, observation mode)...")
+            self._track_task(self._run_capacity_monitor_loop())
+
+        if self.medallion_regime:
+            self.logger.info("Launching regime detector loop (every 5 min, observation mode)...")
+            self._track_task(self._run_regime_detector_loop())
+
+        # ── Gap 5 fix: Unified Telegram Reporting ──
+        if self.monitoring_alert_manager:
+            self.logger.info("Launching unified Telegram hourly report loop...")
+            self._track_task(self._run_telegram_report_loop())
 
         while not self._killed:
             try:
@@ -1751,6 +3627,12 @@ class RenaissanceTradingBot:
 
                 # Write heartbeat after each successful cycle
                 self._write_heartbeat()
+                # Recovery module heartbeat (file-based for watchdog)
+                if self.state_manager:
+                    try:
+                        await self.state_manager.asend_heartbeat()
+                    except Exception:
+                        pass
 
                 # Wait for next cycle
                 await asyncio.sleep(cycle_interval)
@@ -1765,6 +3647,101 @@ class RenaissanceTradingBot:
         self.logger.info("Trading loop exited. Shutting down background tasks...")
         await self._shutdown()
 
+    def _compute_adaptive_weights(self, product_id: str, base_weights: Dict[str, float]) -> Dict[str, float]:
+        """
+        Adaptive Weight Engine — Renaissance-style Bayesian signal weight updating.
+
+        Uses the signal scorecard (measured accuracy per signal) to adjust weights:
+        - Signals with >55% accuracy get upweighted
+        - Signals with <48% accuracy get downweighted
+        - Signals with too few samples keep config weights (prior)
+        - Blend between config (prior) and measured (posterior) ramps up as data accumulates
+
+        Returns adjusted weights dict (does NOT mutate self.signal_weights).
+        """
+        sc = self._signal_scorecard.get(product_id, {})
+        if not sc:
+            return base_weights
+
+        # Aggregate across all products for more data
+        agg_sc: Dict[str, Dict[str, int]] = {}
+        for pid, signals in self._signal_scorecard.items():
+            for sig_name, stats in signals.items():
+                entry = agg_sc.setdefault(sig_name, {"correct": 0, "total": 0})
+                entry["correct"] += stats["correct"]
+                entry["total"] += stats["total"]
+
+        # Find signals with enough data
+        eligible = {}
+        max_total = 0
+        for sig_name, stats in agg_sc.items():
+            if stats["total"] >= self._adaptive_min_samples:
+                accuracy = stats["correct"] / stats["total"]
+                eligible[sig_name] = accuracy
+                max_total = max(max_total, stats["total"])
+
+        if not eligible:
+            return base_weights
+
+        # Ramp blend factor: 0 at min_samples, 0.5 at 100+ samples
+        blend = min(0.5, (max_total - self._adaptive_min_samples) / 170.0)
+        self._adaptive_weight_blend = blend
+
+        # Compute accuracy-derived weights
+        # Transform accuracy to weight multiplier:
+        # 50% (random) → 0.5x, 55% → 1.0x, 60% → 1.5x, 65%+ → 2.0x
+        # <48% (anti-predictive) → 0.1x
+        multipliers = {}
+        for sig_name in base_weights:
+            if sig_name in eligible:
+                acc = eligible[sig_name]
+                if acc < 0.48:
+                    multipliers[sig_name] = 0.1  # actively wrong — near zero
+                elif acc < 0.52:
+                    multipliers[sig_name] = 0.5  # noise
+                elif acc < 0.55:
+                    multipliers[sig_name] = 0.8  # weak
+                elif acc < 0.60:
+                    multipliers[sig_name] = 1.2  # good
+                elif acc < 0.65:
+                    multipliers[sig_name] = 1.5  # strong
+                else:
+                    multipliers[sig_name] = 2.0  # excellent
+            else:
+                multipliers[sig_name] = 1.0  # no data → keep as-is
+
+        # Blend: final = (1 - blend) * config_weight + blend * (config_weight * multiplier)
+        # Simplifies to: final = config_weight * (1 - blend + blend * multiplier)
+        adapted = {}
+        for sig_name, w in base_weights.items():
+            m = multipliers.get(sig_name, 1.0)
+            adapted[sig_name] = w * (1.0 - blend + blend * m)
+
+        # Renormalize so weights sum to 1.0
+        total = sum(adapted.values())
+        if total > 0:
+            adapted = {k: v / total for k, v in adapted.items()}
+
+        return adapted
+
+    def _get_measured_edge(self, product_id: str) -> Optional[float]:
+        """
+        Compute realized edge from signal scorecard instead of fabricating it.
+        Returns None if insufficient data, else a float [0, 0.15].
+        """
+        sc = self._signal_scorecard.get(product_id, {})
+        if not sc:
+            return None
+        total_correct = sum(s["correct"] for s in sc.values())
+        total_total = sum(s["total"] for s in sc.values())
+        if total_total < 20:
+            return None  # not enough data
+        # Aggregate accuracy across all signals
+        accuracy = total_correct / total_total
+        # Edge = accuracy - 0.5 (above random), capped at 0.15
+        edge = max(0.0, accuracy - 0.5)
+        return min(edge, 0.15)
+
     def _update_dynamic_thresholds(self, product_id: str, market_data: Dict[str, Any]):
         """Adjusts BUY/SELL thresholds based on volatility and confidence (Step 8)"""
         if not self.adaptive_thresholds:
@@ -1772,7 +3749,7 @@ class RenaissanceTradingBot:
 
         try:
             # Use technical indicators volatility regime
-            latest_tech = self.technical_indicators.get_latest_signals()
+            latest_tech = self._get_tech(product_id).get_latest_signals()
             vol_regime = latest_tech.volatility_regime if latest_tech else None
             
             # Base thresholds

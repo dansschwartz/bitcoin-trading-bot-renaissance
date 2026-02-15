@@ -456,14 +456,22 @@ class EnhancedTechnicalIndicators:
                 obv_position = 0
             
             # OBV momentum (rate of change)
-            if len(obv_series) > 5:
-                obv_momentum = (obv_series.iloc[-1] - obv_series.iloc[-6]) / abs(obv_series.iloc[-6])
+            if len(obv_series) > 6:
+                denom = abs(obv_series.iloc[-6])
+                obv_momentum = (obv_series.iloc[-1] - obv_series.iloc[-6]) / denom if denom > 0 else 0
             else:
                 obv_momentum = 0
-            
+
             # Price-OBV divergence analysis
-            price_change = (df['close'].iloc[-1] - df['close'].iloc[-self.obv_lookback]) / df['close'].iloc[-self.obv_lookback]
-            obv_change = (obv_series.iloc[-1] - obv_series.iloc[-self.obv_lookback]) / abs(obv_series.iloc[-self.obv_lookback])
+            lookback = min(self.obv_lookback, len(df) - 1)
+            if lookback < 2:
+                price_change = 0
+                obv_change = 0
+            else:
+                denom_p = df['close'].iloc[-lookback]
+                denom_o = abs(obv_series.iloc[-lookback])
+                price_change = (df['close'].iloc[-1] - denom_p) / denom_p if denom_p != 0 else 0
+                obv_change = (obv_series.iloc[-1] - obv_series.iloc[-lookback]) / denom_o if denom_o > 0 else 0
             
             # Detect divergence
             divergence = 0

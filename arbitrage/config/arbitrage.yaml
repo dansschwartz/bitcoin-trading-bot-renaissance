@@ -1,0 +1,80 @@
+# === Renaissance of One — Arbitrage Configuration ===
+# ALL thresholds live here. Change this file, not code.
+
+exchanges:
+  primary: mexc
+  secondary: binance
+
+pairs:
+  phase_1:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - XRP/USDT
+    - BNB/USDT
+    - DOGE/USDT
+    - ADA/USDT
+    - AVAX/USDT
+    - LINK/USDT
+    - DOT/USDT
+
+cross_exchange:
+  min_net_spread_bps: 1.0
+  signal_ttl_seconds: 5
+  min_trade_usd: 50
+  max_trade_usd: 500
+  scan_interval_ms: 100
+  fill_timeout_seconds: 3
+  emergency_close_seconds: 5
+  order_type: LIMIT_MAKER
+
+funding_rate:
+  min_differential_apr: 5.0
+  close_differential_apr: 2.0
+  max_leverage: 3.0
+  check_interval_seconds: 300
+  max_position_usd: 2000
+  max_simultaneous_positions: 5
+
+triangular:
+  min_net_profit_bps: 0.5
+  exchange: mexc
+  start_currencies:
+    - USDT
+    - BTC
+    - ETH
+  scan_interval_ms: 500
+  max_trade_usd: 200
+
+inventory:
+  target_allocation: 0.50
+  rebalance_threshold: 0.70
+  min_rebalance_usd: 500
+  check_interval_minutes: 15
+  preferred_networks:
+    USDT: TRC20
+    USDC: SOL
+    BTC: BTC
+    ETH: ARB
+    SOL: SOL
+
+risk:
+  max_single_arb_usd: 500
+  max_total_exposure_usd: 5000
+  max_one_sided_usd: 200
+  max_daily_loss_usd: 100
+  max_funding_position_usd: 2000
+  max_trades_per_hour: 100
+  max_consecutive_losses: 10
+  max_api_latency_ms: 500
+  max_book_staleness_sec: 3
+  min_exchange_balance_usd: 100
+
+paper_trading:
+  enabled: true
+  simulated_latency_ms: 50
+  simulated_fill_rate: 0.85
+
+logging:
+  level: INFO
+  file: logs/arbitrage.log

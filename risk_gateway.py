@@ -37,7 +37,7 @@ class RiskGateway:
             # input_dim=128 matches FractalFeaturePipeline output
             self.vae = VariationalAutoEncoder(input_dim=128, latent_dim=32)
             self.vae.eval()
-            self.anomaly_threshold = 2.5 # Sigma threshold for anomaly
+            self.anomaly_threshold = float(config.get("anomaly_threshold", 2.5))
             self.logger.info("VAE Anomaly Detector initialized in RiskGateway")
         except Exception as e:
             self.logger.warning(f"VAE initialization failed: {e}")

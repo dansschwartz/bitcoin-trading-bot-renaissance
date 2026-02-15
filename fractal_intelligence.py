@@ -12,12 +12,18 @@ from scipy.spatial.distance import cdist
 class FractalIntelligenceEngine:
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
-        # Define some "Golden Patterns" (Normalized)
+        # Define "Golden Patterns" (Normalized) — bullish AND bearish
         self.patterns = {
+            # Bullish patterns
             "v_recovery": np.array([1.0, 0.8, 0.6, 0.4, 0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0]),
             "bull_flag": np.array([0.0, 0.5, 1.0, 0.9, 0.8, 0.7, 0.75, 0.8, 1.0, 1.1, 1.2]),
             "double_bottom": np.array([1.0, 0.5, 0.0, 0.3, 0.0, 0.5, 1.0]),
-            "consolidation_breakout": np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.6, 0.8, 1.0, 1.2])
+            "consolidation_breakout": np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.6, 0.8, 1.0, 1.2]),
+            # Bearish patterns (mirrors of bullish)
+            "inverted_v": np.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.2, 0.0]),
+            "bear_flag": np.array([1.2, 0.7, 0.0, 0.1, 0.2, 0.3, 0.25, 0.2, 0.0, -0.1, -0.2]),
+            "double_top": np.array([0.0, 0.5, 1.0, 0.7, 1.0, 0.5, 0.0]),
+            "breakdown": np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.4, 0.2, 0.0, -0.2]),
         }
         
     def find_best_match(self, price_series: np.array) -> Dict[str, Any]:
@@ -78,6 +84,10 @@ class FractalIntelligenceEngine:
             "bull_flag": 1.0,
             "double_bottom": 0.9,
             "consolidation_breakout": 0.7,
-            "none": 0.0
+            "inverted_v": -0.8,
+            "bear_flag": -1.0,
+            "double_top": -0.9,
+            "breakdown": -0.7,
+            "none": 0.0,
         }
         return mapping.get(pattern, 0.0) * similarity

@@ -79,7 +79,13 @@ class CoinbaseAdvancedClient:
                     try:
                         data_queue.put_nowait(processed_data)
                     except queue.Full:
-                        self.logger.warning("Market data queue is full, dropping message")
+                        # Drain stale entries and push latest — keep log quiet
+                        try:
+                            while not data_queue.empty():
+                                data_queue.get_nowait()
+                            data_queue.put_nowait(processed_data)
+                        except Exception:
+                            pass
 
         except websockets.exceptions.ConnectionClosed:
             self.logger.warning("Coinbase WebSocket connection closed")

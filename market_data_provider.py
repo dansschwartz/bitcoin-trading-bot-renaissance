@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 import logging
 import os
+import time
 
 from coinbase_client import create_client_from_config, EnhancedCoinbaseClient
 from microstructure_engine import OrderBookSnapshot, OrderBookLevel
@@ -126,13 +127,13 @@ class LiveMarketDataProvider:
             return None
 
         pid = product_id or self.product_id
-        end = datetime.utcnow()
-        start = end - timedelta(minutes=self.candle_lookback_minutes)
+        end_ts = int(time.time())
+        start_ts = end_ts - (self.candle_lookback_minutes * 60)
 
         response = self._client.get_product_candles(
             pid,
-            start=start.isoformat(),
-            end=end.isoformat(),
+            start=str(start_ts),
+            end=str(end_ts),
             granularity=self.candle_granularity,
         )
 
@@ -157,6 +158,54 @@ class LiveMarketDataProvider:
             close=_coerce_float(latest.get("close")),
             volume=_coerce_float(latest.get("volume")),
         )
+
+    def fetch_candle_history(self, product_id: Optional[str] = None) -> List[PriceData]:
+        """
+        Fetch ALL available candles (up to lookback window) sorted oldest-first.
+        Used for preloading price history so technical indicators work immediately.
+        """
+        if not self._client:
+            return []
+
+        pid = product_id or self.product_id
+        end_ts = int(time.time())
+        start_ts = end_ts - (self.candle_lookback_minutes * 60)
+
+        response = self._client.get_product_candles(
+            pid,
+            start=str(start_ts),
+            end=str(end_ts),
+            granularity=self.candle_granularity,
+        )
+
+        candles: List[Dict[str, Any]] = response.get("candles", []) if isinstance(response, dict) else []
+        if not candles:
+            return []
+
+        # Sort oldest-first for chronological loading
+        candles.sort(key=lambda c: int(c.get("start", 0)))
+
+        result = []
+        for c in candles:
+            ts = int(c.get("start", 0))
+            close_price = _coerce_float(c.get("close"))
+            if close_price <= 0:
+                continue
+            result.append(PriceData(
+                timestamp=datetime.utcfromtimestamp(ts) if ts else datetime.utcnow(),
+                open=_coerce_float(c.get("open")),
+                high=_coerce_float(c.get("high")),
+                low=_coerce_float(c.get("low")),
+                close=close_price,
+                volume=_coerce_float(c.get("volume")),
+            ))
+
+        if result:
+            self._last_candle_ts = int(candles[-1].get("start", 0)) or None
+            self.logger.info(f"Loaded {len(result)} historical candles for {pid} "
+                           f"(oldest: {result[0].timestamp}, newest: {result[-1].timestamp})")
+
+        return result
 
     def fetch_snapshot(self, product_id: Optional[str] = None) -> MarketDataSnapshot:
         pid = product_id or self.product_id

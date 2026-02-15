@@ -36,6 +36,15 @@ class MedallionRegimePredictor:
             features = np.column_stack([returns[-min_len:], volatility[-min_len:]])
             
             self.model.fit(features)
+            # Regularize transition matrix: add small epsilon to zero rows
+            # so predict() doesn't fail on "transmat_ rows must sum to 1"
+            tm = self.model.transmat_.copy()
+            row_sums = tm.sum(axis=1)
+            for i in range(len(row_sums)):
+                if row_sums[i] < 1e-10:
+                    tm[i] = 1.0 / self.n_regimes  # uniform fallback
+            tm = tm / tm.sum(axis=1, keepdims=True)
+            self.model.transmat_ = tm
             self.is_fitted = True
             self.logger.info(f"Medallion HMM fitted with {self.n_regimes} regimes.")
         except Exception as e:

@@ -399,6 +399,44 @@ ml_bridge = EnhancedMLBridge()
 # Export the fixed config class that was causing the import error
 MLConfig = MLPatternConfig  # Alias for backwards compatibility
 
+
+# ── Missing class stubs required by ml_pattern_engine / cnn_lstm_model / nbeats_forecaster ──
+
+from enum import Enum
+
+class ModelType(Enum):
+    CNN_LSTM = "cnn_lstm"
+    NBEATS = "nbeats"
+    TRANSFORMER = "transformer"
+    ENSEMBLE = "ensemble"
+
+class TimeFrame(Enum):
+    M1 = "1m"
+    M5 = "5m"
+    M15 = "15m"
+    H1 = "1h"
+    H4 = "4h"
+    D1 = "1d"
+
+class EnsembleConfig:
+    def __init__(self):
+        self.models = [ModelType.CNN_LSTM, ModelType.NBEATS]
+        self.voting = "soft"
+        self.confidence_threshold = 0.6
+
+class FeaturePipelineConfig:
+    def __init__(self):
+        self.feature_count = 10
+        self.lookback = 60
+        self.normalize = True
+        self.scaler = "standard"
+
+class PatternConfidenceConfig:
+    def __init__(self):
+        self.min_confidence = 0.6
+        self.decay_rate = 0.95
+        self.lookback_periods = 20
+
 if __name__ == "__main__":
     print("🚀 Enhanced ML Bridge loaded successfully!")
     print("✅ MLConfig import error RESOLVED")

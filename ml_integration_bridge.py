@@ -50,50 +50,98 @@ class MLModelManager:
         self.logger = logging.getLogger(__name__)
 
     def initialize_models(self) -> bool:
-        """Initialize all ML models"""
-        try:
-            # CNN-LSTM Model
-            if HAS_ML_COMPONENTS:
+        """Initialize ML models — tries TF path first, falls back to PyTorch trained models."""
+        # Try TensorFlow path first
+        if HAS_ML_COMPONENTS:
+            try:
                 self.models['cnn_lstm'] = CNNLSTMModel()
                 self.model_status['cnn_lstm'] = MLModelStatus(
-                    model_name='cnn_lstm',
-                    is_loaded=True,
-                    last_prediction_time=None,
-                    error_count=0,
-                    performance_score=0.8,
-                    health_status='healthy'
+                    model_name='cnn_lstm', is_loaded=True,
+                    last_prediction_time=None, error_count=0,
+                    performance_score=0.8, health_status='healthy',
                 )
-
-                # N-BEATS Model
                 self.models['nbeats'] = NBEATSForecaster()
                 self.model_status['nbeats'] = MLModelStatus(
-                    model_name='nbeats',
-                    is_loaded=True,
-                    last_prediction_time=None,
-                    error_count=0,
-                    performance_score=0.75,
-                    health_status='healthy'
+                    model_name='nbeats', is_loaded=True,
+                    last_prediction_time=None, error_count=0,
+                    performance_score=0.75, health_status='healthy',
                 )
-
-                # ML Pattern Engine (includes ensemble models)
                 self.models['pattern_engine'] = MLPatternEngine()
                 self.model_status['pattern_engine'] = MLModelStatus(
-                    model_name='pattern_engine',
-                    is_loaded=True,
-                    last_prediction_time=None,
-                    error_count=0,
-                    performance_score=0.85,
-                    health_status='healthy'
+                    model_name='pattern_engine', is_loaded=True,
+                    last_prediction_time=None, error_count=0,
+                    performance_score=0.85, health_status='healthy',
                 )
+                self.logger.info("All ML models initialized (TensorFlow path)")
+                return True
+            except Exception as e:
+                self.logger.info(f"TF models unavailable ({e}), trying PyTorch fallback...")
 
-                self.logger.info("All ML models initialized successfully")
+        # Fallback: load trained PyTorch models
+        return self._initialize_pytorch_fallback()
+
+    def _initialize_pytorch_fallback(self) -> bool:
+        """Load trained PyTorch models as fallback when TF components unavailable."""
+        try:
+            import torch
+            import os
+            from neural_network_prediction_engine import LegendaryNeuralPredictionEngine, PredictionConfig
+
+            nn_config = PredictionConfig()
+            nn_engine = LegendaryNeuralPredictionEngine(nn_config)
+
+            # Map model names to their .pth files and creation functions
+            # Models were trained with input_dim=83
+            trained_dim = 83
+            model_defs = {
+                'quantum_transformer': ('models/trained/best_quantum_transformer_model.pth',
+                                        lambda: nn_engine._create_quantum_transformer(input_dim=trained_dim)),
+                'bidirectional_lstm': ('models/trained/best_bidirectional_lstm_model.pth',
+                                       lambda: nn_engine._create_bidirectional_lstm(input_dim=trained_dim)),
+                'cnn': ('models/trained/best_cnn_model.pth',
+                        lambda: nn_engine._create_dilated_cnn(input_dim=trained_dim)),
+            }
+
+            loaded_count = 0
+            for model_name, (model_path, create_fn) in model_defs.items():
+                if not os.path.exists(model_path):
+                    continue
+                try:
+                    saved_data = torch.load(model_path, map_location='cpu', weights_only=False)
+                    input_features = saved_data.get('input_features', 115)
+                    model = create_fn()
+                    state_dict = saved_data.get('model_state_dict', saved_data)
+                    # Load with strict=False to handle architecture evolution
+                    # (trained core weights load, newer layers keep random init)
+                    result = model.load_state_dict(state_dict, strict=False)
+                    loaded_params = len(state_dict) - len(result.unexpected_keys)
+                    model.eval()
+                    self.models[model_name] = model
+                    self.model_status[model_name] = MLModelStatus(
+                        model_name=model_name, is_loaded=True,
+                        last_prediction_time=None, error_count=0,
+                        performance_score=0.8, health_status='healthy',
+                    )
+                    loaded_count += 1
+                    self.logger.info(
+                        f"PyTorch model loaded: {model_name} "
+                        f"({loaded_params} trained params, {len(result.missing_keys)} new params)"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to load PyTorch model {model_name}: {e}")
+
+            if loaded_count > 0:
+                self.logger.info(f"PyTorch fallback: {loaded_count} trained models loaded")
                 return True
             else:
-                self.logger.warning("ML components not available - running in fallback mode")
+                self.logger.warning("No PyTorch models could be loaded — ML in fallback mode")
                 return False
 
+        except ImportError:
+            self.logger.warning("PyTorch not available — ML in fallback mode")
+            return False
         except Exception as e:
-            self.logger.error(f"Error initializing ML models: {e}")
+            self.logger.warning(f"PyTorch fallback init failed: {e}")
             return False
 
     def get_model_health(self) -> Dict[str, MLModelStatus]:

@@ -45,6 +45,53 @@ except ImportError:
     pd = None
 
 
+class _CDPAuth:
+    """Coinbase Developer Platform JWT auth using Ed25519 keys."""
+
+    BASE_URL = "https://api.coinbase.com"
+
+    def __init__(self, api_key: str, api_secret_b64: str, logger=None):
+        self.api_key = api_key
+        self.logger = logger or logging.getLogger(__name__)
+        raw = base64.b64decode(api_secret_b64)
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        self._private_key = Ed25519PrivateKey.from_private_bytes(raw[:32])
+        from cryptography.hazmat.primitives import serialization as _ser
+        self._pem = self._private_key.private_bytes(
+            encoding=_ser.Encoding.PEM,
+            format=_ser.PrivateFormat.PKCS8,
+            encryption_algorithm=_ser.NoEncryption(),
+        )
+
+    def _jwt(self, method: str, path: str) -> str:
+        import jwt as pyjwt
+        uri = f"{method} api.coinbase.com{path}"
+        payload = {
+            "sub": self.api_key,
+            "iss": "cdp",
+            "aud": ["cdp_service"],
+            "nbf": int(time.time()),
+            "exp": int(time.time()) + 120,
+            "uris": [uri],
+        }
+        return pyjwt.encode(payload, self._pem, algorithm="EdDSA",
+                            headers={"kid": self.api_key, "nonce": secrets.token_hex(16)})
+
+    def request(self, method: str, path: str, params: Optional[Dict] = None,
+                body: Optional[Dict] = None) -> Dict[str, Any]:
+        token = self._jwt(method, path)
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        url = f"{self.BASE_URL}{path}"
+        if method == "GET":
+            resp = requests.get(url, headers=headers, params=params, timeout=15)
+        else:
+            resp = requests.post(url, headers=headers, json=body, timeout=15)
+        if not resp.ok:
+            self.logger.debug("CDP %s %s -> %s: %s", method, path, resp.status_code, resp.text[:200])
+        resp.raise_for_status()
+        return resp.json()
+
+
 class OrderSide(Enum):
     """Order side enumeration"""
     BUY = "BUY"
@@ -195,7 +242,7 @@ class RateLimiter:
 
 
 class PaperTradingSimulator:
-    """Simulate trading operations for paper trading mode"""
+    """Simulate trading operations for paper trading mode with real P&L tracking"""
 
     def __init__(self):
         self.orders = {}
@@ -205,26 +252,100 @@ class PaperTradingSimulator:
         }
         self.order_counter = 1000
         self._lock = threading.Lock()
+        self.logger = logging.getLogger("PaperTrader")
+        self._last_prices: Dict[str, float] = {}  # product_id -> last known price
+
+    def update_price(self, product_id: str, price: float):
+        """Update the last known price for a product (called by bot each cycle)."""
+        if price > 0:
+            self._last_prices[product_id] = price
+
+    def _ensure_currency(self, product_id: str):
+        """Ensure balance entry exists for the base currency of a product."""
+        base = product_id.split("-")[0] if "-" in product_id else product_id
+        if base not in self.balances:
+            self.balances[base] = {"available": "0.00", "hold": "0.00"}
 
     def create_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Simulate order creation"""
+        """Simulate order creation with actual balance updates."""
         with self._lock:
             order_id = f"paper_order_{self.order_counter}"
             self.order_counter += 1
 
-            # Simulate order with realistic data
+            product_id = order_data.get("product_id", "BTC-USD")
+            side = order_data.get("side", "BUY")
+            config = order_data.get("order_configuration", {})
+
+            # Extract base_size/quote_size from nested order config
+            # Coinbase API nests under market_market_ioc, limit_limit_gtc, etc.
+            base_size = None
+            quote_size = None
+            for key, val in config.items():
+                if isinstance(val, dict):
+                    if "base_size" in val and base_size is None:
+                        base_size = float(val["base_size"])
+                    if "quote_size" in val and quote_size is None:
+                        quote_size = float(val["quote_size"])
+            # Fallback to top-level keys
+            if base_size is None:
+                base_size = float(config.get("base_size", 0.001))
+            if quote_size is None:
+                quote_size = float(config.get("quote_size", 0))
+            fee_rate = 0.005  # 50bps simulated fee
+
+            # Compute fill value using actual price with slippage simulation (Gap 6 fix)
+            last_price = self._last_prices.get(product_id, 0)
+            if quote_size > 0:
+                fill_value = quote_size
+            elif last_price > 0:
+                # Simulate realistic slippage: 1-5 bps adverse fill
+                slippage_bps = random.uniform(1.0, 5.0)
+                slippage_mult = 1.0 + (slippage_bps / 10000.0) if side == "BUY" else 1.0 - (slippage_bps / 10000.0)
+                fill_price = last_price * slippage_mult
+                fill_value = base_size * fill_price
+            else:
+                fill_value = base_size * 50000  # ultimate fallback
+            fee = fill_value * fee_rate
+
+            # Update balances
+            self._ensure_currency(product_id)
+            base_currency = product_id.split("-")[0]
+            usd_available = float(self.balances["USD"]["available"])
+            base_available = float(self.balances[base_currency]["available"])
+
+            if side == "BUY":
+                cost = fill_value + fee
+                if cost <= usd_available:
+                    usd_available -= cost
+                    base_available += base_size
+                    self.logger.info(f"PAPER FILL: BUY {base_size:.6f} {base_currency} for ${fill_value:.2f} (fee ${fee:.2f})")
+                else:
+                    self.logger.warning(f"PAPER: Insufficient USD (${usd_available:.2f}) for ${cost:.2f} order")
+            else:  # SELL
+                if base_available >= base_size:
+                    base_available -= base_size
+                    usd_available += fill_value - fee
+                    self.logger.info(f"PAPER FILL: SELL {base_size:.6f} {base_currency} for ${fill_value:.2f} (fee ${fee:.2f})")
+                else:
+                    # Allow short selling in paper mode
+                    base_available -= base_size
+                    usd_available += fill_value - fee
+                    self.logger.info(f"PAPER FILL: SHORT SELL {base_size:.6f} {base_currency} for ${fill_value:.2f}")
+
+            self.balances["USD"]["available"] = f"{usd_available:.2f}"
+            self.balances[base_currency]["available"] = f"{base_available:.8f}"
+
             simulated_order = {
                 "order_id": order_id,
-                "product_id": order_data.get("product_id", "BTC-USD"),
-                "side": order_data.get("side", "BUY"),
-                "order_configuration": order_data.get("order_configuration", {}),
-                "status": "FILLED",  # Simulate immediate fill for simplicity
-                "filled_size": order_data.get("order_configuration", {}).get("base_size", "0.001"),
-                "filled_value": str(float(order_data.get("order_configuration", {}).get("quote_size", "100")) * 0.999),
-                # Simulate small slippage
+                "product_id": product_id,
+                "side": side,
+                "order_configuration": config,
+                "status": "FILLED",
+                "filled_size": str(base_size),
+                "filled_value": f"{fill_value:.2f}",
                 "created_time": datetime.now().isoformat(),
                 "completion_percentage": "100",
-                "fee": "0.50"  # Simulate fee
+                "fee": f"{fee:.2f}"
             }
 
             self.orders[order_id] = simulated_order
@@ -311,16 +432,19 @@ class EnhancedCoinbaseClient:
         # Paper trading simulator
         self.paper_trader = PaperTradingSimulator() if paper_trading else None
 
-        # Initialize ccxt for v3 Cloud API if detected
+        # Initialize CDP JWT auth for Cloud API keys (UUID or organizations/ format)
         self.ccxt_exchange = None
-        if credentials.api_key.startswith("organizations/"):
-            import ccxt
-            self.ccxt_exchange = ccxt.coinbase({
-                'apiKey': credentials.api_key,
-                'secret': credentials.api_secret.strip("'").strip('"').replace('\\n', '\n'),
-                'enableRateLimit': True
-            })
-            self.logger.info("Initialized ccxt.coinbase for v3 Cloud API")
+        self._cdp_auth = None
+        is_cloud_key = (
+            credentials.api_key.startswith("organizations/")
+            or (len(credentials.api_key) == 36 and credentials.api_key.count('-') == 4)  # UUID format
+        )
+        if is_cloud_key and credentials.api_key and credentials.api_secret:
+            try:
+                self._cdp_auth = _CDPAuth(credentials.api_key, credentials.api_secret, self.logger)
+                self.logger.info("Initialized CDP JWT auth (key: %s...)", credentials.api_key[:12])
+            except Exception as e:
+                self.logger.error("Failed to initialize CDP auth: %s", e)
 
         # Request session setup
         if REQUESTS_AVAILABLE:
@@ -506,33 +630,17 @@ class EnhancedCoinbaseClient:
         if not REQUESTS_AVAILABLE or not self.session:
             raise RuntimeError("Requests library not available")
 
-        # Use ccxt for v3 Cloud API if available
-        if self.ccxt_exchange:
+        # Use CDP JWT auth for Cloud API keys
+        if self._cdp_auth:
             try:
                 self._update_stats("requests_made")
-                # Remove leading slash if present for ccxt
-                path = endpoint[1:] if endpoint.startswith('/') else endpoint
-                # Convert /api/v3/brokerage/... to brokerage/...
-                if path.startswith('api/v3/'):
-                    path = path[7:]
-                
-                # Split path to get api part (brokerage) and endpoint part
-                parts = path.split('/', 1)
-                api = parts[0]
-                inner_path = parts[1] if len(parts) > 1 else ""
-                
-                # ccxt doesn't always have a direct method for every endpoint, 
-                # so we use its lower-level fetch/request if needed
-                # But fetch_accounts etc are better.
-                # For custom endpoints, use sign() + requests or exchange.fetch()
-                
-                # Use ccxt's internal request handling which generates the JWT
-                # Use 'request' instead of 'fetch' for more reliable generic calls
-                response = self.ccxt_exchange.request(inner_path, api, method, data or {})
+                params = data if method == "GET" else None
+                body_data = data if method != "GET" else None
+                response = self._cdp_auth.request(method, endpoint, params=params, body=body_data)
                 return response
             except Exception as e:
                 self._update_stats("requests_failed")
-                self.logger.error(f"ccxt request failed: {e}")
+                self.logger.error(f"CDP request failed: {e}")
                 raise e
 
         url = f"{self.base_url}{endpoint}"
@@ -619,12 +727,11 @@ class EnhancedCoinbaseClient:
         if self.paper_trading and self.paper_trader:
             return self.paper_trader.get_accounts()
 
-        if self.ccxt_exchange:
+        if self._cdp_auth:
             try:
-                accounts = self.ccxt_exchange.fetch_accounts()
-                return {"accounts": accounts}
+                return self._make_request("GET", "/api/v3/brokerage/accounts")
             except Exception as e:
-                self.logger.error(f"ccxt fetch_accounts failed: {e}")
+                self.logger.error(f"CDP fetch accounts failed: {e}")
                 return {"error": str(e), "accounts": []}
 
         try:
@@ -742,15 +849,12 @@ class EnhancedCoinbaseClient:
 
     def get_product_book(self, product_id: str, limit: int = 10) -> Dict[str, Any]:
         """Get product order book (best-effort)."""
-        if self.ccxt_exchange:
+        if self._cdp_auth:
             try:
-                book = self.ccxt_exchange.fetch_order_book(product_id, limit=limit)
-                return {
-                    "bids": [[str(l[0]), str(l[1])] for l in book.get("bids", [])],
-                    "asks": [[str(l[0]), str(l[1])] for l in book.get("asks", [])]
-                }
+                params = {"product_id": product_id, "limit": limit}
+                return self._make_request("GET", "/api/v3/brokerage/product_book", params)
             except Exception as e:
-                self.logger.error(f"ccxt fetch_order_book failed: {e}")
+                self.logger.error(f"CDP fetch_order_book failed: {e}")
                 return {"error": str(e), "bids": [], "asks": []}
 
         try:
@@ -763,51 +867,31 @@ class EnhancedCoinbaseClient:
     def get_product_candles(self, product_id: str, start: Optional[str] = None,
                             end: Optional[str] = None, granularity: str = "ONE_HOUR") -> Dict[str, Any]:
         """Get historical candle data"""
-        if self.ccxt_exchange:
+        if self._cdp_auth:
             try:
-                # Map granularity
-                gran_map = {
-                    "ONE_MINUTE": "1m",
-                    "FIVE_MINUTE": "5m",
-                    "FIFTEEN_MINUTE": "15m",
-                    "ONE_HOUR": "1h",
-                    "SIX_HOUR": "6h",
-                    "ONE_DAY": "1d"
-                }
-                ccxt_gran = gran_map.get(granularity, "1h")
-                
-                # fetch_ohlcv returns [timestamp, open, high, low, close, volume]
-                ohlcv = self.ccxt_exchange.fetch_ohlcv(product_id, timeframe=ccxt_gran)
-                
-                candles = []
-                for c in ohlcv:
-                    candles.append({
-                        "start": str(int(c[0] / 1000)),
-                        "open": str(c[1]),
-                        "high": str(c[2]),
-                        "low": str(c[3]),
-                        "close": str(c[4]),
-                        "volume": str(c[5])
-                    })
-                
+                params = {"granularity": granularity}
+                if start:
+                    params["start"] = start
+                if end:
+                    params["end"] = end
+                resp = self._cdp_auth.request("GET", f"/api/v3/brokerage/products/{product_id}/candles", params=params)
+                candles = resp.get("candles", [])
                 response = {"candles": candles}
-                # Convert to DataFrame if pandas is available
-                if PANDAS_AVAILABLE and pd is not None:
+                if PANDAS_AVAILABLE and pd is not None and candles:
                     candles_data = []
-                    for candle in candles:
+                    for c in candles:
                         candles_data.append({
-                            "timestamp": datetime.fromtimestamp(int(candle["start"])),
-                            "open": float(candle["open"]),
-                            "high": float(candle["high"]),
-                            "low": float(candle["low"]),
-                            "close": float(candle["close"]),
-                            "volume": float(candle["volume"])
+                            "timestamp": datetime.fromtimestamp(int(c["start"])),
+                            "open": float(c["open"]),
+                            "high": float(c["high"]),
+                            "low": float(c["low"]),
+                            "close": float(c["close"]),
+                            "volume": float(c["volume"])
                         })
                     response["dataframe"] = pd.DataFrame(candles_data)
-                
                 return response
             except Exception as e:
-                self.logger.error(f"ccxt fetch_ohlcv failed: {e}")
+                self.logger.error(f"CDP fetch candles failed: {e}")
                 return {"error": str(e), "candles": []}
 
         try:
@@ -846,19 +930,18 @@ class EnhancedCoinbaseClient:
 
     def get_market_trades(self, product_id: str, limit: int = 100) -> Dict[str, Any]:
         """Get recent market trades"""
-        if self.ccxt_exchange:
+        if self._cdp_auth:
             try:
-                ticker = self.ccxt_exchange.fetch_ticker(product_id)
-                # Format to match expected bot structure
+                product = self._make_request("GET", f"/api/v3/brokerage/products/{product_id}")
                 return {
-                    "price": str(ticker.get("last", 0)),
-                    "best_bid": str(ticker.get("bid", 0)),
-                    "best_ask": str(ticker.get("ask", 0)),
-                    "volume_24h": str(ticker.get("quoteVolume", 0)),
-                    "trades": [] # CCXT fetch_ticker doesn't return full trade list
+                    "price": str(product.get("price", 0)),
+                    "best_bid": str(product.get("bid_price", product.get("price", 0))),
+                    "best_ask": str(product.get("ask_price", product.get("price", 0))),
+                    "volume_24h": str(product.get("volume_24h", 0)),
+                    "trades": []
                 }
             except Exception as e:
-                self.logger.error(f"ccxt fetch_ticker failed: {e}")
+                self.logger.error(f"CDP fetch ticker failed: {e}")
                 return {"error": str(e), "trades": []}
 
         try:

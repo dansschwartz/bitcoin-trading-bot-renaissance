@@ -189,6 +189,14 @@ class AdvancedRegimeDetector:
                     random_state=42,
                 )
                 model.fit(normalized)
+                # Regularize transition matrix: fix zero-sum rows
+                tm = model.transmat_.copy()
+                row_sums = tm.sum(axis=1)
+                for i in range(len(row_sums)):
+                    if row_sums[i] < 1e-10:
+                        tm[i] = 1.0 / self.n_regimes
+                tm = tm / tm.sum(axis=1, keepdims=True)
+                model.transmat_ = tm
                 self._model = model
                 hidden_states = model.predict(normalized)
                 self._regime_map = self._label_regimes(hidden_states, features)
