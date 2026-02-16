@@ -1,10 +1,12 @@
 """
 Regime Overlay Adapter
 Bridges the Advanced 5-state HMM Regime Detector with the Renaissance Trading Bot.
-Falls back to the legacy MedallionRegimePredictor if AdvancedRegimeDetector is unavailable.
+Uses Bootstrap ATR/SMA rules when <200 bars available, then switches to HMM.
+Reads OHLCV bars from five_minute_bars DB table for proper HMM input.
 """
 
 import logging
+import sqlite3
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional
@@ -21,23 +23,140 @@ try:
 except ImportError:
     ADVANCED_HMM_AVAILABLE = False
 
+# Minimum bars for each classifier
+BOOTSTRAP_MIN_BARS = 20
+HMM_MIN_BARS = 200
+
+
+class BootstrapRegimeClassifier:
+    """
+    Simple ATR/SMA-based regime classifier that works with as few as 20 bars.
+    Used as PRIMARY classifier until enough bars accumulate for the HMM.
+
+    Rules:
+    - ATR(14) / Close > 2% → high_volatility
+    - ATR(14) / Close < 0.5% → low_volatility
+    - SMA(10) > SMA(30) and ATR moderate → trending (bullish)
+    - SMA(10) < SMA(30) and ATR moderate → trending (bearish)
+    - Otherwise → low_volatility (range-bound)
+    """
+
+    def __init__(self, logger: Optional[logging.Logger] = None):
+        self.logger = logger or logging.getLogger(__name__)
+
+    def classify(self, bars_df: pd.DataFrame) -> Dict[str, Any]:
+        """Classify regime from OHLCV bars DataFrame.
+
+        Returns dict with keys: regime, confidence, classifier, details.
+        """
+        n = len(bars_df)
+        if n < BOOTSTRAP_MIN_BARS:
+            return {
+                "regime": "unknown",
+                "confidence": 0.0,
+                "classifier": "bootstrap",
+                "details": f"Insufficient bars ({n}/{BOOTSTRAP_MIN_BARS})",
+            }
+
+        close = bars_df["close"].values.astype(float)
+        high = bars_df["high"].values.astype(float)
+        low = bars_df["low"].values.astype(float)
+
+        # ATR(14)
+        atr_period = min(14, n - 1)
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.maximum(
+                np.abs(high[1:] - close[:-1]),
+                np.abs(low[1:] - close[:-1]),
+            ),
+        )
+        atr = float(np.mean(tr[-atr_period:]))
+        current_price = float(close[-1])
+        atr_pct = atr / (current_price + 1e-9)
+
+        # SMAs
+        sma_fast_period = min(10, n)
+        sma_slow_period = min(30, n)
+        sma_fast = float(np.mean(close[-sma_fast_period:]))
+        sma_slow = float(np.mean(close[-sma_slow_period:]))
+        sma_diff_pct = (sma_fast - sma_slow) / (sma_slow + 1e-9)
+
+        # Classification
+        if atr_pct > 0.02:
+            regime = "high_volatility"
+            confidence = min(0.9, 0.5 + (atr_pct - 0.02) * 10)
+        elif atr_pct < 0.005:
+            regime = "low_volatility"
+            confidence = min(0.9, 0.5 + (0.005 - atr_pct) * 100)
+        elif sma_diff_pct > 0.002:
+            regime = "trending"
+            confidence = min(0.85, 0.5 + abs(sma_diff_pct) * 50)
+        elif sma_diff_pct < -0.002:
+            regime = "trending"
+            confidence = min(0.85, 0.5 + abs(sma_diff_pct) * 50)
+        else:
+            regime = "low_volatility"
+            confidence = 0.55
+
+        return {
+            "regime": regime,
+            "confidence": float(confidence),
+            "classifier": "bootstrap",
+            "details": f"ATR%={atr_pct:.4f} SMA_diff={sma_diff_pct:.4f}",
+            "atr_pct": float(atr_pct),
+            "sma_diff_pct": float(sma_diff_pct),
+            "trend_direction": "bullish" if sma_diff_pct > 0 else "bearish",
+        }
+
+
+def _load_bars_from_db(db_path: str, pair: str = "BTC-USD", limit: int = 500) -> pd.DataFrame:
+    """Load OHLCV bars from the five_minute_bars table."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT bar_start, open, high, low, close, volume "
+            "FROM five_minute_bars WHERE pair = ? ORDER BY bar_start DESC LIMIT ?",
+            (pair, limit),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        data = [dict(r) for r in rows]
+        df = pd.DataFrame(data)
+        df = df.sort_values("bar_start").reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
 
 class RegimeOverlay:
     """
     Adapter that provides market regime intelligence to the Renaissance Trading Bot.
-    Uses the 5-state HMM AdvancedRegimeDetector when available, with legacy fallback.
+    Uses Bootstrap ATR/SMA rules when <200 bars, then switches to trained HMM.
+    Reads OHLCV from five_minute_bars DB table for proper HMM input.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None):
+    def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None,
+                 db_path: Optional[str] = None):
         self.logger = logger or logging.getLogger(__name__)
         self.enabled = config.get("enabled", False)
         self.consciousness_boost = config.get("consciousness_boost", 0.0)
+        self._db_path = db_path
 
         # Initialize the experimental regime detector (legacy)
         self.detector = RenaissanceTechnicalIndicators()
 
         # Legacy 3-state HMM
         self.hmm_predictor = MedallionRegimePredictor(n_regimes=3, logger=self.logger)
+
+        # Bootstrap classifier (works with 20+ bars)
+        self._bootstrap = BootstrapRegimeClassifier(logger=self.logger)
+
+        # Active classifier tracking
+        self._active_classifier = "bootstrap"  # "bootstrap" or "hmm"
+        self._bar_count = 0
 
         # Advanced 5-state HMM (new)
         self._advanced_detector: Optional[Any] = None
@@ -47,7 +166,7 @@ class RegimeOverlay:
             hmm_cfg = {
                 "n_regimes": config.get("hmm_regimes", 5),
                 "refit_interval": config.get("hmm_refit_interval", 50),
-                "min_samples": config.get("hmm_min_samples", 200),
+                "min_samples": config.get("hmm_min_samples", HMM_MIN_BARS),
                 "covariance_type": config.get("hmm_covariance_type", "full"),
                 "n_iter": config.get("hmm_n_iter", 150),
             }
@@ -55,12 +174,22 @@ class RegimeOverlay:
             self.logger.info("Advanced 5-state HMM regime detector initialized")
 
         self.current_regime = None
-        self.logger.info(f"RegimeOverlay initialized (Enabled: {self.enabled}, Advanced HMM: {ADVANCED_HMM_AVAILABLE})")
+        self.logger.info(
+            f"RegimeOverlay initialized (Enabled: {self.enabled}, "
+            f"Advanced HMM: {ADVANCED_HMM_AVAILABLE}, Bootstrap: ready)"
+        )
+
+    def set_db_path(self, db_path: str):
+        """Set the DB path for reading five_minute_bars (called after init if not passed)."""
+        self._db_path = db_path
 
     def update(self, price_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         Update market regime detection using the latest price data.
-        Uses the 5-state HMM if available, otherwise falls back to legacy.
+        1. Loads OHLCV bars from five_minute_bars table
+        2. If >= 200 bars: use HMM (AdvancedRegimeDetector)
+        3. Else if >= 20 bars: use Bootstrap ATR/SMA rules
+        4. Falls back to legacy signals if no bars available
         """
         if not self.enabled or price_df.empty:
             return None
@@ -78,27 +207,65 @@ class RegimeOverlay:
                 'confidence': signals.get('confidence', 0.0)
             }
 
-            # --- Advanced 5-state HMM path ---
-            if self._advanced_detector is not None:
+            # Load OHLCV bars from DB for regime classification
+            # Try BTC-USD first, fall back to BTC/USDT (arbitrage module)
+            bars_df = pd.DataFrame()
+            if self._db_path:
+                bars_df = _load_bars_from_db(self._db_path, pair="BTC-USD", limit=500)
+                if len(bars_df) < BOOTSTRAP_MIN_BARS:
+                    alt = _load_bars_from_db(self._db_path, pair="BTC/USDT", limit=500)
+                    if len(alt) > len(bars_df):
+                        bars_df = alt
+
+            self._bar_count = len(bars_df)
+
+            # --- Path A: HMM with proper OHLCV bars (>= 200 bars) ---
+            hmm_classified = False
+            if (self._advanced_detector is not None
+                    and len(bars_df) >= HMM_MIN_BARS):
+                # Fit if not already fitted
+                if not self._advanced_detector.is_fitted:
+                    self._advanced_detector.fit(bars_df)
+                    if self._advanced_detector.is_fitted:
+                        self.logger.info(
+                            f"HMM fitted from five_minute_bars: {len(bars_df)} bars"
+                        )
+
                 # Periodically refit
-                self._advanced_detector.maybe_refit(price_df, self._cycle_count)
+                if self._advanced_detector.is_fitted:
+                    self._advanced_detector.maybe_refit(bars_df, self._cycle_count)
 
-                # If not fitted yet and we have enough data, do initial fit
-                if not self._advanced_detector.is_fitted and len(price_df) >= 200:
-                    self._advanced_detector.fit(price_df)
-
-                # Predict current regime
-                regime_state = self._advanced_detector.predict(price_df)
+                # Predict
+                regime_state = self._advanced_detector.predict(bars_df)
                 if regime_state is not None:
                     self._advanced_regime_state = regime_state
+                    self._active_classifier = "hmm"
                     self.current_regime['hmm_regime'] = regime_state.current_regime.value
                     self.current_regime['hmm_confidence'] = regime_state.confidence
                     self.current_regime['regime_probabilities'] = regime_state.regime_probabilities
                     self.current_regime['next_regime_probs'] = regime_state.next_regime_probs
                     self.current_regime['regime_duration'] = regime_state.regime_duration_estimate
                     self.current_regime['alpha_weights'] = regime_state.alpha_weights
+                    self.current_regime['classifier'] = "hmm"
+                    hmm_classified = True
 
-            # --- Legacy HMM path ---
+            # --- Path B: Bootstrap ATR/SMA rules (20-199 bars) ---
+            if not hmm_classified and len(bars_df) >= BOOTSTRAP_MIN_BARS:
+                bootstrap_result = self._bootstrap.classify(bars_df)
+                self._active_classifier = "bootstrap"
+                self.current_regime['hmm_regime'] = bootstrap_result['regime']
+                self.current_regime['hmm_confidence'] = bootstrap_result['confidence']
+                self.current_regime['classifier'] = "bootstrap"
+                self.current_regime['bootstrap_details'] = bootstrap_result.get('details', '')
+
+            # --- Path C: No bars → stay unknown ---
+            if not hmm_classified and len(bars_df) < BOOTSTRAP_MIN_BARS:
+                self._active_classifier = "none"
+                self.current_regime['hmm_regime'] = 'unknown'
+                self.current_regime['hmm_confidence'] = 0.0
+                self.current_regime['classifier'] = 'none'
+
+            # --- Legacy HMM path (for hmm_forecast field) ---
             if not self.hmm_predictor.is_fitted and len(price_df) > 100:
                 self.hmm_predictor.fit(price_df)
 
@@ -124,10 +291,11 @@ class RegimeOverlay:
                 self.current_regime['volatility_acceleration'] = 1.0
 
             regime_label = self.current_regime.get('hmm_regime', 'unknown')
+            conf = self.current_regime.get('hmm_confidence', 0.0)
             self.logger.info(
-                f"Market Regime: {regime_label} "
-                f"(Persistence: {self.current_regime['trend_persistence']:.2f}, "
-                f"VolAccel: {self.current_regime['volatility_acceleration']:.2f})"
+                f"Market Regime: {regime_label} [{self._active_classifier}] "
+                f"(conf={conf:.2f}, bars={self._bar_count}, "
+                f"Persist={self.current_regime['trend_persistence']:.2f})"
             )
 
             return self.current_regime
@@ -135,6 +303,16 @@ class RegimeOverlay:
         except Exception as e:
             self.logger.error(f"Regime detection failed in overlay: {e}")
             return None
+
+    @property
+    def active_classifier(self) -> str:
+        """Return which classifier is currently active: 'bootstrap', 'hmm', or 'none'."""
+        return self._active_classifier
+
+    @property
+    def bar_count(self) -> int:
+        """Return how many five-minute bars are available."""
+        return self._bar_count
 
     def get_regime_adjusted_weights(self, base_weights: Dict[str, float]) -> Dict[str, float]:
         """
@@ -206,7 +384,7 @@ class RegimeOverlay:
 
     def get_hmm_regime_label(self) -> str:
         """Return the current HMM regime label string."""
-        if self._advanced_regime_state is not None:
+        if self._active_classifier == "hmm" and self._advanced_regime_state is not None:
             return self._advanced_regime_state.current_regime.value
         if self.current_regime:
             return self.current_regime.get('hmm_regime', 'unknown')
@@ -235,14 +413,10 @@ class RegimeOverlay:
         # Calculate probability of transitioning to an adverse regime
         adverse_prob = 0.0
         if current_regime in bullish_regimes:
-            # Currently bullish — adverse = transitioning to bearish
             adverse_prob = sum(next_probs.get(r, 0.0) for r in bearish_regimes)
         elif current_regime in bearish_regimes:
-            # Currently bearish — adverse = transitioning to bullish (if we're short)
-            # In a long-only bot, bearish->bullish is actually good, so use neutral as adverse
             adverse_prob = sum(next_probs.get(r, 0.0) for r in bullish_regimes)
         else:
-            # Neutral — adverse = transitioning to trending (high vol)
             adverse_prob = next_probs.get('bear_trending', 0.0) + next_probs.get('bull_trending', 0.0)
 
         duration = self.current_regime.get('regime_duration', 0)
@@ -274,5 +448,12 @@ class RegimeOverlay:
             conf = self._advanced_regime_state.confidence
             return float((conf - 0.5) * 0.1)  # Max +/- 5% boost
 
-        conf_score = self.current_regime.get('confidence_score', 0.5)
-        return (conf_score - 0.5) * 0.1
+        # Use bootstrap confidence
+        hmm_conf = self.current_regime.get('hmm_confidence', 0.5)
+        return (hmm_conf - 0.5) * 0.1
+
+    def get_current_regime(self) -> str:
+        """Return current regime name for display."""
+        if self.current_regime:
+            return self.current_regime.get('hmm_regime', 'unknown')
+        return 'unknown'

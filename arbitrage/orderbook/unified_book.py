@@ -37,7 +37,7 @@ class UnifiedPairView:
     @property
     def is_fresh(self) -> bool:
         now = datetime.utcnow()
-        max_age = timedelta(seconds=5)  # 5s for REST polling mode
+        max_age = timedelta(seconds=3)  # 3s — WS ideal, REST fallback compatible
         return (
             (now - self.mexc_last_update) < max_age
             and (now - self.binance_last_update) < max_age
@@ -119,11 +119,13 @@ class UnifiedPairView:
 class UnifiedBookManager:
     """Manages order books for all monitored pairs across both exchanges."""
 
-    def __init__(self, mexc_client, binance_client, pairs: Optional[List[str]] = None):
+    def __init__(self, mexc_client, binance_client, pairs: Optional[List[str]] = None,
+                 bar_aggregator=None):
         self.mexc = mexc_client
         self.binance = binance_client
         self.monitored_pairs = pairs or PHASE_1_PAIRS
         self.pairs: Dict[str, UnifiedPairView] = {}
+        self._bar_aggregator = bar_aggregator
         self._running = False
         self._validation_task = None
 
@@ -161,12 +163,30 @@ class UnifiedBookManager:
             self.pairs[pair].mexc_book = book
             self.pairs[pair].mexc_last_update = datetime.utcnow()
             self.pairs[pair].mexc_update_count += 1
+            if self._bar_aggregator and book.best_bid and book.best_ask:
+                try:
+                    self._bar_aggregator.on_orderbook_snapshot(
+                        pair=pair, exchange="mexc",
+                        best_bid=float(book.best_bid), best_ask=float(book.best_ask),
+                        timestamp=book.timestamp.timestamp(),
+                    )
+                except Exception:
+                    pass
 
     async def _on_binance_update(self, pair: str, book: OrderBook):
         if pair in self.pairs:
             self.pairs[pair].binance_book = book
             self.pairs[pair].binance_last_update = datetime.utcnow()
             self.pairs[pair].binance_update_count += 1
+            if self._bar_aggregator and book.best_bid and book.best_ask:
+                try:
+                    self._bar_aggregator.on_orderbook_snapshot(
+                        pair=pair, exchange="binance",
+                        best_bid=float(book.best_bid), best_ask=float(book.best_ask),
+                        timestamp=book.timestamp.timestamp(),
+                    )
+                except Exception:
+                    pass
 
     async def _validation_loop(self):
         """Every 30s, validate local books against REST snapshots."""

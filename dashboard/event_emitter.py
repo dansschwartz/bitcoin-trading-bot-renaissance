@@ -25,6 +25,8 @@ class DashboardEventEmitter:
     def __init__(self) -> None:
         self._subscribers: List[queue.Queue] = []
         self._lock = threading.Lock()
+        # Cache latest payload per channel for REST fallback (even with 0 WS clients)
+        self._channel_cache: Dict[str, Any] = {}
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=2000)
@@ -45,6 +47,10 @@ class DashboardEventEmitter:
     def emit_sync(self, channel: str, payload: Dict[str, Any]) -> None:
         self._do_emit(channel, payload)
 
+    def get_cached(self, channel: str) -> Any:
+        """Get the latest cached payload for a channel (REST fallback)."""
+        return self._channel_cache.get(channel)
+
     def _do_emit(self, channel: str, payload: Dict[str, Any]) -> None:
         msg = {
             "channel": channel,
@@ -52,6 +58,8 @@ class DashboardEventEmitter:
             "ts": datetime.now(timezone.utc).isoformat(),
         }
         with self._lock:
+            # Cache for REST fallback regardless of WS clients
+            self._channel_cache[channel] = payload
             for q in self._subscribers:
                 try:
                     q.put_nowait(msg)

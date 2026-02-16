@@ -1,8 +1,10 @@
 """
 Binance exchange client — SECONDARY exchange for arbitrage.
-Uses ccxt for unified interface. Includes BNB fee discount logic.
+Uses ccxt for REST API, real WebSocket for streaming market data.
+Includes BNB fee discount logic.
 """
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime
@@ -10,13 +12,23 @@ from decimal import Decimal
 from typing import Optional, Callable, Awaitable, Dict
 
 import ccxt.async_support as ccxt_async
+import websockets
 
 from .base import (
     ExchangeClient, OrderBook, OrderBookLevel, OrderRequest, OrderResult,
     OrderSide, OrderType, OrderStatus, TimeInForce, Balance, FundingRate,
+    Trade,
 )
 
 logger = logging.getLogger("arb.binance")
+
+# WebSocket constants
+WS_ENDPOINT = "wss://stream.binance.com:9443/ws"
+WS_MAX_AGE_HOURS = 23
+WS_MAX_RECONNECT = 3
+WS_FALLBACK_DURATION = 60
+WS_DEPTH_LEVELS = 20
+WS_DEPTH_UPDATE_SPEED_MS = 100
 
 
 class BinanceClient(ExchangeClient):
@@ -29,9 +41,11 @@ class BinanceClient(ExchangeClient):
         self._api_secret = api_secret
         self._exchange: Optional[ccxt_async.binance] = None
         self._symbol_info_cache: Dict[str, dict] = {}
-        self._ws_callbacks: Dict[str, Callable] = {}
+        self._ws_callbacks: Dict[str, Callable] = {}      # symbol → depth callback
+        self._trade_callbacks: Dict[str, Callable] = {}    # symbol → trade callback
         self._ws_running = False
         self._last_books: Dict[str, OrderBook] = {}
+        self._ws_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
         config = {
@@ -54,6 +68,8 @@ class BinanceClient(ExchangeClient):
 
     async def disconnect(self) -> None:
         self._ws_running = False
+        if self._ws_task and not self._ws_task.done():
+            self._ws_task.cancel()
         if self._exchange:
             await self._exchange.close()
             self._exchange = None
@@ -72,11 +88,136 @@ class BinanceClient(ExchangeClient):
         self._ws_callbacks[symbol] = callback
         if not self._ws_running:
             self._ws_running = True
-            asyncio.create_task(self._ws_order_book_loop())
+            self._ws_task = asyncio.create_task(self._ws_main_loop())
 
-    async def _ws_order_book_loop(self):
-        """Fetch order books for all subscribed symbols in parallel."""
+    async def subscribe_trades(
+        self, symbol: str,
+        callback: Callable[[Trade], Awaitable[None]],
+    ) -> None:
+        self._trade_callbacks[symbol] = callback
+
+    # ========== WebSocket Engine ==========
+
+    async def _ws_main_loop(self):
+        """Outer loop: reconnection state machine."""
+        reconnect_attempts = 0
         while self._ws_running:
+            try:
+                await self._ws_connect_and_run()
+                reconnect_attempts = 0
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                reconnect_attempts += 1
+                if reconnect_attempts >= WS_MAX_RECONNECT:
+                    logger.warning(f"Binance WS failed {reconnect_attempts}x, falling back to REST for {WS_FALLBACK_DURATION}s")
+                    await self._rest_fallback_loop()
+                    reconnect_attempts = 0
+                else:
+                    backoff = min(2 ** reconnect_attempts, 30)
+                    logger.warning(f"Binance WS disconnected: {e} — reconnecting in {backoff}s (attempt {reconnect_attempts})")
+                    await asyncio.sleep(backoff)
+
+    async def _ws_connect_and_run(self):
+        """Single WebSocket session lifecycle using combined stream URL."""
+        connect_time = time.monotonic()
+        max_age_sec = WS_MAX_AGE_HOURS * 3600
+
+        # Build combined stream URL — includes symbol in every message wrapper
+        all_syms = set(list(self._ws_callbacks.keys()) + list(self._trade_callbacks.keys()))
+        streams = []
+        for symbol in all_syms:
+            raw_sym = self._normalized_to_binance_sym(symbol)
+            if symbol in self._ws_callbacks:
+                streams.append(f"{raw_sym}@depth{WS_DEPTH_LEVELS}@{WS_DEPTH_UPDATE_SPEED_MS}ms")
+            if symbol in self._trade_callbacks:
+                streams.append(f"{raw_sym}@trade")
+
+        stream_path = "/".join(streams)
+        url = f"{WS_ENDPOINT.replace('/ws', '')}/stream?streams={stream_path}"
+
+        async with websockets.connect(
+            url,
+            ping_interval=20,
+            ping_timeout=60,
+            close_timeout=5,
+        ) as ws:
+            logger.info(f"Binance WebSocket connected ({len(streams)} streams)")
+
+            async for raw in ws:
+                if not self._ws_running:
+                    break
+                if time.monotonic() - connect_time > max_age_sec:
+                    logger.info("Binance WS max age reached (23h), reconnecting")
+                    break
+                try:
+                    self._ws_handle_message(raw)
+                except Exception as e:
+                    logger.debug(f"Binance WS message parse error: {e}")
+
+    def _ws_handle_message(self, raw: str):
+        """Parse combined-stream JSON message and dispatch to depth/trade handlers."""
+        wrapper = json.loads(raw)
+
+        # Combined stream format: {"stream": "btcusdt@depth20@100ms", "data": {...}}
+        stream_name = wrapper.get("stream", "")
+        msg = wrapper.get("data", wrapper)  # Fall back to raw if no wrapper
+
+        if not stream_name:
+            return
+
+        # Extract symbol from stream name: "btcusdt@depth20@100ms" → "btcusdt"
+        raw_sym = stream_name.split("@")[0].upper()
+        symbol = self._binance_sym_to_normalized(raw_sym)
+
+        if "@depth" in stream_name:
+            self._ws_handle_depth(msg, symbol)
+        elif "@trade" in stream_name:
+            self._ws_handle_trade(msg, symbol)
+
+    def _ws_handle_depth(self, msg: dict, symbol: str):
+        """Parse depth snapshot → OrderBook → invoke callback."""
+        bids = msg.get("bids", msg.get("b", []))
+        asks = msg.get("asks", msg.get("a", []))
+
+        book = OrderBook(
+            exchange="binance",
+            symbol=symbol,
+            timestamp=datetime.utcnow(),
+            bids=[OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in bids[:WS_DEPTH_LEVELS]],
+            asks=[OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in asks[:WS_DEPTH_LEVELS]],
+        )
+        self._last_books[symbol] = book
+
+        cb = self._ws_callbacks.get(symbol)
+        if cb:
+            asyncio.get_event_loop().create_task(cb(book))
+
+    def _ws_handle_trade(self, msg: dict, symbol: str):
+        """Parse trade event → Trade → invoke callback."""
+        cb = self._trade_callbacks.get(symbol)
+        if not cb:
+            return
+
+        # "m" == true means buyer is market maker, so the taker side is SELL
+        side = OrderSide.SELL if msg.get("m", False) else OrderSide.BUY
+
+        trade = Trade(
+            exchange="binance",
+            symbol=symbol,
+            trade_id=str(msg.get("t", "")),
+            price=Decimal(str(msg.get("p", "0"))),
+            quantity=Decimal(str(msg.get("q", "0"))),
+            side=side,
+            timestamp=datetime.utcfromtimestamp(msg.get("T", time.time() * 1000) / 1000),
+        )
+        asyncio.get_event_loop().create_task(cb(trade))
+
+    async def _rest_fallback_loop(self):
+        """REST polling fallback when WS fails repeatedly."""
+        end_time = time.monotonic() + WS_FALLBACK_DURATION
+        logger.info("Binance entering REST fallback mode")
+        while self._ws_running and time.monotonic() < end_time:
             async def _fetch_one(sym, cb):
                 try:
                     raw = await self._exchange.fetch_order_book(sym, limit=20)
@@ -84,12 +225,31 @@ class BinanceClient(ExchangeClient):
                     self._last_books[sym] = book
                     await cb(book)
                 except Exception as e:
-                    logger.debug(f"Binance book update error {sym}: {e}")
+                    logger.debug(f"Binance REST fallback error {sym}: {e}")
 
             tasks = [_fetch_one(s, c) for s, c in list(self._ws_callbacks.items())]
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(0.5)  # 500ms cycle for REST rate limit safety
+            await asyncio.sleep(0.5)
+        logger.info("Binance REST fallback complete, retrying WebSocket")
+
+    # ========== Symbol Conversion ==========
+
+    def _normalized_to_binance_sym(self, symbol: str) -> str:
+        """BTC/USDT → btcusdt (lowercase, no slash)."""
+        return symbol.replace("/", "").lower()
+
+    def _binance_sym_to_normalized(self, raw: str) -> str:
+        """BTCUSDT → BTC/USDT. Best-effort using known quote currencies."""
+        raw = raw.upper()
+        for quote in ("USDT", "USDC", "BTC", "ETH", "BNB"):
+            if raw.endswith(quote):
+                base = raw[: -len(quote)]
+                if base:
+                    return f"{base}/{quote}"
+        return raw
+
+    # ========== REST endpoints (unchanged) ==========
 
     async def get_ticker(self, symbol: str) -> dict:
         ticker = await self._exchange.fetch_ticker(symbol)

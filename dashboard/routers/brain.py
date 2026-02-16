@@ -37,6 +37,20 @@ async def regime_status(request: Request):
     db = request.app.state.dashboard_config.db_path
     history = db_queries.get_regime_history(db, limit=50)
     current = history[0] if history else None
+
+    # Overlay live regime from emitter cache (has classifier + bar_count)
+    emitter = getattr(request.app.state, "emitter", None)
+    live = emitter.get_cached("regime") if emitter else None
+    if live:
+        current = {
+            **(current or {}),
+            "hmm_regime": live.get("hmm_regime", "unknown"),
+            "confidence": live.get("confidence", 0.0),
+            "classifier": live.get("classifier", "none"),
+            "bar_count": live.get("bar_count", 0),
+            "details": live.get("details", ""),
+        }
+
     return {
         "current": current,
         "history": history,
@@ -45,9 +59,16 @@ async def regime_status(request: Request):
 
 @router.get("/confluence")
 async def confluence_status(request: Request):
-    """Confluence data — populated via WebSocket events from live bot."""
-    emitter_state = getattr(request.app.state, "last_confluence", None)
-    return emitter_state or {"status": "no_live_data", "message": "Waiting for bot cycle"}
+    """Confluence data — populated via emitter cache from live bot."""
+    # Primary: read from emitter's channel cache (works even with 0 WS clients)
+    emitter = getattr(request.app.state, "emitter", None)
+    if emitter:
+        cached = emitter.get_cached("confluence")
+        if cached:
+            return cached
+    # Fallback: legacy WS relay cache
+    legacy = getattr(request.app.state, "last_confluence", None)
+    return legacy or {"status": "no_live_data", "message": "Waiting for bot cycle"}
 
 
 @router.get("/vae")

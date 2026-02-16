@@ -35,6 +35,7 @@ from arbitrage.triangular.triangle_arb import TriangularArbitrage
 from arbitrage.risk.arb_risk import ArbitrageRiskEngine
 from arbitrage.inventory.manager import InventoryManager
 from arbitrage.tracking.performance import PerformanceTracker
+from arbitrage.exchanges.base import Trade
 
 logger = logging.getLogger("arb.orchestrator")
 
@@ -64,9 +65,15 @@ class ArbitrageOrchestrator:
             paper_trading=paper,
         )
 
+        # BarAggregator for trade/book data
+        self.bar_aggregator = self._init_bar_aggregator()
+
         # Core modules
         pairs = self.config.get('pairs', {}).get('phase_1', [])
-        self.book_manager = UnifiedBookManager(self.mexc, self.binance, pairs=pairs)
+        self.book_manager = UnifiedBookManager(
+            self.mexc, self.binance, pairs=pairs,
+            bar_aggregator=self.bar_aggregator,
+        )
         self.cost_model = ArbitrageCostModel()
         self.risk_engine = ArbitrageRiskEngine(self.config.get('risk', {}))
 
@@ -169,6 +176,7 @@ class ArbitrageOrchestrator:
             asyncio.create_task(self._run_triangular_arb(), name="triangular_arb"),
             asyncio.create_task(self._run_monitoring(), name="monitoring"),
             asyncio.create_task(self._run_inventory_checks(), name="inventory"),
+            asyncio.create_task(self._subscribe_trade_feeds(), name="trade_feeds"),
         ]
 
         logger.info(f"All {len(tasks)} subsystems launched")
@@ -286,6 +294,52 @@ class ArbitrageOrchestrator:
             except Exception as e:
                 logger.debug(f"Inventory check error: {e}")
             await asyncio.sleep(interval)
+
+    # --- BarAggregator + Trade Feeds ---
+
+    def _init_bar_aggregator(self):
+        """Create BarAggregator if the module is available."""
+        try:
+            from data_module.bar_aggregator import BarAggregator
+            bar_agg = BarAggregator(config=self.config)
+            logger.info("BarAggregator initialized for trade/book data")
+            return bar_agg
+        except Exception as e:
+            logger.warning(f"BarAggregator not available (trade data won't aggregate): {e}")
+            return None
+
+    async def _subscribe_trade_feeds(self):
+        """Subscribe to trade streams on both exchanges for all pairs."""
+        await asyncio.sleep(3)  # Wait for WS connections to establish
+        pairs = self.config.get('pairs', {}).get('phase_1', [])
+
+        for pair in pairs:
+            try:
+                await self.mexc.subscribe_trades(pair, self._on_trade)
+                await self.binance.subscribe_trades(pair, self._on_trade)
+            except Exception as e:
+                logger.debug(f"Trade subscribe error for {pair}: {e}")
+
+        logger.info(f"Trade feeds subscribed for {len(pairs)} pairs on both exchanges")
+
+        # Keep task alive
+        while self._running:
+            await asyncio.sleep(60)
+
+    async def _on_trade(self, trade: Trade):
+        """Forward trade data to BarAggregator."""
+        if self.bar_aggregator:
+            try:
+                self.bar_aggregator.on_trade(
+                    pair=trade.symbol,
+                    exchange=trade.exchange,
+                    price=float(trade.price),
+                    quantity=float(trade.quantity),
+                    side=trade.side.value,
+                    timestamp=trade.timestamp.timestamp(),
+                )
+            except Exception:
+                pass
 
     # --- Reporting ---
 

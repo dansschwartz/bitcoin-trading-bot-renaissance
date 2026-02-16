@@ -20,7 +20,7 @@ async def open_positions(request: Request):
             entry_price = pos.get("entry_price", 0.0)
             size = pos.get("size", 0.0)
             side = pos.get("side", "BUY")
-            if side == "BUY":
+            if side.upper() in ("BUY", "LONG"):
                 pos["unrealized_pnl"] = round((current_price - entry_price) * size, 2)
             else:
                 pos["unrealized_pnl"] = round((entry_price - current_price) * size, 2)

@@ -55,3 +55,10 @@ async def calendar_heatmap(request: Request):
 async def hourly_heatmap(request: Request):
     db = request.app.state.dashboard_config.db_path
     return db_queries.get_hourly_pnl(db)
+
+
+@router.get("/benchmark")
+async def benchmark(request: Request, range: str = "1D", product_id: str = "BTC-USD"):
+    db = request.app.state.dashboard_config.db_path
+    hours = _parse_range(range)
+    return db_queries.get_benchmark_equity(db, hours=hours, product_id=product_id)

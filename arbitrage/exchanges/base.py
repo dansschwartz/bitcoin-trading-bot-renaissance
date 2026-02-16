@@ -18,6 +18,13 @@ class OrderSide(Enum):
     SELL = "sell"
 
 
+class SpeedTier(Enum):
+    """Execution speed tiers — determines fee structure."""
+    MAKER_MAKER = "maker_maker"    # Both legs maker — cheapest, slowest
+    TAKER_MAKER = "taker_maker"    # Buy taker, sell maker — medium speed
+    TAKER_TAKER = "taker_taker"    # Both legs taker — fastest, most expensive
+
+
 class OrderType(Enum):
     LIMIT = "limit"
     MARKET = "market"
@@ -161,6 +168,18 @@ class FundingRate:
     timestamp: datetime
 
 
+@dataclass
+class Trade:
+    """A single trade event from a WebSocket stream."""
+    exchange: str
+    symbol: str        # Normalized: "BTC/USDT"
+    trade_id: str
+    price: Decimal
+    quantity: Decimal
+    side: OrderSide    # BUY or SELL (taker side)
+    timestamp: datetime
+
+
 class ExchangeClient(ABC):
     """Abstract base. Both MEXC and Binance clients implement this."""
 
@@ -182,6 +201,13 @@ class ExchangeClient(ABC):
         self, symbol: str,
         callback: Callable[[OrderBook], Awaitable[None]],
         depth: int = 20,
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def subscribe_trades(
+        self, symbol: str,
+        callback: Callable[['Trade'], Awaitable[None]],
     ) -> None:
         pass
 

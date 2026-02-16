@@ -4,10 +4,10 @@ import MetricCard from '../components/cards/MetricCard';
 import RegimeCard from '../components/cards/RegimeCard';
 import EquityCurve from '../components/charts/EquityCurve';
 import PriceChart from '../components/charts/PriceChart';
-import OpenPositionsTable from '../components/tables/OpenPositionsTable';
+import AssetSummaryPanel from '../components/panels/AssetSummaryPanel';
 import ActivityFeed from '../components/panels/ActivityFeed';
+import SystemHealthBar from '../components/panels/SystemHealthBar';
 import { useDashboard } from '../context/DashboardContext';
-import { formatCurrency, formatNumber } from '../utils/formatters';
 
 export default function CommandCenter() {
   const { state } = useDashboard();
@@ -15,6 +15,9 @@ export default function CommandCenter() {
 
   return (
     <PageShell title="Command Center" subtitle="Real-time operational overview">
+      {/* System Health Bar */}
+      <SystemHealthBar />
+
       {/* Metric Cards Row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <PnLCard />
@@ -41,7 +44,7 @@ export default function CommandCenter() {
 
       {/* Bottom Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <OpenPositionsTable />
+        <AssetSummaryPanel compact />
         <ActivityFeed />
       </div>
     </PageShell>

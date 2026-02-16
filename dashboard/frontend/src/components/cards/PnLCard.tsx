@@ -7,17 +7,20 @@ export default function PnLCard() {
   const pnl = state.pnl;
 
   if (!pnl) {
-    return <MetricCard title="Realized P&L" value="--" subtitle="Loading..." />;
+    return <MetricCard title="Total P&L" value="--" subtitle="Loading..." />;
   }
 
-  const color = pnlColor(pnl.realized_pnl);
+  const totalPnl = pnl.total_pnl ?? (pnl.realized_pnl + (pnl.unrealized_pnl || 0));
+  const color = pnlColor(totalPnl);
+  const wr = pnl.win_rate != null ? `WR: ${(pnl.win_rate * 100).toFixed(1)}%` : '';
+  const trips = pnl.total_round_trips != null ? `${pnl.total_round_trips} round-trips` : `${pnl.total_trades} trades`;
 
   return (
     <MetricCard
-      title="Realized P&L (24h)"
-      value={`${pnlSign(pnl.realized_pnl)}${formatCurrency(pnl.realized_pnl)}`}
+      title="Total P&L (24h)"
+      value={`${pnlSign(totalPnl)}${formatCurrency(totalPnl)}`}
       valueColor={color}
-      subtitle={`${pnl.total_trades} trades | WR: ${(pnl.win_rate * 100).toFixed(1)}%`}
+      subtitle={`R: ${pnlSign(pnl.realized_pnl)}${formatCurrency(pnl.realized_pnl)} | U: ${pnlSign(pnl.unrealized_pnl || 0)}${formatCurrency(pnl.unrealized_pnl || 0)} | ${trips} | ${wr}`}
     />
   );
 }

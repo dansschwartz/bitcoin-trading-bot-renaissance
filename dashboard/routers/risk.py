@@ -27,6 +27,15 @@ async def gateway_log(request: Request, limit: int = 100):
 
 @router.get("/alerts")
 async def active_alerts(request: Request):
-    """Active alerts — populated from emitter state."""
-    alerts = getattr(request.app.state, "active_alerts", [])
-    return {"alerts": alerts}
+    """Active alerts — generated from risk metrics + any live WebSocket alerts."""
+    db = request.app.state.dashboard_config.db_path
+    cfg = request.app.state.dashboard_config
+    thresholds = cfg.dashboard.get("alerts", {})
+
+    # Compute alerts from current risk state
+    computed = db_queries.evaluate_risk_alerts(db, thresholds if thresholds else None)
+
+    # Merge with any live WS-pushed alerts
+    ws_alerts = getattr(request.app.state, "active_alerts", [])
+
+    return {"alerts": computed + ws_alerts}

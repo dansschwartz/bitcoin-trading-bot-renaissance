@@ -247,7 +247,7 @@ class PaperTradingSimulator:
     def __init__(self):
         self.orders = {}
         self.balances = {
-            "USD": {"available": "10000.00", "hold": "0.00"},
+            "USD": {"available": "410000.00", "hold": "0.00"},
             "BTC": {"available": "0.00", "hold": "0.00"}
         }
         self.order_counter = 1000
@@ -749,7 +749,7 @@ class EnhancedCoinbaseClient:
                     "uuid": account_uuid,
                     "name": "Paper Trading Account",
                     "currency": "USD",
-                    "available_balance": {"value": "10000.00", "currency": "USD"},
+                    "available_balance": {"value": "410000.00", "currency": "USD"},
                     "default": True,
                     "active": True,
                     "created_at": "2024-01-01T00:00:00Z",

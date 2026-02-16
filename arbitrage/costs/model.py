@@ -12,6 +12,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional, Dict, List
 
+from ..exchanges.base import SpeedTier
+
 logger = logging.getLogger("arb.costs")
 
 
@@ -67,6 +69,7 @@ class ArbitrageCostModel:
         sell_price: Decimal,
         quantity: Optional[Decimal] = None,
         market_type: str = "spot",
+        speed_tier: SpeedTier = SpeedTier.MAKER_MAKER,
     ) -> CostEstimate:
         """Estimate total roundtrip cost of an arbitrage trade."""
         buy_fee_maker = self.FEES[buy_exchange][market_type]["maker"]
@@ -97,8 +100,16 @@ class ArbitrageCostModel:
             + buy_slippage + sell_slippage + timing_cost
         )
 
+        # Select total_cost_bps based on requested speed tier
+        if speed_tier == SpeedTier.TAKER_TAKER:
+            selected_total = total_tt
+        elif speed_tier == SpeedTier.TAKER_MAKER:
+            selected_total = total_tm
+        else:
+            selected_total = total_mm
+
         return CostEstimate(
-            total_cost_bps=total_mm,
+            total_cost_bps=selected_total,
             buy_fee_bps=buy_fee_maker * 10000,
             sell_fee_bps=sell_fee_maker * 10000,
             buy_slippage_bps=buy_slippage,

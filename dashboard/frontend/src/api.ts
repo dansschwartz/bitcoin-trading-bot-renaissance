@@ -47,6 +47,10 @@ export const api = {
   distribution: () => get<{ trade_pnl: number }[]>('/api/analytics/distribution'),
   calendar: () => get<CalendarPnL[]>('/api/analytics/calendar'),
   hourly: () => get<HourlyPnL[]>('/api/analytics/hourly'),
+  benchmark: (range: TimeRange = '1D', productId = 'BTC-USD') =>
+    get<{ timestamp: string; benchmark_equity: number }[]>(
+      `/api/analytics/benchmark?range=${range}&product_id=${productId}`,
+    ),
 
   // Brain
   ensemble: () => get<EnsembleStatus>('/api/brain/ensemble'),

@@ -114,6 +114,21 @@ class _SymbolHistory:
     )
 
 
+@dataclass
+class _RealtimeState:
+    """Per-symbol real-time price/volume/spread state for fast evaluation."""
+
+    price_window: Deque[tuple] = field(
+        default_factory=lambda: deque(maxlen=120)
+    )  # (timestamp, price)
+    volume_window: Deque[tuple] = field(
+        default_factory=lambda: deque(maxlen=120)
+    )  # (timestamp, volume)
+    spread_window: Deque[tuple] = field(
+        default_factory=lambda: deque(maxlen=120)
+    )  # (timestamp, spread_bps)
+
+
 # ---------------------------------------------------------------------------
 # Detector
 # ---------------------------------------------------------------------------
@@ -170,13 +185,22 @@ class LiquidationCascadeDetector:
         # Rate-limit back-off state
         self._backoff_until: float = 0.0
 
+        # Fast evaluation loop (1s real-time cascade detection)
+        self._fast_eval_enabled: bool = bool(merged.get("fast_eval_enabled", False))
+        self._fast_eval_interval: float = float(merged.get("fast_eval_interval_seconds", 1))
+        self._fast_eval_task: Optional[asyncio.Task[None]] = None
+        self._realtime_state: Dict[str, _RealtimeState] = {
+            sym: _RealtimeState() for sym in self._symbols
+        }
+
         logger.info(
             "LiquidationCascadeDetector initialised  symbols=%s  interval=%ds  "
-            "threshold=%.2f  enabled=%s",
+            "threshold=%.2f  enabled=%s  fast_eval=%s",
             self._symbols,
             self._scan_interval,
             self._risk_threshold,
             self._enabled,
+            self._fast_eval_enabled,
         )
 
     # ----- public properties ----------------------------------------------
@@ -210,18 +234,28 @@ class LiquidationCascadeDetector:
         self._scan_task = asyncio.create_task(
             self._scan_loop(), name="liquidation-cascade-scan"
         )
+        if self._fast_eval_enabled:
+            self._fast_eval_task = asyncio.create_task(
+                self._fast_eval_loop(), name="liquidation-cascade-fast-eval"
+            )
+            logger.info(
+                "LiquidationCascadeDetector fast eval loop started (%.1fs)",
+                self._fast_eval_interval,
+            )
         logger.info("LiquidationCascadeDetector scan loop started")
 
     async def stop(self) -> None:
         """Gracefully shut down the scan loop and close the HTTP session."""
         self._running = False
-        if self._scan_task is not None:
-            self._scan_task.cancel()
-            try:
-                await self._scan_task
-            except asyncio.CancelledError:
-                pass
-            self._scan_task = None
+        for task_attr in ("_scan_task", "_fast_eval_task"):
+            task = getattr(self, task_attr, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, task_attr, None)
         if self._session is not None and not self._session.closed:
             await self._session.close()
             self._session = None
@@ -254,6 +288,134 @@ class LiquidationCascadeDetector:
             except asyncio.QueueEmpty:
                 break
         return signals
+
+    # ----- real-time price feed (fast eval) --------------------------------
+
+    def on_price_update(
+        self,
+        symbol: str,
+        price: float,
+        volume: float,
+        spread_bps: float,
+        timestamp: float,
+    ) -> None:
+        """Called by the main bot to feed real-time data for fast evaluation."""
+        if not self._fast_eval_enabled:
+            return
+        state = self._realtime_state.get(symbol)
+        if state is None:
+            # Only track configured symbols
+            if symbol not in self._symbols:
+                return
+            state = _RealtimeState()
+            self._realtime_state[symbol] = state
+
+        state.price_window.append((timestamp, price))
+        state.volume_window.append((timestamp, volume))
+        state.spread_window.append((timestamp, spread_bps))
+
+    # ----- fast evaluation loop -------------------------------------------
+
+    async def _fast_eval_loop(self) -> None:
+        """Run every 1s: combine cached REST risk with real-time metrics."""
+        logger.info("Fast eval loop started (%.1fs interval)", self._fast_eval_interval)
+        while self._running:
+            try:
+                if not self._enabled:
+                    await asyncio.sleep(self._fast_eval_interval)
+                    continue
+
+                now = time.time()
+                for symbol in self._symbols:
+                    state = self._realtime_state.get(symbol)
+                    if state is None or len(state.price_window) < 5:
+                        continue
+
+                    # --- Compute real-time metrics ---
+                    # Price drop: % decline in last 10s vs rolling 60s mean
+                    recent_prices = [
+                        p for ts, p in state.price_window if ts > now - 10
+                    ]
+                    rolling_prices = [
+                        p for ts, p in state.price_window if ts > now - 60
+                    ]
+                    if not recent_prices or not rolling_prices:
+                        continue
+
+                    recent_mean = sum(recent_prices) / len(recent_prices)
+                    rolling_mean = sum(rolling_prices) / len(rolling_prices)
+
+                    price_drop_pct = 0.0
+                    if rolling_mean > 0:
+                        price_drop_pct = (rolling_mean - recent_mean) / rolling_mean * 100.0
+
+                    # Volume surge: recent 10s volume vs rolling 60s average
+                    recent_vols = [v for ts, v in state.volume_window if ts > now - 10]
+                    rolling_vols = [v for ts, v in state.volume_window if ts > now - 60]
+                    volume_surge = 1.0
+                    if rolling_vols:
+                        avg_rolling_vol = sum(rolling_vols) / len(rolling_vols)
+                        avg_recent_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 0
+                        if avg_rolling_vol > 0:
+                            volume_surge = avg_recent_vol / avg_rolling_vol
+
+                    # Spread widening
+                    recent_spreads = [s for ts, s in state.spread_window if ts > now - 10]
+                    rolling_spreads = [s for ts, s in state.spread_window if ts > now - 60]
+                    spread_ratio = 1.0
+                    if rolling_spreads:
+                        avg_rolling_spread = sum(rolling_spreads) / len(rolling_spreads)
+                        avg_recent_spread = sum(recent_spreads) / len(recent_spreads) if recent_spreads else 0
+                        if avg_rolling_spread > 0:
+                            spread_ratio = avg_recent_spread / avg_rolling_spread
+
+                    # --- Combine with base REST risk ---
+                    base_risk = self._current_risk.get(symbol, {})
+                    base_score = float(base_risk.get("risk_score", 0.0))
+
+                    realtime_boost = 0.0
+                    # Cascade detection: sharp price drop + volume surge
+                    if price_drop_pct > 0.5 and volume_surge > 3.0:
+                        realtime_boost += 0.3
+                    elif price_drop_pct > 0.3 and volume_surge > 2.0:
+                        realtime_boost += 0.15
+                    # Spread widening adds minor boost
+                    if spread_ratio > 2.0:
+                        realtime_boost += 0.1
+
+                    enhanced_score = min(base_score + realtime_boost, 1.0)
+
+                    # Update risk dict if enhanced score differs meaningfully
+                    if realtime_boost > 0.05:
+                        enhanced_risk = dict(base_risk) if base_risk else {
+                            "direction": "long_liquidation",
+                            "funding_rate": 0.0,
+                            "funding_rate_percentile": 0.5,
+                            "open_interest_change_24h": 0.0,
+                            "long_short_ratio": 1.0,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                        enhanced_risk["risk_score"] = round(enhanced_score, 4)
+                        enhanced_risk["realtime_boost"] = round(realtime_boost, 4)
+                        enhanced_risk["price_drop_pct"] = round(price_drop_pct, 4)
+                        enhanced_risk["volume_surge"] = round(volume_surge, 2)
+                        self._current_risk[symbol] = enhanced_risk
+
+                        if enhanced_score > self._risk_threshold:
+                            logger.warning(
+                                "FAST CASCADE DETECT  symbol=%s  base=%.3f  "
+                                "boost=+%.3f  total=%.3f  price_drop=%.2f%%  "
+                                "vol_surge=%.1fx",
+                                symbol, base_score, realtime_boost,
+                                enhanced_score, price_drop_pct, volume_surge,
+                            )
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Fast eval cycle failed")
+
+            await asyncio.sleep(self._fast_eval_interval)
 
     # ----- internal scan loop ---------------------------------------------
 

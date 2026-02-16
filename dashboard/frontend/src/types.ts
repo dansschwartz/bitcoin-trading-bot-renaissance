@@ -18,6 +18,7 @@ export interface PriceSnapshot {
   bid: number;
   ask: number;
   timestamp: string;
+  change_pct?: number;
 }
 
 export interface SystemConfig {
@@ -91,16 +92,20 @@ export interface EquityPoint {
   price: number;
   pnl_delta: number;
   cumulative_pnl: number;
+  equity?: number;
 }
 
 export interface PnLSummary {
   total_trades: number;
   realized_pnl: number;
   unrealized_pnl: number;
+  total_pnl: number;
   avg_slippage: number;
   win_rate: number;
-  total_sells: number;
-  total_wins: number;
+  total_round_trips: number;
+  winning_round_trips: number;
+  initial_capital: number;
+  current_equity: number;
 }
 
 export interface RegimePerformance {
@@ -155,8 +160,24 @@ export interface RiskMetrics {
   max_drawdown: number;
   cumulative_pnl: number;
   peak_equity: number;
+  current_equity: number;
+  initial_capital: number;
+  sharpe_ratio: number;
   max_consecutive_losses: number;
   total_trading_days: number;
+  unrealized_pnl: number;
+}
+
+export interface AssetExposure {
+  count: number;
+  long_size: number;
+  short_size: number;
+  long_value: number;
+  short_value: number;
+  net_size: number;
+  net_value: number;
+  total_size: number;
+  total_value: number;
 }
 
 export interface Exposure {
@@ -165,7 +186,7 @@ export interface Exposure {
   net_exposure: number;
   gross_exposure: number;
   position_count: number;
-  positions_by_asset: Record<string, { count: number; total_size: number; total_value: number }>;
+  positions_by_asset: Record<string, AssetExposure>;
 }
 
 export interface RiskGatewayEntry {
@@ -176,6 +197,7 @@ export interface RiskGatewayEntry {
   confidence: number;
   vae_loss: number;
   hmm_regime: string;
+  gateway_verdict?: string;
 }
 
 // ─── WebSocket ───────────────────────────────────────────────────────────

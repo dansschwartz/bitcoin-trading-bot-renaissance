@@ -593,6 +593,192 @@ class DevilTracker:
             return None
 
     # ------------------------------------------------------------------
+    # Re-evaluation tracking (Doc 10)
+    # ------------------------------------------------------------------
+
+    _CREATE_REEVAL_TABLE = """
+    CREATE TABLE IF NOT EXISTS reeval_events (
+        event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type     TEXT NOT NULL,
+        position_id    TEXT NOT NULL,
+        timestamp      TEXT NOT NULL,
+        pair           TEXT,
+        side           TEXT,
+        reason_code    TEXT,
+        entry_price    REAL,
+        exit_price     REAL,
+        trim_price     REAL,
+        size           REAL,
+        trim_size      REAL,
+        estimated_cost_bps  REAL,
+        actual_cost_bps     REAL,
+        hold_time_seconds   REAL,
+        adjustments    INTEGER DEFAULT 0,
+        pnl_bps        REAL
+    )
+    """
+
+    def _ensure_reeval_table(self) -> None:
+        """Create the reeval_events table if it does not exist."""
+        try:
+            with self._conn() as conn:
+                conn.execute(self._CREATE_REEVAL_TABLE)
+                conn.commit()
+        except Exception as exc:
+            logger.error("DevilTracker: failed to create reeval table: %s", exc)
+
+    def record_trim(
+        self,
+        position_id: str,
+        pair: str = "",
+        trim_size: float = 0.0,
+        trim_price: float = 0.0,
+        actual_cost_bps: float = 0.0,
+    ) -> None:
+        """Record a partial position trim for analysis."""
+        try:
+            self._ensure_reeval_table()
+            now = datetime.now(timezone.utc).isoformat()
+            with self._conn() as conn:
+                conn.execute(
+                    """INSERT INTO reeval_events
+                       (event_type, position_id, timestamp, pair,
+                        trim_size, trim_price, actual_cost_bps)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    ("trim", position_id, now, pair,
+                     trim_size, trim_price, actual_cost_bps),
+                )
+                conn.commit()
+            logger.debug(
+                "DevilTracker: trim recorded pos=%s size=%.4f price=%.2f",
+                position_id, trim_size, trim_price,
+            )
+        except Exception as exc:
+            logger.error("DevilTracker.record_trim failed: %s", exc)
+
+    def record_exit(
+        self,
+        position_id: str,
+        pair: str = "",
+        side: str = "",
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        size: float = 0.0,
+        estimated_cost_bps: float = 0.0,
+        actual_cost_bps: float = 0.0,
+        reason_code: str = "",
+        hold_time_seconds: float = 0.0,
+        adjustments: int = 0,
+        pnl_bps: float = 0.0,
+    ) -> None:
+        """
+        Record a position close with full context for re-evaluation analysis.
+
+        Enables analysis of:
+          - Was the re-evaluator's timing good?
+          - Did trims improve or hurt final P&L?
+          - Which reason codes lead to best outcomes?
+        """
+        try:
+            self._ensure_reeval_table()
+            now = datetime.now(timezone.utc).isoformat()
+            with self._conn() as conn:
+                conn.execute(
+                    """INSERT INTO reeval_events
+                       (event_type, position_id, timestamp, pair, side,
+                        reason_code, entry_price, exit_price, size,
+                        estimated_cost_bps, actual_cost_bps,
+                        hold_time_seconds, adjustments, pnl_bps)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ("exit", position_id, now, pair, side,
+                     reason_code, entry_price, exit_price, size,
+                     estimated_cost_bps, actual_cost_bps,
+                     hold_time_seconds, adjustments, pnl_bps),
+                )
+                conn.commit()
+            logger.info(
+                "DevilTracker: exit recorded pos=%s reason=%s pnl=%.1fbps hold=%.0fs",
+                position_id, reason_code, pnl_bps, hold_time_seconds,
+            )
+        except Exception as exc:
+            logger.error("DevilTracker.record_exit failed: %s", exc)
+
+    def get_reeval_effectiveness_report(self) -> Dict[str, Any]:
+        """
+        How well is the re-evaluator performing?
+
+        Key metrics:
+          - Trim P&L: money saved/earned by trimming early
+          - Avg hold time: reeval positions vs hard exit positions
+          - Cost of churn: total costs from reeval-triggered orders
+        """
+        empty: Dict[str, Any] = {
+            "total_exits": 0,
+            "reeval_exits": 0,
+            "hard_exits": 0,
+            "total_trims": 0,
+            "avg_pnl_reeval_bps": 0.0,
+            "avg_pnl_hard_bps": 0.0,
+            "avg_hold_time_reeval": 0.0,
+            "avg_hold_time_hard": 0.0,
+            "avg_adjustments_per_position": 0.0,
+            "total_trim_cost_bps": 0.0,
+        }
+        try:
+            self._ensure_reeval_table()
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+
+                exits = conn.execute(
+                    "SELECT * FROM reeval_events WHERE event_type = 'exit'"
+                ).fetchall()
+                trims = conn.execute(
+                    "SELECT * FROM reeval_events WHERE event_type = 'trim'"
+                ).fetchall()
+
+            if not exits:
+                return empty
+
+            reeval_exits = [
+                e for e in exits
+                if not (e["reason_code"] or "").startswith("HARD_")
+            ]
+            hard_exits = [
+                e for e in exits
+                if (e["reason_code"] or "").startswith("HARD_")
+            ]
+
+            def _safe_avg(rows, key):
+                vals = [r[key] for r in rows if r[key] is not None]
+                return sum(vals) / len(vals) if vals else 0.0
+
+            return {
+                "total_exits": len(exits),
+                "reeval_exits": len(reeval_exits),
+                "hard_exits": len(hard_exits),
+                "total_trims": len(trims),
+                "avg_pnl_reeval_bps": round(_safe_avg(reeval_exits, "pnl_bps"), 2),
+                "avg_pnl_hard_bps": round(_safe_avg(hard_exits, "pnl_bps"), 2),
+                "avg_hold_time_reeval": round(
+                    _safe_avg(reeval_exits, "hold_time_seconds"), 1
+                ),
+                "avg_hold_time_hard": round(
+                    _safe_avg(hard_exits, "hold_time_seconds"), 1
+                ),
+                "avg_adjustments_per_position": round(
+                    _safe_avg(exits, "adjustments"), 2
+                ),
+                "total_trim_cost_bps": round(
+                    sum(
+                        (t["actual_cost_bps"] or 0) for t in trims
+                    ), 2
+                ),
+            }
+        except Exception as exc:
+            logger.error("DevilTracker.get_reeval_effectiveness_report failed: %s", exc)
+            return empty
+
+    # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
 

@@ -4,6 +4,19 @@
 exchanges:
   primary: mexc
   secondary: binance
+  mexc_order_rate_limit_per_second: 5
+
+websocket:
+  enabled: true
+  mexc_endpoint: "wss://wbs-api.mexc.com/ws"
+  mexc_ping_interval_seconds: 15
+  mexc_depth_levels: 20
+  binance_endpoint: "wss://stream.binance.com:9443/ws"
+  binance_depth_levels: 20
+  binance_depth_update_speed_ms: 100
+  max_connection_age_hours: 23
+  max_reconnect_attempts: 3
+  rest_fallback_duration_seconds: 60
 
 pairs:
   phase_1:

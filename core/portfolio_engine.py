@@ -28,9 +28,29 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
+from core.data_structures import PositionContext, ReEvalResult, REASON_CODES
+
 logger = logging.getLogger(__name__)
+
+# Try to import PositionReEvaluator (may not be available yet during bootstrap)
+try:
+    from portfolio.position_reevaluator import PositionReEvaluator
+    REEVALUATOR_AVAILABLE = True
+except ImportError:
+    REEVALUATOR_AVAILABLE = False
+
+# Try to import MHPE components (Doc 11)
+try:
+    from intelligence.microstructure_predictor import MicrostructurePredictor
+    from intelligence.statistical_predictor import StatisticalPredictor
+    from intelligence.regime_predictor import RegimePredictor
+    from intelligence.multi_horizon_estimator import MultiHorizonEstimator
+    MHPE_AVAILABLE = True
+except ImportError:
+    MHPE_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -111,13 +131,18 @@ class PortfolioEngine:
         cost_model: Optional[Any] = None,
         devil_tracker: Optional[Any] = None,
         position_manager: Optional[Any] = None,
+        kelly_sizer: Optional[Any] = None,
+        regime_detector: Optional[Any] = None,
     ):
-        raw = (config or {}).get("medallion_portfolio_engine", {})
+        full_config = config or {}
+        raw = full_config.get("medallion_portfolio_engine", {})
         self.cfg: Dict[str, Any] = {**_DEFAULT_CONFIG, **raw}
 
         self.cost_model = cost_model
         self.devil_tracker = devil_tracker
         self.position_manager = position_manager
+        self.kelly_sizer = kelly_sizer
+        self.regime_detector = regime_detector
 
         # Active signals -- keyed by (pair, signal_type)
         # Each value is the full signal dict plus an ``_expires_at`` epoch.
@@ -132,12 +157,56 @@ class PortfolioEngine:
         # Flag for graceful shutdown
         self._running: bool = False
 
+        # ── Multi-Horizon Probability Estimator (Doc 11) ──
+        self.mhpe: Optional[Any] = None
+        mhpe_cfg = full_config.get("multi_horizon_estimator", {})
+        if mhpe_cfg.get("enabled", False) and MHPE_AVAILABLE:
+            try:
+                micro_pred = MicrostructurePredictor(
+                    mhpe_cfg.get("microstructure_predictor", {})
+                )
+                stat_pred = StatisticalPredictor(
+                    mhpe_cfg.get("statistical_predictor", {})
+                )
+                regime_pred = RegimePredictor(
+                    mhpe_cfg.get("regime_predictor", {}),
+                    regime_detector=regime_detector,
+                )
+                self.mhpe = MultiHorizonEstimator(
+                    config=mhpe_cfg,
+                    micro_predictor=micro_pred,
+                    stat_predictor=stat_pred,
+                    regime_predictor=regime_pred,
+                )
+                logger.info("MHPE: ACTIVE — probability cones across 7 horizons")
+            except Exception as exc:
+                logger.warning("MHPE init failed: %s", exc)
+
+        # ── Continuous Position Re-evaluation (Doc 10) ──
+        self.reevaluator: Optional[Any] = None
+        self.open_positions: Dict[str, PositionContext] = {}
+        reeval_cfg = full_config.get("reevaluation", {})
+        if reeval_cfg.get("enabled", False) and REEVALUATOR_AVAILABLE:
+            try:
+                self.reevaluator = PositionReEvaluator(
+                    config=reeval_cfg,
+                    cost_model=cost_model,
+                    kelly_sizer=kelly_sizer,
+                    regime_detector=regime_detector,
+                    devil_tracker=devil_tracker,
+                    mhpe=self.mhpe,
+                )
+                logger.info("PositionReEvaluator: ACTIVE — continuous position management")
+            except Exception as exc:
+                logger.warning("PositionReEvaluator init failed: %s", exc)
+
         logger.info(
             "PortfolioEngine initialised: recon_interval=%ss, drift_thresh=%.1f%%, "
-            "max_corrections=%d",
+            "max_corrections=%d, reevaluator=%s",
             self.cfg["reconciliation_interval_seconds"],
             self.cfg["drift_threshold_pct"],
             self.cfg["max_corrections_per_cycle"],
+            "active" if self.reevaluator else "disabled",
         )
 
     # ------------------------------------------------------------------
@@ -491,6 +560,7 @@ class PortfolioEngine:
         """
         Async loop that periodically reconciles target vs. actual.
 
+        Now includes continuous re-evaluation of all open positions (Doc 10).
         Call ``engine.stop()`` to break the loop gracefully.
         """
         self._running = True
@@ -502,6 +572,25 @@ class PortfolioEngine:
         while self._running:
             try:
                 self._corrections_this_cycle = 0
+
+                # ═══ CONTINUOUS RE-EVALUATION (Doc 10) ═══
+                if self.reevaluator and self.open_positions:
+                    try:
+                        portfolio_state = self._get_portfolio_state()
+                        market_state = self._get_market_state()
+                        reeval_results = self.reevaluator.reevaluate_all(
+                            positions=list(self.open_positions.values()),
+                            portfolio_state=portfolio_state,
+                            market_state=market_state,
+                        )
+                        for result in reeval_results:
+                            self._execute_reeval_action(result)
+                    except Exception as exc:
+                        logger.error(
+                            "PortfolioEngine: re-evaluation error: %s", exc,
+                        )
+
+                # ═══ EXISTING: Drift correction ═══
                 drift = self.compute_drift()
                 if drift:
                     corrections = self.generate_corrections(drift)
@@ -525,6 +614,139 @@ class PortfolioEngine:
     def stop(self) -> None:
         """Signal the reconciliation loop to exit on the next iteration."""
         self._running = False
+
+    # ------------------------------------------------------------------
+    # Re-evaluation helpers (Doc 10)
+    # ------------------------------------------------------------------
+
+    def _get_portfolio_state(self) -> Dict[str, Any]:
+        """Build portfolio state dict for the re-evaluator."""
+        actual = self._last_actual
+        equity = actual.equity if actual else 10_000.0
+        return {
+            "equity": equity,
+            "available_capital": equity,
+            "daily_loss_limit_hit": False,
+            "system_halted": False,
+        }
+
+    def _get_market_state(self) -> Dict[str, Any]:
+        """Build market state dict for the re-evaluator from position manager."""
+        market: Dict[str, Any] = {}
+        try:
+            if self.position_manager is not None and hasattr(self.position_manager, "get_all_positions"):
+                for pos in self.position_manager.get_all_positions():
+                    pair = getattr(pos, "product_id", None) or pos.get("product_id", "")
+                    if pair:
+                        market[pair] = {
+                            "last_price": getattr(pos, "current_price", 0) or pos.get("current_price", 0),
+                        }
+        except Exception:
+            pass
+        return market
+
+    def _execute_reeval_action(self, result: ReEvalResult) -> None:
+        """Execute the action decided by the re-evaluator."""
+        pos = self.open_positions.get(result.position_id)
+        if pos is None:
+            return
+
+        if result.action == "hold":
+            logger.debug(
+                "REEVAL HOLD %s | %s | confidence=%.4f | edge=%.1fbps",
+                pos.pair, result.reason_code,
+                result.rescored_confidence, result.remaining_edge_bps,
+            )
+            return
+
+        if result.action == "close":
+            logger.info(
+                "REEVAL CLOSE %s | %s | pnl=%.1fbps | %s",
+                pos.pair, result.reason_code,
+                pos.unrealized_pnl_bps, result.reason,
+            )
+            # Record in DevilTracker
+            if self.devil_tracker and hasattr(self.devil_tracker, "record_exit"):
+                self.devil_tracker.record_exit(
+                    position_id=pos.position_id,
+                    pair=pos.pair,
+                    side=pos.side,
+                    entry_price=float(pos.entry_price),
+                    exit_price=float(pos.current_price),
+                    size=float(pos.current_size),
+                    estimated_cost_bps=pos.entry_cost_estimate_bps,
+                    actual_cost_bps=pos.current_cost_to_exit_bps,
+                    reason_code=result.reason_code,
+                    hold_time_seconds=pos.age_seconds,
+                    adjustments=len(pos.adjustments),
+                    pnl_bps=pos.unrealized_pnl_bps,
+                )
+            pos.adjustments.append({
+                "timestamp": time.time(),
+                "action": "close",
+                "amount_usd": float(pos.current_size_usd),
+                "reason": result.reason_code,
+                "pnl_bps": pos.unrealized_pnl_bps,
+            })
+            del self.open_positions[pos.position_id]
+
+        elif result.action == "trim":
+            logger.info(
+                "REEVAL TRIM %s | $%.0f of $%.0f | ratio=%.2f | %s",
+                pos.pair, float(result.trim_amount_usd or 0),
+                float(pos.current_size_usd), result.size_ratio, result.reason,
+            )
+            trim_usd = result.trim_amount_usd or Decimal("0")
+            pos.current_size_usd -= trim_usd
+            if pos.current_price > 0:
+                pos.current_size = pos.current_size_usd / pos.current_price
+            pos.total_trimmed_usd += trim_usd
+            pos.adjustments.append({
+                "timestamp": time.time(),
+                "action": "trim",
+                "amount_usd": float(trim_usd),
+                "reason": result.reason_code,
+                "pnl_bps": pos.unrealized_pnl_bps,
+            })
+            if self.devil_tracker and hasattr(self.devil_tracker, "record_trim"):
+                self.devil_tracker.record_trim(
+                    position_id=pos.position_id,
+                    pair=pos.pair,
+                    trim_size=float(trim_usd / pos.current_price) if pos.current_price > 0 else 0,
+                    trim_price=float(pos.current_price),
+                    actual_cost_bps=pos.current_cost_to_exit_bps,
+                )
+            if self.reevaluator:
+                self.reevaluator._total_trims += 1
+
+        elif result.action == "add":
+            logger.info(
+                "REEVAL ADD %s | +$%.0f to $%.0f | confidence=%.4f | %s",
+                pos.pair, float(result.add_amount_usd or 0),
+                float(pos.current_size_usd), result.rescored_confidence, result.reason,
+            )
+            add_usd = result.add_amount_usd or Decimal("0")
+            pos.current_size_usd += add_usd
+            if pos.current_price > 0:
+                pos.current_size = pos.current_size_usd / pos.current_price
+            pos.total_added_usd += add_usd
+            pos.adjustments.append({
+                "timestamp": time.time(),
+                "action": "add",
+                "amount_usd": float(add_usd),
+                "reason": result.reason_code,
+                "pnl_bps": 0,
+            })
+            if self.reevaluator:
+                self.reevaluator._total_adds += 1
+
+    def register_position(self, pos: PositionContext) -> None:
+        """Register a new position for continuous re-evaluation."""
+        self.open_positions[pos.position_id] = pos
+        logger.info(
+            "Position registered for re-evaluation: %s %s %s $%.0f",
+            pos.position_id, pos.pair, pos.side, float(pos.entry_size_usd),
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -552,7 +774,7 @@ class PortfolioEngine:
     def get_status(self) -> Dict[str, Any]:
         """Return a JSON-safe status snapshot for dashboards."""
         try:
-            return {
+            status = {
                 "active_signals": len(self._signals),
                 "corrections_last_cycle": self._corrections_this_cycle,
                 "running": self._running,
@@ -562,7 +784,12 @@ class PortfolioEngine:
                     "net_exposure": self._last_actual.net_exposure if self._last_actual else 0.0,
                     "equity": self._last_actual.equity if self._last_actual else 0.0,
                 } if self._last_actual else None,
+                "open_positions": len(self.open_positions),
+                "reevaluator_active": self.reevaluator is not None,
             }
+            if self.reevaluator:
+                status["reevaluation_metrics"] = self.reevaluator.get_metrics()
+            return status
         except Exception as exc:
             logger.error("PortfolioEngine.get_status failed: %s", exc)
             return {"error": str(exc)}

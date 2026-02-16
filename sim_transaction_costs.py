@@ -113,6 +113,46 @@ class SimTransactionCostModel:
             return 0.0
         return cost.total / abs(trade_size_usd) * 1e4
 
+    def estimate_exit_cost(
+        self,
+        pair: str = "",
+        size_usd: float = 0.0,
+        exchange: str = "",
+        current_spread_bps: float = 0.0,
+        current_book_depth_usd: float = 0.0,
+        **kwargs,
+    ) -> float:
+        """
+        Estimate the cost of EXITING a position right now, in basis points.
+
+        Called every re-evaluation cycle for every position.
+        Uses cached data only — no API calls.
+
+        Components:
+          1. Exchange fee (maker)
+          2. Half the spread (one side only — exit)
+          3. Slippage estimate based on current depth
+        """
+        abs_size = abs(size_usd)
+        if abs_size == 0:
+            return 0.0
+
+        # Fee component (assume maker for limit exits)
+        fee_bps = self.maker_fee * 1e4
+
+        # Spread component (half spread for one-way exit)
+        spread_bps = current_spread_bps / 2.0 if current_spread_bps > 0 else self.half_spread_bps
+
+        # Slippage: based on size vs available depth
+        slippage_bps = self.base_slippage_bps
+        if current_book_depth_usd > 0:
+            participation = min(abs_size / current_book_depth_usd, 0.3)
+            slippage_bps = self.base_slippage_bps + (
+                self.volume_slippage_coeff * np.sqrt(participation) * 1e4
+            )
+
+        return fee_bps + spread_bps + slippage_bps
+
     def apply_costs_to_returns(
         self,
         returns: np.ndarray,

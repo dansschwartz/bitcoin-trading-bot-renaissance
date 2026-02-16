@@ -31,10 +31,17 @@ export default function StatusStrip() {
         </div>
       )}
 
-      {/* Asset Prices — show all tracked assets */}
+      {/* Asset Prices — show all tracked assets with % change */}
       {Object.entries(prices).map(([asset, snap]) => snap.price > 0 && (
-        <div key={asset} className="text-gray-300 font-semibold">
-          {asset.replace('-USD', '')} ${snap.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        <div key={asset} className="flex items-center gap-1">
+          <span className="text-gray-300 font-semibold">
+            {asset.replace('-USD', '')} ${snap.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+          </span>
+          {snap.change_pct != null && snap.change_pct !== 0 && (
+            <span className={`text-[10px] ${snap.change_pct > 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+              {snap.change_pct > 0 ? '+' : ''}{snap.change_pct.toFixed(2)}%
+            </span>
+          )}
         </div>
       ))}
 
@@ -43,13 +50,13 @@ export default function StatusStrip() {
 
       {/* PnL */}
       {pnl && (
-        <div className={`font-semibold ${pnlColor(pnl.realized_pnl)}`}>
-          PnL: {pnlSign(pnl.realized_pnl)}{formatCurrency(pnl.realized_pnl)}
+        <div className={`font-semibold ${pnlColor(pnl.total_pnl ?? pnl.realized_pnl)}`}>
+          PnL: {pnlSign(pnl.total_pnl ?? pnl.realized_pnl)}{formatCurrency(pnl.total_pnl ?? pnl.realized_pnl)}
         </div>
       )}
 
       {/* Win Rate */}
-      {pnl && pnl.total_sells > 0 && (
+      {pnl && (pnl.total_round_trips ?? 0) > 0 && (
         <div className="text-gray-400">
           WR: <span className="text-gray-300">{(pnl.win_rate * 100).toFixed(1)}%</span>
         </div>

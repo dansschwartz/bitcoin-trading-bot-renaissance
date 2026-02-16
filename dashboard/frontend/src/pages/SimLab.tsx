@@ -75,17 +75,11 @@ function PerformanceDashboard() {
     return () => clearInterval(id);
   }, []);
 
-  // Compute Sharpe proxy: realized_pnl / max_drawdown (simplified)
+  // Use proper Sharpe ratio from risk metrics (annualized)
   const sharpeAll = useMemo(() => {
-    if (!pnlAll || !risk || risk.max_drawdown === 0) return null;
-    return pnlAll.realized_pnl / (risk.max_drawdown * risk.peak_equity || 1);
-  }, [pnlAll, risk]);
-
-  const sharpeWeek = useMemo(() => {
-    if (!pnlWeek || !risk || risk.max_drawdown === 0) return null;
-    // Rough weekly ratio
-    return pnlWeek.realized_pnl / (risk.max_drawdown * risk.peak_equity || 1) * 4;
-  }, [pnlWeek, risk]);
+    if (!risk) return null;
+    return risk.sharpe_ratio ?? null;
+  }, [risk]);
 
   // Bar chart data: current period vs prior
   const comparisonData = useMemo(() => {
@@ -131,7 +125,7 @@ function PerformanceDashboard() {
         <MetricCard
           title="Sharpe Ratio"
           value={sharpeAll != null ? sharpeAll.toFixed(2) : '--'}
-          subtitle="All time (proxy)"
+          subtitle="Annualized (365d)"
           valueColor={sharpeAll != null && sharpeAll >= 1 ? 'text-accent-green' : 'text-gray-100'}
         />
         <MetricCard
@@ -143,7 +137,7 @@ function PerformanceDashboard() {
         <MetricCard
           title="Win Rate"
           value={pnlAll ? formatPercent(pnlAll.win_rate) : '--'}
-          subtitle={pnlAll ? `${pnlAll.total_wins}/${pnlAll.total_sells} trades` : ''}
+          subtitle={pnlAll ? `${pnlAll.winning_round_trips ?? 0}/${pnlAll.total_round_trips ?? 0} round-trips` : ''}
           valueColor={pnlAll && pnlAll.win_rate >= 0.5 ? 'text-accent-green' : 'text-gray-100'}
         />
       </div>
@@ -157,10 +151,10 @@ function PerformanceDashboard() {
           valueColor={pnlWeek ? (pnlWeek.realized_pnl >= 0 ? 'text-accent-green' : 'text-accent-red') : 'text-gray-100'}
         />
         <MetricCard
-          title="Weekly Sharpe"
-          value={sharpeWeek != null ? sharpeWeek.toFixed(2) : '--'}
-          subtitle="This week (proxy)"
-          valueColor={sharpeWeek != null && sharpeWeek >= 1 ? 'text-accent-green' : 'text-gray-100'}
+          title="Unrealized P&L"
+          value={risk ? formatCurrency(risk.unrealized_pnl) : '--'}
+          subtitle="Open positions"
+          valueColor={risk ? (risk.unrealized_pnl >= 0 ? 'text-accent-green' : 'text-accent-red') : 'text-gray-100'}
         />
         <MetricCard
           title="Total Trades"
@@ -367,7 +361,7 @@ function LiveVsBacktestComparison({ comparison, onClose }: ComparisonProps) {
     },
     {
       label: 'Sharpe Ratio',
-      live: live.risk_metrics.cumulative_pnl / (live.risk_metrics.max_drawdown * live.risk_metrics.peak_equity || 1),
+      live: live.risk_metrics.sharpe_ratio ?? 0,
       backtest: backtest.sharpe_ratio,
       format: (v: number) => v.toFixed(2),
       higherIsBetter: true,

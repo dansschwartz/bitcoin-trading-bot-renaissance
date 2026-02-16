@@ -1,25 +1,44 @@
 """
 MEXC exchange client — PRIMARY exchange for arbitrage.
-Uses ccxt for unified market data, with maker-only order enforcement.
+Uses ccxt for REST API, real WebSocket for streaming market data.
 
 CRITICAL: MEXC 0% maker fee is our structural edge.
 All orders default to LIMIT_MAKER (post-only).
 """
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
-from typing import Optional, Callable, Awaitable, Dict
+from typing import Optional, Callable, Awaitable, Dict, List
 
 import ccxt.async_support as ccxt_async
+import websockets
 
 from .base import (
     ExchangeClient, OrderBook, OrderBookLevel, OrderRequest, OrderResult,
     OrderSide, OrderType, OrderStatus, TimeInForce, Balance, FundingRate,
+    Trade,
 )
 
 logger = logging.getLogger("arb.mexc")
+
+# MEXC documented rate limit: 5 orders per second
+ORDER_RATE_LIMIT_PER_SECOND = 5
+
+# WebSocket constants
+WS_ENDPOINT = "wss://wbs-api.mexc.com/ws"
+WS_PING_INTERVAL = 15       # seconds
+WS_MAX_AGE_HOURS = 23       # reconnect before 24h limit
+WS_MAX_RECONNECT = 3        # attempts before REST fallback
+WS_FALLBACK_DURATION = 60   # seconds of REST fallback before retrying WS
+WS_DEPTH_LEVELS = 20
+
+
+class _WSBlockedError(Exception):
+    """Raised when MEXC WS subscriptions are geo-blocked."""
+    pass
 
 
 class MEXCClient(ExchangeClient):
@@ -30,9 +49,11 @@ class MEXCClient(ExchangeClient):
         self._api_secret = api_secret
         self._exchange: Optional[ccxt_async.mexc] = None
         self._symbol_info_cache: Dict[str, dict] = {}
-        self._ws_callbacks: Dict[str, Callable] = {}
+        self._ws_callbacks: Dict[str, Callable] = {}      # symbol → depth callback
+        self._trade_callbacks: Dict[str, Callable] = {}    # symbol → trade callback
         self._ws_running = False
         self._last_books: Dict[str, OrderBook] = {}
+        self._ws_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
         config = {
@@ -47,7 +68,6 @@ class MEXCClient(ExchangeClient):
 
         self._exchange = ccxt_async.mexc(config)
 
-        # Load markets for symbol info
         try:
             await self._exchange.load_markets()
             logger.info(f"MEXC connected — {len(self._exchange.markets)} markets loaded")
@@ -56,6 +76,8 @@ class MEXCClient(ExchangeClient):
 
     async def disconnect(self) -> None:
         self._ws_running = False
+        if self._ws_task and not self._ws_task.done():
+            self._ws_task.cancel()
         if self._exchange:
             await self._exchange.close()
             self._exchange = None
@@ -74,10 +96,221 @@ class MEXCClient(ExchangeClient):
         self._ws_callbacks[symbol] = callback
         if not self._ws_running:
             self._ws_running = True
-            asyncio.create_task(self._ws_order_book_loop())
+            self._ws_task = asyncio.create_task(self._ws_main_loop())
 
-    async def _ws_order_book_loop(self):
-        """Fetch order books for all subscribed symbols in parallel."""
+    async def subscribe_trades(
+        self, symbol: str,
+        callback: Callable[[Trade], Awaitable[None]],
+    ) -> None:
+        self._trade_callbacks[symbol] = callback
+        # WS loop already started by subscribe_order_book
+
+    # ========== WebSocket Engine ==========
+
+    async def _ws_main_loop(self):
+        """Outer loop: reconnection state machine."""
+        reconnect_attempts = 0
+        while self._ws_running:
+            try:
+                await self._ws_connect_and_run()
+                # Clean exit (e.g. max age) — reset counter
+                reconnect_attempts = 0
+            except asyncio.CancelledError:
+                return
+            except _WSBlockedError:
+                # Geo-blocked — skip WS entirely, run REST permanently
+                logger.warning("MEXC WS geo-blocked — using REST polling permanently")
+                await self._rest_fallback_loop_permanent()
+                return
+            except Exception as e:
+                reconnect_attempts += 1
+                if reconnect_attempts >= WS_MAX_RECONNECT:
+                    logger.warning(f"MEXC WS failed {reconnect_attempts}x, falling back to REST for {WS_FALLBACK_DURATION}s")
+                    await self._rest_fallback_loop()
+                    reconnect_attempts = 0
+                else:
+                    backoff = min(2 ** reconnect_attempts, 30)
+                    logger.warning(f"MEXC WS disconnected: {e} — reconnecting in {backoff}s (attempt {reconnect_attempts})")
+                    await asyncio.sleep(backoff)
+
+    async def _ws_connect_and_run(self):
+        """Single WebSocket session lifecycle."""
+        connect_time = time.monotonic()
+        max_age_sec = WS_MAX_AGE_HOURS * 3600
+        self._ws_got_data = False
+
+        async with websockets.connect(
+            WS_ENDPOINT,
+            ping_interval=None,  # We send our own PING
+            close_timeout=5,
+        ) as ws:
+            logger.info("MEXC WebSocket connected")
+
+            # Subscribe all current symbols
+            all_syms = set(list(self._ws_callbacks.keys()) + list(self._trade_callbacks.keys()))
+            for symbol in all_syms:
+                await self._ws_subscribe_symbol(ws, symbol)
+                await asyncio.sleep(0.1)
+
+            # Run ping + message loops concurrently
+            ping_task = asyncio.create_task(self._ws_ping_loop(ws))
+            data_watchdog = asyncio.create_task(self._ws_data_watchdog())
+            try:
+                async for raw in ws:
+                    if not self._ws_running:
+                        break
+                    if time.monotonic() - connect_time > max_age_sec:
+                        logger.info("MEXC WS max age reached (23h), reconnecting")
+                        break
+                    try:
+                        self._ws_handle_message(raw)
+                    except _WSBlockedError:
+                        raise  # Propagate to trigger fallback
+                    except Exception as e:
+                        logger.debug(f"MEXC WS message parse error: {e}")
+            finally:
+                ping_task.cancel()
+                data_watchdog.cancel()
+
+    async def _ws_data_watchdog(self):
+        """If no market data arrives within 10s of subscribing, raise to trigger fallback."""
+        await asyncio.sleep(10)
+        if not self._ws_got_data:
+            logger.warning("MEXC WS: no market data received in 10s — likely geo-blocked")
+            raise _WSBlockedError("No data received")
+
+    async def _ws_subscribe_symbol(self, ws, symbol: str):
+        """Send depth + trade subscription messages for one symbol."""
+        raw_sym = self._normalized_to_mexc_sym(symbol)
+
+        # Depth subscription
+        depth_msg = {
+            "method": "SUBSCRIPTION",
+            "params": [f"spot@public.limit.depth.v3.api@{raw_sym}@{WS_DEPTH_LEVELS}"]
+        }
+        await ws.send(json.dumps(depth_msg))
+
+        # Trade subscription
+        trade_msg = {
+            "method": "SUBSCRIPTION",
+            "params": [f"spot@public.deals.v3.api@{raw_sym}"]
+        }
+        await ws.send(json.dumps(trade_msg))
+        logger.debug(f"MEXC WS subscribed: {symbol} ({raw_sym})")
+
+    async def _ws_ping_loop(self, ws):
+        """Send PING every 15 seconds to keep connection alive."""
+        try:
+            while self._ws_running:
+                await asyncio.sleep(WS_PING_INTERVAL)
+                await ws.send(json.dumps({"method": "PING"}))
+        except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
+            pass
+
+    def _ws_handle_message(self, raw: str):
+        """Parse JSON message and dispatch to depth/trade handlers."""
+        msg = json.loads(raw)
+
+        if isinstance(msg, dict):
+            # Check for subscription failure (geo-block)
+            msg_text = msg.get("msg", "")
+            if "Blocked" in msg_text:
+                logger.warning(f"MEXC WS subscription blocked: {msg_text}")
+                raise _WSBlockedError(msg_text)
+            # Ignore PONG and successful subscription confirmations
+            if msg_text == "PONG" or msg.get("id") is not None:
+                return
+
+        channel = msg.get("c", "")
+
+        if "limit.depth" in channel:
+            self._ws_got_data = True
+            self._ws_handle_depth(msg)
+        elif "public.deals" in channel:
+            self._ws_got_data = True
+            self._ws_handle_trade(msg)
+
+    def _ws_handle_depth(self, msg: dict):
+        """Parse depth message → OrderBook → invoke callback."""
+        data = msg.get("d", {})
+        channel = msg.get("c", "")
+
+        # Extract symbol from channel: spot@public.limit.depth.v3.api@BTCUSDT@20
+        parts = channel.split("@")
+        if len(parts) < 3:
+            return
+        raw_sym = parts[2]
+        symbol = self._mexc_sym_to_normalized(raw_sym)
+
+        bids_raw = data.get("bids", [])
+        asks_raw = data.get("asks", [])
+
+        bids = [OrderBookLevel(Decimal(str(b["p"])), Decimal(str(b["v"]))) for b in bids_raw]
+        asks = [OrderBookLevel(Decimal(str(a["p"])), Decimal(str(a["v"]))) for a in asks_raw]
+
+        ts = data.get("t") or data.get("r")
+        dt = datetime.utcfromtimestamp(ts / 1000) if ts else datetime.utcnow()
+
+        book = OrderBook(exchange="mexc", symbol=symbol, timestamp=dt, bids=bids, asks=asks)
+        self._last_books[symbol] = book
+
+        cb = self._ws_callbacks.get(symbol)
+        if cb:
+            asyncio.get_event_loop().create_task(cb(book))
+
+    def _ws_handle_trade(self, msg: dict):
+        """Parse deals message → Trade → invoke callback."""
+        data = msg.get("d", {})
+        channel = msg.get("c", "")
+
+        parts = channel.split("@")
+        if len(parts) < 3:
+            return
+        raw_sym = parts[2]
+        symbol = self._mexc_sym_to_normalized(raw_sym)
+
+        deals = data.get("deals", [])
+        cb = self._trade_callbacks.get(symbol)
+        if not cb:
+            return
+
+        for deal in deals:
+            side = OrderSide.BUY if deal.get("S") == 1 else OrderSide.SELL
+            ts = deal.get("t", 0)
+            trade = Trade(
+                exchange="mexc",
+                symbol=symbol,
+                trade_id=str(deal.get("t", "")),
+                price=Decimal(str(deal.get("p", "0"))),
+                quantity=Decimal(str(deal.get("v", "0"))),
+                side=side,
+                timestamp=datetime.utcfromtimestamp(ts / 1000) if ts else datetime.utcnow(),
+            )
+            asyncio.get_event_loop().create_task(cb(trade))
+
+    async def _rest_fallback_loop(self):
+        """REST polling fallback when WS fails repeatedly."""
+        end_time = time.monotonic() + WS_FALLBACK_DURATION
+        logger.info("MEXC entering REST fallback mode")
+        while self._ws_running and time.monotonic() < end_time:
+            async def _fetch_one(sym, cb):
+                try:
+                    raw = await self._exchange.fetch_order_book(sym, limit=20)
+                    book = self._parse_order_book(raw, sym)
+                    self._last_books[sym] = book
+                    await cb(book)
+                except Exception as e:
+                    logger.debug(f"MEXC REST fallback error {sym}: {e}")
+
+            tasks = [_fetch_one(s, c) for s, c in list(self._ws_callbacks.items())]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(0.5)
+        logger.info("MEXC REST fallback complete, retrying WebSocket")
+
+    async def _rest_fallback_loop_permanent(self):
+        """Permanent REST polling when WS is geo-blocked."""
+        logger.info("MEXC running permanent REST polling (WS unavailable)")
         while self._ws_running:
             async def _fetch_one(sym, cb):
                 try:
@@ -86,12 +319,30 @@ class MEXCClient(ExchangeClient):
                     self._last_books[sym] = book
                     await cb(book)
                 except Exception as e:
-                    logger.debug(f"MEXC book update error {sym}: {e}")
+                    logger.debug(f"MEXC REST poll error {sym}: {e}")
 
             tasks = [_fetch_one(s, c) for s, c in list(self._ws_callbacks.items())]
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(0.5)  # 500ms cycle for REST rate limit safety
+            await asyncio.sleep(0.5)
+
+    # ========== Symbol Conversion ==========
+
+    def _normalized_to_mexc_sym(self, symbol: str) -> str:
+        """BTC/USDT → BTCUSDT (uppercase, no slash)."""
+        return symbol.replace("/", "").upper()
+
+    def _mexc_sym_to_normalized(self, raw: str) -> str:
+        """BTCUSDT → BTC/USDT. Best-effort using known quote currencies."""
+        raw = raw.upper()
+        for quote in ("USDT", "USDC", "BTC", "ETH"):
+            if raw.endswith(quote):
+                base = raw[: -len(quote)]
+                if base:
+                    return f"{base}/{quote}"
+        return raw
+
+    # ========== REST endpoints (unchanged) ==========
 
     async def get_ticker(self, symbol: str) -> dict:
         ticker = await self._exchange.fetch_ticker(symbol)
@@ -120,7 +371,6 @@ class MEXCClient(ExchangeClient):
 
     async def get_funding_rate(self, symbol: str) -> FundingRate:
         try:
-            # Switch to futures context
             fr = await self._exchange.fetch_funding_rate(symbol)
             return FundingRate(
                 exchange="mexc",
