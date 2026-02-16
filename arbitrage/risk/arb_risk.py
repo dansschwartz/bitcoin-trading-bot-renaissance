@@ -51,8 +51,10 @@ class ArbitrageRiskEngine:
 
     def approve_arbitrage(self, signal) -> bool:
         """Gate: approve or reject an arbitrage signal."""
+        sig_id = getattr(signal, 'signal_id', '?')
+
         if self._halted:
-            logger.debug(f"Rejected — halted: {self._halt_reason}")
+            logger.info(f"Rejected {sig_id} — halted: {self._halt_reason}")
             return False
 
         # Reset daily PnL at midnight
@@ -73,24 +75,24 @@ class ArbitrageRiskEngine:
         hour_ago = now - timedelta(hours=1)
         recent_trades = sum(1 for t in self._trade_times if t > hour_ago)
         if recent_trades >= self.max_trades_per_hour:
-            logger.debug("Rejected — trade rate limit")
+            logger.info(f"Rejected {sig_id} — trade rate limit ({recent_trades}/hr)")
             return False
 
         # Single trade size
         notional = signal.recommended_quantity * (signal.buy_price + signal.sell_price) / 2
         if notional > self.max_single_arb_usd:
-            logger.debug(f"Rejected — trade size ${float(notional):.2f} > limit ${float(self.max_single_arb_usd)}")
+            logger.info(f"Rejected {sig_id} — trade size ${float(notional):.2f} > limit ${float(self.max_single_arb_usd)}")
             return False
 
         # Total exposure check
         total_exp = sum(self._current_exposure.values())
         if total_exp + notional > self.max_total_exposure_usd:
-            logger.debug("Rejected — total exposure limit")
+            logger.info(f"Rejected {sig_id} — total exposure ${float(total_exp + notional):.2f}")
             return False
 
-        # Order book freshness
+        # Confidence check
         if hasattr(signal, 'confidence') and signal.confidence < Decimal('0.3'):
-            logger.debug("Rejected — low confidence signal")
+            logger.info(f"Rejected {sig_id} — low confidence {float(signal.confidence):.2f}")
             return False
 
         self._trade_times.append(now)

@@ -226,6 +226,18 @@ except ImportError:
     TRADE_HIDER_AVAILABLE = False
 
 try:
+    from intelligence.fast_mean_reversion import FastMeanReversionScanner
+    FAST_REVERSION_AVAILABLE = True
+except ImportError:
+    FAST_REVERSION_AVAILABLE = False
+
+try:
+    from orchestrator.heartbeat import HeartbeatWriter
+    HEARTBEAT_AVAILABLE = True
+except ImportError:
+    HEARTBEAT_AVAILABLE = False
+
+try:
     from monitoring.beta_monitor import BetaMonitor
     BETA_MONITOR_AVAILABLE = True
 except ImportError:
@@ -497,7 +509,8 @@ class RenaissanceTradingBot:
         self.alternative_data_engine = AlternativeDataEngine(self.config, logger=self.logger)
 
         # Initialize Advanced Adapters (Step 7 & 9)
-        self.regime_overlay = RegimeOverlay(self.config.get("regime_overlay", {}), logger=self.logger)
+        _regime_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+        self.regime_overlay = RegimeOverlay(self.config.get("regime_overlay", {}), logger=self.logger, db_path=_regime_db)
         self.risk_gateway = RiskGateway(self.config.get("risk_gateway", {}), logger=self.logger)
         
         # Initialize the core risk manager (moved from gateway integration logic)
@@ -516,7 +529,7 @@ class RenaissanceTradingBot:
         risk_cfg = self.config.get("risk_management", {})
         self.daily_loss_limit = float(risk_cfg.get("daily_loss_limit", 500))
         self.position_limit = float(risk_cfg.get("position_limit", 1000))
-        self.min_confidence = float(risk_cfg.get("min_confidence", 0.65))
+        self.min_confidence = float(risk_cfg.get("min_confidence", 0.50))
 
         # Initialize Coinbase Client & Position Manager
         cb_config = self.config.get("coinbase", {})
@@ -755,6 +768,12 @@ class RenaissanceTradingBot:
         self.ml_bridge = MLIntegrationBridge(self.config)
         if self.ml_enabled:
             self.ml_bridge.initialize()
+            # Validate trained models loaded correctly
+            loaded_models = list(self.ml_bridge.model_manager.models.keys())
+            if loaded_models:
+                self.logger.info(f"ML startup validation: {len(loaded_models)} trained models active: {loaded_models}")
+            else:
+                self.logger.warning("ML startup validation: NO trained models loaded — ML predictions will be empty")
         
         # Performance Tracking
         self.ml_performance_metrics = {
@@ -809,6 +828,32 @@ class RenaissanceTradingBot:
                 self.logger.info("Liquidation Cascade Detector initialized")
             except Exception as e:
                 self.logger.warning(f"Liquidation detector init failed: {e}")
+
+        # Fast Mean Reversion Scanner (1s evaluation)
+        self.fast_reversion_scanner = None
+        fmr_cfg = self.config.get("fast_mean_reversion", {})
+        if fmr_cfg.get("enabled", False) and FAST_REVERSION_AVAILABLE:
+            try:
+                self.fast_reversion_scanner = FastMeanReversionScanner(
+                    fmr_cfg, self.bar_aggregator
+                )
+                self.logger.info("Fast Mean Reversion Scanner initialized")
+            except Exception as e:
+                self.logger.warning(f"Fast reversion scanner init failed: {e}")
+
+        # Heartbeat Writer (multi-bot coordination)
+        self.heartbeat_writer = None
+        bot_id = self.config.get("bot_id", "bot-01")
+        orch_cfg = self.config.get("orchestrator", {})
+        if HEARTBEAT_AVAILABLE:
+            try:
+                self.heartbeat_writer = HeartbeatWriter(
+                    bot_id=bot_id,
+                    heartbeat_dir=orch_cfg.get("heartbeat_dir", "data/heartbeats"),
+                )
+                self.logger.info(f"HeartbeatWriter initialized (bot_id={bot_id})")
+            except Exception as e:
+                self.logger.warning(f"HeartbeatWriter init failed: {e}")
 
         # Module F: Advanced Microstructure Signal Aggregator
         self.signal_aggregator = None
@@ -884,16 +929,9 @@ class RenaissanceTradingBot:
             except Exception as e:
                 self.logger.warning(f"Multi-exchange bridge init failed: {e}")
 
-        # Initialize Feature Pipeline (Step 16)
-        from feature_pipeline import FractalFeaturePipeline
-        self.feature_pipeline = FractalFeaturePipeline(
-            hd_dimension=100  # Ensure stable feature vector size
-        )
-        self.pipeline_fitted = False
-        
-        # Step 8: Dynamic Thresholds
-        self.buy_threshold = 0.1
-        self.sell_threshold = -0.1
+        # Step 8: Dynamic Thresholds (calibrated to actual signal distribution)
+        self.buy_threshold = 0.04
+        self.sell_threshold = -0.04
         self.adaptive_thresholds = self.config.get("adaptive_thresholds", True)
         self.breakout_candidates = []
         self.scan_cycle_count = 0
@@ -978,7 +1016,7 @@ class RenaissanceTradingBot:
             "risk_management": {
                 "daily_loss_limit": 500,
                 "position_limit": 1000,
-                "min_confidence": 0.65
+                "min_confidence": 0.50
             },
             "signal_weights": {
                 "order_flow": 0.32,
@@ -1306,25 +1344,17 @@ class RenaissanceTradingBot:
 
             # ML Feature Pipeline & Real-Time Intelligence (Step 12/16 Bridge)
             try:
-                if not df.empty and len(df) >= 18:
-                    if not self.pipeline_fitted:
-                        self.feature_pipeline.fit_transform(df)
-                        self.pipeline_fitted = True
-
-                    feature_vector = self.feature_pipeline.transform(df)
-
-                    if self.real_time_pipeline.enabled:
-                        rt_result = await self.real_time_pipeline.processor.process_all_models({
-                            'feature_vector': feature_vector,
-                            'price_df': df
-                        })
-                        market_data['real_time_predictions'] = rt_result
-                        if 'Ensemble' in rt_result:
-                            signals['ml_ensemble'] = rt_result['Ensemble']
-                        if 'CNN' in rt_result:
-                            signals['ml_cnn'] = rt_result['CNN']
+                if not df.empty and len(df) >= 18 and self.real_time_pipeline.enabled:
+                    rt_result = await self.real_time_pipeline.processor.process_all_models({
+                        'price_df': df
+                    })
+                    market_data['real_time_predictions'] = rt_result
+                    if 'Ensemble' in rt_result:
+                        signals['ml_ensemble'] = rt_result['Ensemble']
+                    if 'CNN' in rt_result:
+                        signals['ml_cnn'] = rt_result['CNN']
             except Exception as e:
-                self.logger.warning(f"ML feature bridge failed: {e}")
+                self.logger.warning(f"ML RT pipeline failed: {e}")
 
             # Quantum Oscillator (QHO)
             try:
@@ -1457,10 +1487,20 @@ class RenaissanceTradingBot:
         except Exception:
             pass  # Don't let cost pre-screen crash the decision pipeline
 
-        # Calculate confidence based on signal strength and consensus
-        signal_strength = abs(weighted_signal)
-        signal_consensus = 1.0 - np.std(list(signal_contributions.values()))
-        confidence = (signal_strength + signal_consensus) / 2.0
+        # Calculate confidence based on signal strength and directional consensus
+        # signal_strength: rescale so that typical max (0.10) maps to 1.0
+        signal_strength = min(abs(weighted_signal) / 0.10, 1.0)
+
+        # Directional consensus: fraction of non-trivial signals agreeing on direction
+        raw_contribs = [v for v in signal_contributions.values() if abs(v) > 0.0001]
+        if raw_contribs and weighted_signal != 0:
+            agreeing = sum(1 for v in raw_contribs if np.sign(v) == np.sign(weighted_signal))
+            signal_consensus = agreeing / len(raw_contribs)
+        else:
+            signal_consensus = 0.5
+
+        # Geometric mean: both strength AND consensus must be present
+        confidence = float(np.sqrt(signal_strength * signal_consensus))
 
         # Apply regime-derived confidence boost (max +/-5%)
         confidence = float(np.clip(confidence + self.regime_overlay.get_confidence_boost(), 0.0, 1.0))
@@ -2234,10 +2274,13 @@ class RenaissanceTradingBot:
                                     self.stat_arb_engine.update_price(pid, candle.close)
                                     self.correlation_network.update_price(pid, candle.close)
                                     self.mean_reversion_engine.update_price(pid, candle.close)
+                                    # Feed cross-asset correlation engine (lead_lag signal)
+                                    self.correlation_engine.update_price(pid, candle.close)
                             self.logger.info(
                                 f"Preloaded {len(candles)} candles for {pid} — "
                                 f"price_history={len(pid_tech.price_history)}, "
-                                f"GARCH returns={len(self.garch_engine._returns.get(pid, []))}"
+                                f"GARCH returns={len(self.garch_engine._returns.get(pid, []))}, "
+                                f"lead_lag history={len(self.correlation_engine.history.get(pid, []))}"
                             )
                             # Try initial GARCH fit with preloaded data
                             if self.garch_engine.should_refit(pid):
@@ -2358,6 +2401,29 @@ class RenaissanceTradingBot:
                     except Exception:
                         pass
 
+                # 1.56 Feed fast signal layers with real-time price data
+                if self.fast_reversion_scanner and current_price > 0:
+                    try:
+                        self.fast_reversion_scanner.on_price_update(
+                            pair=product_id,
+                            price=float(current_price),
+                            volume=float(ticker.get('volume_24h', 0)),
+                            timestamp=time.time(),
+                        )
+                    except Exception:
+                        pass
+                if self.liquidation_detector and hasattr(self.liquidation_detector, 'on_price_update'):
+                    try:
+                        self.liquidation_detector.on_price_update(
+                            symbol=product_id.replace("-USD", "USDT").replace("-", ""),
+                            price=float(current_price) if current_price else 0.0,
+                            volume=float(ticker.get('volume_24h', 0)),
+                            spread_bps=float(ticker.get('spread_bps', 0)),
+                            timestamp=time.time(),
+                        )
+                    except Exception:
+                        pass
+
                 # 1.6 Update Medallion-style engines with current price
                 if current_price > 0:
                     self.mean_reversion_engine.update_price(product_id, current_price)
@@ -2444,6 +2510,18 @@ class RenaissanceTradingBot:
                             }
                     except Exception as _liq_err:
                         self.logger.debug(f"Liquidation cascade signal failed: {_liq_err}")
+
+                # 2.0d Fast Mean Reversion Signal
+                if self.fast_reversion_scanner:
+                    try:
+                        fmr_signal = self.fast_reversion_scanner.get_latest_signal(product_id)
+                        if fmr_signal and fmr_signal.confidence > 0.52:
+                            direction_mult = 1.0 if fmr_signal.direction == "long" else -1.0
+                            signals['fast_mean_reversion'] = self._force_float(
+                                direction_mult * fmr_signal.confidence
+                            )
+                    except Exception as _fmr_err:
+                        self.logger.debug(f"Fast mean reversion signal failed: {_fmr_err}")
 
                 # 2.0c Multi-Exchange Signal Bridge (MEXC + Binance consensus)
                 if self.multi_exchange_bridge:
@@ -2547,10 +2625,14 @@ class RenaissanceTradingBot:
 
                 # 2.5 Update regime overlay BEFORE signal fusion (so regime weights apply)
                 try:
-                    if self.regime_overlay.enabled and len(_tech_inst.price_history) > 0:
-                        price_df = _tech_inst._to_dataframe()
-                        if not price_df.empty:
-                            self.regime_overlay.update(price_df)
+                    if self.regime_overlay.enabled:
+                        if len(_tech_inst.price_history) > 0:
+                            price_df = _tech_inst._to_dataframe()
+                        else:
+                            # Minimal price_df for overlay (real data comes from DB bars)
+                            import pandas as _pd
+                            price_df = _pd.DataFrame({'close': [current_price]})
+                        self.regime_overlay.update(price_df)
                 except Exception as _e:
                     self.logger.debug(f"Regime overlay skipped: {_e}")
 
@@ -2871,6 +2953,7 @@ class RenaissanceTradingBot:
                         'weighted_signal': weighted_signal,
                         'reasoning': decision.reasoning,
                         'hmm_regime': hmm_regime_label,
+                        'vae_loss': decision.reasoning.get('vae_loss'),
                     }
                     self._track_task(self.db_manager.store_decision(decision_persist))
                     
@@ -3009,6 +3092,18 @@ class RenaissanceTradingBot:
                         "hmm_regime": self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else None,
                         "price": float(current_price),
                     }))
+                    # Emit live regime state (classifier, bar count, confidence)
+                    if self.regime_overlay.enabled and self.regime_overlay.current_regime:
+                        _regime = self.regime_overlay.current_regime
+                        self._track_task(self.dashboard_emitter.emit("regime", {
+                            "hmm_regime": _regime.get("hmm_regime", "unknown"),
+                            "confidence": float(_regime.get("hmm_confidence", 0.0)),
+                            "classifier": self.regime_overlay.active_classifier,
+                            "bar_count": self.regime_overlay.bar_count,
+                            "trend_persistence": float(_regime.get("trend_persistence", 0.0)),
+                            "volatility_acceleration": float(_regime.get("volatility_acceleration", 1.0)),
+                            "details": _regime.get("bootstrap_details", ""),
+                        }))
                     if decision.action != 'HOLD':
                         self._track_task(self.dashboard_emitter.emit("trade", {
                             "product_id": product_id,
@@ -3245,6 +3340,30 @@ class RenaissanceTradingBot:
                 await self.liquidation_detector.stop()
             except Exception:
                 pass
+
+    # ──────────────────────────────────────────────
+    #  Fast Mean Reversion Scanner
+    # ──────────────────────────────────────────────
+    async def _run_fast_reversion_scanner(self):
+        """Run the fast mean reversion scanner as a background task."""
+        try:
+            await self.fast_reversion_scanner.run_loop()
+        except asyncio.CancelledError:
+            self.fast_reversion_scanner.stop()
+        except Exception as e:
+            self.logger.error(f"Fast reversion scanner error: {e}")
+
+    # ──────────────────────────────────────────────
+    #  Heartbeat Writer (Multi-Bot Coordination)
+    # ──────────────────────────────────────────────
+    async def _run_heartbeat_writer(self, interval: float = 5.0):
+        """Run the heartbeat writer as a background task."""
+        try:
+            await self.heartbeat_writer.start(self, interval=interval)
+        except asyncio.CancelledError:
+            self.heartbeat_writer.stop()
+        except Exception as e:
+            self.logger.error(f"Heartbeat writer error: {e}")
 
     # ──────────────────────────────────────────────
     #  Phase 2 Observation Loops
@@ -3575,6 +3694,19 @@ class RenaissanceTradingBot:
             self.logger.info("Launching liquidation cascade detector...")
             self._track_task(self._run_liquidation_detector())
 
+        # ── Fast Mean Reversion Scanner (1s eval) ──
+        if self.fast_reversion_scanner:
+            self.logger.info("Launching fast mean reversion scanner (1s eval)...")
+            self._track_task(self._run_fast_reversion_scanner())
+
+        # ── Heartbeat Writer (multi-bot coordination) ──
+        if self.heartbeat_writer:
+            hb_interval = self.config.get("orchestrator", {}).get(
+                "heartbeat_interval_seconds", 5
+            )
+            self.logger.info(f"Launching heartbeat writer (every {hb_interval}s)...")
+            self._track_task(self._run_heartbeat_writer(hb_interval))
+
         # ── Phase 2 Observation Loops ──
         if self.medallion_portfolio_engine:
             self.logger.info("Launching medallion portfolio drift logger (observation mode)...")
@@ -3752,19 +3884,20 @@ class RenaissanceTradingBot:
             latest_tech = self._get_tech(product_id).get_latest_signals()
             vol_regime = latest_tech.volatility_regime if latest_tech else None
             
-            # Base thresholds
-            self.buy_threshold = 0.1
-            self.sell_threshold = -0.1
-            
+            # Base thresholds — calibrated to actual signal distribution
+            # Typical weighted signals: 0.003-0.01, occasional spikes: 0.02-0.06
+            self.buy_threshold = 0.04
+            self.sell_threshold = -0.04
+
             # Adjust based on volatility
             if vol_regime == "high_volatility" or vol_regime == "extreme_volatility":
                 # Increase thresholds in high volatility to avoid fakeouts
-                self.buy_threshold = 0.15
-                self.sell_threshold = -0.15
+                self.buy_threshold = 0.06
+                self.sell_threshold = -0.06
             elif vol_regime == "low_volatility":
                 # Decrease thresholds in low volatility to catch smaller moves
-                self.buy_threshold = 0.07
-                self.sell_threshold = -0.07
+                self.buy_threshold = 0.025
+                self.sell_threshold = -0.025
                 
             self.logger.info(f"Dynamic Thresholds updated: Buy {self.buy_threshold:.2f}, Sell {self.sell_threshold:.2f} (Regime: {vol_regime})")
         except Exception as e:

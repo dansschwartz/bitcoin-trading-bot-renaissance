@@ -16,7 +16,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
@@ -78,27 +78,49 @@ class TriangularArbitrage:
                         )
 
                     # Create signal for execution
+                    # Use first leg's pair for the signal; calculate quantities
+                    # from MAX_TRADE_USD and first-leg price
                     from ..detector.cross_exchange import ArbitrageSignal
+                    first_leg = opp.path[0]  # (symbol, side, intermediate)
+                    first_symbol = first_leg[0]
+
+                    # Get first-leg price from graph
+                    parts = first_symbol.split('/')
+                    if len(parts) == 2:
+                        base_c, quote_c = parts
+                        edge = self._pair_graph.get(quote_c, {}).get(base_c, {})
+                        first_price = Decimal('1') / edge.get('rate', Decimal('1')) if edge.get('rate') else Decimal('0')
+                        if first_price <= 0:
+                            edge2 = self._pair_graph.get(base_c, {}).get(quote_c, {})
+                            first_price = edge2.get('rate', Decimal('1'))
+                    else:
+                        first_price = Decimal('1')
+
+                    if first_price > 0:
+                        max_qty = self.MAX_TRADE_USD / first_price
+                    else:
+                        max_qty = Decimal('0')
+
                     signal = ArbitrageSignal(
                         signal_id=f"tri_{opp.start_currency}_{self._scan_count}",
                         signal_type="triangular",
                         timestamp=datetime.utcnow(),
-                        symbol=f"{opp.path[0][0]}",
+                        symbol=first_symbol,
                         buy_exchange="mexc",
                         sell_exchange="mexc",
-                        buy_price=Decimal('0'),
-                        sell_price=Decimal('0'),
+                        buy_price=first_price,
+                        sell_price=first_price * opp.cycle_rate,
                         gross_spread_bps=opp.profit_bps,
                         total_cost_bps=Decimal('0'),  # 0% maker on MEXC
                         net_spread_bps=opp.profit_bps,
-                        max_quantity=Decimal('0'),
-                        recommended_quantity=Decimal('0'),
+                        max_quantity=max_qty,
+                        recommended_quantity=max_qty,
                         expected_profit_usd=self.MAX_TRADE_USD * opp.profit_bps / 10000,
                         buy_fee_bps=Decimal('0'),
                         sell_fee_bps=Decimal('0'),
                         buy_slippage_bps=Decimal('0.5'),
                         sell_slippage_bps=Decimal('0.5'),
-                        expires_at=datetime.utcnow(),
+                        expires_at=datetime.utcnow() + timedelta(seconds=5),
                         confidence=min(Decimal('0.8'), opp.profit_bps / 10),
                     )
 

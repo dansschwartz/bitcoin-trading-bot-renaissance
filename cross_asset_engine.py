@@ -13,7 +13,7 @@ class CrossAssetCorrelationEngine:
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
         self.history = {} # product_id -> prices
-        self.window_size = 60 # 1-hour of 1-min candles
+        self.window_size = 120 # 2-hour of 1-min candles (matches preload depth)
         
     def update_price(self, product_id: str, price: float):
         if product_id not in self.history:
@@ -33,7 +33,7 @@ class CrossAssetCorrelationEngine:
         base_prices = self.history[base_id]
         target_prices = self.history[target_id]
         
-        if len(base_prices) < 10 or len(target_prices) < 10:
+        if len(base_prices) < 6 or len(target_prices) < 6:
             return {"correlation": 0.0, "lag_seconds": 0, "status": "insufficient_data"}
             
         # Synchronize lengths
@@ -59,12 +59,25 @@ class CrossAssetCorrelationEngine:
                 corrs.append(correlation)
             elif lag > 0:
                 # b leads t
-                c = np.corrcoef(b_ret[:-lag], t_ret[lag:])[0, 1]
-                corrs.append(c)
+                if len(b_ret) > lag and len(t_ret) > lag:
+                    try:
+                        c = np.corrcoef(b_ret[:-lag], t_ret[lag:])[0, 1]
+                        corrs.append(c if not np.isnan(c) else 0.0)
+                    except Exception:
+                        corrs.append(0.0)
+                else:
+                    corrs.append(0.0)
             else:
                 # t leads b
-                c = np.corrcoef(b_ret[-lag:], t_ret[:lag])[0, 1]
-                corrs.append(c)
+                abs_lag = abs(lag)
+                if len(b_ret) > abs_lag and len(t_ret) > abs_lag:
+                    try:
+                        c = np.corrcoef(b_ret[abs_lag:], t_ret[:-abs_lag])[0, 1]
+                        corrs.append(c if not np.isnan(c) else 0.0)
+                    except Exception:
+                        corrs.append(0.0)
+                else:
+                    corrs.append(0.0)
                 
         best_lag_idx = np.argmax([abs(c) if not np.isnan(c) else 0 for c in corrs])
         best_lag = lags[best_lag_idx]

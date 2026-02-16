@@ -11,8 +11,12 @@ from database_manager import DatabaseManager
 
 
 def run(coro):
-    """Helper to run async coroutines in sync tests."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Helper to run async coroutines in sync tests (Python 3.12+ safe)."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 class TestPositionPersistence(unittest.TestCase):

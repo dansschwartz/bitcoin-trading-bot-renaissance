@@ -15,7 +15,7 @@
     "risk_management": {
         "daily_loss_limit": 500,
         "position_limit": 1000,
-        "min_confidence": 0.55
+        "min_confidence": 0.5
     },
     "regime_overlay": {
         "enabled": true,
@@ -44,30 +44,28 @@
         "models": [
             "QuantumTransformer",
             "Bi-LSTM",
-            "CNN",
-            "VAE",
-            "Ensemble"
+            "CNN"
         ]
     },
     "signal_weights": {
-        "order_flow": 0.08,
-        "order_book": 0.10,
-        "volume": 0.08,
-        "macd": 0.08,
-        "rsi": 0.10,
-        "bollinger": 0.08,
-        "alternative": 0.04,
-        "stat_arb": 0.07,
-        "volume_profile": 0.06,
-        "fractal": 0.06,
-        "entropy": 0.04,
-        "quantum": 0.04,
-        "lead_lag": 0.04,
-        "correlation_divergence": 0.03,
-        "garch_vol": 0.03,
-        "multi_exchange": 0.07
+        "order_flow": 0.00477211759756799,
+        "order_book": 0.09200580781416333,
+        "volume": 0.15770402457013227,
+        "macd": 0.15809259833018102,
+        "rsi": 0.005482323877049504,
+        "bollinger": 0.1220715738968879,
+        "alternative": 0.004615931192917808,
+        "stat_arb": 0.005357878787184235,
+        "volume_profile": 0.09144461036930382,
+        "fractal": 0.09793828376303806,
+        "entropy": 0.023276657882905838,
+        "quantum": 0.04197536323002295,
+        "lead_lag": 0.004327440283712427,
+        "correlation_divergence": 0.14118591201442374,
+        "garch_vol": 0.045525057438758655,
+        "multi_exchange": 0.004224418951750448
     },
-    "weight_lock": true,
+    "weight_lock": false,
     "mean_reversion": {
         "window_size": 240,
         "min_history": 60,
@@ -95,9 +93,9 @@
         "model_type": "GARCH",
         "p": 1,
         "q": 1,
-        "min_observations": 50,
-        "refit_interval_cycles": 50,
-        "historical_vol_window": 30,
+        "min_observations": 20,
+        "refit_interval_cycles": 20,
+        "historical_vol_window": 10,
         "forecast_horizon": 1,
         "ewma_lambda": 0.94,
         "position_size_impact": 0.5
@@ -208,7 +206,26 @@
         "risk_threshold": 0.5,
         "extreme_funding_percentile": 0.9,
         "high_oi_change_pct": 10.0,
-        "extreme_ls_ratio": 2.0
+        "extreme_ls_ratio": 2.0,
+        "fast_eval_enabled": true,
+        "fast_eval_interval_seconds": 1
+    },
+    "fast_mean_reversion": {
+        "enabled": true,
+        "evaluation_interval_seconds": 1.0,
+        "rolling_window_seconds": 60,
+        "deviation_threshold_sigma": 2.0,
+        "min_deviation_bps": 5.0,
+        "max_signal_ttl_seconds": 120,
+        "min_confidence": 0.52,
+        "pairs": [
+            "BTC-USD",
+            "ETH-USD",
+            "SOL-USD",
+            "DOGE-USD",
+            "AVAX-USD",
+            "LINK-USD"
+        ]
     },
     "microstructure_signals": {
         "enabled": true,
@@ -232,8 +249,8 @@
         "enabled": true,
         "correlation_threshold": 0.75,
         "correlation_penalty": 0.5,
-        "max_concentration": 0.40,
-        "max_total_exposure_pct": 0.80,
+        "max_concentration": 0.4,
+        "max_total_exposure_pct": 0.8,
         "corr_update_interval": 20
     },
     "medallion_analogs": {
@@ -382,5 +399,129 @@
         "max_single_position_pct": 15.0,
         "max_leverage": 3.0,
         "signal_ttl_default_seconds": 60
+    },
+    "multi_horizon_estimator": {
+        "enabled": true,
+        "horizons": [
+            1,
+            5,
+            30,
+            120,
+            300,
+            900,
+            3600
+        ],
+        "max_computation_ms": 5.0,
+        "microstructure_predictor": {
+            "orderbook_levels": 10,
+            "max_history_seconds": 120,
+            "max_ticks": 2000,
+            "signal_steepness": {
+                "1": 1.2,
+                "5": 1.0,
+                "30": 0.7
+            },
+            "probability_clamp": [
+                0.4,
+                0.7
+            ]
+        },
+        "statistical_predictor": {
+            "vwap_window_trades": 3000,
+            "vol_window_returns": 100,
+            "bar_momentum_weight": 0.2,
+            "probability_clamp": [
+                0.42,
+                0.62
+            ]
+        },
+        "regime_predictor": {
+            "regime_vol_bps": {
+                "low_volatility": 8,
+                "mean_reverting": 15,
+                "trending_up": 20,
+                "trending_down": 25,
+                "high_volatility": 40,
+                "chaotic": 80
+            },
+            "probability_clamp": [
+                0.45,
+                0.56
+            ]
+        },
+        "calibrator": {
+            "run_interval_hours": 24,
+            "min_samples_per_bucket": 5,
+            "min_positions_to_calibrate": 20
+        },
+        "reevaluator_integration": {
+            "cone_close_override": true,
+            "cone_tail_risk_threshold_bps": 3.0,
+            "cone_size_multiplier_enabled": true,
+            "front_loaded_close_threshold": 0.5
+        }
+    },
+    "reevaluation": {
+        "enabled": true,
+        "evaluation_interval_seconds": 1.0,
+        "min_edge_bps": 0.5,
+        "confidence_floor": 0.505,
+        "trim_threshold": 0.8,
+        "close_threshold": 0.3,
+        "add_threshold": 1.5,
+        "churn_prevention_seconds": 10,
+        "max_adjustments_per_position": 5,
+        "min_trim_usd": 5.0,
+        "cost_spike_multiplier": 2.0,
+        "spread_spike_multiplier": 3.0,
+        "max_position_loss_bps": 50,
+        "strategy_overrides": {
+            "cross_exchange": {
+                "evaluation_interval_seconds": 0.5,
+                "churn_prevention_seconds": 5,
+                "max_adjustments_per_position": 3,
+                "min_edge_bps": 0.3
+            },
+            "funding_rate": {
+                "evaluation_interval_seconds": 5.0,
+                "churn_prevention_seconds": 60,
+                "max_adjustments_per_position": 2,
+                "min_edge_bps": 1.0
+            },
+            "fast_mean_reversion": {
+                "evaluation_interval_seconds": 1.0,
+                "churn_prevention_seconds": 5,
+                "max_adjustments_per_position": 3,
+                "min_edge_bps": 0.3
+            }
+        }
+    },
+    "bot_id": "bot-01",
+    "orchestrator": {
+        "enabled": false,
+        "heartbeat_dir": "data/heartbeats",
+        "heartbeat_interval_seconds": 5,
+        "aggregate_limits": {
+            "max_single_asset_pct": 30,
+            "max_total_exposure_pct": 80,
+            "max_drawdown_pct": 10
+        },
+        "telegram_aggregate_report_interval_minutes": 60
+    },
+    "exchange_accounts": {
+        "primary": {
+            "api_key_env": "COINBASE_API_KEY",
+            "api_secret_env": "COINBASE_API_SECRET"
+        },
+        "sub_accounts": {
+            "bot-02": {
+                "api_key_env": "CB_BOT02_KEY",
+                "api_secret_env": "CB_BOT02_SECRET"
+            },
+            "bot-03": {
+                "api_key_env": "CB_BOT03_KEY",
+                "api_secret_env": "CB_BOT03_SECRET"
+            }
+        }
     }
 }

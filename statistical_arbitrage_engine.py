@@ -34,7 +34,7 @@ class StatisticalArbitrageEngine:
             b_prices = self.history[base_id]
             t_prices = self.history[target_id]
             
-            if len(b_prices) < 10 or len(t_prices) < 10:
+            if len(b_prices) < 5 or len(t_prices) < 5:
                 return {"z_score": 0.0, "signal": 0.0, "status": "insufficient_data"}
                 
             # Synchronize
@@ -46,7 +46,8 @@ class StatisticalArbitrageEngine:
             # Spread = b - beta * t
             cov_matrix = np.cov(b, t)
             if cov_matrix.shape == (2, 2):
-                beta = cov_matrix[0, 1] / np.var(t)
+                t_var = np.var(t)
+                beta = cov_matrix[0, 1] / t_var if t_var > 1e-12 else 1.0
             else:
                 beta = 1.0
                 

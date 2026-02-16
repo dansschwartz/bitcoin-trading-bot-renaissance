@@ -95,6 +95,11 @@ class ArbitrageExecutor:
         sell_price = self._round_price(signal.sell_price, sell_info.get('price_precision', 8))
 
         if buy_qty <= 0 or sell_qty <= 0:
+            logger.warning(
+                f"Rejected {trade_id}: quantity_too_small "
+                f"(buy_qty={float(buy_qty):.8f}, sell_qty={float(sell_qty):.8f}, "
+                f"recommended={float(signal.recommended_quantity):.8f})"
+            )
             return ExecutionResult(trade_id=trade_id, status="quantity_too_small", signal=signal)
 
         logger.info(
@@ -290,13 +295,15 @@ class ArbitrageExecutor:
                         if sell.filled_quantity > 0 and sell.average_fill_price > 0 else Decimal('0'))
         return buy_fee_bps + sell_fee_bps + buy_slip + sell_slip
 
-    def _round_qty(self, qty: Decimal, precision: int) -> Decimal:
+    def _round_qty(self, qty: Decimal, precision) -> Decimal:
+        precision = int(precision)
         if precision <= 0:
             return qty.quantize(Decimal('1'), rounding=ROUND_DOWN)
         quant = Decimal(10) ** -precision
         return qty.quantize(quant, rounding=ROUND_DOWN)
 
-    def _round_price(self, price: Decimal, precision: int) -> Decimal:
+    def _round_price(self, price: Decimal, precision) -> Decimal:
+        precision = int(precision)
         if precision <= 0:
             return price.quantize(Decimal('1'), rounding=ROUND_DOWN)
         quant = Decimal(10) ** -precision

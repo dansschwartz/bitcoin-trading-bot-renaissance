@@ -33,9 +33,9 @@ class GARCHVolatilityEngine:
         self.model_type = config.get("model_type", "GARCH")
         self.p = config.get("p", 1)
         self.q = config.get("q", 1)
-        self.min_observations = config.get("min_observations", 200)
+        self.min_observations = config.get("min_observations", 20)
         self.refit_interval = config.get("refit_interval_cycles", 50)
-        self.hist_vol_window = config.get("historical_vol_window", 30)
+        self.hist_vol_window = config.get("historical_vol_window", 10)
         self.forecast_horizon = config.get("forecast_horizon", 1)
         self.ewma_lambda = config.get("ewma_lambda", 0.94)
         self.position_impact = config.get("position_size_impact", 0.5)
@@ -144,22 +144,19 @@ class GARCHVolatilityEngine:
 
         model = self._models.get(product_id)
 
-        if model is None:
-            default["historical_vol"] = hist_vol
-            return default
-
         forecast_vol = hist_vol  # Default
         model_type = "none"
         confidence = 0.3
 
-        if model == "EWMA":
+        if model == "EWMA" or model is None:
             # EWMA variance: sigma2[t] = lambda * sigma2[t-1] + (1-lambda) * r[t-1]^2
+            # Used both as explicit EWMA fallback and as pre-fit inline estimate
             ewma_var = returns[-1] ** 2
             for r in reversed(list(returns[:-1])[-50:]):
                 ewma_var = self.ewma_lambda * ewma_var + (1 - self.ewma_lambda) * r ** 2
             forecast_vol = float(np.sqrt(ewma_var) * np.sqrt(252))
-            model_type = "EWMA_fallback"
-            confidence = 0.5
+            model_type = "EWMA_inline" if model is None else "EWMA_fallback"
+            confidence = 0.35 if model is None else 0.5
         elif ARCH_AVAILABLE and hasattr(model, "forecast"):
             try:
                 fc = model.forecast(horizon=self.forecast_horizon, reindex=False)

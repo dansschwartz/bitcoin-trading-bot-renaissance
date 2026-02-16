@@ -174,7 +174,16 @@ class AdvancedMeanReversionEngine:
         if theta >= 0:
             return float("inf")  # Not mean-reverting
 
-        half_life = -np.log(2) / np.log(1 + theta)
+        phi = 1 + theta  # AR(1) coefficient
+        abs_phi = abs(phi)
+        if abs_phi >= 1 or abs_phi < 1e-12:
+            return float("inf")  # Non-stationary or degenerate
+
+        half_life = -np.log(2) / np.log(abs_phi)
+
+        if not np.isfinite(half_life) or half_life <= 0:
+            return float("inf")
+
         return max(1.0, float(half_life))
 
     def _kalman_update(self, pair_key: str, y: float, x: float) -> Tuple[float, float]:
