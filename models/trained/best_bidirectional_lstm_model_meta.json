@@ -1,0 +1,13 @@
+{
+  "model": "bidirectional_lstm",
+  "last_trained": "2026-02-16T15:27:05.284099+00:00",
+  "epochs_trained": 5,
+  "val_loss": 0.997861001564532,
+  "val_dir_acc": 0.5301262585903788,
+  "test_loss": 1.0078795227137478,
+  "test_dir_acc": 0.5159740571703099,
+  "train_samples": 35775,
+  "val_samples": 6257,
+  "test_samples": 8326,
+  "device": "cpu"
+}

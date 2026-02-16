@@ -1,0 +1,13 @@
+{
+  "model": "dilated_cnn",
+  "last_trained": "2026-02-16T15:43:24.612454+00:00",
+  "epochs_trained": 5,
+  "val_loss": 1.0011083033620094,
+  "val_dir_acc": 0.5470672846412018,
+  "test_loss": 1.005229584195397,
+  "test_dir_acc": 0.5265433581551766,
+  "train_samples": 35775,
+  "val_samples": 6257,
+  "test_samples": 8326,
+  "device": "cpu"
+}

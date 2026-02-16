@@ -1,0 +1,13 @@
+{
+  "model": "quantum_transformer",
+  "last_trained": "2026-02-16T15:13:32.316029+00:00",
+  "epochs_trained": 5,
+  "val_loss": 0.9982033152969516,
+  "val_dir_acc": 0.539875339619626,
+  "test_loss": 1.0010955658825962,
+  "test_dir_acc": 0.5157338457842902,
+  "train_samples": 35775,
+  "val_samples": 6257,
+  "test_samples": 8326,
+  "device": "cpu"
+}

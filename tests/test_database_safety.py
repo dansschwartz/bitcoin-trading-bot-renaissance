@@ -16,7 +16,7 @@ class TestDatabaseSafety(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmpdir, "test_safety.db")
         self.db = DatabaseManager({"path": self.db_path})
-        asyncio.get_event_loop().run_until_complete(self.db.init_database())
+        asyncio.run(self.db.init_database())
 
     def test_wal_mode_enabled(self):
         """Database should use WAL journal mode after init."""

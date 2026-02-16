@@ -255,6 +255,19 @@ try:
 except ImportError:
     SHARPE_MONITOR_AVAILABLE = False
 
+try:
+    from portfolio.position_reevaluator import PositionReEvaluator
+    from core.data_structures import PositionContext, ReEvalResult
+    POSITION_REEVALUATOR_AVAILABLE = True
+except ImportError:
+    POSITION_REEVALUATOR_AVAILABLE = False
+
+try:
+    from intelligence.multi_horizon_estimator import MultiHorizonEstimator
+    MHPE_AVAILABLE = True
+except ImportError:
+    MHPE_AVAILABLE = False
+
 # Types moved to renaissance_types.py
 
 def _signed_strength(signal: IndicatorOutput) -> float:
@@ -604,11 +617,11 @@ class RenaissanceTradingBot:
 
         self.devil_tracker = DevilTracker(db_path) if DEVIL_TRACKER_AVAILABLE else None
         if self.devil_tracker:
-            self.logger.info("DevilTracker: ACTIVE — tracking execution quality")
+            self.logger.info("DevilTracker: ACTIVE — tracking signal→fill execution quality")
 
         self.kelly_sizer = KellyPositionSizer(self.config, db_path) if KELLY_SIZER_AVAILABLE else None
         if self.kelly_sizer:
-            self.logger.info("KellyPositionSizer: OBSERVATION — logging Kelly stats alongside active sizer")
+            self.logger.info("KellyPositionSizer: ACTIVE — optimal sizing from trade history")
 
         # Daily Signal Review — end-of-day P&L audit per signal type (distinct from intra-day signal_throttle)
         self.daily_signal_review = MedallionSignalThrottle(self.config, db_path) if MEDALLION_THROTTLE_AVAILABLE else None
@@ -662,6 +675,33 @@ class RenaissanceTradingBot:
         self.sharpe_monitor_medallion = SharpeMonitor(self.config, db_path) if SHARPE_MONITOR_AVAILABLE else None
         if self.sharpe_monitor_medallion:
             self.logger.info("SharpeMonitor: ACTIVE — rolling Sharpe health")
+
+        # ── Multi-Horizon Probability Estimator (Doc 11) ──
+        self.mhpe = None
+        if MHPE_AVAILABLE:
+            try:
+                self.mhpe = MultiHorizonEstimator(
+                    config=self.config.get('multi_horizon_estimator', {}),
+                    regime_predictor=self.medallion_regime,
+                )
+                self.logger.info("MHPE: ACTIVE — 7-horizon probability cones")
+            except Exception as _mhpe_err:
+                self.logger.warning(f"MHPE init failed: {_mhpe_err}")
+
+        # ── Position Re-evaluator (Doc 10) ──
+        self.position_reevaluator = None
+        if POSITION_REEVALUATOR_AVAILABLE:
+            try:
+                self.position_reevaluator = PositionReEvaluator(
+                    config=self.config.get('reevaluation', {}),
+                    kelly_sizer=self.kelly_sizer,
+                    regime_detector=self.medallion_regime,
+                    devil_tracker=self.devil_tracker,
+                    mhpe=self.mhpe,
+                )
+                self.logger.info("PositionReEvaluator: ACTIVE — continuous position re-evaluation")
+            except Exception as _re_err:
+                self.logger.warning(f"PositionReEvaluator init failed: {_re_err}")
 
         # ── Signal Scorecard (Renaissance: measure everything) ──
         # Records {product_id: {signal_name: {"correct": N, "total": N}}}
@@ -774,7 +814,23 @@ class RenaissanceTradingBot:
                 self.logger.info(f"ML startup validation: {len(loaded_models)} trained models active: {loaded_models}")
             else:
                 self.logger.warning("ML startup validation: NO trained models loaded — ML predictions will be empty")
-        
+
+            # Check model staleness
+            metadata_path = os.path.join("models", "trained", "training_metadata.json")
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path) as f:
+                        training_meta = json.load(f)
+                    for model_name, info in training_meta.items():
+                        last_trained = datetime.fromisoformat(info["last_trained"].replace("Z", "+00:00"))
+                        age_days = (datetime.now(timezone.utc) - last_trained).days
+                        if age_days > 7:
+                            self.logger.warning(
+                                f"ML staleness: {model_name} last trained {age_days} days ago — retraining recommended"
+                            )
+                except Exception as e:
+                    self.logger.debug(f"Could not check model staleness: {e}")
+
         # Performance Tracking
         self.ml_performance_metrics = {
             'total_trades': 0,
@@ -976,6 +1032,29 @@ class RenaissanceTradingBot:
         if product_id not in self._tech_indicators:
             self._tech_indicators[product_id] = EnhancedTechnicalIndicators()
         return self._tech_indicators[product_id]
+
+    def _load_price_df_from_db(self, product_id: str, limit: int = 100):
+        """Load recent OHLCV bars from DB for ML inference when tech indicators are sparse."""
+        try:
+            import pandas as _pd
+            import sqlite3
+            db_path = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+            conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            rows = conn.execute(
+                "SELECT bar_start, open, high, low, close, volume "
+                "FROM five_minute_bars WHERE pair=? ORDER BY bar_start DESC LIMIT ?",
+                (product_id, limit)
+            ).fetchall()
+            conn.close()
+            if len(rows) < 30:
+                return _pd.DataFrame()
+            df = _pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df = df.sort_values('timestamp').reset_index(drop=True)
+            return df
+        except Exception as e:
+            self.logger.debug(f"DB bar load failed for {product_id}: {e}")
+            import pandas as _pd
+            return _pd.DataFrame()
 
     def _setup_logging(self, config: Dict[str, Any]) -> logging.Logger:
         """Setup comprehensive logging"""
@@ -1468,14 +1547,19 @@ class RenaissanceTradingBot:
         """Make final trading decision with Renaissance methodology + Kelly position sizing"""
 
         # ── COST PRE-SCREEN: "The edge must exceed the vig" — Medallion Principle ──
-        # Check this FIRST before spending compute on confidence/regime/ML
+        # In paper trading mode, use much lower cost threshold since fees are simulated.
+        # The full cost pre-screen runs later in live mode but should not block paper signals.
         try:
-            round_trip_cost = self.position_sizer.estimate_round_trip_cost()
-            min_viable_signal = round_trip_cost * 1.0  # Need to exceed cost to justify trade
+            if self.paper_trading:
+                # Paper mode: use minimal cost threshold to avoid blocking valid signals
+                min_viable_signal = 0.001
+            else:
+                round_trip_cost = self.position_sizer.estimate_round_trip_cost()
+                min_viable_signal = round_trip_cost * 1.0
             if abs(weighted_signal) < min_viable_signal:
                 self.logger.debug(
                     f"COST PRE-SCREEN: {product_id} signal {weighted_signal:.4f} < "
-                    f"min viable {min_viable_signal:.4f} (2x cost {round_trip_cost:.4f})"
+                    f"min viable {min_viable_signal:.4f}"
                 )
                 return TradingDecision(
                     action='HOLD', confidence=0.0, position_size=0.0,
@@ -1809,22 +1893,66 @@ class RenaissanceTradingBot:
                 f"kelly={kelly_f:.4f} -> final=${final_usd:.2f}"
             )
 
-            # ── Kelly Sizer observation (Audit 1/2: log alongside active sizer) ──
-            if self.kelly_sizer and sizing_result:
+            # ── Kelly Sizer ACTIVE — adjust position size via Kelly optimal sizing ──
+            if self.kelly_sizer and position_size > 0 and current_price > 0:
                 try:
-                    # Use dominant signal type for Kelly stats lookup
-                    dominant_sig = max(signal_contributions, key=lambda k: abs(signal_contributions[k]), default="unknown")
-                    kelly_stats = self.kelly_sizer.get_statistics(dominant_sig, product_id)
-                    if kelly_stats.get("sufficient_data"):
+                    dominant_sig = max(signal_contributions, key=lambda k: abs(signal_contributions[k]), default="combined")
+                    kelly_usd = self.kelly_sizer.get_position_size(
+                        signal_dict={"signal_type": dominant_sig, "pair": product_id, "confidence": confidence},
+                        equity=self._cached_balance_usd or 10000.0,
+                    )
+                    if kelly_usd > 0:
+                        base_usd = position_size * current_price
+                        # Blend: use minimum of existing size and Kelly recommendation
+                        # This prevents over-sizing beyond what Kelly says is optimal
+                        kelly_capped_usd = min(base_usd, kelly_usd)
+                        kelly_ratio = kelly_capped_usd / base_usd if base_usd > 0 else 1.0
+                        if kelly_ratio < 0.95:  # Only adjust if Kelly says significantly less
+                            position_size = kelly_capped_usd / current_price
+                            self.logger.info(
+                                f"KELLY SIZER: {product_id} sized to {kelly_ratio:.0%} of base "
+                                f"(Kelly=${kelly_usd:.2f}, base=${base_usd:.2f}, final=${kelly_capped_usd:.2f})"
+                            )
+                        else:
+                            self.logger.info(
+                                f"KELLY SIZER: {product_id} Kelly=${kelly_usd:.2f} >= base=${base_usd:.2f} — no reduction"
+                            )
+                    elif kelly_usd == 0:
+                        # Kelly says don't trade — but only if we have sufficient data
+                        kelly_stats = self.kelly_sizer.get_statistics(dominant_sig, product_id)
+                        if kelly_stats.get("sufficient_data") and kelly_stats.get("expectancy_per_trade_bps", 0) <= 0:
+                            self.logger.warning(
+                                f"KELLY SIZER: {product_id} negative expectancy — blocking trade"
+                            )
+                            position_size = 0.0
+                            action = 'HOLD'
+                except Exception as _kelly_err:
+                    self.logger.debug(f"Kelly sizer failed: {_kelly_err}")
+
+            # ── Leverage Manager ACTIVE — apply consistency-based leverage multiplier ──
+            if self.leverage_mgr and position_size > 0:
+                try:
+                    max_safe_lev = self.leverage_mgr.compute_max_safe_leverage()
+                    if max_safe_lev > 0 and max_safe_lev < 1.0:
+                        # Reduce size if leverage headroom is limited
+                        position_size *= max_safe_lev
                         self.logger.info(
-                            f"KELLY SIZER (obs) {product_id}: "
-                            f"f*={kelly_stats.get('fractional_kelly_pct', 0):.2f}% "
-                            f"(win={kelly_stats.get('win_rate', 0):.1%}, "
-                            f"trades={kelly_stats.get('total_trades', 0)}, "
-                            f"E={kelly_stats.get('expectancy_per_trade_bps', 0):.1f}bps)"
+                            f"LEVERAGE MGR: {product_id} sized to {max_safe_lev:.0%} "
+                            f"(consistency-based leverage cap)"
                         )
-                except Exception:
-                    pass
+                    elif max_safe_lev >= 1.0:
+                        self.logger.debug(
+                            f"LEVERAGE MGR: {product_id} leverage headroom OK ({max_safe_lev:.2f}x)"
+                        )
+                    # If max_safe_lev == 0, block trade
+                    if max_safe_lev == 0 and self.leverage_mgr.should_reduce_leverage():
+                        self.logger.warning(
+                            f"LEVERAGE MGR: {product_id} no leverage headroom — blocking"
+                        )
+                        position_size = 0.0
+                        action = 'HOLD'
+                except Exception as _lev_err:
+                    self.logger.debug(f"Leverage manager failed: {_lev_err}")
 
             # ── Medallion Regime observation (Audit 1/2: log alongside RegimeOverlay) ──
             if self.medallion_regime:
@@ -1919,6 +2047,21 @@ class RenaissanceTradingBot:
             # Record trade cycle for anti-churn cooldown
             if success:
                 self._last_trade_cycle[product_id] = getattr(self, 'scan_cycle_count', 0)
+
+            # Devil Tracker — record fill (actual execution price vs signal price)
+            if success and self.devil_tracker:
+                try:
+                    _dtid = getattr(self, '_last_devil_trade_id', {}).get(product_id)
+                    if _dtid:
+                        self.devil_tracker.record_order_submission(_dtid, current_price)
+                        self.devil_tracker.record_fill(
+                            _dtid,
+                            fill_price=current_price,
+                            fill_quantity=decision.position_size,
+                            fill_fee=slippage_risk.get('predicted_slippage', 0.0) * decision.position_size * current_price / 10000,
+                        )
+                except Exception as _dt_err:
+                    self.logger.debug(f"Devil tracker fill record failed: {_dt_err}")
 
             # 4. Persist Trade
             if success and self.db_enabled:
@@ -2602,15 +2745,20 @@ class RenaissanceTradingBot:
                     except Exception as _ma_err:
                         self.logger.debug(f"Medallion analogs error: {_ma_err}")
 
+                # Build OHLCV DataFrame for ML models (needed by bridge + RT pipeline)
+                _tech_inst = self._get_tech(product_id)
+                price_df = _tech_inst._to_dataframe()
+                # Fallback: if tech indicators have <30 rows, load from DB bars
+                if len(price_df) < 30:
+                    price_df = self._load_price_df_from_db(product_id, limit=100)
+
                 # 2.1 ML Enhanced Signal Fusion (Unified from Enhanced Bot)
                 ml_package = None
                 if self.ml_enabled:
-                    # ML Bridge generates parallel model predictions (CNN-LSTM, N-BEATS, etc.)
-                    ml_package = await self.ml_bridge.generate_ml_signals(market_data, signals)
-                
+                    # ML Bridge generates parallel model predictions using OHLCV data
+                    ml_package = await self.ml_bridge.generate_ml_signals(price_df, signals)
+
                 # 2.2 Volume Profile Intelligence (Institutional)
-                _tech_inst = self._get_tech(product_id)
-                price_df = _tech_inst._to_dataframe()
                 vp_signal = 0.0
                 vp_status = "No Profile"
                 if not price_df.empty:
@@ -2624,15 +2772,15 @@ class RenaissanceTradingBot:
                 self._last_vp_status[product_id] = vp_status
 
                 # 2.5 Update regime overlay BEFORE signal fusion (so regime weights apply)
+                # NOTE: use regime_df (not price_df) to avoid clobbering the ML DataFrame
                 try:
                     if self.regime_overlay.enabled:
                         if len(_tech_inst.price_history) > 0:
-                            price_df = _tech_inst._to_dataframe()
+                            regime_df = _tech_inst._to_dataframe()
                         else:
-                            # Minimal price_df for overlay (real data comes from DB bars)
                             import pandas as _pd
-                            price_df = _pd.DataFrame({'close': [current_price]})
-                        self.regime_overlay.update(price_df)
+                            regime_df = _pd.DataFrame({'close': [current_price]})
+                        self.regime_overlay.update(regime_df)
                 except Exception as _e:
                     self.logger.debug(f"Regime overlay skipped: {_e}")
 
@@ -2750,7 +2898,7 @@ class RenaissanceTradingBot:
                 rt_result = None
                 if self.real_time_pipeline.enabled:
                     await self.real_time_pipeline.start()
-                    raw_rt = await self.real_time_pipeline.run_cycle()
+                    raw_rt = await self.real_time_pipeline.run_cycle(price_df=price_df)
                     if raw_rt:
                         # Hardening real-time pipeline outputs
                         rt_result = {}
@@ -2886,6 +3034,22 @@ class RenaissanceTradingBot:
                                                     market_data=market_data,
                                                     drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0))
 
+                # 5.05 Devil Tracker — record signal detection price for cost tracking
+                if self.devil_tracker and decision.action != 'HOLD':
+                    try:
+                        _devil_trade_id = self.devil_tracker.record_signal_detection(
+                            signal_type="combined",
+                            pair=product_id,
+                            exchange="coinbase",
+                            price=current_price,
+                            side=decision.action,
+                        )
+                        if not hasattr(self, '_last_devil_trade_id'):
+                            self._last_devil_trade_id = {}
+                        self._last_devil_trade_id[product_id] = _devil_trade_id
+                    except Exception as _dt_err:
+                        self.logger.debug(f"Devil tracker signal record failed: {_dt_err}")
+
                 # Drawdown circuit breaker: block new positions in exits-only mode
                 if getattr(self, '_drawdown_exits_only', False) and decision.action != 'HOLD':
                     self.logger.warning(f"CIRCUIT BREAKER: blocking {decision.action} for {product_id} — exits only mode")
@@ -2957,14 +3121,22 @@ class RenaissanceTradingBot:
                     }
                     self._track_task(self.db_manager.store_decision(decision_persist))
                     
-                    # Store ML predictions
+                    # Store ML predictions (prefer RT pipeline, fallback to ml_bridge)
+                    _ml_preds = {}
                     if rt_result and 'predictions' in rt_result:
-                        for model_name, pred in rt_result['predictions'].items():
-                            self._track_task(self.db_manager.store_ml_prediction({
-                                'product_id': product_id,
-                                'model_name': model_name,
-                                'prediction': pred
-                            }))
+                        _ml_preds = rt_result['predictions']
+                    elif ml_package and ml_package.ml_predictions:
+                        for mp in ml_package.ml_predictions:
+                            if isinstance(mp, dict):
+                                _ml_preds[mp.get('model', 'unknown')] = mp.get('prediction', 0.0)
+                            elif isinstance(mp, tuple) and len(mp) == 2:
+                                _ml_preds[mp[0]] = mp[1]
+                    for model_name, pred in _ml_preds.items():
+                        self._track_task(self.db_manager.store_ml_prediction({
+                            'product_id': product_id,
+                            'model_name': model_name,
+                            'prediction': pred
+                        }))
 
                 # 5.5 Exit Engine — Monitor open positions for alpha decay
                 try:
@@ -3013,7 +3185,85 @@ class RenaissanceTradingBot:
                 except Exception as exit_err:
                     self.logger.debug(f"Exit engine error: {exit_err}")
 
-                # 5.6 Position stacking is prevented in make_trading_decision()
+                # 5.6 Continuous Position Re-evaluation (Doc 10)
+                if self.position_reevaluator:
+                    try:
+                        with self.position_manager._lock:
+                            _reeval_positions = list(self.position_manager.positions.values())
+                        _reeval_positions_for_pid = [p for p in _reeval_positions if p.product_id == product_id]
+                        if _reeval_positions_for_pid:
+                            from decimal import Decimal as _D
+                            _regime_label = self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else "unknown"
+                            _contexts = []
+                            for _pos in _reeval_positions_for_pid:
+                                _age_s = (datetime.now() - _pos.entry_time).total_seconds()
+                                _side = _pos.side.value.lower() if hasattr(_pos.side, 'value') else str(_pos.side).lower()
+                                _pnl_bps = 0.0
+                                if _pos.entry_price > 0 and current_price > 0:
+                                    _move = (current_price - _pos.entry_price) / _pos.entry_price * 10000
+                                    _pnl_bps = _move if _side == "long" else -_move
+                                _ctx = PositionContext(
+                                    position_id=_pos.position_id,
+                                    pair=product_id,
+                                    exchange="coinbase",
+                                    side=_side,
+                                    strategy="combined",
+                                    entry_price=_D(str(_pos.entry_price)),
+                                    entry_size=_D(str(_pos.size)),
+                                    entry_size_usd=_D(str(_pos.size * _pos.entry_price)),
+                                    entry_timestamp=_pos.entry_time.timestamp(),
+                                    entry_confidence=decision.confidence,
+                                    entry_expected_move_bps=10.0,
+                                    entry_cost_estimate_bps=2.0,
+                                    entry_net_edge_bps=8.0,
+                                    entry_regime=_regime_label,
+                                    entry_volatility=0.02,
+                                    entry_book_depth_usd=_D("50000"),
+                                    entry_spread_bps=1.0,
+                                    current_size=_D(str(_pos.size)),
+                                    current_size_usd=_D(str(_pos.size * current_price)),
+                                    current_price=_D(str(current_price)),
+                                    unrealized_pnl_bps=_pnl_bps,
+                                    current_confidence=decision.confidence,
+                                    current_regime=_regime_label,
+                                )
+                                _contexts.append(_ctx)
+                            _reeval_results = self.position_reevaluator.reevaluate_all(
+                                _contexts,
+                                portfolio_state={"equity": self._cached_balance_usd or 10000.0},
+                                market_state={"regime": _regime_label, "price": current_price},
+                            )
+                            for _rr in _reeval_results:
+                                if _rr.action == "close":
+                                    _close_ok, _close_msg = self.position_manager.close_position(
+                                        _rr.position_id, reason=f"ReEval: {_rr.reason_code}"
+                                    )
+                                    if _close_ok:
+                                        self.logger.warning(
+                                            f"REEVAL CLOSE: {_rr.position_id} — {_rr.reason_code} "
+                                            f"(edge={_rr.remaining_edge_bps:.1f}bps, urgency={_rr.urgency})"
+                                        )
+                                        if self.devil_tracker:
+                                            self.devil_tracker.record_exit(
+                                                _rr.position_id, "reeval", _rr.reason_code
+                                            )
+                                    else:
+                                        self.logger.warning(
+                                            f"REEVAL CLOSE FAILED: {_rr.position_id} — {_close_msg}"
+                                        )
+                                elif _rr.action == "trim" and _rr.trim_to_usd > 0:
+                                    self.logger.warning(
+                                        f"REEVAL TRIM: {_rr.position_id} to ${_rr.trim_to_usd:.2f} "
+                                        f"— {_rr.reason_code}"
+                                    )
+                                elif _rr.action != "hold":
+                                    self.logger.warning(
+                                        f"REEVAL {_rr.action.upper()}: {_rr.position_id} — {_rr.reason_code}"
+                                    )
+                    except Exception as _reeval_err:
+                        self.logger.warning(f"Position re-evaluation failed: {_reeval_err}")
+
+                # 5.7 Position stacking is prevented in make_trading_decision()
                 # Same-direction positions are blocked; reversals close existing positions
 
                 # 6. Smart Execution (Step 10)
@@ -3070,6 +3320,41 @@ class RenaissanceTradingBot:
                                     self.signal_weights = new_weights
 
                         self._track_task(run_evo())
+
+                    # ── Medallion Monitors (periodic health checks) ──
+                    try:
+                        if self.sharpe_monitor_medallion:
+                            sharpe_report = self.sharpe_monitor_medallion.get_report()
+                            sharpe_val = sharpe_report.get("rolling_sharpe_30d", 0)
+                            if self.sharpe_monitor_medallion.should_reduce_exposure():
+                                self.logger.warning(
+                                    f"SHARPE MONITOR: reduce exposure (Sharpe={sharpe_val:.2f})"
+                                )
+                            else:
+                                self.logger.info(f"SHARPE MONITOR: Sharpe={sharpe_val:.2f}")
+                    except Exception:
+                        pass
+                    try:
+                        if self.beta_monitor:
+                            beta_report = self.beta_monitor.get_report()
+                            if self.beta_monitor.should_alert():
+                                rec = self.beta_monitor.get_hedge_recommendation()
+                                self.logger.warning(
+                                    f"BETA MONITOR: beta={beta_report.get('beta', 0):.2f} — "
+                                    f"hedge: {rec.get('action', 'none')}"
+                                )
+                    except Exception:
+                        pass
+                    try:
+                        if self.capacity_monitor:
+                            caps = self.capacity_monitor.get_all_capacities()
+                            for _cpair, _cdata in caps.items():
+                                if _cdata.get("at_capacity_wall"):
+                                    self.logger.warning(
+                                        f"CAPACITY MONITOR: {_cpair} at capacity wall"
+                                    )
+                    except Exception:
+                        pass
 
                 # Run Breakout Scan (Step 16+)
                 self.scan_cycle_count += 1

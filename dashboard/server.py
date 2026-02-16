@@ -15,7 +15,7 @@ from dashboard.config import DashboardConfig
 from dashboard.event_emitter import DashboardEventEmitter
 from dashboard.ws_manager import ConnectionManager
 
-from dashboard.routers import system, decisions, trades, analytics, brain, risk, backtest, medallion
+from dashboard.routers import system, decisions, trades, analytics, brain, risk, backtest, medallion, devil
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ def create_app(
     app.include_router(risk.router)
     app.include_router(backtest.router)
     app.include_router(medallion.router)
+    app.include_router(devil.router)
 
     # WebSocket endpoint
     @app.websocket("/ws")

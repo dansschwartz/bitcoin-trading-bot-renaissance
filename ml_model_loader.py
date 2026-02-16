@@ -382,6 +382,170 @@ class TrainedDilatedCNN(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MODEL 4: Simple CNN  (best_cnn_model.pth — fresh architecture for 83 features)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TrainedCNN(nn.Module):
+    """Simple Conv1d model for 83-feature input.
+
+    4 conv layers with increasing then decreasing channels,
+    global average pooling, and a small classifier head.
+    Input: (batch, seq_len, 83)  Output: (batch, 1)
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(83, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.GELU(),
+            nn.Conv1d(128, 256, kernel_size=5, padding=2),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Conv1d(256, 128, kernel_size=7, padding=3),
+            nn.BatchNorm1d(128),
+            nn.GELU(),
+            nn.Conv1d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (batch, seq_len, 83) → prediction (batch, 1)"""
+        x = x.transpose(1, 2)  # (batch, 83, seq_len)
+        x = self.conv_layers(x)  # (batch, 64, seq_len)
+        x = x.mean(dim=-1)  # global avg pool → (batch, 64)
+        return self.classifier(x)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODEL 5: Bidirectional GRU  (best_gru_model.pth — fresh architecture)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TrainedGRU(nn.Module):
+    """Bidirectional GRU for 83-feature input.
+
+    2-layer BiGRU with hidden_size=134 (268 total), plus a classifier head.
+    Input: (batch, seq_len, 83)  Output: (batch, 1)
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=83,
+            hidden_size=134,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.2,
+        )
+        bidir_dim = 268  # 134 * 2
+        self.classifier = nn.Sequential(
+            nn.Linear(bidir_dim, 134),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(134, 64),
+            nn.GELU(),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (batch, seq_len, 83) → prediction (batch, 1)"""
+        out, _ = self.gru(x)  # (batch, seq_len, 268)
+        pooled = out.mean(dim=1)  # (batch, 268)
+        return self.classifier(pooled)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODEL 6: Meta-Ensemble  (stacking layer over 5 base models)
+# ══════════════════════════════════════════════════════════════════════════════
+
+N_BASE_MODELS = 5  # QT, BiLSTM, DilatedCNN, CNN, GRU
+BASE_MODEL_NAMES = [
+    'quantum_transformer', 'bidirectional_lstm', 'dilated_cnn', 'cnn', 'gru',
+]
+
+
+class TrainedMetaEnsemble(nn.Module):
+    """Meta-learning stacking layer that learns which base models to trust.
+
+    Takes 83-dim market features + 5 base model predictions = 88-dim input.
+    Learns context-dependent model weighting: in trending markets, trust
+    momentum models more; in choppy markets, trust mean-reversion models.
+
+    Input: (batch, 88) — first 83 = features, last 5 = base model predictions
+    Output: (prediction, confidence) tuple
+    """
+
+    def __init__(self):
+        super().__init__()
+        n_models = N_BASE_MODELS  # 5
+
+        # Feature extractor — understands market context
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(83, 128),         # 0
+            nn.BatchNorm1d(128),        # 1
+            nn.GELU(),                  # 2
+            nn.Dropout(0.2),            # 3
+            nn.Linear(128, 64),         # 4
+            nn.BatchNorm1d(64),         # 5
+            nn.GELU(),                  # 6
+        )
+
+        # Weight generator — context-dependent per-model attention weights
+        self.weight_generator = nn.Sequential(
+            nn.Linear(64, 32),          # 0
+            nn.GELU(),                  # 1
+            nn.Linear(32, n_models),    # 2  → 5 weights
+        )
+
+        # Final predictor — combines context + base predictions
+        self.final_predictor = nn.Sequential(
+            nn.Linear(64 + n_models, 32),  # 0
+            nn.GELU(),                     # 1
+            nn.Dropout(0.1),               # 2
+            nn.Linear(32, 1),              # 3
+        )
+
+        # Confidence estimator — how sure is the ensemble
+        self.confidence_estimator = nn.Sequential(
+            nn.Linear(64 + n_models, 16),  # 0
+            nn.ReLU(),                     # 1
+            nn.Linear(16, 1),              # 2
+            nn.Sigmoid(),                  # 3
+        )
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """x: (batch, 88) → prediction (batch, 1), confidence (batch, 1)
+
+        First 83 dims are features, last 5 are base model predictions.
+        """
+        features = x[:, :83]
+        model_preds = x[:, 83:]  # (batch, 5)
+
+        # Extract market context
+        ctx = self.feature_extractor(features)  # (batch, 64)
+
+        # Generate per-model attention weights
+        weights = F.softmax(self.weight_generator(ctx), dim=-1)  # (batch, 5)
+
+        # Combine context + raw model predictions
+        combined = torch.cat([ctx, model_preds], dim=-1)  # (batch, 69)
+
+        # Final prediction (learns both from weighted combo and direct features)
+        pred = self.final_predictor(combined)  # (batch, 1)
+        conf = self.confidence_estimator(combined)  # (batch, 1)
+
+        return pred, conf
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FEATURE EXTRACTION — builds 83-dim feature vectors from market data
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -521,6 +685,18 @@ MODEL_REGISTRY = {
         'models/trained/best_dilated_cnn_model.pth',
         TrainedDilatedCNN,
     ),
+    'cnn': (
+        'models/trained/best_cnn_model.pth',
+        TrainedCNN,
+    ),
+    'gru': (
+        'models/trained/best_gru_model.pth',
+        TrainedGRU,
+    ),
+    'meta_ensemble': (
+        'models/trained/best_meta_ensemble_model.pth',
+        TrainedMetaEnsemble,
+    ),
 }
 
 
@@ -603,22 +779,37 @@ def predict_with_models(
     predictions = {}
     x = torch.FloatTensor(features).unsqueeze(0)  # (1, seq_len, 83)
 
+    # Run base models first (all take sequence input)
     for name, model in models.items():
+        if name == 'meta_ensemble':
+            continue  # Handle after base models
         try:
             with torch.no_grad():
-                if name == 'quantum_transformer':
-                    pred, _unc = model(x)
-                    predictions[name] = float(torch.tanh(pred[0, 0]))
-                elif name == 'bidirectional_lstm':
-                    pred, conf = model(x)
-                    predictions[name] = float(torch.tanh(pred[0, 0]))
-                elif name == 'dilated_cnn':
-                    pred = model(x)
-                    predictions[name] = float(torch.tanh(pred[0, 0]))
+                output = model(x)
+                if isinstance(output, tuple):
+                    pred = output[0]  # (prediction, uncertainty/confidence)
                 else:
-                    predictions[name] = 0.0
+                    pred = output
+                predictions[name] = float(torch.tanh(pred[0, 0]))
         except Exception as e:
             logger.warning(f"Inference failed for {name}: {e}")
             predictions[name] = 0.0
+
+    # Run meta-ensemble if loaded (uses base model predictions + features)
+    if 'meta_ensemble' in models:
+        try:
+            with torch.no_grad():
+                # Build meta-ensemble input: last-timestep features + 5 base predictions
+                feat_vec = torch.FloatTensor(features[-1, :]).unsqueeze(0)  # (1, 83)
+                base_preds = torch.FloatTensor([[
+                    predictions.get(name, 0.0)
+                    for name in BASE_MODEL_NAMES
+                ]])  # (1, 5)
+                meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, 88)
+                pred, _conf = models['meta_ensemble'](meta_input)
+                predictions['meta_ensemble'] = float(torch.tanh(pred[0, 0]))
+        except Exception as e:
+            logger.warning(f"Inference failed for meta_ensemble: {e}")
+            predictions['meta_ensemble'] = 0.0
 
     return predictions

@@ -24,9 +24,9 @@ class TestGracefulShutdown(unittest.TestCase):
 
     def test_track_task_adds_to_list(self):
         """_track_task should add a task to _background_tasks."""
-        bot = self._make_bot_with_mocks()
-
         async def _run():
+            bot = self._make_bot_with_mocks()
+
             async def dummy():
                 await asyncio.sleep(10)
 
@@ -39,13 +39,13 @@ class TestGracefulShutdown(unittest.TestCase):
             except asyncio.CancelledError:
                 pass
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
 
     def test_shutdown_cancels_tasks(self):
         """_shutdown should cancel all tracked tasks."""
-        bot = self._make_bot_with_mocks()
-
         async def _run():
+            bot = self._make_bot_with_mocks()
+
             async def long_task():
                 await asyncio.sleep(3600)
 
@@ -58,13 +58,13 @@ class TestGracefulShutdown(unittest.TestCase):
             for t in bot._background_tasks:
                 self.assertTrue(t.done())
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
 
     def test_shutdown_clears_task_list(self):
         """After shutdown, _background_tasks should be empty."""
-        bot = self._make_bot_with_mocks()
-
         async def _run():
+            bot = self._make_bot_with_mocks()
+
             async def short_task():
                 return 42
 
@@ -73,7 +73,7 @@ class TestGracefulShutdown(unittest.TestCase):
             await bot._shutdown()
             self.assertEqual(len(bot._background_tasks), 0)
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
 
 
 if __name__ == "__main__":

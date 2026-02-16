@@ -121,14 +121,17 @@ class FeatureFanOutProcessor:
 
         try:
             self._trained_models = load_trained_models()
-            # Map trained model names to RT pipeline model names for compatibility
-            name_map = {
+            # Map trained model names to display names for DB/dashboard
+            self._name_map = {
                 'quantum_transformer': 'QuantumTransformer',
-                'bidirectional_lstm': 'Bi-LSTM',
-                'dilated_cnn': 'CNN',
+                'bidirectional_lstm': 'BiLSTM',
+                'dilated_cnn': 'DilatedCNN',
+                'cnn': 'CNN',
+                'gru': 'GRU',
+                'meta_ensemble': 'MetaEnsemble',
             }
             for trained_name, model in self._trained_models.items():
-                rt_name = name_map.get(trained_name, trained_name)
+                rt_name = self._name_map.get(trained_name, trained_name)
                 self.models[rt_name] = model
 
             self.logger.info(
@@ -138,8 +141,15 @@ class FeatureFanOutProcessor:
         except Exception as e:
             self.logger.error(f"Error initializing trained models: {e}")
 
-    async def process_all_models(self, features: Dict[str, Any]) -> Dict[str, float]:
-        """Process features through trained models and collect predictions."""
+    async def process_all_models(self, features: Dict[str, Any],
+                                price_df=None) -> Dict[str, float]:
+        """Process features through trained models and collect predictions.
+
+        Args:
+            features: Dict with snapshot data (avg_price, etc.)
+            price_df: Optional OHLCV DataFrame for build_feature_sequence().
+                      If provided, overrides features.get('price_df').
+        """
         start_time = datetime.now(timezone.utc)
         predictions = {}
 
@@ -147,31 +157,32 @@ class FeatureFanOutProcessor:
             return predictions
 
         try:
-            # Build 83-dim feature sequence from price_df if available
-            price_df = features.get('price_df')
+            # Use explicit price_df arg, fallback to features dict
+            if price_df is None:
+                price_df = features.get('price_df')
+
             feat_array = None
             if price_df is not None and hasattr(price_df, 'empty') and not price_df.empty:
                 feat_array = build_feature_sequence(price_df, seq_len=30)
 
             if feat_array is None:
-                # No valid features — return zeros
-                return {name: 0.0 for name in self.model_names}
+                # No valid features — return empty so caller uses fallback
+                _pdf_len = len(price_df) if price_df is not None and hasattr(price_df, '__len__') else 'N/A'
+                self.logger.warning(
+                    f"build_feature_sequence returned None (price_df rows={_pdf_len}, need≥30)"
+                )
+                return {}
 
             # Run inference on trained models
             raw_preds = predict_with_models(self._trained_models, feat_array)
 
-            # Map back to RT pipeline model names
-            name_map = {
-                'quantum_transformer': 'QuantumTransformer',
-                'bidirectional_lstm': 'Bi-LSTM',
-                'dilated_cnn': 'CNN',
-            }
+            # Map to display names
             for trained_name, pred_val in raw_preds.items():
-                rt_name = name_map.get(trained_name, trained_name)
+                rt_name = self._name_map.get(trained_name, trained_name)
                 predictions[rt_name] = float(pred_val)
 
         except Exception as e:
-            self.logger.error(f"Inference error: {e}")
+            self.logger.error(f"Inference error: {e}", exc_info=True)
 
         processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
         self.logger.info(f"Processed {len(predictions)} trained models in {processing_time:.4f}s")
@@ -198,11 +209,15 @@ class RealTimePipeline:
         if self.enabled and not self.feed.active:
             await self.feed.start()
 
-    async def run_cycle(self) -> Dict[str, Any]:
-        """Execute one real-time pipeline cycle."""
+    async def run_cycle(self, price_df=None) -> Dict[str, Any]:
+        """Execute one real-time pipeline cycle.
+
+        Args:
+            price_df: Optional OHLCV DataFrame for ML model inference.
+        """
         if not self.enabled:
             return {}
-            
+
         snapshot = await self.feed.get_aggregated_snapshot()
         if not snapshot:
             self.logger.warning("Real-time pipeline failed to get aggregated snapshot")
@@ -214,8 +229,8 @@ class RealTimePipeline:
             'global_liquidity': snapshot['global_liquidity'],
             'source_count': snapshot['source_count']
         }
-        
-        predictions = await self.processor.process_all_models(features)
+
+        predictions = await self.processor.process_all_models(features, price_df=price_df)
         
         result = {
             'snapshot': snapshot,

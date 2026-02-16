@@ -70,15 +70,38 @@ class LiveMarketDataProvider:
 
         return create_client_from_config(client_config, logger=self.logger)
 
-    def fetch_ticker(self, product_id: Optional[str] = None) -> Dict[str, Any]:
-        if not self._client:
-            return {}
+    def _public_ticker_fallback(self, product_id: str) -> Dict[str, Any]:
+        """Fetch ticker via Coinbase public REST API (no auth needed)."""
         try:
-            pid = product_id or self.product_id
-            return self._client.get_market_trades(pid)
+            import requests
+            url = f"https://api.exchange.coinbase.com/products/{product_id}/ticker"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                _f = lambda v: float(v) if v is not None else 0.0
+                return {
+                    "price": _f(data.get("price")),
+                    "bid": _f(data.get("bid")),
+                    "ask": _f(data.get("ask")),
+                    "best_bid": _f(data.get("bid")),
+                    "best_ask": _f(data.get("ask")),
+                    "volume": _f(data.get("volume")),
+                    "size": _f(data.get("size")),
+                    "time": data.get("time"),
+                }
         except Exception as exc:
-            self.logger.error("Failed to fetch ticker: %s", exc)
-            return {}
+            self.logger.debug("Public ticker fallback failed for %s: %s", product_id, exc)
+        return {}
+
+    def fetch_ticker(self, product_id: Optional[str] = None) -> Dict[str, Any]:
+        pid = product_id or self.product_id
+        if self._client:
+            try:
+                return self._client.get_market_trades(pid)
+            except Exception as exc:
+                self.logger.error("Failed to fetch ticker: %s", exc)
+        # Fallback to public API (no auth needed)
+        return self._public_ticker_fallback(pid)
 
     def fetch_order_book_snapshot(self, product_id: Optional[str] = None) -> Optional[OrderBookSnapshot]:
         if not self._client:
