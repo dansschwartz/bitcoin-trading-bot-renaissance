@@ -17,6 +17,7 @@ Usage:
     python -m scripts.training.train_all
     python -m scripts.training.train_all --days 30 --epochs 100
     python -m scripts.training.train_all --epochs 5  # quick smoke test
+    python -m scripts.training.train_all --historical  # use 5+ year historical data
 """
 
 import argparse
@@ -51,12 +52,13 @@ def _train_one(name: str, train_fn, epochs: int, results: dict) -> None:
         results[name] = {"status": "failed", "error": str(e)}
 
 
-def _train_vae(epochs: int, results: dict) -> None:
+def _train_vae(epochs: int, results: dict, pair_dfs=None) -> None:
     """Train the VAE using the CSV training data pipeline."""
     try:
-        from scripts.training.training_utils import load_training_csvs
+        if pair_dfs is None:
+            from scripts.training.training_utils import load_training_csvs
+            pair_dfs = load_training_csvs()
 
-        pair_dfs = load_training_csvs()
         if not pair_dfs:
             raise RuntimeError("No training data for VAE")
 
@@ -88,13 +90,71 @@ def _train_vae(epochs: int, results: dict) -> None:
         results["vae"] = {"status": "failed", "error": str(e)}
 
 
-def train_all(days: int = 30, epochs: int = 100, pairs: list = None) -> dict:
+def _log_split_info(
+    train_dfs: dict, val_dfs: dict, test_dfs: dict
+) -> None:
+    """Log date ranges and regime distribution for each split."""
+    from scripts.training.fetch_historical_data import compute_regime_distribution
+
+    for label, dfs in [("Train", train_dfs), ("Val", val_dfs), ("Test", test_dfs)]:
+        if not dfs:
+            continue
+        # Date range across all pairs
+        all_first = []
+        all_last = []
+        for pair, df in dfs.items():
+            if "timestamp" in df.columns and len(df) > 0:
+                all_first.append(df["timestamp"].iloc[0])
+                all_last.append(df["timestamp"].iloc[-1])
+
+        if all_first:
+            first_ts = min(all_first)
+            last_ts = max(all_last)
+            # Detect if timestamps are in milliseconds or seconds
+            if first_ts > 1e12:
+                first_dt = datetime.fromtimestamp(first_ts / 1000, tz=timezone.utc)
+                last_dt = datetime.fromtimestamp(last_ts / 1000, tz=timezone.utc)
+            else:
+                first_dt = datetime.fromtimestamp(first_ts, tz=timezone.utc)
+                last_dt = datetime.fromtimestamp(last_ts, tz=timezone.utc)
+            total_bars = sum(len(df) for df in dfs.values())
+            logger.info(
+                f"  {label}: {first_dt.strftime('%Y-%m-%d')} to {last_dt.strftime('%Y-%m-%d')} "
+                f"({total_bars:,} bars)"
+            )
+
+        # Regime distribution (aggregate across pairs)
+        regime_counts = {"low_vol": 0, "trending": 0, "high_vol": 0}
+        total_classified = 0
+        for pair, df in dfs.items():
+            if len(df) > 120:
+                dist = compute_regime_distribution(pair, df)
+                n = len(df)
+                for regime, frac in dist.items():
+                    regime_counts[regime] += int(frac * n)
+                total_classified += n
+
+        if total_classified > 0:
+            regime_str = ", ".join(
+                f"{r}: {c/total_classified*100:.0f}%"
+                for r, c in regime_counts.items()
+            )
+            logger.info(f"    Regimes: {regime_str}")
+
+
+def train_all(
+    days: int = 30,
+    epochs: int = 100,
+    pairs: list = None,
+    historical: bool = False,
+) -> dict:
     """Download data and train all 7 models in the correct order.
 
     Args:
-        days: Days of historical data to download
+        days: Days of historical data to download (ignored if historical=True)
         epochs: Max epochs per model
         pairs: Trading pairs (default: 6 major pairs)
+        historical: If True, use 5+ year historical CSVs with 70/15/15 split
 
     Returns:
         Dict with per-model results
@@ -105,16 +165,38 @@ def train_all(days: int = 30, epochs: int = 100, pairs: list = None) -> dict:
     start_time = time.time()
     results = {}
 
-    # ── Step 1: Download data ──────────────────────────────────────────────
+    # ── Step 1: Load or download data ─────────────────────────────────────
     logger.info("=" * 60)
-    logger.info("STEP 1: Downloading training data")
+    if historical:
+        logger.info("STEP 1: Loading historical training data (5+ years)")
+    else:
+        logger.info("STEP 1: Downloading training data")
     logger.info("=" * 60)
-    pair_dfs = download_all(pairs, days)
-    if not pair_dfs:
-        raise RuntimeError("No training data downloaded. Check network connectivity.")
+
+    if historical:
+        from scripts.training.fetch_historical_data import load_historical_csvs
+        pair_dfs = load_historical_csvs(pairs)
+        if not pair_dfs:
+            raise RuntimeError(
+                "No historical CSVs found. Run "
+                "'python -m scripts.training.fetch_historical_data' first."
+            )
+    else:
+        pair_dfs = download_all(pairs, days)
+        if not pair_dfs:
+            raise RuntimeError("No training data downloaded. Check network connectivity.")
 
     total_bars = sum(len(df) for df in pair_dfs.values())
-    logger.info(f"Downloaded {total_bars} total bars across {len(pair_dfs)} pairs\n")
+    logger.info(f"Loaded {total_bars:,} total bars across {len(pair_dfs)} pairs")
+
+    # Log walk-forward split info
+    if historical:
+        from scripts.training.training_utils import walk_forward_split
+        logger.info("\nWalk-forward split (70% / 15% / 15%):")
+        train_dfs, val_dfs, test_dfs = walk_forward_split(pair_dfs)
+        _log_split_info(train_dfs, val_dfs, test_dfs)
+
+    logger.info("")
 
     # ── Step 2: Train 5 base models ───────────────────────────────────────
     base_models = [
@@ -156,7 +238,7 @@ def train_all(days: int = 30, epochs: int = 100, pairs: list = None) -> dict:
     logger.info(f"\n{'=' * 60}")
     logger.info("STEP 8: Training VAE Anomaly Detector")
     logger.info(f"{'=' * 60}")
-    _train_vae(epochs, results)
+    _train_vae(epochs, results, pair_dfs=pair_dfs if historical else None)
 
     elapsed = time.time() - start_time
 
@@ -176,7 +258,9 @@ def train_all(days: int = 30, epochs: int = 100, pairs: list = None) -> dict:
         print(f"{model_name:<25} {status:<10} {val_loss:>10} {val_acc:>10} {test_acc:>10} {ep:>8}")
 
     n_success = sum(1 for r in results.values() if r.get("status") == "success")
+    data_label = "historical (5+ years)" if historical else f"{days}-day"
     print(f"\n{n_success}/{len(results)} models trained successfully")
+    print(f"Data: {data_label}, {total_bars:,} bars")
     print(f"Total time: {elapsed/60:.1f} minutes")
     logger.info(f"Total time: {elapsed/60:.1f} minutes")
 
@@ -193,9 +277,20 @@ def main():
     parser.add_argument("--days", type=int, default=30, help="Days of history to download")
     parser.add_argument("--epochs", type=int, default=100, help="Max epochs per model")
     parser.add_argument("--pairs", nargs="+", default=None)
+    parser.add_argument(
+        "--historical",
+        action="store_true",
+        help="Use 5+ year historical CSVs instead of 30-day data. "
+             "Run 'python -m scripts.training.fetch_historical_data' first.",
+    )
     args = parser.parse_args()
 
-    train_all(days=args.days, epochs=args.epochs, pairs=args.pairs)
+    train_all(
+        days=args.days,
+        epochs=args.epochs,
+        pairs=args.pairs,
+        historical=args.historical,
+    )
 
 
 if __name__ == "__main__":

@@ -10,9 +10,11 @@ Each model has its own safety gate: deploy only if new_accuracy >= old_accuracy 
 Date-stamped backups are kept for 4 weeks.
 
 Usage:
-    python -m scripts.training.retrain_weekly           # interactive
+    python -m scripts.training.retrain_weekly           # interactive (last 30 days)
     python -m scripts.training.retrain_weekly --auto     # auto-deploy if better
     python -m scripts.training.retrain_weekly --days 30  # custom data window
+    python -m scripts.training.retrain_weekly --full-history  # use ALL historical data
+    python -m scripts.training.retrain_weekly --rolling-days 180  # rolling window from historical
 
 Exit codes:
     0 = all models retrained successfully
@@ -284,8 +286,19 @@ def retrain_weekly(
     epochs: int = 100,
     auto_deploy: bool = False,
     pairs: list = None,
+    full_history: bool = False,
+    rolling_days: int = 180,
 ) -> Tuple[dict, int]:
     """Run weekly retraining for all 7 models with safety gates.
+
+    Args:
+        days: Days of data to download (default 30, ignored if full_history)
+        epochs: Max training epochs per model
+        auto_deploy: Auto-deploy without prompting
+        pairs: Trading pairs (default: all 6)
+        full_history: Use ALL available historical data for initial training
+        rolling_days: When not full_history but historical CSVs exist, use
+                      last N days as a rolling window (default: 180)
 
     Returns:
         (results_dict, exit_code)
@@ -299,13 +312,49 @@ def retrain_weekly(
     results = {}
     exit_code = 0
 
-    # ── Download data ─────────────────────────────────────────────────────
+    # ── Load or download data ─────────────────────────────────────────────
     logger.info("=" * 60)
-    logger.info("WEEKLY RETRAINING — Downloading latest data")
+    if full_history:
+        logger.info("WEEKLY RETRAINING — Using FULL historical data")
+    else:
+        logger.info(f"WEEKLY RETRAINING — Rolling {rolling_days}-day window")
     logger.info("=" * 60)
-    pair_dfs = download_all(pairs, days)
+
+    if full_history:
+        # Use all available historical CSVs
+        from scripts.training.fetch_historical_data import load_historical_csvs
+        pair_dfs = load_historical_csvs(pairs)
+        if not pair_dfs:
+            logger.warning("No historical CSVs found. Falling back to Coinbase download.")
+            pair_dfs = download_all(pairs, days)
+    else:
+        # Try to use historical CSVs with a rolling window
+        from scripts.training.fetch_historical_data import load_historical_csvs
+        hist_dfs = load_historical_csvs(pairs)
+
+        if hist_dfs:
+            # Trim to rolling window (last N days)
+            import pandas as _pd
+            cutoff_ms = int((time.time() - rolling_days * 86400) * 1000)
+            pair_dfs = {}
+            for pair, df in hist_dfs.items():
+                ts_col = df["timestamp"]
+                # Handle both ms and s timestamps
+                if ts_col.iloc[0] > 1e12:
+                    trimmed = df[df["timestamp"] >= cutoff_ms].reset_index(drop=True)
+                else:
+                    trimmed = df[df["timestamp"] >= cutoff_ms / 1000].reset_index(drop=True)
+                if len(trimmed) > 0:
+                    pair_dfs[pair] = trimmed
+                    logger.info(f"  {pair}: {len(trimmed):,} bars (rolling {rolling_days}d)")
+            if not pair_dfs:
+                logger.warning("Historical CSVs empty after rolling trim. Falling back.")
+                pair_dfs = download_all(pairs, days)
+        else:
+            pair_dfs = download_all(pairs, days)
+
     if not pair_dfs:
-        logger.error("No data downloaded. Aborting.")
+        logger.error("No data available. Aborting.")
         return {}, 1
 
     # Prepare test set for safety gate evaluation
@@ -533,9 +582,20 @@ def main():
 
     parser = argparse.ArgumentParser(description="Weekly retraining for all 7 models")
     parser.add_argument("--auto", action="store_true", help="Auto-deploy without prompting")
-    parser.add_argument("--days", type=int, default=30, help="Days of training data")
+    parser.add_argument("--days", type=int, default=30, help="Days of training data (Coinbase fallback)")
     parser.add_argument("--epochs", type=int, default=100, help="Max epochs per model")
     parser.add_argument("--pairs", nargs="+", default=None)
+    parser.add_argument(
+        "--full-history",
+        action="store_true",
+        help="Use ALL available historical data for training (initial training run)",
+    )
+    parser.add_argument(
+        "--rolling-days",
+        type=int,
+        default=180,
+        help="Rolling window in days for weekly retraining (default: 180)",
+    )
     args = parser.parse_args()
 
     _, exit_code = retrain_weekly(
@@ -543,6 +603,8 @@ def main():
         epochs=args.epochs,
         auto_deploy=args.auto,
         pairs=args.pairs,
+        full_history=args.full_history,
+        rolling_days=args.rolling_days,
     )
     sys.exit(exit_code)
 
