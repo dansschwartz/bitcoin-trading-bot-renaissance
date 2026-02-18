@@ -1,0 +1,306 @@
+{
+  "meta": {
+    "generated_at": "2026-02-18T22:16:23.395912+00:00",
+    "week_start": "2026-02-11T22:16:23.395912+00:00",
+    "week_end": "2026-02-18T22:16:23.395912+00:00",
+    "window_hours": 168
+  },
+  "portfolio": {
+    "total_trades": 21,
+    "wins": 0,
+    "total_pnl": 0.0,
+    "win_rate": 0.0,
+    "open_positions": 0,
+    "daily_pnl": []
+  },
+  "signals": {
+    "per_signal_pnl": [],
+    "confidence_distribution": {
+      "high": 21,
+      "low": 110,
+      "medium": 53
+    }
+  },
+  "regimes": {
+    "regime_distribution": [
+      {
+        "regime": "unknown",
+        "decisions": 138,
+        "avg_confidence": 0.2511
+      },
+      {
+        "regime": "bull_trending",
+        "decisions": 36,
+        "avg_confidence": 0.4921
+      },
+      {
+        "regime": "bull_mean_reverting",
+        "decisions": 6,
+        "avg_confidence": 0.3904
+      },
+      {
+        "regime": "neutral_sideways",
+        "decisions": 4,
+        "avg_confidence": 0.3985
+      }
+    ]
+  },
+  "ml_models": {
+    "predictions_per_model": [
+      {
+        "model": "BiLSTM",
+        "count": 16,
+        "avg_confidence": null
+      },
+      {
+        "model": "CNN",
+        "count": 16,
+        "avg_confidence": null
+      },
+      {
+        "model": "DilatedCNN",
+        "count": 16,
+        "avg_confidence": null
+      },
+      {
+        "model": "GRU",
+        "count": 16,
+        "avg_confidence": null
+      },
+      {
+        "model": "LightGBM",
+        "count": 16,
+        "avg_confidence": null
+      },
+      {
+        "model": "MetaEnsemble",
+        "count": 16,
+        "avg_confidence": null
+      },
+      {
+        "model": "QuantumTransformer",
+        "count": 16,
+        "avg_confidence": null
+      },
+      {
+        "model": "bidirectional_lstm",
+        "count": 30,
+        "avg_confidence": 0.5659
+      },
+      {
+        "model": "cnn",
+        "count": 30,
+        "avg_confidence": 0.5743
+      },
+      {
+        "model": "dilated_cnn",
+        "count": 30,
+        "avg_confidence": 0.506
+      },
+      {
+        "model": "gru",
+        "count": 30,
+        "avg_confidence": 0.5181
+      },
+      {
+        "model": "lightgbm",
+        "count": 30,
+        "avg_confidence": 0.157
+      },
+      {
+        "model": "meta_ensemble",
+        "count": 30,
+        "avg_confidence": 0.4791
+      },
+      {
+        "model": "quantum_transformer",
+        "count": 30,
+        "avg_confidence": 0.5092
+      }
+    ],
+    "model_ledger": []
+  },
+  "execution": {
+    "per_signal_execution": [
+      {
+        "signal_type": "combined",
+        "fills": 21,
+        "avg_slippage_bps": 0.0,
+        "avg_latency_ms": 4.1,
+        "avg_devil": 0.0
+      }
+    ]
+  },
+  "risk_events": {
+    "events_by_type": [
+      {
+        "type": "high_confidence_signal",
+        "severity": "info",
+        "count": 2
+      }
+    ]
+  },
+  "data_quality": {
+    "bar_completeness": [
+      {
+        "pair": "BTC-USD",
+        "total_bars": 601,
+        "first": 1771270500.0,
+        "last": 1771452600.0,
+        "completeness_pct": 29.8
+      },
+      {
+        "pair": "DOGE-USD",
+        "total_bars": 601,
+        "first": 1771270500.0,
+        "last": 1771452000.0,
+        "completeness_pct": 29.8
+      },
+      {
+        "pair": "ETH-USD",
+        "total_bars": 601,
+        "first": 1771270500.0,
+        "last": 1771452600.0,
+        "completeness_pct": 29.8
+      },
+      {
+        "pair": "SOL-USD",
+        "total_bars": 601,
+        "first": 1771270500.0,
+        "last": 1771452600.0,
+        "completeness_pct": 29.8
+      },
+      {
+        "pair": "LINK-USD",
+        "total_bars": 600,
+        "first": 1771270500.0,
+        "last": 1771450500.0,
+        "completeness_pct": 29.8
+      },
+      {
+        "pair": "AVAX-USD",
+        "total_bars": 596,
+        "first": 1771270500.0,
+        "last": 1771450500.0,
+        "completeness_pct": 29.6
+      },
+      {
+        "pair": "ADA/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "AVAX/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "BNB/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "BTC/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "DOGE/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "DOT/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "ETH/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "LINK/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "SOL/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      },
+      {
+        "pair": "XRP/USDT",
+        "total_bars": 3,
+        "first": 1771467900.0,
+        "last": 1771468800.0,
+        "completeness_pct": 0.1
+      }
+    ]
+  },
+  "config_snapshot": {
+    "signal_weights": {
+      "order_flow": 0.010647478012317397,
+      "order_book": 0.11291726427008744,
+      "volume": 0.01817603916600188,
+      "macd": 0.00950721794688737,
+      "rsi": 0.1046320165265041,
+      "bollinger": 0.00986638221107749,
+      "alternative": 0.010256124388790684,
+      "stat_arb": 0.18055147147418213,
+      "volume_profile": 0.07972125163875278,
+      "fractal": 0.00929953904287684,
+      "entropy": 0.01491850802676663,
+      "quantum": 0.011253600751662552,
+      "lead_lag": 0.013010672121542301,
+      "correlation_divergence": 0.03548226829345959,
+      "garch_vol": 0.06300808373683899,
+      "multi_exchange": 0.3167520823922519
+    },
+    "risk_management": {
+      "daily_loss_limit": 500,
+      "position_limit": 1000,
+      "min_confidence": 0.5
+    },
+    "regime_overlay": {
+      "enabled": true,
+      "consciousness_boost": 0.0,
+      "hmm_regimes": 5,
+      "hmm_refit_interval": 50,
+      "hmm_min_samples": 200,
+      "hmm_covariance_type": "full",
+      "hmm_n_iter": 150
+    },
+    "risk_gateway": {
+      "enabled": true,
+      "consciousness_boost": 0.0,
+      "max_portfolio_value": 1000.0,
+      "anomaly_threshold": 5.0
+    }
+  },
+  "summary": {
+    "total_pnl": 0.0,
+    "total_trades": 21,
+    "win_rate": 0.0,
+    "open_positions": 0,
+    "sharpe_7d": null
+  }
+}
