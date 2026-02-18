@@ -103,7 +103,7 @@ class DatabaseManager:
             cursor.execute('''CREATE TABLE IF NOT EXISTS ml_predictions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,
                 product_id TEXT NOT NULL, model_name TEXT NOT NULL,
-                prediction REAL NOT NULL)''')
+                prediction REAL NOT NULL, confidence REAL)''')
 
             cursor.execute('''CREATE TABLE IF NOT EXISTS open_positions (
                 position_id TEXT PRIMARY KEY, product_id TEXT NOT NULL,
@@ -356,13 +356,14 @@ class DatabaseManager:
                     ts = ts.isoformat()
 
                 cursor.execute('''
-                    INSERT INTO ml_predictions (timestamp, product_id, model_name, prediction)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO ml_predictions (timestamp, product_id, model_name, prediction, confidence)
+                    VALUES (?, ?, ?, ?, ?)
                 ''', (
                     ts,
                     prediction_data.get('product_id'),
                     prediction_data.get('model_name'),
-                    prediction_data.get('prediction')
+                    prediction_data.get('prediction'),
+                    prediction_data.get('confidence'),
                 ))
 
                 conn.commit()

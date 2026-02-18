@@ -1679,6 +1679,10 @@ class RenaissanceTradingBot:
                             close_ok, close_msg = self.position_manager.close_position(
                                 pos.position_id, reason=f"Signal reversal: {pos_side} -> {action}"
                             )
+                            if close_ok:
+                                self._track_task(
+                                    self.db_manager.close_position_record(pos.position_id)
+                                )
                             self.logger.info(
                                 f"SIGNAL REVERSAL: {product_id} closed {pos_side} position — {close_msg}"
                             )
@@ -2381,7 +2385,9 @@ class RenaissanceTradingBot:
                     with self.position_manager._lock:
                         all_positions = list(self.position_manager.positions.values())
                     for pos in all_positions:
-                        self.position_manager.close_position(pos.position_id, reason="Circuit breaker: 15% drawdown")
+                        ok, _ = self.position_manager.close_position(pos.position_id, reason="Circuit breaker: 15% drawdown")
+                        if ok:
+                            self._track_task(self.db_manager.close_position_record(pos.position_id))
                 except Exception as cb_err:
                     self.logger.error(f"Circuit breaker close-all failed: {cb_err}")
                 self._drawdown_exits_only = True
@@ -2416,9 +2422,11 @@ class RenaissanceTradingBot:
                             elif hasattr(pos, 'entry_price') and pos.entry_price > 0:
                                 worst_pos = worst_pos or pos  # fallback: pick first
                         if worst_pos:
-                            self.position_manager.close_position(
+                            ok, _ = self.position_manager.close_position(
                                 worst_pos.position_id, reason="Exposure limit exceeded"
                             )
+                            if ok:
+                                self._track_task(self.db_manager.close_position_record(worst_pos.position_id))
                             self.logger.info(f"EXPOSURE CLOSE: {worst_pos.position_id}")
             except Exception as exp_err:
                 self.logger.debug(f"Exposure monitor error: {exp_err}")
@@ -2462,6 +2470,9 @@ class RenaissanceTradingBot:
                 try:
                     _tech = self._get_tech(_pid)
                     _cdf = _tech._to_dataframe()
+                    # Fallback to DB bars when tech indicators are sparse
+                    if _cdf is None or len(_cdf) < 30:
+                        _cdf = self._load_price_df_from_db(_pid, limit=100)
                     if _cdf is not None and len(_cdf) > 0:
                         cross_data[_pid] = _cdf
                 except Exception:
@@ -3177,21 +3188,26 @@ class RenaissanceTradingBot:
                     }
                     self._track_task(self.db_manager.store_decision(decision_persist))
                     
-                    # Store ML predictions (prefer RT pipeline, fallback to ml_bridge)
-                    _ml_preds = {}
-                    if rt_result and 'predictions' in rt_result:
-                        _ml_preds = rt_result['predictions']
-                    elif ml_package and ml_package.ml_predictions:
+                    # Store ML predictions (prefer ml_bridge which has confidence)
+                    _ml_preds = {}  # model_name -> (prediction, confidence)
+                    if ml_package and ml_package.ml_predictions:
                         for mp in ml_package.ml_predictions:
                             if isinstance(mp, dict):
-                                _ml_preds[mp.get('model', 'unknown')] = mp.get('prediction', 0.0)
-                            elif isinstance(mp, tuple) and len(mp) == 2:
-                                _ml_preds[mp[0]] = mp[1]
-                    for model_name, pred in _ml_preds.items():
+                                _ml_preds[mp.get('model', 'unknown')] = (
+                                    mp.get('prediction', 0.0),
+                                    mp.get('confidence'),
+                                )
+                            elif isinstance(mp, tuple) and len(mp) >= 2:
+                                _ml_preds[mp[0]] = (mp[1], mp[2] if len(mp) > 2 else None)
+                    elif rt_result and 'predictions' in rt_result:
+                        for mn, pv in rt_result['predictions'].items():
+                            _ml_preds[mn] = (pv, None)
+                    for model_name, (pred, conf) in _ml_preds.items():
                         self._track_task(self.db_manager.store_ml_prediction({
                             'product_id': product_id,
                             'model_name': model_name,
-                            'prediction': pred
+                            'prediction': pred,
+                            'confidence': conf,
                         }))
 
                 # 5.5 Exit Engine — Monitor open positions for alpha decay
@@ -3224,6 +3240,7 @@ class RenaissanceTradingBot:
                                 pos.position_id, reason=f"Exit engine: {exit_decision['reason']}"
                             )
                             if close_ok:
+                                self._track_task(self.db_manager.close_position_record(pos.position_id))
                                 self.logger.info(f"EXIT EXECUTED: {pos.position_id} — {close_msg}")
                                 # Record trade PnL for health monitor
                                 if self.health_monitor and pos.entry_price > 0:
@@ -3297,6 +3314,10 @@ class RenaissanceTradingBot:
                                         _rr.position_id, reason=f"ReEval: {_rr.reason_code}"
                                     )
                                     if _close_ok:
+                                        # Update DB record too
+                                        self._track_task(
+                                            self.db_manager.close_position_record(_rr.position_id)
+                                        )
                                         self.logger.warning(
                                             f"REEVAL CLOSE: {_rr.position_id} — {_rr.reason_code} "
                                             f"(edge={_rr.remaining_edge_bps:.1f}bps, urgency={_rr.urgency})"
@@ -4003,14 +4024,37 @@ class RenaissanceTradingBot:
             signal.signal(signal.SIGINT, _handle_shutdown)
             signal.signal(signal.SIGTERM, _handle_shutdown)
 
-        # Restore state from DB (skip for paper mode — balances reset each start)
+        # Restore positions from DB so anti-stacking logic works across restarts.
+        # In paper mode: restore positions but reset daily PnL (balances reset each start).
         paper_mode = self.config.get("trading", {}).get("paper_trading", True)
         if not paper_mode:
             await self._restore_state()
         else:
+            # Restore positions only (for anti-stacking), reset PnL
+            try:
+                open_positions = await self.db_manager.get_open_positions()
+                restored = 0
+                for row in open_positions:
+                    from position_manager import Position, PositionSide, PositionStatus
+                    pos = Position(
+                        position_id=row['position_id'],
+                        product_id=row['product_id'],
+                        side=PositionSide(row['side']),
+                        size=row['size'],
+                        entry_price=row['entry_price'],
+                        current_price=row['entry_price'],
+                        stop_loss_price=row.get('stop_loss_price'),
+                        take_profit_price=row.get('take_profit_price'),
+                        status=PositionStatus.OPEN,
+                        entry_time=datetime.fromisoformat(row['opened_at']),
+                    )
+                    self.position_manager.positions[pos.position_id] = pos
+                    restored += 1
+                self.logger.info(f"Paper mode: restored {restored} positions from DB (anti-stacking)")
+            except Exception as e:
+                self.logger.warning(f"Paper mode position restore failed: {e}")
             self.position_manager.daily_pnl = 0.0
-            self.position_manager.positions.clear()
-            self.logger.info("Paper mode: starting fresh (no state restore)")
+            self.daily_pnl = 0.0
 
         # ── Module A: Set RUNNING state ──
         if self.state_manager:
