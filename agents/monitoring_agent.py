@@ -52,7 +52,7 @@ class MonitoringAgent(BaseAgent):
             )
             # Daily performance in window
             rows = conn.execute(
-                """SELECT date, total_pnl, sharpe_ratio, total_trades, win_rate
+                """SELECT date, net_profit_usd, total_trades, winning_trades
                    FROM daily_performance
                    WHERE date >= date('now', ? || ' days')
                    ORDER BY date""",
@@ -62,9 +62,9 @@ class MonitoringAgent(BaseAgent):
                 {
                     "date": r[0],
                     "pnl": r[1],
-                    "sharpe": r[2],
-                    "trades": r[3],
-                    "win_rate": r[4],
+                    "trades": r[2],
+                    "wins": r[3],
+                    "win_rate": round(r[3] / r[2], 4) if r[2] and r[2] > 0 else 0.0,
                 }
                 for r in rows
             ]

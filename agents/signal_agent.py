@@ -58,11 +58,11 @@ class SignalAgent(BaseAgent):
             )
             # Per-signal daily P&L
             rows = conn.execute(
-                """SELECT signal_type, SUM(daily_pnl), COUNT(*)
+                """SELECT signal_type, SUM(pnl), COUNT(*)
                    FROM signal_daily_pnl
                    WHERE date >= date('now', ? || ' days')
                    GROUP BY signal_type
-                   ORDER BY SUM(daily_pnl) DESC""",
+                   ORDER BY SUM(pnl) DESC""",
                 (f"-{window_hours // 24}",),
             ).fetchall()
             obs["signal_pnl"] = [

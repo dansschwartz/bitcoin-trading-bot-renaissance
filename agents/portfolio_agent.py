@@ -37,10 +37,10 @@ class PortfolioAgent(BaseAgent):
                 "SELECT COUNT(*) FROM open_positions WHERE status='open'"
             ).fetchone()
             status["open_positions"] = row[0] if row else 0
-            # Recent P&L
+            # Recent P&L from daily_performance
             row = conn.execute(
-                """SELECT SUM(pnl) FROM trades
-                   WHERE close_time >= datetime('now', '-24 hours')"""
+                """SELECT SUM(net_profit_usd) FROM daily_performance
+                   WHERE date >= date('now', '-1 day')"""
             ).fetchone()
             status["pnl_24h"] = round(row[0], 2) if row and row[0] else 0.0
             conn.close()
@@ -55,27 +55,30 @@ class PortfolioAgent(BaseAgent):
             conn = sqlite3.connect(
                 f"file:{self.db_path}?mode=ro", uri=True, timeout=5.0,
             )
-            # Closed trades in window
-            rows = conn.execute(
-                """SELECT COUNT(*) as trades,
-                          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                          SUM(pnl) as total_pnl,
-                          AVG(pnl) as avg_pnl
-                   FROM trades
-                   WHERE close_time >= datetime('now', ? || ' hours')""",
+            # Trade count in window
+            row = conn.execute(
+                """SELECT COUNT(*) FROM trades
+                   WHERE timestamp >= datetime('now', ? || ' hours')""",
                 (f"-{window_hours}",),
-            ).fetchall()
-            if rows and rows[0][0]:
-                r = rows[0]
-                trades = r[0] or 0
-                wins = r[1] or 0
+            ).fetchone()
+            obs["trades"] = row[0] if row else 0
+            # P&L from daily_performance
+            row = conn.execute(
+                """SELECT SUM(total_trades), SUM(winning_trades),
+                          SUM(net_profit_usd)
+                   FROM daily_performance
+                   WHERE date >= date('now', ? || ' days')""",
+                (f"-{window_hours // 24}",),
+            ).fetchone()
+            if row and row[0]:
+                trades = row[0] or 0
+                wins = row[1] or 0
                 obs["trades"] = trades
                 obs["wins"] = wins
                 obs["win_rate"] = round(wins / trades, 4) if trades > 0 else 0.0
-                obs["total_pnl"] = round(r[2], 2) if r[2] else 0.0
-                obs["avg_pnl"] = round(r[3], 4) if r[3] else 0.0
+                obs["total_pnl"] = round(row[2] or 0.0, 2)
             else:
-                obs["trades"] = 0
+                obs["wins"] = 0
                 obs["win_rate"] = 0.0
                 obs["total_pnl"] = 0.0
             # Re-evaluation events

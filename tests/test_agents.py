@@ -37,13 +37,18 @@ def test_db():
             weighted_signal REAL, reasoning TEXT, hmm_regime TEXT
         );
         CREATE TABLE IF NOT EXISTS signal_daily_pnl (
-            id INTEGER PRIMARY KEY, date TEXT, signal_type TEXT, daily_pnl REAL
+            id INTEGER PRIMARY KEY, date TEXT, signal_type TEXT, pnl REAL,
+            num_trades INTEGER, win_rate REAL
         );
         CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY, close_time TEXT, pnl REAL
+            id INTEGER PRIMARY KEY, timestamp TEXT, product_id TEXT,
+            side TEXT, size REAL, price REAL, status TEXT,
+            algo_used TEXT, slippage REAL, execution_time REAL
         );
         CREATE TABLE IF NOT EXISTS open_positions (
-            id INTEGER PRIMARY KEY, status TEXT
+            position_id TEXT, product_id TEXT, side TEXT, size REAL,
+            entry_price REAL, stop_loss_price REAL, take_profit_price REAL,
+            opened_at TEXT, status TEXT
         );
         CREATE TABLE IF NOT EXISTS devil_tracker (
             trade_id TEXT PRIMARY KEY, signal_type TEXT, pair TEXT,
@@ -52,8 +57,8 @@ def test_db():
             latency_signal_to_fill_ms REAL, devil REAL
         );
         CREATE TABLE IF NOT EXISTS daily_performance (
-            id INTEGER PRIMARY KEY, date TEXT, total_pnl REAL,
-            sharpe_ratio REAL, total_trades INTEGER, win_rate REAL
+            date TEXT, total_trades INTEGER, winning_trades INTEGER,
+            losing_trades INTEGER, net_profit_usd REAL
         );
         CREATE TABLE IF NOT EXISTS balance_snapshots (
             id INTEGER PRIMARY KEY, timestamp TEXT, total_balance_usd REAL

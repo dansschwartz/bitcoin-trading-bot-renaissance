@@ -127,27 +127,38 @@ class ObservationCollector:
     def _portfolio_section(self, conn: sqlite3.Connection, hours: int) -> Dict[str, Any]:
         section: Dict[str, Any] = {}
         try:
-            # Trades summary
+            # Trades summary (trades table is a fill log — no pnl column)
             row = conn.execute(
-                """SELECT COUNT(*) as cnt,
-                          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                          SUM(pnl) as total_pnl,
-                          AVG(pnl) as avg_pnl,
-                          MAX(pnl) as best_trade,
-                          MIN(pnl) as worst_trade
+                """SELECT COUNT(*) as cnt
                    FROM trades
-                   WHERE close_time >= datetime('now', ? || ' hours')""",
+                   WHERE timestamp >= datetime('now', ? || ' hours')""",
                 (f"-{hours}",),
             ).fetchone()
-            if row:
-                section["total_trades"] = row["cnt"] or 0
+            section["total_trades"] = row["cnt"] if row else 0
+
+            # Use daily_performance for P&L aggregates
+            row = conn.execute(
+                """SELECT SUM(total_trades) as trades,
+                          SUM(winning_trades) as wins,
+                          SUM(net_profit_usd) as total_pnl,
+                          MAX(net_profit_usd) as best_day,
+                          MIN(net_profit_usd) as worst_day
+                   FROM daily_performance
+                   WHERE date >= date('now', ? || ' days')""",
+                (f"-{hours // 24}",),
+            ).fetchone()
+            if row and row["trades"]:
+                section["total_trades"] = row["trades"] or 0
                 section["wins"] = row["wins"] or 0
                 section["total_pnl"] = round(row["total_pnl"] or 0.0, 2)
-                section["avg_pnl"] = round(row["avg_pnl"] or 0.0, 4)
-                section["best_trade"] = round(row["best_trade"] or 0.0, 4)
-                section["worst_trade"] = round(row["worst_trade"] or 0.0, 4)
+                section["best_day_pnl"] = round(row["best_day"] or 0.0, 4)
+                section["worst_day_pnl"] = round(row["worst_day"] or 0.0, 4)
                 trades = section["total_trades"]
                 section["win_rate"] = round(section["wins"] / trades, 4) if trades > 0 else 0.0
+            else:
+                section["wins"] = 0
+                section["total_pnl"] = 0.0
+                section["win_rate"] = 0.0
 
             # Open positions
             row = conn.execute(
@@ -155,16 +166,17 @@ class ObservationCollector:
             ).fetchone()
             section["open_positions"] = row[0] if row else 0
 
-            # Daily performance
+            # Daily performance timeline
             rows = conn.execute(
-                """SELECT date, total_pnl, sharpe_ratio
+                """SELECT date, net_profit_usd, total_trades, winning_trades
                    FROM daily_performance
                    WHERE date >= date('now', ? || ' days')
                    ORDER BY date""",
                 (f"-{hours // 24}",),
             ).fetchall()
             section["daily_pnl"] = [
-                {"date": r["date"], "pnl": r["total_pnl"], "sharpe": r["sharpe_ratio"]}
+                {"date": r["date"], "pnl": r["net_profit_usd"],
+                 "trades": r["total_trades"], "wins": r["winning_trades"]}
                 for r in rows
             ]
         except Exception as exc:
@@ -175,15 +187,15 @@ class ObservationCollector:
         section: Dict[str, Any] = {}
         try:
             rows = conn.execute(
-                """SELECT signal_type, SUM(daily_pnl) as pnl, COUNT(*) as days
+                """SELECT signal_type, SUM(pnl) as total_pnl, COUNT(*) as days
                    FROM signal_daily_pnl
                    WHERE date >= date('now', ? || ' days')
                    GROUP BY signal_type
-                   ORDER BY pnl DESC""",
+                   ORDER BY total_pnl DESC""",
                 (f"-{hours // 24}",),
             ).fetchall()
             section["per_signal_pnl"] = [
-                {"signal": r["signal_type"], "pnl": round(r["pnl"], 2), "days": r["days"]}
+                {"signal": r["signal_type"], "pnl": round(r["total_pnl"], 2), "days": r["days"]}
                 for r in rows
             ]
             # Decision confidence distribution

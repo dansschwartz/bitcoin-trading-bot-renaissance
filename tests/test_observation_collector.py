@@ -30,13 +30,18 @@ def test_db():
             weighted_signal REAL, reasoning TEXT, hmm_regime TEXT
         );
         CREATE TABLE IF NOT EXISTS signal_daily_pnl (
-            id INTEGER PRIMARY KEY, date TEXT, signal_type TEXT, daily_pnl REAL
+            id INTEGER PRIMARY KEY, date TEXT, signal_type TEXT, pnl REAL,
+            num_trades INTEGER, win_rate REAL
         );
         CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY, close_time TEXT, pnl REAL
+            id INTEGER PRIMARY KEY, timestamp TEXT, product_id TEXT,
+            side TEXT, size REAL, price REAL, status TEXT,
+            algo_used TEXT, slippage REAL, execution_time REAL
         );
         CREATE TABLE IF NOT EXISTS open_positions (
-            id INTEGER PRIMARY KEY, status TEXT
+            position_id TEXT, product_id TEXT, side TEXT, size REAL,
+            entry_price REAL, stop_loss_price REAL, take_profit_price REAL,
+            opened_at TEXT, status TEXT
         );
         CREATE TABLE IF NOT EXISTS devil_tracker (
             trade_id TEXT PRIMARY KEY, signal_type TEXT, pair TEXT,
@@ -45,8 +50,16 @@ def test_db():
             latency_signal_to_fill_ms REAL, devil REAL
         );
         CREATE TABLE IF NOT EXISTS daily_performance (
-            id INTEGER PRIMARY KEY, date TEXT, total_pnl REAL,
-            sharpe_ratio REAL, total_trades INTEGER, win_rate REAL
+            date TEXT, total_trades INTEGER, winning_trades INTEGER,
+            losing_trades INTEGER, failed_trades INTEGER,
+            gross_profit_usd REAL, total_fees_usd REAL, net_profit_usd REAL,
+            cross_exchange_pnl REAL, funding_rate_pnl REAL,
+            triangular_pnl REAL, directional_pnl REAL,
+            max_drawdown_usd REAL, max_one_sided_usd REAL,
+            emergency_closes INTEGER, avg_estimated_cost REAL,
+            avg_realized_cost REAL, cost_estimation_error REAL,
+            total_equity_usd REAL, coinbase_equity_usd REAL,
+            mexc_equity_usd REAL, binance_equity_usd REAL
         );
         CREATE TABLE IF NOT EXISTS ml_predictions (
             id INTEGER PRIMARY KEY, timestamp TEXT, model_name TEXT,
@@ -58,20 +71,23 @@ def test_db():
                               weighted_signal, reasoning, hmm_regime)
         VALUES (datetime('now'), 'BTC-USD', 'BUY', 0.75, 100, 0.5, '{}', 'trending');
 
-        INSERT INTO trades (close_time, pnl) VALUES (datetime('now'), 12.50);
-        INSERT INTO trades (close_time, pnl) VALUES (datetime('now'), -5.00);
+        INSERT INTO trades (timestamp, product_id, side, size, price, status)
+        VALUES (datetime('now'), 'BTC-USD', 'BUY', 0.01, 50000, 'EXECUTED');
+        INSERT INTO trades (timestamp, product_id, side, size, price, status)
+        VALUES (datetime('now'), 'ETH-USD', 'SELL', 0.1, 2000, 'EXECUTED');
 
-        INSERT INTO open_positions (status) VALUES ('open');
+        INSERT INTO open_positions (position_id, product_id, side, size, entry_price, status)
+        VALUES ('pos-1', 'BTC-USD', 'BUY', 0.01, 50000, 'open');
 
-        INSERT INTO signal_daily_pnl (date, signal_type, daily_pnl)
+        INSERT INTO signal_daily_pnl (date, signal_type, pnl)
         VALUES (date('now'), 'rsi', 5.0);
-        INSERT INTO signal_daily_pnl (date, signal_type, daily_pnl)
+        INSERT INTO signal_daily_pnl (date, signal_type, pnl)
         VALUES (date('now'), 'macd', -2.0);
 
-        INSERT INTO daily_performance (date, total_pnl, sharpe_ratio, total_trades, win_rate)
-        VALUES (date('now'), 7.50, 1.2, 2, 0.5);
-        INSERT INTO daily_performance (date, total_pnl, sharpe_ratio, total_trades, win_rate)
-        VALUES (date('now', '-1 day'), 3.00, 0.8, 3, 0.67);
+        INSERT INTO daily_performance (date, net_profit_usd, total_trades, winning_trades, losing_trades)
+        VALUES (date('now'), 7.50, 2, 1, 1);
+        INSERT INTO daily_performance (date, net_profit_usd, total_trades, winning_trades, losing_trades)
+        VALUES (date('now', '-1 day'), 3.00, 3, 2, 1);
     """)
     conn.commit()
     conn.close()
@@ -97,10 +113,11 @@ class TestObservationCollector:
         collector = ObservationCollector(db_path=test_db, config={})
         report = collector.compile_weekly_report()
         portfolio = report["portfolio"]
-        assert portfolio["total_trades"] == 2
-        assert portfolio["wins"] == 1
-        assert portfolio["win_rate"] == 0.5
-        assert portfolio["total_pnl"] == 7.5
+        # Aggregated from daily_performance: 2+3=5 trades, 1+2=3 wins
+        assert portfolio["total_trades"] == 5
+        assert portfolio["wins"] == 3
+        assert portfolio["win_rate"] == 0.6
+        assert portfolio["total_pnl"] == 10.5  # 7.50 + 3.00
         assert portfolio["open_positions"] == 1
 
     def test_signals_section(self, test_db):
@@ -122,8 +139,8 @@ class TestObservationCollector:
         collector = ObservationCollector(db_path=test_db, config={})
         report = collector.compile_weekly_report()
         summary = report["summary"]
-        assert summary["total_pnl"] == 7.5
-        assert summary["total_trades"] == 2
+        assert summary["total_pnl"] == 10.5
+        assert summary["total_trades"] == 5
         assert summary["best_signal"] == "rsi"
         assert summary["worst_signal"] == "macd"
 
