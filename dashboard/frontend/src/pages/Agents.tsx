@@ -57,8 +57,8 @@ export default function Agents() {
   useEffect(() => {
     const load = () => {
       api.agentStatuses().then((d) => setStatuses(d as AgentStatus[])).catch(() => {});
-      api.agentEvents(50).then((d) => setEvents(d as AgentEvent[])).catch(() => {});
-      api.agentProposals(undefined, 20).then((d) => setProposals(d as Proposal[])).catch(() => {});
+      api.agentEvents(50).then((d) => setEvents(d as unknown as AgentEvent[])).catch(() => {});
+      api.agentProposals(undefined, 20).then((d) => setProposals(d as unknown as Proposal[])).catch(() => {});
       api.agentLatestReport().then(setLatestReport).catch(() => {});
     };
     load();
@@ -90,7 +90,7 @@ export default function Agents() {
               />
             </div>
             <div className="text-lg font-mono text-gray-100">
-              {agent.run_count ?? agent.event_count ?? 0}
+              {String(agent.run_count ?? agent.event_count ?? 0)}
             </div>
             <div className="text-xs text-gray-500">
               {agent.error_count ? `${agent.error_count} errors` : 'runs'}
@@ -192,7 +192,7 @@ export default function Agents() {
             <div>
               <div className="text-xs text-gray-500">Trades</div>
               <div className="text-sm text-gray-200 font-mono">
-                {latestReport.total_trades ?? '--'}
+                {String(latestReport.total_trades ?? '--')}
               </div>
             </div>
             <div>
