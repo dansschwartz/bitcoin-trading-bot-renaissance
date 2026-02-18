@@ -23,6 +23,7 @@ from enhanced_config_manager import EnhancedConfigManager
 from microstructure_engine import MicrostructureEngine, MicrostructureMetrics
 from enhanced_technical_indicators import EnhancedTechnicalIndicators, IndicatorOutput
 from market_data_provider import LiveMarketDataProvider
+from derivatives_data_provider import DerivativesDataProvider
 from renaissance_signal_fusion import RenaissanceSignalFusion
 from alternative_data_engine import AlternativeDataEngine, AlternativeSignal
 
@@ -515,6 +516,7 @@ class RenaissanceTradingBot:
             pid: EnhancedTechnicalIndicators() for pid in self.product_ids
         }
         self.market_data_provider = LiveMarketDataProvider(self.config, logger=self.logger)
+        self.derivatives_provider = DerivativesDataProvider(cache_ttl_seconds=60)
         
         # Unified Signal Fusion (Step 16+)
         self.signal_fusion = SignalFusion()
@@ -1424,9 +1426,14 @@ class RenaissanceTradingBot:
             # ML Feature Pipeline & Real-Time Intelligence (Step 12/16 Bridge)
             try:
                 if not df.empty and len(df) >= 18 and self.real_time_pipeline.enabled:
-                    rt_result = await self.real_time_pipeline.processor.process_all_models({
-                        'price_df': df
-                    })
+                    _cross = market_data.get('_cross_data')
+                    _pair = market_data.get('_pair_name')
+                    _deriv = market_data.get('_derivatives_data')
+                    rt_result = await self.real_time_pipeline.processor.process_all_models(
+                        {'price_df': df},
+                        cross_data=_cross, pair_name=_pair,
+                        derivatives_data=_deriv,
+                    )
                     market_data['real_time_predictions'] = rt_result
                     if 'Ensemble' in rt_result:
                         signals['ml_ensemble'] = rt_result['Ensemble']
@@ -2431,6 +2438,17 @@ class RenaissanceTradingBot:
                     except Exception as e:
                         self.logger.warning(f"History preload failed for {pid}: {e}")
 
+            # ── Build cross-asset data dict for ML cross-pair features ──
+            cross_data = {}
+            for _pid in self.product_ids:
+                try:
+                    _tech = self._get_tech(_pid)
+                    _cdf = _tech._to_dataframe()
+                    if _cdf is not None and len(_cdf) > 0:
+                        cross_data[_pid] = _cdf
+                except Exception:
+                    pass
+
             for product_id in self.product_ids:
                 self.logger.info(f"Starting cycle for {product_id}...")
 
@@ -2590,6 +2608,21 @@ class RenaissanceTradingBot:
 
                     # Correlation network full update
                     self.correlation_network.run_full_update(self.scan_cycle_count)
+
+                # Inject cross-asset data into market_data for ML features
+                market_data['_cross_data'] = cross_data
+                market_data['_pair_name'] = product_id
+
+                # Fetch derivatives snapshot (Binance futures + Fear & Greed) for ML features
+                try:
+                    deriv_snap = await self.derivatives_provider.get_derivatives_snapshot(product_id)
+                    if deriv_snap:
+                        market_data['_derivatives_data'] = {
+                            k: pd.Series([v]) for k, v in deriv_snap.items()
+                            if not (isinstance(v, float) and np.isnan(v))
+                        }
+                except Exception as _de:
+                    self.logger.debug(f"Derivatives fetch skipped for {product_id}: {_de}")
 
                 # 2. Generate signals from all components
                 signals = await self.generate_signals(market_data)
@@ -2756,7 +2789,12 @@ class RenaissanceTradingBot:
                 ml_package = None
                 if self.ml_enabled:
                     # ML Bridge generates parallel model predictions using OHLCV data
-                    ml_package = await self.ml_bridge.generate_ml_signals(price_df, signals)
+                    _deriv = market_data.get('_derivatives_data')
+                    ml_package = await self.ml_bridge.generate_ml_signals(
+                        price_df, signals,
+                        cross_data=cross_data, pair_name=product_id,
+                        derivatives_data=_deriv,
+                    )
 
                 # 2.2 Volume Profile Intelligence (Institutional)
                 vp_signal = 0.0
@@ -3202,6 +3240,7 @@ class RenaissanceTradingBot:
                                 if _pos.entry_price > 0 and current_price > 0:
                                     _move = (current_price - _pos.entry_price) / _pos.entry_price * 10000
                                     _pnl_bps = _move if _side == "long" else -_move
+                                _signal_ttl = self.config.get('reevaluation', {}).get('signal_ttl_seconds', 3600)
                                 _ctx = PositionContext(
                                     position_id=_pos.position_id,
                                     pair=product_id,
@@ -3220,6 +3259,7 @@ class RenaissanceTradingBot:
                                     entry_volatility=0.02,
                                     entry_book_depth_usd=_D("50000"),
                                     entry_spread_bps=1.0,
+                                    signal_ttl_seconds=_signal_ttl,
                                     current_size=_D(str(_pos.size)),
                                     current_size_usd=_D(str(_pos.size * current_price)),
                                     current_price=_D(str(current_price)),

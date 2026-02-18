@@ -7,10 +7,9 @@ This module creates architectures that exactly match the saved weight shapes,
 loads them with strict=True to guarantee 100% weight match, and exposes
 a simple prediction interface.
 
-Trained model inventory (input_dim=83 for all):
-  - QuantumTransformer:   hidden=288, 4 blocks, 8 heads (d_head=41)
-  - BidirectionalLSTM:    hidden=292 per direction (584 total), 2 layers
-  - DilatedCNN:           channels=83, 5 dilated blocks, hidden=332
+Feature dimension: INPUT_DIM=98 (49 single-pair + 15 cross-asset, padded)
+  - 49 single-pair features: OHLCV, returns, MAs, RSI, MACD, BB, ATR, volume
+  - 15 cross-asset features: lead signals, correlations, spreads, market-wide
 """
 
 import os
@@ -24,6 +23,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+# ── Feature dimension constants ───────────────────────────────────────────────
+
+INPUT_DIM = 98          # Current feature dimension (padded to 98)
+INPUT_DIM_LEGACY = 83   # Previous feature dimension (for reference / weight loading)
+N_CROSS_FEATURES = 15   # Number of cross-asset features
+N_DERIVATIVES_FEATURES = 7  # funding_rate_z, oi_change_pct, long_short_ratio,
+                            # taker_buy_sell_ratio, has_derivatives_data,
+                            # fear_greed_norm, fear_greed_roc
+# Total real features: 46 single-pair + 15 cross-asset + 7 derivatives = 68, padded to 98
+
+# ── Cross-asset lead signal configuration ─────────────────────────────────────
+
+LEAD_SIGNALS = {
+    'BTC-USD':  {'primary': 'ETH-USD',  'secondary': 'SOL-USD'},
+    'ETH-USD':  {'primary': 'BTC-USD',  'secondary': 'LINK-USD'},
+    'SOL-USD':  {'primary': 'BTC-USD',  'secondary': 'ETH-USD'},
+    'LINK-USD': {'primary': 'ETH-USD',  'secondary': 'BTC-USD'},
+    'AVAX-USD': {'primary': 'ETH-USD',  'secondary': 'BTC-USD'},
+    'DOGE-USD': {'primary': 'BTC-USD',  'secondary': 'ETH-USD'},
+}
 
 # ── Attention (matching trained weights) ──────────────────────────────────────
 
@@ -131,15 +151,15 @@ class _TrainedTransformerBlock(nn.Module):
 class TrainedQuantumTransformer(nn.Module):
     """Architecture matching saved weights exactly.
 
-    input_dim=83, hidden=288, 4 blocks, 8 heads (qkv_dim=328), d_ff=1315
+    input_dim=98, hidden=288, 4 blocks, 8 heads (qkv_dim=328), d_ff=1315
     Single output_head → scalar prediction.
     """
 
-    def __init__(self):
+    def __init__(self, input_dim: int = INPUT_DIM):
         super().__init__()
         d_model, n_heads, qkv_dim, d_ff, n_blocks = 288, 8, 328, 1315, 4
 
-        self.input_projection = nn.Linear(83, d_model)
+        self.input_projection = nn.Linear(input_dim, d_model)
         self.pos_encoding = _TrainedPosEncoding(d_model)
         self.transformer_blocks = nn.ModuleList([
             _TrainedTransformerBlock(d_model, n_heads, qkv_dim, d_ff)
@@ -164,7 +184,7 @@ class TrainedQuantumTransformer(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """x: (batch, seq_len, 83) → prediction (batch, 1), uncertainty (batch, 1)"""
+        """x: (batch, seq_len, input_dim) → prediction (batch, 1), uncertainty (batch, 1)"""
         x = self.input_projection(x)
         x = self.pos_encoding(x)
         for block in self.transformer_blocks:
@@ -182,7 +202,7 @@ class TrainedQuantumTransformer(nn.Module):
 class _TrainedLSTMCore(nn.Module):
     """Matches saved keys: lstm.lstm_layers, lstm.skip_projections, lstm.consciousness_gates"""
 
-    def __init__(self, input_size: int = 83, hidden_size: int = 292, num_layers: int = 2):
+    def __init__(self, input_size: int = INPUT_DIM, hidden_size: int = 292, num_layers: int = 2):
         super().__init__()
         self.hidden_size = hidden_size
         bidir_dim = hidden_size * 2  # 584
@@ -215,16 +235,16 @@ class _TrainedLSTMCore(nn.Module):
 class TrainedBidirectionalLSTM(nn.Module):
     """Architecture matching saved weights exactly.
 
-    input=83, hidden=292 per direction (584 total), 2 LSTM layers.
+    input=98, hidden=292 per direction (584 total), 2 LSTM layers.
     prediction_head: BN(584)→Linear→BN→Linear→Linear→1
     confidence_head: Linear(584,73)→Linear(73,1)
     """
 
-    def __init__(self):
+    def __init__(self, input_dim: int = INPUT_DIM):
         super().__init__()
         bidir_dim = 584  # 292 * 2
 
-        self.lstm = _TrainedLSTMCore(input_size=83, hidden_size=292, num_layers=2)
+        self.lstm = _TrainedLSTMCore(input_size=input_dim, hidden_size=292, num_layers=2)
 
         # prediction_head: indices 0=BN, 2=Linear(584,292), 4=BN, 6=Linear(292,146), 8=Linear(146,1)
         self.prediction_head = nn.Sequential(
@@ -248,7 +268,7 @@ class TrainedBidirectionalLSTM(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """x: (batch, seq_len, 83) → prediction (batch, 1), confidence (batch, 1)"""
+        """x: (batch, seq_len, input_dim) → prediction (batch, 1), confidence (batch, 1)"""
         lstm_out = self.lstm(x)
         pooled = lstm_out.mean(dim=1)  # (batch, 584)
         pred = self.prediction_head(pooled)
@@ -290,7 +310,7 @@ class _TrainedDilatedBlock(nn.Module):
 class _TrainedDilatedCNNCore(nn.Module):
     """Matches saved keys: dilated_cnn.conv_blocks, dilated_cnn.fusion, dilated_cnn.attention_pool"""
 
-    def __init__(self, channels: int = 83, hidden: int = 332, n_blocks: int = 5):
+    def __init__(self, channels: int = INPUT_DIM, hidden: int = 332, n_blocks: int = 5):
         super().__init__()
         # 5 dilated conv blocks (channels=83)
         self.conv_blocks = nn.ModuleList([
@@ -340,17 +360,17 @@ class _TrainedDilatedCNNCore(nn.Module):
 class TrainedDilatedCNN(nn.Module):
     """Architecture matching saved weights exactly.
 
-    channels=83, 5 dilated blocks, hidden=332.
-    classifier: BN(332)→Linear(332,166)→BN(166)→...→Linear(83,1)
+    channels=input_dim, 5 dilated blocks, hidden=332.
+    classifier: BN(332)→Linear(332,166)→BN(166)→...→Linear(input_dim,1)
     """
 
-    def __init__(self):
+    def __init__(self, input_dim: int = INPUT_DIM):
         super().__init__()
         hidden = 332
 
-        self.dilated_cnn = _TrainedDilatedCNNCore(channels=83, hidden=hidden, n_blocks=5)
+        self.dilated_cnn = _TrainedDilatedCNNCore(channels=input_dim, hidden=hidden, n_blocks=5)
 
-        # classifier: saved indices — BN(332), Linear(332→166), BN(166), ..., Linear(83→1)
+        # classifier: BN(332)→Linear→BN→...→Linear(input_dim, 1)
         self.classifier = nn.Sequential(
             nn.BatchNorm1d(hidden),         # 0
             nn.GELU(),                      # 1
@@ -358,10 +378,10 @@ class TrainedDilatedCNN(nn.Module):
             nn.BatchNorm1d(166),            # 3
             nn.GELU(),                      # 4
             nn.Dropout(0.2),                # 5
-            nn.Linear(166, 83),             # 6
-            nn.BatchNorm1d(83),             # 7
+            nn.Linear(166, input_dim),      # 6
+            nn.BatchNorm1d(input_dim),      # 7
             nn.GELU(),                      # 8
-            nn.Linear(83, 1),               # 9
+            nn.Linear(input_dim, 1),        # 9
         )
 
         # pattern_strength: Linear(332→41) → ReLU → Linear(41→1)
@@ -372,11 +392,11 @@ class TrainedDilatedCNN(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (batch, seq_len, 83) → prediction (batch, 1)
+        """x: (batch, seq_len, input_dim) → prediction (batch, 1)
 
-        Transposes to (batch, 83, seq_len) for conv1d processing.
+        Transposes to (batch, input_dim, seq_len) for conv1d processing.
         """
-        x = x.transpose(1, 2)  # (batch, 83, seq_len)
+        x = x.transpose(1, 2)  # (batch, input_dim, seq_len)
         pooled = self.dilated_cnn(x)  # (batch, 332)
         return self.classifier(pooled)
 
@@ -386,17 +406,17 @@ class TrainedDilatedCNN(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TrainedCNN(nn.Module):
-    """Simple Conv1d model for 83-feature input.
+    """Simple Conv1d model for input_dim-feature input.
 
     4 conv layers with increasing then decreasing channels,
     global average pooling, and a small classifier head.
-    Input: (batch, seq_len, 83)  Output: (batch, 1)
+    Input: (batch, seq_len, input_dim)  Output: (batch, 1)
     """
 
-    def __init__(self):
+    def __init__(self, input_dim: int = INPUT_DIM):
         super().__init__()
         self.conv_layers = nn.Sequential(
-            nn.Conv1d(83, 128, kernel_size=3, padding=1),
+            nn.Conv1d(input_dim, 128, kernel_size=3, padding=1),
             nn.BatchNorm1d(128),
             nn.GELU(),
             nn.Conv1d(128, 256, kernel_size=5, padding=2),
@@ -417,8 +437,8 @@ class TrainedCNN(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (batch, seq_len, 83) → prediction (batch, 1)"""
-        x = x.transpose(1, 2)  # (batch, 83, seq_len)
+        """x: (batch, seq_len, input_dim) → prediction (batch, 1)"""
+        x = x.transpose(1, 2)  # (batch, input_dim, seq_len)
         x = self.conv_layers(x)  # (batch, 64, seq_len)
         x = x.mean(dim=-1)  # global avg pool → (batch, 64)
         return self.classifier(x)
@@ -429,16 +449,16 @@ class TrainedCNN(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TrainedGRU(nn.Module):
-    """Bidirectional GRU for 83-feature input.
+    """Bidirectional GRU for input_dim-feature input.
 
     2-layer BiGRU with hidden_size=134 (268 total), plus a classifier head.
-    Input: (batch, seq_len, 83)  Output: (batch, 1)
+    Input: (batch, seq_len, input_dim)  Output: (batch, 1)
     """
 
-    def __init__(self):
+    def __init__(self, input_dim: int = INPUT_DIM):
         super().__init__()
         self.gru = nn.GRU(
-            input_size=83,
+            input_size=input_dim,
             hidden_size=134,
             num_layers=2,
             batch_first=True,
@@ -456,7 +476,7 @@ class TrainedGRU(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (batch, seq_len, 83) → prediction (batch, 1)"""
+        """x: (batch, seq_len, input_dim) → prediction (batch, 1)"""
         out, _ = self.gru(x)  # (batch, seq_len, 268)
         pooled = out.mean(dim=1)  # (batch, 268)
         return self.classifier(pooled)
@@ -466,30 +486,34 @@ class TrainedGRU(nn.Module):
 # MODEL 6: Meta-Ensemble  (stacking layer over 5 base models)
 # ══════════════════════════════════════════════════════════════════════════════
 
-N_BASE_MODELS = 5  # QT, BiLSTM, DilatedCNN, CNN, GRU
+N_BASE_MODELS = 5  # QT, BiLSTM, DilatedCNN, CNN, GRU (meta-ensemble uses these 5)
 BASE_MODEL_NAMES = [
     'quantum_transformer', 'bidirectional_lstm', 'dilated_cnn', 'cnn', 'gru',
 ]
+
+# LightGBM momentum lookback bars (must match train_lightgbm.py)
+LIGHTGBM_MOMENTUM_BARS = [1, 3, 6, 12, 24, 72]
 
 
 class TrainedMetaEnsemble(nn.Module):
     """Meta-learning stacking layer that learns which base models to trust.
 
-    Takes 83-dim market features + 5 base model predictions = 88-dim input.
+    Takes input_dim-dim market features + 5 base model predictions = (input_dim+5)-dim input.
     Learns context-dependent model weighting: in trending markets, trust
     momentum models more; in choppy markets, trust mean-reversion models.
 
-    Input: (batch, 88) — first 83 = features, last 5 = base model predictions
+    Input: (batch, input_dim+5) — first input_dim = features, last 5 = base model predictions
     Output: (prediction, confidence) tuple
     """
 
-    def __init__(self):
+    def __init__(self, input_dim: int = INPUT_DIM):
         super().__init__()
+        self._input_dim = input_dim
         n_models = N_BASE_MODELS  # 5
 
         # Feature extractor — understands market context
         self.feature_extractor = nn.Sequential(
-            nn.Linear(83, 128),         # 0
+            nn.Linear(input_dim, 128),  # 0
             nn.BatchNorm1d(128),        # 1
             nn.GELU(),                  # 2
             nn.Dropout(0.2),            # 3
@@ -522,12 +546,12 @@ class TrainedMetaEnsemble(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """x: (batch, 88) → prediction (batch, 1), confidence (batch, 1)
+        """x: (batch, input_dim+5) → prediction (batch, 1), confidence (batch, 1)
 
-        First 83 dims are features, last 5 are base model predictions.
+        First input_dim dims are features, last 5 are base model predictions.
         """
-        features = x[:, :83]
-        model_preds = x[:, 83:]  # (batch, 5)
+        features = x[:, :self._input_dim]
+        model_preds = x[:, self._input_dim:]  # (batch, 5)
 
         # Extract market context
         ctx = self.feature_extractor(features)  # (batch, 64)
@@ -546,131 +570,541 @@ class TrainedMetaEnsemble(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FEATURE EXTRACTION — builds 83-dim feature vectors from market data
+# FEATURE EXTRACTION — 46 scale-invariant single-pair + 15 cross-asset features
+# No raw prices or raw volumes — all returns, ratios, z-scores, bounded indicators.
+# Ensures identical feature distributions whether BTC is $3K or $130K.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_feature_sequence(price_df, seq_len: int = 30) -> Optional[np.ndarray]:
-    """Build a (seq_len, 83) feature matrix from a price DataFrame.
 
-    If the DataFrame has fewer than seq_len rows, returns None.
-    Features are standardised (zero-mean, unit-variance) per column.
+def _compute_single_pair_features(
+    df: 'pd.DataFrame',
+) -> Dict[str, 'pd.Series']:
+    """Compute 46 scale-invariant single-pair features from OHLCV data.
+
+    CRITICAL: No feature depends on absolute price level or raw volume.
+    Every feature is a return, ratio, z-score, or bounded indicator.
+    This ensures the model sees identical feature distributions whether
+    BTC is $3K or $130K.
+
+    Returns:
+        Dict of feature_name → pd.Series (46 features)
     """
-    import pandas as pd  # must be first to avoid local-before-assignment
+    close = df['close'].astype(float)
+    _open = df['open'].astype(float) if 'open' in df.columns else close
+    high = df['high'].astype(float) if 'high' in df.columns else close
+    low = df['low'].astype(float) if 'low' in df.columns else close
+    vol = df['volume'].astype(float) if 'volume' in df.columns else None
 
-    if price_df is None or len(price_df) < seq_len:
-        return None
+    features: Dict[str, 'pd.Series'] = {}
 
-    df = price_df.tail(seq_len + 50).copy()  # extra rows for rolling calcs
+    # ── Group 1: Candle shape (5 features) — replaces raw OHLCV ──────────
+    features['open_gap'] = np.log(_open / (close.shift(1) + 1e-10))
+    features['upper_wick'] = (high - np.maximum(_open, close)) / (close + 1e-10)
+    features['lower_wick'] = (np.minimum(_open, close) - low) / (close + 1e-10)
+    features['body'] = (close - _open) / (close + 1e-10)
+    # Volume: rolling z-score (100-bar window)
+    if vol is not None:
+        vol_mean = vol.rolling(100, min_periods=10).mean()
+        vol_std = vol.rolling(100, min_periods=10).std()
+        features['volume_z'] = (vol - vol_mean) / (vol_std + 1e-10)
+    else:
+        features['volume_z'] = close * 0.0
 
-    # Start with raw OHLCV
-    features = {}
-    for col in ['open', 'high', 'low', 'close', 'volume']:
-        if col in df.columns:
-            features[col] = df[col].astype(float)
-
-    close = df['close'].astype(float) if 'close' in df.columns else None
-    if close is None:
-        return None
-
-    # Returns at multiple horizons
+    # ── Group 2: Returns at multiple horizons (7 features) ────────────────
     for w in [1, 2, 3, 5, 10, 20]:
         features[f'ret_{w}'] = close.pct_change(w)
-
-    # Log return
     features['log_ret'] = np.log(close / close.shift(1))
 
-    # Moving averages
+    # ── Group 3: SMA distance + slope (8 features) — replaces raw SMA ────
     for w in [5, 10, 20, 50]:
         sma = close.rolling(w).mean()
-        features[f'sma_{w}'] = sma
-        features[f'sma_ratio_{w}'] = close / sma
+        features[f'sma_dist_{w}'] = (close - sma) / (sma + 1e-10)
+        features[f'sma_slope_{w}'] = sma.pct_change(3)
 
-    # Exponential moving averages
+    # ── Group 4: EMA distance + slope (6 features) — replaces raw EMA ────
     for w in [5, 10, 20]:
         ema = close.ewm(span=w, adjust=False).mean()
-        features[f'ema_{w}'] = ema
-        features[f'ema_ratio_{w}'] = close / ema
+        features[f'ema_dist_{w}'] = (close - ema) / (ema + 1e-10)
+        features[f'ema_slope_{w}'] = ema.pct_change(3)
 
-    # Volatility
+    # ── Group 5: Realized volatility (3 features) ────────────────────────
+    pct_ret = close.pct_change()
     for w in [5, 10, 20]:
-        features[f'vol_{w}'] = close.pct_change().rolling(w).std()
+        features[f'vol_{w}'] = pct_ret.rolling(w).std()
 
-    # RSI (14-period)
+    # ── Group 6: RSI, rescaled to [-1, 1] (1 feature) ────────────────────
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / (loss + 1e-10)
-    features['rsi_14'] = 100 - (100 / (1 + rs))
+    loss_s = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / (loss_s + 1e-10)
+    features['rsi_norm'] = (100 - (100 / (1 + rs)) - 50) / 50
 
-    # MACD
+    # ── Group 7: MACD normalized by price (3 features) ────────────────────
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
-    features['macd'] = ema12 - ema26
-    features['macd_signal'] = (ema12 - ema26).ewm(span=9, adjust=False).mean()
-    features['macd_hist'] = features['macd'] - features['macd_signal']
+    macd = ema12 - ema26
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+    features['macd_pct'] = macd / (close + 1e-10)
+    features['macd_signal_pct'] = macd_signal / (close + 1e-10)
+    features['macd_hist_pct'] = (macd - macd_signal) / (close + 1e-10)
 
-    # Bollinger Bands
+    # ── Group 8: Bollinger Bands — z-score + width (4 features) ──────────
     sma20 = close.rolling(20).mean()
     std20 = close.rolling(20).std()
-    features['bb_upper'] = sma20 + 2 * std20
-    features['bb_lower'] = sma20 - 2 * std20
-    features['bb_pct'] = (close - features['bb_lower']) / (features['bb_upper'] - features['bb_lower'] + 1e-10)
-    features['bb_width'] = (features['bb_upper'] - features['bb_lower']) / sma20
+    bb_upper = sma20 + 2 * std20
+    bb_lower = sma20 - 2 * std20
+    bb_range = bb_upper - bb_lower + 1e-10
+    features['bb_pct'] = (close - bb_lower) / bb_range
+    features['bb_width'] = bb_range / (sma20 + 1e-10)
+    features['bb_upper_dist'] = (bb_upper - close) / (close + 1e-10)
+    features['bb_lower_dist'] = (close - bb_lower) / (close + 1e-10)
 
-    # ATR
-    if all(c in df.columns for c in ['high', 'low', 'close']):
-        high = df['high'].astype(float)
-        low = df['low'].astype(float)
-        tr = pd.concat([
-            high - low,
-            (high - close.shift(1)).abs(),
-            (low - close.shift(1)).abs(),
-        ], axis=1).max(axis=1)
-        features['atr_14'] = tr.rolling(14).mean()
+    # ── Group 9: ATR as % of price (1 feature) ───────────────────────────
+    import pandas as pd
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    features['atr_pct'] = tr.rolling(14).mean() / (close + 1e-10)
 
-    # Volume features
-    if 'volume' in df.columns:
-        vol = df['volume'].astype(float)
-        features['vol_sma_10'] = vol.rolling(10).mean()
-        features['vol_ratio'] = vol / (vol.rolling(10).mean() + 1e-10)
+    # ── Group 10: Volume ratios (3 features) ─────────────────────────────
+    if vol is not None:
+        features['vol_ratio'] = vol / (vol.rolling(10, min_periods=1).mean() + 1e-10)
         features['vol_change'] = vol.pct_change()
+        features['vol_trend'] = (vol.rolling(5, min_periods=1).mean()
+                                 / (vol.rolling(20, min_periods=1).mean() + 1e-10))
+    else:
+        features['vol_ratio'] = close * 0.0
+        features['vol_change'] = close * 0.0
+        features['vol_trend'] = close * 0.0 + 1.0
 
-    # Price momentum
+    # ── Group 11: Price momentum (3 features) ────────────────────────────
     features['momentum_5'] = close / close.shift(5) - 1
     features['momentum_10'] = close / close.shift(10) - 1
     features['momentum_20'] = close / close.shift(20) - 1
 
-    # High-low range
-    if 'high' in df.columns and 'low' in df.columns:
-        features['hl_range'] = (df['high'].astype(float) - df['low'].astype(float)) / close
-        features['hl_range_sma'] = features['hl_range'].rolling(10).mean()
+    # ── Group 12: Range features (2 features) ────────────────────────────
+    features['hl_range'] = (high - low) / (close + 1e-10)
+    hl_range = features['hl_range']
+    features['hl_range_norm'] = hl_range / (hl_range.rolling(10, min_periods=1).mean() + 1e-10)
 
-    # Combine into DataFrame
+    # Total: 5 + 7 + 8 + 6 + 3 + 1 + 3 + 4 + 1 + 3 + 3 + 2 = 46
+    return features
+
+
+def _build_cross_features(
+    close: 'pd.Series',
+    volume: 'pd.Series',
+    cross_data: Dict[str, 'pd.DataFrame'],
+    pair_name: str,
+) -> Dict[str, 'pd.Series']:
+    """Compute 15 cross-asset features from other pairs' data.
+
+    Features are computed using only past data (no future leakage).
+
+    Args:
+        close: This pair's close price series (aligned index with cross_data)
+        volume: This pair's volume series
+        cross_data: Dict of pair_name → DataFrame with at least [close, volume] columns
+        pair_name: This pair's name (e.g. 'BTC-USD')
+
+    Returns:
+        Dict of feature_name → pd.Series (15 features)
+    """
+    import pandas as pd
+
+    feats: Dict[str, pd.Series] = {}
+    log_ret = np.log(close / close.shift(1))
+
+    # ── Lead signals (5 features) ─────────────────────────────────────────
+    lead_cfg = LEAD_SIGNALS.get(pair_name, {})
+    primary_pair = lead_cfg.get('primary')
+    secondary_pair = lead_cfg.get('secondary')
+
+    for role, leader_pair, horizons in [
+        ('primary', primary_pair, [1, 3, 6]),
+        ('secondary', secondary_pair, [1, 3]),
+    ]:
+        if leader_pair and leader_pair in cross_data:
+            leader_close = cross_data[leader_pair]['close'].astype(float)
+            leader_log_ret = np.log(leader_close / leader_close.shift(1))
+            for h in horizons:
+                # h-bar log return of the leader
+                feat_name = f'lead_{role}_ret_{h}'
+                feats[feat_name] = leader_log_ret.rolling(h).sum()
+        else:
+            # Fill zeros for missing leader
+            for h in ([1, 3, 6] if role == 'primary' else [1, 3]):
+                feats[f'lead_{role}_ret_{h}'] = pd.Series(0.0, index=close.index)
+
+    # ── Cross-pair correlations (4 features) ──────────────────────────────
+    for ref_name, ref_label in [('BTC-USD', 'btc'), ('ETH-USD', 'eth')]:
+        if ref_name in cross_data and ref_name != pair_name:
+            ref_close = cross_data[ref_name]['close'].astype(float)
+            ref_log_ret = np.log(ref_close / ref_close.shift(1))
+            corr_50 = log_ret.rolling(50).corr(ref_log_ret)
+            feats[f'corr_{ref_label}_50'] = corr_50
+            # Z-score of correlation over 200-bar window
+            corr_mean = corr_50.rolling(200).mean()
+            corr_std = corr_50.rolling(200).std()
+            feats[f'corr_z_{ref_label}'] = (corr_50 - corr_mean) / (corr_std + 1e-10)
+        else:
+            feats[f'corr_{ref_label}_50'] = pd.Series(0.0, index=close.index)
+            feats[f'corr_z_{ref_label}'] = pd.Series(0.0, index=close.index)
+
+    # ── Spread features (2 features) ──────────────────────────────────────
+    for ref_name, ref_label in [('BTC-USD', 'btc'), ('ETH-USD', 'eth')]:
+        if ref_name in cross_data and ref_name != pair_name:
+            ref_close = cross_data[ref_name]['close'].astype(float)
+            log_spread = np.log(close / (ref_close + 1e-10))
+            spread_mean = log_spread.rolling(100).mean()
+            spread_std = log_spread.rolling(100).std()
+            feats[f'spread_{ref_label}_z'] = (log_spread - spread_mean) / (spread_std + 1e-10)
+        else:
+            feats[f'spread_{ref_label}_z'] = pd.Series(0.0, index=close.index)
+
+    # ── Market-wide features (4 features, same for all pairs) ─────────────
+    all_rets = []
+    all_vol_zs = []
+    for p, cdf in cross_data.items():
+        c = cdf['close'].astype(float)
+        r = np.log(c / c.shift(1))
+        all_rets.append(r)
+        if 'volume' in cdf.columns:
+            v = cdf['volume'].astype(float)
+            vol_ma = v.rolling(20).mean()
+            all_vol_zs.append(v / (vol_ma + 1e-10) - 1.0)
+
+    # Also include self
+    all_rets.append(log_ret)
+    if volume is not None:
+        vol_ma_self = volume.rolling(20).mean()
+        all_vol_zs.append(volume / (vol_ma_self + 1e-10) - 1.0)
+
+    if all_rets:
+        ret_df = pd.concat(all_rets, axis=1)
+        feats['mkt_avg_ret'] = ret_df.mean(axis=1)
+        feats['mkt_dispersion'] = ret_df.std(axis=1)
+        feats['mkt_breadth'] = (ret_df > 0).mean(axis=1)
+    else:
+        feats['mkt_avg_ret'] = pd.Series(0.0, index=close.index)
+        feats['mkt_dispersion'] = pd.Series(0.0, index=close.index)
+        feats['mkt_breadth'] = pd.Series(0.5, index=close.index)
+
+    if all_vol_zs:
+        vol_df = pd.concat(all_vol_zs, axis=1)
+        feats['mkt_avg_vol_z'] = vol_df.mean(axis=1)
+    else:
+        feats['mkt_avg_vol_z'] = pd.Series(0.0, index=close.index)
+
+    return feats
+
+
+def _build_derivatives_features(
+    n_rows: int,
+    derivatives_data: Optional[Dict[str, 'pd.Series']] = None,
+) -> Dict[str, 'pd.Series']:
+    """Compute 7 derivatives + sentiment features.
+
+    Args:
+        n_rows: Number of rows in the price DataFrame (for index alignment)
+        derivatives_data: Dict with optional keys:
+            - 'funding_rate': pd.Series of raw funding rates
+            - 'open_interest': pd.Series of open interest values
+            - 'long_short_ratio': pd.Series of long/short account ratios
+            - 'taker_buy_vol': pd.Series of taker buy volume
+            - 'taker_sell_vol': pd.Series of taker sell volume
+            - 'fear_greed': pd.Series of Fear & Greed index (0-100)
+            All series must be aligned to the same index as price_df.
+            Missing keys → zeros with has_derivatives_data=0.
+
+    Returns:
+        Dict of 7 feature_name → pd.Series
+    """
+    import pandas as pd
+
+    idx = pd.RangeIndex(n_rows)
+    feats: Dict[str, pd.Series] = {}
+
+    has_deriv = False
+
+    if derivatives_data is not None:
+        # ── Funding rate z-score (50-bar window) ────────────────────────
+        fr = derivatives_data.get('funding_rate')
+        if fr is not None and len(fr) > 0:
+            fr = fr.astype(float)
+            fr_mean = fr.rolling(50, min_periods=5).mean()
+            fr_std = fr.rolling(50, min_periods=5).std()
+            feats['funding_rate_z'] = (fr - fr_mean) / (fr_std + 1e-10)
+            has_deriv = True
+        else:
+            feats['funding_rate_z'] = pd.Series(0.0, index=idx)
+
+        # ── Open interest 5-bar % change ────────────────────────────────
+        oi = derivatives_data.get('open_interest')
+        if oi is not None and len(oi) > 0:
+            oi = oi.astype(float)
+            feats['oi_change_pct'] = oi.pct_change(5)
+            has_deriv = True
+        else:
+            feats['oi_change_pct'] = pd.Series(0.0, index=idx)
+
+        # ── Long/short ratio (raw, already scale-invariant) ─────────────
+        ls = derivatives_data.get('long_short_ratio')
+        if ls is not None and len(ls) > 0:
+            feats['long_short_ratio'] = ls.astype(float)
+            has_deriv = True
+        else:
+            feats['long_short_ratio'] = pd.Series(0.0, index=idx)
+
+        # ── Taker buy/sell ratio ────────────────────────────────────────
+        buy_vol = derivatives_data.get('taker_buy_vol')
+        sell_vol = derivatives_data.get('taker_sell_vol')
+        if buy_vol is not None and sell_vol is not None and len(buy_vol) > 0:
+            bv = buy_vol.astype(float)
+            sv = sell_vol.astype(float)
+            feats['taker_buy_sell_ratio'] = bv / (sv + 1e-10)
+            has_deriv = True
+        else:
+            feats['taker_buy_sell_ratio'] = pd.Series(0.0, index=idx)
+
+        # ── Fear & Greed (normalized + 3-day ROC) ──────────────────────
+        fg = derivatives_data.get('fear_greed')
+        if fg is not None and len(fg) > 0:
+            fg = fg.astype(float)
+            feats['fear_greed_norm'] = fg / 100.0
+            # 3-day ROC: for 5-min bars, 3 days = 3 * 288 = 864 bars
+            # But FnG is daily (forward-filled), so diff(864) gives ~3-day change
+            feats['fear_greed_roc'] = fg.diff(864) / 100.0
+        else:
+            feats['fear_greed_norm'] = pd.Series(0.0, index=idx)
+            feats['fear_greed_roc'] = pd.Series(0.0, index=idx)
+
+    else:
+        # No derivatives data at all — fill zeros
+        feats['funding_rate_z'] = pd.Series(0.0, index=idx)
+        feats['oi_change_pct'] = pd.Series(0.0, index=idx)
+        feats['long_short_ratio'] = pd.Series(0.0, index=idx)
+        feats['taker_buy_sell_ratio'] = pd.Series(0.0, index=idx)
+        feats['fear_greed_norm'] = pd.Series(0.0, index=idx)
+        feats['fear_greed_roc'] = pd.Series(0.0, index=idx)
+
+    # ── Binary flag: model knows when derivatives data is present ────
+    feats['has_derivatives_data'] = pd.Series(
+        1.0 if has_deriv else 0.0, index=idx
+    )
+
+    return feats
+
+
+def build_feature_sequence(
+    price_df,
+    seq_len: int = 30,
+    cross_data: Optional[Dict[str, 'pd.DataFrame']] = None,
+    pair_name: Optional[str] = None,
+    derivatives_data: Optional[Dict[str, 'pd.Series']] = None,
+) -> Optional[np.ndarray]:
+    """Build a (seq_len, INPUT_DIM) feature matrix from a price DataFrame.
+
+    All features are scale-invariant: returns, ratios, z-scores, bounded
+    indicators.  No raw prices or raw volumes.  Per-window standardization
+    is applied on top so every sample has zero mean / unit variance.
+
+    Args:
+        price_df: DataFrame with OHLCV columns
+        seq_len: Number of time steps in the output sequence
+        cross_data: Optional dict of pair_name → DataFrame with [close, volume] columns.
+        pair_name: This pair's identifier (e.g. 'BTC-USD').
+        derivatives_data: Optional dict of feature_name → pd.Series for derivatives
+            features (funding_rate, open_interest, long_short_ratio, taker_buy_vol,
+            taker_sell_vol, fear_greed). Series must be aligned to price_df index.
+
+    Returns:
+        (seq_len, INPUT_DIM) float32 array, or None if insufficient data
+    """
+    import pandas as pd
+
+    if price_df is None or len(price_df) < seq_len:
+        return None
+
+    df = price_df.tail(seq_len + 50).copy()
+
+    # Trim derivatives_data to match
+    if derivatives_data is not None:
+        n_tail = len(df)
+        derivatives_data = {
+            k: v.tail(n_tail).reset_index(drop=True) if hasattr(v, 'tail') else v
+            for k, v in derivatives_data.items()
+        }
+
+    if cross_data is not None:
+        _cross = {}
+        for p, cdf in cross_data.items():
+            if p == pair_name:
+                continue
+            _cross[p] = cdf.tail(seq_len + 50).copy().reset_index(drop=True)
+        cross_data = _cross if _cross else None
+
+    df = df.reset_index(drop=True)
+    close = df['close'].astype(float) if 'close' in df.columns else None
+    if close is None:
+        return None
+    vol = df['volume'].astype(float) if 'volume' in df.columns else None
+
+    # 46 scale-invariant single-pair features
+    features = _compute_single_pair_features(df)
+
+    # 15 cross-asset features (already scale-invariant)
+    if cross_data is not None and pair_name is not None:
+        cross_feats = _build_cross_features(close, vol, cross_data, pair_name)
+        features.update(cross_feats)
+
+    # 7 derivatives + sentiment features
+    deriv_feats = _build_derivatives_features(len(df), derivatives_data)
+    features.update(deriv_feats)
+
     feat_df = pd.DataFrame(features, index=df.index)
     feat_df = feat_df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0)
 
     # Take last seq_len rows
     feat_arr = feat_df.tail(seq_len).values.astype(np.float32)
 
-    # Standardise each column
+    # Per-window standardization (zero-mean, unit-variance per column)
     mean = feat_arr.mean(axis=0, keepdims=True)
     std = feat_arr.std(axis=0, keepdims=True) + 1e-8
     feat_arr = (feat_arr - mean) / std
 
-    # Pad or truncate to exactly 83 features
+    # Pad or truncate to exactly INPUT_DIM
     n_feat = feat_arr.shape[1]
-    if n_feat < 83:
-        pad = np.zeros((seq_len, 83 - n_feat), dtype=np.float32)
+    if n_feat < INPUT_DIM:
+        pad = np.zeros((seq_len, INPUT_DIM - n_feat), dtype=np.float32)
         feat_arr = np.concatenate([feat_arr, pad], axis=1)
-    elif n_feat > 83:
-        feat_arr = feat_arr[:, :83]
+    elif n_feat > INPUT_DIM:
+        feat_arr = feat_arr[:, :INPUT_DIM]
 
-    return feat_arr  # (seq_len, 83)
+    return feat_arr  # (seq_len, INPUT_DIM)
+
+
+def build_full_feature_matrix(
+    price_df,
+    cross_data: Optional[Dict[str, 'pd.DataFrame']] = None,
+    pair_name: Optional[str] = None,
+    derivatives_data: Optional[Dict[str, 'pd.Series']] = None,
+) -> Optional[np.ndarray]:
+    """Build a (N, INPUT_DIM) feature matrix for the ENTIRE DataFrame at once.
+
+    Uses the same scale-invariant features as build_feature_sequence().
+    Does NOT apply per-window standardization — that is done when slicing
+    windows in generate_sequences().
+
+    Args:
+        price_df: DataFrame with OHLCV columns (entire history for one pair)
+        cross_data: Optional dict of pair_name → DataFrame for cross-asset features
+        pair_name: This pair's identifier
+        derivatives_data: Optional dict of feature_name → pd.Series for derivatives
+            features. Series must be aligned to price_df index.
+
+    Returns:
+        (N, INPUT_DIM) float32 array where N = len(price_df), or None
+    """
+    import pandas as pd
+
+    if price_df is None or len(price_df) < 30:
+        return None
+
+    df = price_df.copy().reset_index(drop=True)
+
+    if cross_data is not None:
+        _cross = {p: cdf.copy().reset_index(drop=True)
+                  for p, cdf in cross_data.items() if p != pair_name}
+        cross_data = _cross if _cross else None
+
+    # Reset derivatives_data index to match df
+    if derivatives_data is not None:
+        derivatives_data = {
+            k: v.reset_index(drop=True) if hasattr(v, 'reset_index') else v
+            for k, v in derivatives_data.items()
+        }
+
+    close = df['close'].astype(float) if 'close' in df.columns else None
+    if close is None:
+        return None
+    vol = df['volume'].astype(float) if 'volume' in df.columns else None
+
+    # 46 scale-invariant single-pair features
+    features = _compute_single_pair_features(df)
+
+    # 15 cross-asset features
+    if cross_data is not None and pair_name is not None:
+        cross_feats = _build_cross_features(close, vol, cross_data, pair_name)
+        features.update(cross_feats)
+
+    # 7 derivatives + sentiment features
+    deriv_feats = _build_derivatives_features(len(df), derivatives_data)
+    features.update(deriv_feats)
+
+    feat_df = pd.DataFrame(features, index=df.index)
+    feat_df = feat_df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0)
+    feat_arr = feat_df.values.astype(np.float32)
+
+    # Pad or truncate to INPUT_DIM
+    n_feat = feat_arr.shape[1]
+    if n_feat < INPUT_DIM:
+        pad = np.zeros((len(feat_arr), INPUT_DIM - n_feat), dtype=np.float32)
+        feat_arr = np.concatenate([feat_arr, pad], axis=1)
+    elif n_feat > INPUT_DIM:
+        feat_arr = feat_arr[:, :INPUT_DIM]
+
+    return feat_arr  # (N, INPUT_DIM)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOADER — loads weights, validates, returns ready-to-use models
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+def _detect_input_dim(model_name: str, state_dict: dict) -> Optional[int]:
+    """Auto-detect the input dimension a saved model was trained with.
+
+    Inspects the first layer's weight shape to infer the original input_dim.
+    Returns None if detection fails (caller should use default).
+    """
+    try:
+        # Each model type has a different "first layer" key
+        key_map = {
+            'quantum_transformer': 'input_projection.weight',
+            'bidirectional_lstm': 'lstm.lstm_layers.0.weight_ih_l0',
+            'dilated_cnn': 'dilated_cnn.conv_blocks.0.0.weight',
+            'cnn': 'conv_layers.0.weight',
+            'gru': 'gru.weight_ih_l0',
+            'meta_ensemble': 'feature_extractor.0.weight',
+        }
+        key = key_map.get(model_name)
+        if key and key in state_dict:
+            w = state_dict[key]
+            if model_name == 'quantum_transformer':
+                # input_projection: Linear(input_dim, d_model) → weight shape (d_model, input_dim)
+                return w.shape[1]
+            elif model_name == 'bidirectional_lstm':
+                # LSTM weight_ih: shape (4*hidden, input_size)
+                return w.shape[1]
+            elif model_name == 'dilated_cnn':
+                # Conv1d(channels, channels, 3) → weight shape (channels, channels, 3)
+                return w.shape[0]
+            elif model_name == 'cnn':
+                # Conv1d(input_dim, 128, 3) → weight shape (128, input_dim, 3)
+                return w.shape[1]
+            elif model_name == 'gru':
+                # GRU weight_ih: shape (3*hidden, input_size)
+                return w.shape[1]
+            elif model_name == 'meta_ensemble':
+                # Linear(input_dim, 128) → weight shape (128, input_dim)
+                return w.shape[1]
+    except Exception:
+        pass
+    return None
+
 
 MODEL_REGISTRY = {
     'quantum_transformer': (
@@ -700,8 +1134,13 @@ MODEL_REGISTRY = {
 }
 
 
-def load_trained_models(base_dir: str = '.') -> Dict[str, nn.Module]:
+def load_trained_models(base_dir: str = '.', input_dim: int = INPUT_DIM) -> Dict[str, nn.Module]:
     """Load all trained models with strict validation.
+
+    Args:
+        base_dir: Base directory for model weight files
+        input_dim: Feature dimension for model constructors (default INPUT_DIM=98).
+                   Use INPUT_DIM_LEGACY=83 to load old pre-trained weights exactly.
 
     Returns dict of model_name → nn.Module (in eval mode).
     Only includes models that loaded with 100% weight match.
@@ -720,7 +1159,11 @@ def load_trained_models(base_dir: str = '.') -> Dict[str, nn.Module]:
             if isinstance(saved_sd, dict) and 'model_state_dict' in saved_sd:
                 saved_sd = saved_sd['model_state_dict']
 
-            model = model_cls()
+            # Auto-detect input_dim from saved weights to handle legacy models
+            detected_dim = _detect_input_dim(name, saved_sd)
+            use_dim = detected_dim if detected_dim is not None else input_dim
+
+            model = model_cls(input_dim=use_dim)
             result = model.load_state_dict(saved_sd, strict=False)
 
             # Check for mismatches
@@ -757,59 +1200,222 @@ def load_trained_models(base_dir: str = '.') -> Dict[str, nn.Module]:
             logger.error(f"Failed to load model {name}: {e}")
 
     logger.info(f"ML Model Loader: {len(loaded)}/{len(MODEL_REGISTRY)} models loaded")
+
+    # Also load LightGBM if available (non-PyTorch, separate path)
+    lgbm = load_lightgbm_model(base_dir)
+    if lgbm is not None:
+        loaded['lightgbm'] = lgbm
+
     return loaded
 
 
 def predict_with_models(
     models: Dict[str, nn.Module],
     features: np.ndarray,
-) -> Dict[str, float]:
+    price_series: Optional[np.ndarray] = None,
+) -> Tuple[Dict[str, float], Dict[str, float]]:
     """Run inference on all loaded models.
 
     Args:
         models: dict from load_trained_models()
-        features: (seq_len, 83) numpy array from build_feature_sequence()
+        features: (seq_len, INPUT_DIM) numpy array from build_feature_sequence()
+        price_series: Optional close prices for LightGBM momentum features
 
     Returns:
-        dict of model_name → prediction (float in ~[-1, 1])
+        (predictions, confidences) where:
+          predictions: dict of model_name → prediction (float in ~[-1, 1])
+          confidences: dict of model_name → confidence (float in [0, 1])
+            For deep learning models, confidence = abs(prediction) (higher signal = more confident).
+            For LightGBM, confidence = distance from 0.5 probability (calibrated).
+            For meta_ensemble, confidence comes from the confidence head.
     """
     if features is None:
-        return {name: 0.0 for name in models}
+        empty = {name: 0.0 for name in models}
+        return empty, {name: 0.5 for name in models}
 
     predictions = {}
-    x = torch.FloatTensor(features).unsqueeze(0)  # (1, seq_len, 83)
+    confidences = {}
+    x = torch.FloatTensor(features).unsqueeze(0)  # (1, seq_len, INPUT_DIM)
 
     # Run base models first (all take sequence input)
     for name, model in models.items():
-        if name == 'meta_ensemble':
-            continue  # Handle after base models
+        if name in ('meta_ensemble', 'lightgbm'):
+            continue  # Handle separately
         try:
             with torch.no_grad():
-                output = model(x)
+                # Match feature dim to model's expected input
+                model_x = _match_feature_dim(x, model, name)
+                output = model(model_x)
                 if isinstance(output, tuple):
                     pred = output[0]  # (prediction, uncertainty/confidence)
                 else:
                     pred = output
-                predictions[name] = float(torch.tanh(pred[0, 0]))
+                pred_val = float(torch.tanh(pred[0, 0]))
+                predictions[name] = pred_val
+                confidences[name] = min(abs(pred_val) + 0.5, 0.95)
         except Exception as e:
             logger.warning(f"Inference failed for {name}: {e}")
             predictions[name] = 0.0
+            confidences[name] = 0.0
+
+    # Run LightGBM if loaded (non-PyTorch, uses flattened features + momentum)
+    if 'lightgbm' in models:
+        lgbm_pred, lgbm_conf = predict_lightgbm(
+            models['lightgbm'], features, price_series
+        )
+        predictions['lightgbm'] = lgbm_pred
+        confidences['lightgbm'] = lgbm_conf
 
     # Run meta-ensemble if loaded (uses base model predictions + features)
     if 'meta_ensemble' in models:
         try:
             with torch.no_grad():
+                meta_model = models['meta_ensemble']
+                meta_dim = meta_model._input_dim
                 # Build meta-ensemble input: last-timestep features + 5 base predictions
-                feat_vec = torch.FloatTensor(features[-1, :]).unsqueeze(0)  # (1, 83)
+                feat_vec = torch.FloatTensor(features[-1, :meta_dim]).unsqueeze(0)  # (1, meta_dim)
                 base_preds = torch.FloatTensor([[
                     predictions.get(name, 0.0)
                     for name in BASE_MODEL_NAMES
                 ]])  # (1, 5)
-                meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, 88)
-                pred, _conf = models['meta_ensemble'](meta_input)
+                meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, meta_dim+5)
+                pred, conf = meta_model(meta_input)
                 predictions['meta_ensemble'] = float(torch.tanh(pred[0, 0]))
+                confidences['meta_ensemble'] = float(conf[0, 0])
         except Exception as e:
             logger.warning(f"Inference failed for meta_ensemble: {e}")
             predictions['meta_ensemble'] = 0.0
+            confidences['meta_ensemble'] = 0.0
 
-    return predictions
+    return predictions, confidences
+
+
+def _match_feature_dim(
+    x: torch.Tensor,
+    model: nn.Module,
+    model_name: str,
+) -> torch.Tensor:
+    """Pad or truncate feature tensor to match model's expected input dimension.
+
+    This handles the case where a model was trained with INPUT_DIM_LEGACY=83
+    but features are now INPUT_DIM=98, or vice versa.
+    """
+    feat_dim = x.shape[-1]
+
+    # Detect model's expected input dim from its first layer
+    expected_dim = None
+    try:
+        if model_name == 'quantum_transformer':
+            expected_dim = model.input_projection.in_features
+        elif model_name == 'bidirectional_lstm':
+            expected_dim = model.lstm.lstm_layers[0].input_size
+        elif model_name == 'dilated_cnn':
+            expected_dim = model.dilated_cnn.conv_blocks[0]._modules['0'].in_channels
+        elif model_name == 'cnn':
+            expected_dim = model.conv_layers[0].in_channels
+        elif model_name == 'gru':
+            expected_dim = model.gru.input_size
+    except Exception:
+        pass
+
+    if expected_dim is None or expected_dim == feat_dim:
+        return x
+
+    if feat_dim > expected_dim:
+        # Truncate extra features
+        return x[:, :, :expected_dim]
+    else:
+        # Pad with zeros
+        pad = torch.zeros(x.shape[0], x.shape[1], expected_dim - feat_dim)
+        return torch.cat([x, pad], dim=-1)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LIGHTGBM — gradient boosting model (non-PyTorch)
+# ══════════════════════════════════════════════════════════════════════════════
+
+LIGHTGBM_PATH = os.path.join('models', 'trained', 'lightgbm_model.txt')
+
+
+def load_lightgbm_model(base_dir: str = '.') -> Optional[object]:
+    """Load a trained LightGBM model from .txt file.
+
+    Returns the LightGBM Booster object, or None if not found/not installed.
+    """
+    full_path = os.path.join(base_dir, LIGHTGBM_PATH)
+    if not os.path.exists(full_path):
+        logger.debug(f"LightGBM model not found: {full_path}")
+        return None
+
+    try:
+        import lightgbm as lgb
+    except ImportError:
+        logger.debug("LightGBM not installed — skipping lightgbm model")
+        return None
+
+    try:
+        model = lgb.Booster(model_file=full_path)
+        logger.info(f"LightGBM model loaded: {full_path} "
+                     f"({model.num_trees()} trees, {model.num_feature()} features)")
+        return model
+    except Exception as e:
+        logger.error(f"Failed to load LightGBM model: {e}")
+        return None
+
+
+def predict_lightgbm(
+    model: object,
+    features: Optional[np.ndarray],
+    price_series: Optional[np.ndarray] = None,
+) -> Tuple[float, float]:
+    """Run inference on LightGBM model.
+
+    Args:
+        model: LightGBM Booster from load_lightgbm_model()
+        features: (seq_len, INPUT_DIM) array from build_feature_sequence()
+        price_series: Optional (N,) close price array for momentum computation.
+                      If None, momentum features are set to 0.
+
+    Returns:
+        (prediction, confidence) where:
+          prediction: float in [-1, 1] (mapped from probability)
+          confidence: float in [0, 1] (distance from 0.5, doubled)
+    """
+    if features is None or model is None:
+        return 0.0, 0.0
+
+    try:
+        # Take the LAST bar's feature vector (flattened, not sequential)
+        bar_features = features[-1, :]  # (INPUT_DIM,)
+
+        # Multi-timeframe momentum from price series
+        if price_series is not None and len(price_series) > max(LIGHTGBM_MOMENTUM_BARS):
+            current_price = price_series[-1]
+            momentum_feats = []
+            for h in LIGHTGBM_MOMENTUM_BARS:
+                if current_price > 0 and len(price_series) > h:
+                    past_price = price_series[-(h + 1)]
+                    momentum_feats.append(current_price / past_price - 1.0 if past_price > 0 else 0.0)
+                else:
+                    momentum_feats.append(0.0)
+        else:
+            momentum_feats = [0.0] * len(LIGHTGBM_MOMENTUM_BARS)
+
+        # Combine: bar features + momentum
+        row = np.concatenate([bar_features, np.array(momentum_feats, dtype=np.float32)])
+        row = np.nan_to_num(row, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # LightGBM predict returns probability of class 1 (up)
+        prob = float(model.predict(row.reshape(1, -1))[0])
+
+        # Map probability [0, 1] → prediction [-1, 1]
+        prediction = (prob - 0.5) * 2.0  # 0.5→0, 0.7→0.4, 0.3→-0.4
+
+        # Confidence: how far from uncertain (0.5)
+        confidence = abs(prob - 0.5) * 2.0  # 0.5→0, 0.7→0.4, 1.0→1.0
+
+        return prediction, confidence
+
+    except Exception as e:
+        logger.warning(f"LightGBM inference failed: {e}")
+        return 0.0, 0.0

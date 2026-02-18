@@ -306,7 +306,7 @@ def retrain_weekly(
     if pairs is None:
         pairs = DEFAULT_PAIRS
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     start_time = time.time()
     metadata = load_metadata()
     results = {}

@@ -385,9 +385,24 @@ class MLIntegrationBridge:
         self.logger.info(f"ML Integration Bridge initialized (ML enabled: {self.ml_enabled})")
         return True
 
-    async def generate_ml_signals(self, market_data: pd.DataFrame,
-                                 traditional_signals: List[TradingSignal]) -> MLSignalPackage:
-        """Generate ML-enhanced signals using trained PyTorch models."""
+    async def generate_ml_signals(
+        self,
+        market_data: pd.DataFrame,
+        traditional_signals: List[TradingSignal],
+        cross_data: Optional[Dict[str, pd.DataFrame]] = None,
+        pair_name: Optional[str] = None,
+        derivatives_data: Optional[Dict[str, Any]] = None,
+    ) -> MLSignalPackage:
+        """Generate ML-enhanced signals using trained PyTorch models.
+
+        Args:
+            market_data: OHLCV DataFrame for this pair
+            traditional_signals: Traditional trading signals
+            cross_data: Optional dict of pair → DataFrame for cross-asset features
+            pair_name: This pair's name for cross-asset feature computation
+            derivatives_data: Optional dict of feature_name → pd.Series for derivatives
+                features (funding_rate, open_interest, etc.)
+        """
         start_time = datetime.now()
 
         if not self.ml_enabled or self.fallback_mode:
@@ -414,8 +429,12 @@ class MLIntegrationBridge:
                     processing_time_ms=0.0,
                 )
 
-            # Build feature sequence from market data
-            features = build_feature_sequence(market_data, seq_len=30)
+            # Build feature sequence from market data (with cross-asset + derivatives features)
+            features = build_feature_sequence(
+                market_data, seq_len=30,
+                cross_data=cross_data, pair_name=pair_name,
+                derivatives_data=derivatives_data,
+            )
             if features is None:
                 return MLSignalPackage(
                     primary_signals=[], ml_predictions=[],
@@ -424,21 +443,33 @@ class MLIntegrationBridge:
                     processing_time_ms=0.0,
                 )
 
+            # Extract close prices for LightGBM momentum features
+            _price_series = None
+            if market_data is not None and 'close' in market_data.columns:
+                _price_series = market_data['close'].values.astype(float)
+
             # Run inference on all loaded models
-            raw_preds = predict_with_models(models, features)
+            raw_preds, raw_confidences = predict_with_models(models, features, price_series=_price_series)
 
             # Convert raw predictions to ML prediction dicts
             for model_name, pred_value in raw_preds.items():
                 if not self.model_manager.is_model_healthy(model_name):
                     continue
                 try:
+                    # Use model-specific confidence if available, else fallback
+                    model_conf = raw_confidences.get(model_name)
+                    if model_conf is not None and model_conf > 0:
+                        confidence = min(float(model_conf), 0.95)
+                    else:
+                        confidence = min(abs(float(pred_value)) + 0.5, 0.95)
+
                     pred_dict = {
                         'model': model_name,
                         'prediction': float(pred_value),
                         'strength': float(np.clip(pred_value, -1.0, 1.0)),
-                        'confidence': min(abs(float(pred_value)) + 0.5, 0.95),
+                        'confidence': confidence,
                         'horizon': 5,
-                        'metadata': {'source': 'trained_pytorch'}
+                        'metadata': {'source': 'lightgbm' if model_name == 'lightgbm' else 'trained_pytorch'}
                     }
                     ml_predictions.append(pred_dict)
                     signal = self._convert_ml_to_trading_signal(pred_dict, model_name)

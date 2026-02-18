@@ -33,17 +33,20 @@ if PROJECT_ROOT not in sys.path:
 
 from ml_model_loader import (
     BASE_MODEL_NAMES,
+    INPUT_DIM,
     TrainedBidirectionalLSTM,
     TrainedCNN,
     TrainedDilatedCNN,
     TrainedGRU,
     TrainedMetaEnsemble,
     TrainedQuantumTransformer,
+    _detect_input_dim,
 )
 from scripts.training.training_utils import (
     DirectionalLoss,
     directional_accuracy,
     generate_sequences,
+    load_derivatives_csvs,
     load_training_csvs,
     save_model_checkpoint,
     walk_forward_split,
@@ -105,10 +108,13 @@ def load_base_models(device: torch.device) -> Dict[str, nn.Module]:
             continue
 
         try:
-            model = cls()
             sd = torch.load(full_path, map_location="cpu", weights_only=False)
             if isinstance(sd, dict) and "model_state_dict" in sd:
                 sd = sd["model_state_dict"]
+            # Auto-detect input_dim from saved weights
+            detected_dim = _detect_input_dim(name, sd)
+            use_dim = detected_dim if detected_dim is not None else INPUT_DIM
+            model = cls(input_dim=use_dim)
             model.load_state_dict(sd, strict=False)
             model.to(device).eval()
             models[name] = model
@@ -178,11 +184,11 @@ def generate_meta_inputs(
         logger.info(f"  Base model {name}: dir_acc={acc:.3f}")
 
     # Build meta-inputs: [last-timestep features | 5 predictions]
-    last_features = X[:, -1, :]  # (N, 83) — last timestep of each sequence
+    last_features = X[:, -1, :]  # (N, INPUT_DIM) — last timestep of each sequence
     pred_matrix = np.column_stack([all_preds[name] for name in BASE_MODEL_NAMES])  # (N, 5)
-    meta_X = np.concatenate([last_features, pred_matrix], axis=1).astype(np.float32)  # (N, 88)
+    meta_X = np.concatenate([last_features, pred_matrix], axis=1).astype(np.float32)  # (N, INPUT_DIM+5)
 
-    logger.info(f"Meta-inputs: {meta_X.shape} (83 features + {n_models} predictions)")
+    logger.info(f"Meta-inputs: {meta_X.shape} ({INPUT_DIM} features + {n_models} predictions)")
     return meta_X, y
 
 
@@ -200,7 +206,7 @@ def train_meta_ensemble(
     Returns:
         Dict with training results
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     logger.info(f"Training MetaEnsemble on {device}")
 
     # Load base models
@@ -212,13 +218,27 @@ def train_meta_ensemble(
     if not pair_dfs:
         raise RuntimeError(f"No training data found in {data_dir}.")
 
+    # Load derivatives data (optional — zeros if missing)
+    derivatives_dfs, fear_greed_df = load_derivatives_csvs(
+        data_dir=os.path.join(data_dir, "derivatives")
+    )
+
     logger.info("Splitting data (walk-forward)...")
     train_dfs, val_dfs, test_dfs = walk_forward_split(pair_dfs)
 
     logger.info("Generating sequences...")
-    X_train_seq, y_train = generate_sequences(train_dfs, stride=1)
-    X_val_seq, y_val = generate_sequences(val_dfs, stride=1)
-    X_test_seq, y_test = generate_sequences(test_dfs, stride=1)
+    X_train_seq, y_train = generate_sequences(
+        train_dfs, stride=1,
+        derivatives_dfs=derivatives_dfs, fear_greed_df=fear_greed_df,
+    )
+    X_val_seq, y_val = generate_sequences(
+        val_dfs, stride=1,
+        derivatives_dfs=derivatives_dfs, fear_greed_df=fear_greed_df,
+    )
+    X_test_seq, y_test = generate_sequences(
+        test_dfs, stride=1,
+        derivatives_dfs=derivatives_dfs, fear_greed_df=fear_greed_df,
+    )
 
     if len(X_train_seq) == 0 or len(X_val_seq) == 0:
         raise RuntimeError("Not enough data.")
@@ -247,7 +267,7 @@ def train_meta_ensemble(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", patience=5, factor=0.5, min_lr=1e-6
     )
-    criterion = DirectionalLoss(directional_weight=DEFAULTS["directional_weight"])
+    criterion = DirectionalLoss(logit_scale=20.0, margin=0.10)
 
     # Create data loaders (meta-ensemble uses flat 88-dim input, not sequences)
     train_ds = TensorDataset(
@@ -367,7 +387,7 @@ def train_meta_ensemble(
         logger.info(f"Test set: loss={test_loss:.4f}, dir_acc={test_dir_acc:.3f}")
 
         # Compare to simple average
-        simple_avg_preds = meta_X_test[:, 83:].mean(axis=1)
+        simple_avg_preds = meta_X_test[:, INPUT_DIM:].mean(axis=1)
         simple_avg_acc = directional_accuracy(simple_avg_preds, meta_y_test)
         logger.info(f"Simple average baseline: dir_acc={simple_avg_acc:.3f}")
         logger.info(

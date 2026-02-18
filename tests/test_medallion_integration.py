@@ -318,6 +318,7 @@ class TestDecisionPipelineProducesOutput(unittest.TestCase):
         bot.portfolio_engine = None
         bot.health_monitor = None
         bot.kelly_sizer = None
+        bot.leverage_mgr = None
         bot.medallion_regime = None
         bot._get_measured_edge = MagicMock(return_value=None)
         bot._force_float = lambda self, x: float(x) if x is not None else 0.0

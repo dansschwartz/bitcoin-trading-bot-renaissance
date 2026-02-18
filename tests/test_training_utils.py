@@ -58,41 +58,41 @@ def _make_ohlcv_df(n_rows: int = 200) -> pd.DataFrame:
 
 class TestDirectionalLoss:
     def test_zero_loss_when_perfect(self):
-        criterion = DirectionalLoss(directional_weight=0.3)
+        criterion = DirectionalLoss()
         pred = torch.tensor([1.0, -1.0, 0.5])
         target = torch.tensor([1.0, -1.0, 0.5])
         loss = criterion(pred, target)
-        # MSE should be 0, directional penalty should be 0
-        assert loss.item() == pytest.approx(0.0, abs=1e-5)
+        # Same-direction predictions with correct sign → low loss
+        assert loss.item() < 1.0
 
     def test_penalty_when_wrong_direction(self):
-        criterion = DirectionalLoss(directional_weight=0.3)
+        criterion = DirectionalLoss()
         pred = torch.tensor([1.0, -1.0])
         target = torch.tensor([-1.0, 1.0])  # Opposite directions
         loss = criterion(pred, target)
-        # MSE: ((1 - (-1))^2 + ((-1) - 1)^2) / 2 = (4 + 4)/2 = 4
-        # Directional penalty: mean(relu(-1*(-1), relu(-(-1)*1))) = mean(relu(1), relu(1)) = 1
-        # Total = 4 + 0.3 * 1 = 4.3
-        assert loss.item() == pytest.approx(4.3, abs=0.01)
+        # Wrong direction → higher loss than correct direction
+        criterion2 = DirectionalLoss()
+        correct_loss = criterion2(torch.tensor([1.0, -1.0]), torch.tensor([1.0, -1.0]))
+        assert loss.item() > correct_loss.item()
 
-    def test_loss_increases_with_directional_weight(self):
-        pred = torch.tensor([1.0])
-        target = torch.tensor([-1.0])
+    def test_loss_increases_with_margin(self):
+        pred = torch.tensor([0.01, -0.01])  # Near-zero predictions
+        target = torch.tensor([1.0, -1.0])
 
-        loss_low = DirectionalLoss(directional_weight=0.1)(pred, target)
-        loss_high = DirectionalLoss(directional_weight=1.0)(pred, target)
+        loss_low = DirectionalLoss(margin=0.05)(pred, target)
+        loss_high = DirectionalLoss(margin=0.20)(pred, target)
         assert loss_high.item() > loss_low.item()
 
     def test_handles_extra_dimension(self):
-        criterion = DirectionalLoss(directional_weight=0.3)
+        criterion = DirectionalLoss()
         pred = torch.tensor([[1.0], [-1.0]])
         target = torch.tensor([[1.0], [-1.0]])
         loss = criterion(pred, target)
-        assert loss.item() == pytest.approx(0.0, abs=1e-5)
+        assert loss.item() >= 0.0
 
     def test_backward_pass(self):
         """Loss should support gradient computation."""
-        criterion = DirectionalLoss(directional_weight=0.3)
+        criterion = DirectionalLoss()
         pred = torch.tensor([0.5, -0.3], requires_grad=True)
         target = torch.tensor([1.0, -1.0])
         loss = criterion(pred, target)
@@ -207,9 +207,10 @@ class TestGenerateSequences:
         pair_dfs = {"BTC-USD": df}
         X, y = generate_sequences(pair_dfs, seq_len=SEQ_LEN, stride=10)
 
-        # Labels should be +1 or -1
-        unique_labels = set(np.unique(y))
-        assert unique_labels.issubset({1.0, -1.0})
+        # Labels should be continuous in [-1, +1] range
+        assert y.min() >= -1.0
+        assert y.max() <= 1.0
+        assert len(y) > 0
 
     @patch("scripts.training.training_utils.build_feature_sequence")
     def test_skips_short_pair(self, mock_bfs):

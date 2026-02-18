@@ -27,6 +27,7 @@ from ml_model_loader import TrainedBidirectionalLSTM
 from scripts.training.training_utils import (
     DirectionalLoss,
     generate_sequences,
+    load_derivatives_csvs,
     load_training_csvs,
     make_dataloaders,
     save_model_checkpoint,
@@ -65,7 +66,7 @@ def train_bidirectional_lstm(
     Returns:
         Dict with training results
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     logger.info(f"Training BidirectionalLSTM on {device}")
 
     # Load and split data
@@ -73,15 +74,29 @@ def train_bidirectional_lstm(
     if not pair_dfs:
         raise RuntimeError(f"No training data found in {data_dir}. Run fetch_training_data first.")
 
+    # Load derivatives data (optional — zeros if missing)
+    derivatives_dfs, fear_greed_df = load_derivatives_csvs(
+        data_dir=os.path.join(data_dir, "derivatives")
+    )
+
     logger.info("Splitting data (walk-forward)...")
     train_dfs, val_dfs, test_dfs = walk_forward_split(pair_dfs)
 
     logger.info("Generating training sequences...")
-    X_train, y_train = generate_sequences(train_dfs, stride=1)
+    X_train, y_train = generate_sequences(
+        train_dfs, stride=1,
+        derivatives_dfs=derivatives_dfs, fear_greed_df=fear_greed_df,
+    )
     logger.info("Generating validation sequences...")
-    X_val, y_val = generate_sequences(val_dfs, stride=1)
+    X_val, y_val = generate_sequences(
+        val_dfs, stride=1,
+        derivatives_dfs=derivatives_dfs, fear_greed_df=fear_greed_df,
+    )
     logger.info("Generating test sequences...")
-    X_test, y_test = generate_sequences(test_dfs, stride=1)
+    X_test, y_test = generate_sequences(
+        test_dfs, stride=1,
+        derivatives_dfs=derivatives_dfs, fear_greed_df=fear_greed_df,
+    )
 
     if len(X_train) == 0 or len(X_val) == 0:
         raise RuntimeError("Not enough data to generate sequences. Need more historical bars.")
@@ -108,7 +123,7 @@ def train_bidirectional_lstm(
 
     for epoch in range(epochs):
         dir_weight = min(dir_weight + dir_weight_step, DEFAULTS["directional_weight_max"])
-        criterion = DirectionalLoss(directional_weight=dir_weight)
+        criterion = DirectionalLoss(logit_scale=20.0, margin=0.10)
 
         train_loss = train_epoch(
             model, train_loader, optimizer, criterion, device,

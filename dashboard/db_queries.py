@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Starting capital for paper trading (matches PaperTradingSimulator default)
-INITIAL_CAPITAL = 410_000.0
+INITIAL_CAPITAL = 10_000.0
 
 # HMM regime numeric → human name mapping
 REGIME_NAMES = {

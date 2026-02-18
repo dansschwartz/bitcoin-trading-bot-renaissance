@@ -26,7 +26,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from vae_anomaly_detector import VariationalAutoEncoder
-from ml_model_loader import build_feature_sequence
+from ml_model_loader import build_feature_sequence, build_full_feature_matrix, INPUT_DIM as ML_INPUT_DIM
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +36,7 @@ logger = logging.getLogger("train_vae")
 
 DB_PATH = "data/renaissance_bot.db"
 OUTPUT_PATH = "models/trained/vae_anomaly_detector.pth"
-INPUT_DIM = 83
+INPUT_DIM = ML_INPUT_DIM  # 98 (from ml_model_loader)
 LATENT_DIM = 32
 SEQ_LEN = 30  # Must match build_feature_sequence default
 
@@ -129,30 +129,37 @@ def fetch_coinbase_candles(pair: str = "BTC-USD", days: int = 7) -> pd.DataFrame
 
 
 def generate_training_samples(pair_dfs: dict) -> np.ndarray:
-    """Generate feature sequences from OHLCV data using build_feature_sequence.
+    """Generate feature samples from OHLCV data using vectorized feature builder.
 
-    Uses a sliding window: for each pair, slide through the bars creating
-    overlapping (seq_len)-row windows, each producing one 83-feature vector.
+    Computes features once per pair (vectorized), then samples every 5th row.
+    Much faster than per-window computation for large datasets.
     """
     all_samples = []
 
     for pair, df in pair_dfs.items():
-        if len(df) < SEQ_LEN + 20:  # Need extra rows for indicator warmup
+        if len(df) < SEQ_LEN + 20:
             logger.info(f"  Skipping {pair}: only {len(df)} bars (need {SEQ_LEN + 20})")
             continue
 
-        # Slide a window through the data
-        stride = 5  # Generate a sample every 5 bars (overlapping)
-        n_samples = 0
+        # Build cross_data (full data from other pairs)
+        cross_data = None
+        if len(pair_dfs) > 1:
+            cross_data = {p: odf for p, odf in pair_dfs.items() if p != pair}
 
-        for start_idx in range(20, len(df) - SEQ_LEN, stride):
-            window = df.iloc[start_idx:start_idx + SEQ_LEN + 20]  # Extra for indicator lookback
-            features = build_feature_sequence(window, seq_len=SEQ_LEN)
-            if features is not None and features.shape == (SEQ_LEN, INPUT_DIM):
-                # Use the last row as the feature sample (most recent state)
-                sample = features[-1, :]  # (83,)
-                all_samples.append(sample)
-                n_samples += 1
+        # Compute ALL features for entire pair at once
+        feat_matrix = build_full_feature_matrix(df, cross_data=cross_data, pair_name=pair)
+        if feat_matrix is None:
+            logger.info(f"  Skipping {pair}: feature computation failed")
+            continue
+
+        # Sample every 5th row after warmup period
+        stride = 5
+        warmup = 50
+        n_samples = 0
+        for idx in range(warmup, len(feat_matrix), stride):
+            sample = feat_matrix[idx, :]  # (INPUT_DIM,)
+            all_samples.append(sample)
+            n_samples += 1
 
         logger.info(f"  {pair}: generated {n_samples} training samples")
 

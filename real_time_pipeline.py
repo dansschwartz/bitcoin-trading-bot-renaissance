@@ -111,6 +111,8 @@ class FeatureFanOutProcessor:
         self.model_names = models
         self.models: Dict[str, Any] = {}
         self._trained_models: Dict[str, Any] = {}
+        self._cross_data: Optional[Dict[str, Any]] = None
+        self._current_pair: Optional[str] = None
         self._initialize_models()
 
     def _initialize_models(self):
@@ -129,6 +131,7 @@ class FeatureFanOutProcessor:
                 'cnn': 'CNN',
                 'gru': 'GRU',
                 'meta_ensemble': 'MetaEnsemble',
+                'lightgbm': 'LightGBM',
             }
             for trained_name, model in self._trained_models.items():
                 rt_name = self._name_map.get(trained_name, trained_name)
@@ -141,20 +144,41 @@ class FeatureFanOutProcessor:
         except Exception as e:
             self.logger.error(f"Error initializing trained models: {e}")
 
+    def set_cross_data(self, cross_data: Optional[Dict[str, Any]], pair_name: Optional[str] = None) -> None:
+        """Set cross-asset data for the next inference call.
+
+        Args:
+            cross_data: Dict of pair_name → DataFrame with [close, volume] columns
+            pair_name: The current pair being processed
+        """
+        self._cross_data = cross_data
+        self._current_pair = pair_name
+
     async def process_all_models(self, features: Dict[str, Any],
-                                price_df=None) -> Dict[str, float]:
+                                price_df=None,
+                                cross_data: Optional[Dict[str, Any]] = None,
+                                pair_name: Optional[str] = None,
+                                derivatives_data: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
         """Process features through trained models and collect predictions.
 
         Args:
             features: Dict with snapshot data (avg_price, etc.)
             price_df: Optional OHLCV DataFrame for build_feature_sequence().
                       If provided, overrides features.get('price_df').
+            cross_data: Optional dict of pair → DataFrame for cross-asset features.
+            pair_name: Current pair name for cross-asset feature computation.
+            derivatives_data: Optional dict of feature_name → pd.Series for derivatives
+                features (funding_rate, open_interest, etc.).
         """
         start_time = datetime.now(timezone.utc)
         predictions = {}
 
         if not self._trained_models:
             return predictions
+
+        # Use explicit args, fall back to instance state
+        _cross = cross_data if cross_data is not None else self._cross_data
+        _pair = pair_name if pair_name is not None else self._current_pair
 
         try:
             # Use explicit price_df arg, fallback to features dict
@@ -163,7 +187,11 @@ class FeatureFanOutProcessor:
 
             feat_array = None
             if price_df is not None and hasattr(price_df, 'empty') and not price_df.empty:
-                feat_array = build_feature_sequence(price_df, seq_len=30)
+                feat_array = build_feature_sequence(
+                    price_df, seq_len=30,
+                    cross_data=_cross, pair_name=_pair,
+                    derivatives_data=derivatives_data,
+                )
 
             if feat_array is None:
                 # No valid features — return empty so caller uses fallback
@@ -173,8 +201,13 @@ class FeatureFanOutProcessor:
                 )
                 return {}
 
+            # Extract close prices for LightGBM momentum features
+            _price_series = None
+            if price_df is not None and 'close' in price_df.columns:
+                _price_series = price_df['close'].values.astype(float)
+
             # Run inference on trained models
-            raw_preds = predict_with_models(self._trained_models, feat_array)
+            raw_preds, _confidences = predict_with_models(self._trained_models, feat_array, price_series=_price_series)
 
             # Map to display names
             for trained_name, pred_val in raw_preds.items():
