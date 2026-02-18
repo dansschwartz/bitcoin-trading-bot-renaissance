@@ -67,7 +67,7 @@ export default function Agents() {
   }, []);
 
   return (
-    <PageShell title="Agent Coordination" subtitle="Doc 15 — autonomous agents, proposals, and weekly research">
+    <PageShell title="Agent Coordination">
       {/* Agent Status Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
         {statuses.map((agent) => (
