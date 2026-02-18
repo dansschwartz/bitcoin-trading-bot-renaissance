@@ -212,6 +212,14 @@ class DatabaseManager:
         "daily_candles", "data_refresh_log",
     })
 
+    # Map tables without a 'timestamp' column to their time column
+    _TIME_COL = {
+        "labels": "t_entry",
+        "open_positions": "opened_at",
+        "daily_candles": "date",
+        "data_refresh_log": "last_refresh",
+    }
+
     async def get_recent_data(self, table: str, hours: int = 24) -> List[Dict]:
         """Get recent data from specified table"""
         if table not in self.ALLOWED_TABLES:
@@ -220,10 +228,11 @@ class DatabaseManager:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
+                time_col = self._TIME_COL.get(table, "timestamp")
                 cursor.execute(
                     f"SELECT * FROM {table} "
-                    "WHERE datetime(timestamp) > datetime('now', ? || ' hours') "
-                    "ORDER BY timestamp DESC",
+                    f"WHERE datetime({time_col}) > datetime('now', ? || ' hours') "
+                    f"ORDER BY {time_col} DESC",
                     (f"-{int(hours)}",)
                 )
 
@@ -248,9 +257,10 @@ class DatabaseManager:
                 for table in tables:
                     if table not in self.ALLOWED_TABLES:
                         continue
+                    time_col = self._TIME_COL.get(table, "timestamp")
                     cursor.execute(
                         f"DELETE FROM {table} "
-                        "WHERE datetime(timestamp) < datetime('now', ? || ' days')",
+                        f"WHERE datetime({time_col}) < datetime('now', ? || ' days')",
                         (f"-{int(days)}",)
                     )
 
