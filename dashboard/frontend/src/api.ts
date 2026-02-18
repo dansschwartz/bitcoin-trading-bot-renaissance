@@ -69,4 +69,15 @@ export const api = {
   backtestRuns: () => get<BacktestRun[]>('/api/backtest/runs'),
   backtestResult: (id: number) => get<BacktestRun>(`/api/backtest/runs/${id}`),
   backtestCompare: (id: number) => get<BacktestComparison>(`/api/backtest/compare/${id}`),
+
+  // Agents (Doc 15)
+  agentStatuses: () => get<Record<string, unknown>[]>('/api/agents/status'),
+  agentEvents: (limit = 100, agent?: string) =>
+    get<Record<string, unknown>[]>(`/api/agents/events?limit=${limit}${agent ? `&agent=${agent}` : ''}`),
+  agentProposals: (status?: string, limit = 50) =>
+    get<Record<string, unknown>[]>(`/api/agents/proposals?limit=${limit}${status ? `&status=${status}` : ''}`),
+  agentImprovements: (limit = 50) =>
+    get<Record<string, unknown>[]>(`/api/agents/improvements?limit=${limit}`),
+  agentLatestReport: () => get<Record<string, unknown>>('/api/agents/reports/latest'),
+  agentModels: () => get<Record<string, unknown>[]>('/api/agents/models'),
 };

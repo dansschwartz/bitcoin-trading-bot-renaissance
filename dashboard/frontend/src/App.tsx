@@ -9,6 +9,7 @@ import Positions from './pages/Positions';
 import Analytics from './pages/Analytics';
 import SimLab from './pages/SimLab';
 import Risk from './pages/Risk';
+import Agents from './pages/Agents';
 
 export default function App() {
   return (
@@ -26,6 +27,7 @@ export default function App() {
                 <Route path="/analytics" element={<Analytics />} />
                 <Route path="/simlab" element={<SimLab />} />
                 <Route path="/risk" element={<Risk />} />
+                <Route path="/agents" element={<Agents />} />
               </Routes>
             </main>
           </div>

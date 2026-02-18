@@ -269,6 +269,13 @@ try:
 except ImportError:
     MHPE_AVAILABLE = False
 
+# Doc 15: Agent Coordination System
+try:
+    from agents.coordinator import AgentCoordinator
+    AGENT_COORDINATOR_AVAILABLE = True
+except ImportError:
+    AGENT_COORDINATOR_AVAILABLE = False
+
 # Types moved to renaissance_types.py
 
 def _signed_strength(signal: IndicatorOutput) -> float:
@@ -1025,6 +1032,17 @@ class RenaissanceTradingBot:
 
         # ── Enhanced Config Validation (Audit 4) ──
         validate_config(self.config, self.logger)
+
+        # ── Doc 15: Agent Coordination System ──
+        self.agent_coordinator = None
+        if AGENT_COORDINATOR_AVAILABLE:
+            try:
+                _agent_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+                self.agent_coordinator = AgentCoordinator(
+                    bot=self, db_path=_agent_db, config=self.config, bot_logger=self.logger,
+                )
+            except Exception as _ac_err:
+                self.logger.warning(f"AgentCoordinator init failed (trading unaffected): {_ac_err}")
 
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
@@ -3449,6 +3467,20 @@ class RenaissanceTradingBot:
             cycle_time = time.time() - cycle_start
             self.logger.info(f"Total cycle completed in {cycle_time:.2f}s")
 
+            # ── Doc 15: Agent cycle hook ──
+            if self.agent_coordinator:
+                try:
+                    first_dec = decisions[0] if decisions else None
+                    self.agent_coordinator.on_cycle_complete({
+                        "action": first_dec.action if first_dec else "HOLD",
+                        "confidence": first_dec.confidence if first_dec else 0.0,
+                        "product_id": first_dec.reasoning.get("product_id", "") if first_dec else "",
+                        "regime": first_dec.reasoning.get("hmm_regime", "unknown") if first_dec else "unknown",
+                        "cycle_time": cycle_time,
+                    })
+                except Exception:
+                    pass
+
             # Return the first decision or a HOLD if none
             return decisions[0] if decisions else TradingDecision('HOLD', 0.0, 0.0, {}, datetime.now())
 
@@ -4061,6 +4093,11 @@ class RenaissanceTradingBot:
         if self.medallion_regime:
             self.logger.info("Launching regime detector loop (every 5 min, observation mode)...")
             self._track_task(self._run_regime_detector_loop())
+
+        # ── Doc 15: Agent weekly research loop ──
+        if self.agent_coordinator:
+            self.logger.info("Launching agent weekly research check loop...")
+            self._track_task(self.agent_coordinator.run_weekly_check_loop())
 
         # ── Gap 5 fix: Unified Telegram Reporting ──
         if self.monitoring_alert_manager:
