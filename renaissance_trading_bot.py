@@ -512,6 +512,26 @@ class RenaissanceTradingBot:
         self.logger = self._setup_logging(self.config)
         self._validate_config(self.config)
 
+        # Log optional module availability at startup
+        _modules = {
+            'Orchestrator': ORCHESTRATOR_AVAILABLE, 'Arbitrage': ARBITRAGE_AVAILABLE,
+            'Recovery': RECOVERY_AVAILABLE, 'Monitoring': MONITORING_AVAILABLE,
+            'LiquidationDetector': LIQUIDATION_DETECTOR_AVAILABLE,
+            'SignalAggregator': SIGNAL_AGGREGATOR_AVAILABLE,
+            'MultiExchangeBridge': MULTI_EXCHANGE_BRIDGE_AVAILABLE,
+            'DataValidator': DATA_VALIDATOR_AVAILABLE,
+            'SignalThrottle': SIGNAL_THROTTLE_AVAILABLE,
+            'SignalValidation': SIGNAL_VALIDATION_AVAILABLE,
+            'HealthMonitor': HEALTH_MONITOR_AVAILABLE,
+            'MedallionAnalogs': MEDALLION_ANALOGS_AVAILABLE,
+            'PortfolioEngine': PORTFOLIO_ENGINE_AVAILABLE,
+            'DevilTracker': DEVIL_TRACKER_AVAILABLE,
+            'KellySizer': KELLY_SIZER_AVAILABLE,
+        }
+        active = [k for k, v in _modules.items() if v]
+        missing = [k for k, v in _modules.items() if not v]
+        self.logger.info(f"Module status: {len(active)}/{len(_modules)} loaded | missing: {missing if missing else 'none'}")
+
         # Multi-Asset Support
         self.product_ids = self.config.get("trading", {}).get("product_ids", ["BTC-USD"])
         self.config_manager = EnhancedConfigManager("config")
@@ -853,6 +873,7 @@ class RenaissanceTradingBot:
         
         # 📊 Dashboard Event Emitter (real-time dashboard integration)
         self.dashboard_emitter = DashboardEventEmitter()
+        self.dashboard_emitter.clear_cache()  # Flush stale data from prior session
 
         # ── Operations & Intelligence Modules ──────────────────────────
         # Module A: Disaster Recovery — State Manager & Graceful Shutdown

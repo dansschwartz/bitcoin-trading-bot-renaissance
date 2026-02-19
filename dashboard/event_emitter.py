@@ -51,6 +51,12 @@ class DashboardEventEmitter:
         """Get the latest cached payload for a channel (REST fallback)."""
         return self._channel_cache.get(channel)
 
+    def clear_cache(self) -> None:
+        """Clear all cached channel data (call on bot startup to avoid stale data)."""
+        with self._lock:
+            self._channel_cache.clear()
+        logger.info("Dashboard event cache cleared")
+
     def _do_emit(self, channel: str, payload: Dict[str, Any]) -> None:
         msg = {
             "channel": channel,
