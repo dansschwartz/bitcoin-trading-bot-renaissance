@@ -68,3 +68,9 @@ async def benchmark(request: Request, range: str = "1D", product_id: str = "BTC-
 async def signal_attribution(request: Request, hours: int = 24):
     db = request.app.state.dashboard_config.db_path
     return db_queries.get_signal_attribution(db, hours=hours)
+
+
+@router.get("/model-accuracy")
+async def model_accuracy(request: Request, hours: int = 24):
+    db = request.app.state.dashboard_config.db_path
+    return db_queries.get_model_accuracy(db, hours=hours)

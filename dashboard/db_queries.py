@@ -952,3 +952,159 @@ def get_signal_attribution(db_path: str, hours: int = 24) -> Dict[str, Any]:
         "signals": signals,
         "asset_breakdown": asset_breakdown,
     })
+
+
+def get_model_accuracy(db_path: str, hours: int = 24) -> Dict[str, Any]:
+    """Evaluate ML model prediction accuracy against actual price moves.
+
+    For each prediction, looks up the actual price 5 minutes later and checks
+    if the predicted direction (sign) matched the actual move.
+    """
+    from collections import defaultdict
+
+    with _conn(db_path) as c:
+        # Get predictions within window
+        predictions = c.execute(
+            """SELECT p.id, p.timestamp, p.product_id, p.model_name,
+                      p.prediction, p.confidence
+               FROM ml_predictions p
+               WHERE p.timestamp >= datetime('now', ?)
+               ORDER BY p.id ASC""",
+            (f"-{hours} hours",),
+        ).fetchall()
+
+        if not predictions:
+            return _sanitize_floats({
+                "window_hours": hours,
+                "total_predictions": 0,
+                "evaluated": 0,
+                "models": [],
+            })
+
+        # Build price history from five_minute_bars per pair
+        # Map product_id (e.g. "BTC-USD") to list of (bar_start, close)
+        import time as _time
+        cutoff_ts = _time.time() - hours * 3600
+        bars = c.execute(
+            """SELECT pair, bar_start, close
+               FROM five_minute_bars
+               WHERE bar_start >= ?
+               ORDER BY pair, bar_start""",
+            (cutoff_ts,),
+        ).fetchall()
+
+    # Build price lookup: pair -> sorted list of (timestamp, close)
+    price_history: Dict[str, List] = defaultdict(list)
+    for bar in bars:
+        price_history[bar["pair"]].append((bar["bar_start"], bar["close"]))
+
+    # Evaluate each prediction
+    model_stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "correct": 0, "wrong": 0, "skipped": 0,
+        "total_confidence": 0.0, "correct_confidence": 0.0,
+        "predictions": [],
+    })
+
+    import bisect
+    from datetime import datetime as _dt, timezone as _tz
+
+    evaluated_count = 0
+
+    for pred in predictions:
+        model = pred["model_name"]
+        product_id = pred["product_id"]
+        prediction_val = pred["prediction"]
+        confidence = pred["confidence"] or 0.5
+
+        if prediction_val is None or abs(prediction_val) < 1e-8:
+            model_stats[model]["skipped"] += 1
+            continue
+
+        # Parse prediction timestamp to epoch
+        ts_str = pred["timestamp"]
+        try:
+            if "+" in ts_str or ts_str.endswith("Z"):
+                dt = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+            else:
+                dt = _dt.fromisoformat(ts_str).replace(tzinfo=_tz.utc)
+            pred_epoch = dt.timestamp()
+        except (ValueError, TypeError):
+            model_stats[model]["skipped"] += 1
+            continue
+
+        # Look up price at prediction time and 5 min later
+        prices = price_history.get(product_id)
+        if not prices:
+            model_stats[model]["skipped"] += 1
+            continue
+
+        timestamps = [p[0] for p in prices]
+        # Find bar closest to prediction time
+        idx = bisect.bisect_right(timestamps, pred_epoch) - 1
+        if idx < 0:
+            model_stats[model]["skipped"] += 1
+            continue
+
+        # Need at least one bar after for actual return
+        if idx + 1 >= len(prices):
+            model_stats[model]["skipped"] += 1
+            continue
+
+        price_at = prices[idx][1]
+        price_after = prices[idx + 1][1]
+
+        if price_at is None or price_after is None or price_at == 0:
+            model_stats[model]["skipped"] += 1
+            continue
+
+        actual_return = (price_after - price_at) / price_at
+        predicted_direction = 1 if prediction_val > 0 else -1
+        actual_direction = 1 if actual_return > 0 else -1
+
+        # Skip near-zero actual returns (noise)
+        if abs(actual_return) < 1e-6:
+            model_stats[model]["skipped"] += 1
+            continue
+
+        stats = model_stats[model]
+        stats["total_confidence"] += confidence
+        evaluated_count += 1
+
+        if predicted_direction == actual_direction:
+            stats["correct"] += 1
+            stats["correct_confidence"] += confidence
+        else:
+            stats["wrong"] += 1
+
+    # Build result
+    models = []
+    for model_name, stats in model_stats.items():
+        total = stats["correct"] + stats["wrong"]
+        accuracy = stats["correct"] / total if total > 0 else 0
+        avg_conf = stats["total_confidence"] / total if total > 0 else 0
+        avg_correct_conf = stats["correct_confidence"] / stats["correct"] if stats["correct"] > 0 else 0
+
+        models.append({
+            "model": model_name,
+            "total_evaluated": total,
+            "correct": stats["correct"],
+            "wrong": stats["wrong"],
+            "skipped": stats["skipped"],
+            "accuracy": round(accuracy, 4),
+            "avg_confidence": round(avg_conf, 4),
+            "avg_correct_confidence": round(avg_correct_conf, 4),
+        })
+
+    models.sort(key=lambda x: x["accuracy"], reverse=True)
+
+    overall_correct = sum(m["correct"] for m in models)
+    overall_total = sum(m["total_evaluated"] for m in models)
+    overall_accuracy = overall_correct / overall_total if overall_total > 0 else 0
+
+    return _sanitize_floats({
+        "window_hours": hours,
+        "total_predictions": len(predictions),
+        "evaluated": evaluated_count,
+        "overall_accuracy": round(overall_accuracy, 4),
+        "models": models,
+    })

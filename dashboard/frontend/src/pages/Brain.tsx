@@ -6,6 +6,7 @@ import RegimeCard from '../components/cards/RegimeCard';
 import PredictionHistory from '../components/charts/PredictionHistory';
 import RegimeTimeline from '../components/charts/RegimeTimeline';
 import DecisionTable from '../components/tables/DecisionTable';
+import ModelAccuracyPanel from '../components/panels/ModelAccuracyPanel';
 import ConditionalPanel from '../components/shared/ConditionalPanel';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
@@ -69,6 +70,9 @@ export default function Brain() {
         <PredictionHistory />
         <SignalWeightsChart />
       </div>
+
+      {/* Model Accuracy */}
+      <ModelAccuracyPanel />
 
       {/* Decision Table */}
       <DecisionTable />

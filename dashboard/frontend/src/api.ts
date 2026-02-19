@@ -55,6 +55,8 @@ export const api = {
     ),
   signalAttribution: (hours = 24) =>
     get<Record<string, unknown>>(`/api/analytics/signal-attribution?hours=${hours}`),
+  modelAccuracy: (hours = 24) =>
+    get<Record<string, unknown>>(`/api/analytics/model-accuracy?hours=${hours}`),
 
   // Brain
   ensemble: () => get<EnsembleStatus>('/api/brain/ensemble'),
