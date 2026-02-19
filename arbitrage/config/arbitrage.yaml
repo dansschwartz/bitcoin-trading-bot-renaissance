@@ -50,14 +50,16 @@ funding_rate:
   max_simultaneous_positions: 5
 
 triangular:
-  min_net_profit_bps: 0.5
+  min_net_profit_bps: 3.0           # Raised from 0.5 — must clear round-trip costs
   exchange: mexc
   start_currencies:
     - USDT
     - BTC
     - ETH
-  scan_interval_ms: 500
+  scan_interval_ms: 5000            # Reduced from 500ms — save API rate limits
   max_trade_usd: 200
+  observation_mode: true            # Log opportunities but don't execute
+  max_signals_per_cycle: 3          # Max signals per 60s window
 
 inventory:
   target_allocation: 0.50

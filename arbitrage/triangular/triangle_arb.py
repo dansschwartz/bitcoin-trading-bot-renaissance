@@ -36,10 +36,12 @@ class TrianglePath:
 
 class TriangularArbitrage:
 
-    MIN_NET_PROFIT_BPS = Decimal('0.5')
-    SCAN_INTERVAL_SECONDS = 0.5
-    MAX_TRADE_USD = Decimal('200')     # Smaller for triangular (thinner books)
+    MIN_NET_PROFIT_BPS = Decimal('3.0')   # Raised from 0.5 — must clear round-trip costs
+    SCAN_INTERVAL_SECONDS = 5.0           # Reduced from 0.5s — save API rate limits
+    MAX_TRADE_USD = Decimal('200')        # Smaller for triangular (thinner books)
     START_CURRENCIES = ["USDT", "BTC", "ETH"]
+    MAX_SIGNALS_PER_CYCLE = 3             # Max signals pushed per 60s cycle
+    OBSERVATION_MODE = True               # Log opportunities but don't execute
 
     def __init__(self, mexc_client, cost_model, risk_engine, signal_queue: asyncio.Queue):
         self.client = mexc_client
@@ -49,6 +51,13 @@ class TriangularArbitrage:
         self._running = False
         self._scan_count = 0
         self._opportunities_found = 0
+        self._signals_submitted = 0
+        self._signals_skipped_balance = 0
+        self._signals_skipped_size = 0
+        self._signals_skipped_observation = 0
+        self._last_signal_time: Optional[datetime] = None
+        self._signals_this_cycle = 0
+        self._cycle_start: Optional[datetime] = None
         self._pair_graph: Dict[str, Dict[str, dict]] = defaultdict(dict)
 
     async def run(self):
@@ -67,21 +76,37 @@ class TriangularArbitrage:
                 # Scan for profitable triangles
                 opportunities = self._find_profitable_cycles(tickers)
 
+                # Rate-limit: reset cycle counter every 60s
+                now = datetime.utcnow()
+                if self._cycle_start is None or (now - self._cycle_start).total_seconds() > 60:
+                    self._cycle_start = now
+                    self._signals_this_cycle = 0
+
                 for opp in opportunities[:3]:  # Top 3 per scan
                     self._opportunities_found += 1
-                    # Only log every 20th scan to avoid spam
+
+                    # Log opportunity (always, but throttled)
                     if self._scan_count % 20 == 0:
                         logger.info(
                             f"TRIANGLE OPP: {' -> '.join(s[0] for s in opp.path)} -> {opp.start_currency} | "
                             f"Profit: {float(opp.profit_bps):.2f}bps | "
                             f"Rate: {float(opp.cycle_rate):.8f}"
+                            f"{' [OBSERVATION]' if self.OBSERVATION_MODE else ''}"
                         )
 
+                    # Observation mode: log but don't execute
+                    if self.OBSERVATION_MODE:
+                        self._signals_skipped_observation += 1
+                        continue
+
+                    # Rate limit: max signals per cycle
+                    if self._signals_this_cycle >= self.MAX_SIGNALS_PER_CYCLE:
+                        logger.debug("Triangular arb rate limited, skipping")
+                        continue
+
                     # Create signal for execution
-                    # Use first leg's pair for the signal; calculate quantities
-                    # from MAX_TRADE_USD and first-leg price
                     from ..detector.cross_exchange import ArbitrageSignal
-                    first_leg = opp.path[0]  # (symbol, side, intermediate)
+                    first_leg = opp.path[0]
                     first_symbol = first_leg[0]
 
                     # Get first-leg price from graph
@@ -96,10 +121,15 @@ class TriangularArbitrage:
                     else:
                         first_price = Decimal('1')
 
-                    if first_price > 0:
-                        max_qty = self.MAX_TRADE_USD / first_price
-                    else:
-                        max_qty = Decimal('0')
+                    if first_price <= 0:
+                        continue
+
+                    max_qty = self.MAX_TRADE_USD / first_price
+
+                    # Pre-flight: check minimum quantity
+                    if max_qty <= 0:
+                        self._signals_skipped_size += 1
+                        continue
 
                     signal = ArbitrageSignal(
                         signal_id=f"tri_{opp.start_currency}_{self._scan_count}",
@@ -111,7 +141,7 @@ class TriangularArbitrage:
                         buy_price=first_price,
                         sell_price=first_price * opp.cycle_rate,
                         gross_spread_bps=opp.profit_bps,
-                        total_cost_bps=Decimal('0'),  # 0% maker on MEXC
+                        total_cost_bps=Decimal('0'),
                         net_spread_bps=opp.profit_bps,
                         max_quantity=max_qty,
                         recommended_quantity=max_qty,
@@ -127,6 +157,8 @@ class TriangularArbitrage:
                     if self.risk.approve_arbitrage(signal):
                         try:
                             self.signal_queue.put_nowait(signal)
+                            self._signals_submitted += 1
+                            self._signals_this_cycle += 1
                         except asyncio.QueueFull:
                             pass
 
@@ -247,6 +279,12 @@ class TriangularArbitrage:
         return {
             "scan_count": self._scan_count,
             "opportunities_found": self._opportunities_found,
+            "signals_submitted": self._signals_submitted,
+            "signals_skipped_observation": self._signals_skipped_observation,
+            "signals_skipped_balance": self._signals_skipped_balance,
+            "signals_skipped_size": self._signals_skipped_size,
+            "observation_mode": self.OBSERVATION_MODE,
+            "min_profit_bps": float(self.MIN_NET_PROFIT_BPS),
             "graph_currencies": len(self._pair_graph),
             "graph_edges": sum(len(v) for v in self._pair_graph.values()),
         }
