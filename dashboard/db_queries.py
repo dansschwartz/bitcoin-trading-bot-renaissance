@@ -171,11 +171,18 @@ def get_trade_lifecycle(db_path: str, trade_id: int) -> Dict[str, Any]:
 def get_closed_positions(
     db_path: str, limit: int = 50, offset: int = 0
 ) -> List[Dict[str, Any]]:
-    """Return closed positions with exit data (round-trip P&L tracking)."""
+    """Return closed positions with exit data, recomputing P&L from prices."""
     with _conn(db_path) as c:
         rows = c.execute(
             """SELECT position_id, product_id, side, size, entry_price,
-                      close_price, opened_at, closed_at, realized_pnl,
+                      close_price, opened_at, closed_at,
+                      CASE WHEN close_price IS NOT NULL AND close_price > 0
+                           THEN CASE WHEN side IN ('BUY','LONG')
+                                     THEN (close_price - entry_price) * size
+                                     ELSE (entry_price - close_price) * size
+                                END
+                           ELSE realized_pnl
+                      END as realized_pnl,
                       exit_reason, hold_duration_seconds
                FROM open_positions
                WHERE status = 'CLOSED'
@@ -187,21 +194,57 @@ def get_closed_positions(
 
 
 def get_position_summary_stats(db_path: str) -> Dict[str, Any]:
-    """Aggregate stats from closed positions with realized P&L data."""
+    """Aggregate stats from closed positions, recomputing P&L from entry/close prices."""
     with _conn(db_path) as c:
+        # Recompute P&L from prices to avoid relying on stored realized_pnl
         row = c.execute(
             """SELECT
                  COUNT(*) as total_closed,
-                 SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
-                 SUM(CASE WHEN realized_pnl <= 0 THEN 1 ELSE 0 END) as losses,
-                 COALESCE(SUM(realized_pnl), 0.0) as total_realized_pnl,
-                 COALESCE(AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl END), 0.0) as avg_win,
-                 COALESCE(AVG(CASE WHEN realized_pnl <= 0 THEN realized_pnl END), 0.0) as avg_loss,
-                 COALESCE(MAX(realized_pnl), 0.0) as largest_win,
-                 COALESCE(MIN(realized_pnl), 0.0) as largest_loss,
+                 SUM(CASE WHEN
+                       (CASE WHEN side IN ('BUY','LONG')
+                             THEN (close_price - entry_price) * size
+                             ELSE (entry_price - close_price) * size END) > 0
+                     THEN 1 ELSE 0 END) as wins,
+                 SUM(CASE WHEN
+                       (CASE WHEN side IN ('BUY','LONG')
+                             THEN (close_price - entry_price) * size
+                             ELSE (entry_price - close_price) * size END) < 0
+                     THEN 1 ELSE 0 END) as losses,
+                 COALESCE(SUM(
+                   CASE WHEN side IN ('BUY','LONG')
+                        THEN (close_price - entry_price) * size
+                        ELSE (entry_price - close_price) * size END
+                 ), 0.0) as total_realized_pnl,
+                 COALESCE(AVG(CASE WHEN
+                   (CASE WHEN side IN ('BUY','LONG')
+                         THEN (close_price - entry_price) * size
+                         ELSE (entry_price - close_price) * size END) > 0
+                   THEN (CASE WHEN side IN ('BUY','LONG')
+                              THEN (close_price - entry_price) * size
+                              ELSE (entry_price - close_price) * size END)
+                   END), 0.0) as avg_win,
+                 COALESCE(AVG(CASE WHEN
+                   (CASE WHEN side IN ('BUY','LONG')
+                         THEN (close_price - entry_price) * size
+                         ELSE (entry_price - close_price) * size END) < 0
+                   THEN (CASE WHEN side IN ('BUY','LONG')
+                              THEN (close_price - entry_price) * size
+                              ELSE (entry_price - close_price) * size END)
+                   END), 0.0) as avg_loss,
+                 COALESCE(MAX(
+                   CASE WHEN side IN ('BUY','LONG')
+                        THEN (close_price - entry_price) * size
+                        ELSE (entry_price - close_price) * size END
+                 ), 0.0) as largest_win,
+                 COALESCE(MIN(
+                   CASE WHEN side IN ('BUY','LONG')
+                        THEN (close_price - entry_price) * size
+                        ELSE (entry_price - close_price) * size END
+                 ), 0.0) as largest_loss,
                  COALESCE(AVG(hold_duration_seconds), 0.0) as avg_hold_seconds
                FROM open_positions
-               WHERE status = 'CLOSED' AND realized_pnl IS NOT NULL"""
+               WHERE status = 'CLOSED'
+                 AND close_price IS NOT NULL AND close_price > 0"""
         ).fetchone()
         total = row["total_closed"] or 0
         wins = row["wins"] or 0
