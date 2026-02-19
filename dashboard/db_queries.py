@@ -600,7 +600,8 @@ def get_risk_gateway_log(db_path: str, limit: int = 100) -> List[Dict[str, Any]]
     with _conn(db_path) as c:
         # Include all decisions that have vae_loss OR are BUY/SELL
         rows = c.execute(
-            """SELECT id, timestamp, product_id, action, confidence, vae_loss, hmm_regime
+            """SELECT id, timestamp, product_id, action, confidence, vae_loss,
+                      hmm_regime, reasoning
                FROM decisions
                WHERE action IN ('BUY', 'SELL') OR vae_loss IS NOT NULL
                ORDER BY id DESC
@@ -610,14 +611,30 @@ def get_risk_gateway_log(db_path: str, limit: int = 100) -> List[Dict[str, Any]]
         results = _rows_to_dicts(rows)
         for r in results:
             r["hmm_regime"] = _map_regime(r.get("hmm_regime"))
-            vae = r.get("vae_loss")
-            if vae is not None and vae > 0:
-                # Gateway was active — high loss = would have blocked
-                r["gateway_verdict"] = "BLOCK" if vae > 0.3 else "PASS"
-            else:
-                # BUY/SELL with no VAE = gateway disabled or no features
+            # Extract actual gateway verdict from reasoning JSON
+            gateway_reason = "not_evaluated"
+            try:
+                import json as _json
+                reasoning = _json.loads(r.get("reasoning", "{}"))
+                gateway_reason = reasoning.get("risk_gateway_reason", "not_evaluated")
+            except (ValueError, TypeError):
+                pass
+            # Remove reasoning from response (too large)
+            r.pop("reasoning", None)
+            # Map gateway_reason to PASS/BLOCK verdict
+            if gateway_reason in ("OK", "not_evaluated", "gateway_disabled"):
                 r["gateway_verdict"] = "PASS"
-                r["vae_loss"] = 0.0
+            elif gateway_reason.startswith("blocked"):
+                r["gateway_verdict"] = "BLOCK"
+            else:
+                # For HOLD decisions without explicit gateway, use VAE threshold
+                vae = r.get("vae_loss")
+                if r.get("action") in ("BUY", "SELL"):
+                    r["gateway_verdict"] = "PASS"  # Got through = passed
+                elif vae is not None and vae > 2.0:
+                    r["gateway_verdict"] = "BLOCK"
+                else:
+                    r["gateway_verdict"] = "PASS"
         return results
 
 
