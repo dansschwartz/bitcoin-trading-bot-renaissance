@@ -62,3 +62,9 @@ async def benchmark(request: Request, range: str = "1D", product_id: str = "BTC-
     db = request.app.state.dashboard_config.db_path
     hours = _parse_range(range)
     return db_queries.get_benchmark_equity(db, hours=hours, product_id=product_id)
+
+
+@router.get("/signal-attribution")
+async def signal_attribution(request: Request, hours: int = 24):
+    db = request.app.state.dashboard_config.db_path
+    return db_queries.get_signal_attribution(db, hours=hours)

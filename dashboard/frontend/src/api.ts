@@ -53,6 +53,8 @@ export const api = {
     get<{ timestamp: string; benchmark_equity: number }[]>(
       `/api/analytics/benchmark?range=${range}&product_id=${productId}`,
     ),
+  signalAttribution: (hours = 24) =>
+    get<Record<string, unknown>>(`/api/analytics/signal-attribution?hours=${hours}`),
 
   // Brain
   ensemble: () => get<EnsembleStatus>('/api/brain/ensemble'),

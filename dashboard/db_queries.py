@@ -861,3 +861,94 @@ def get_latest_price(db_path: str, product_id: str = "BTC-USD") -> Optional[Dict
             (product_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def get_signal_attribution(db_path: str, hours: int = 24) -> Dict[str, Any]:
+    """Aggregate signal contributions from decision reasoning JSON.
+
+    Returns per-signal stats: trade count, avg contribution, total contribution,
+    and per-asset breakdown.
+    """
+    from collections import defaultdict
+
+    with _conn(db_path) as c:
+        rows = c.execute(
+            """SELECT product_id, action, reasoning
+               FROM decisions
+               WHERE action != 'HOLD'
+                 AND reasoning IS NOT NULL
+                 AND timestamp >= datetime('now', ?)
+               ORDER BY id DESC""",
+            (f"-{hours} hours",),
+        ).fetchall()
+
+    # Aggregate signal contributions
+    signal_stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "count": 0, "total_contribution": 0.0, "abs_total": 0.0,
+        "buy_count": 0, "sell_count": 0,
+    })
+    asset_signal: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    total_decisions = 0
+
+    for row in rows:
+        try:
+            data = json.loads(row["reasoning"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        contributions = data.get("signal_contributions")
+        if not contributions or not isinstance(contributions, dict):
+            continue
+
+        total_decisions += 1
+        product_id = row["product_id"]
+        action = row["action"]
+
+        for signal_name, value in contributions.items():
+            if not isinstance(value, (int, float)) or math.isnan(value) or math.isinf(value):
+                continue
+            stats = signal_stats[signal_name]
+            stats["count"] += 1
+            stats["total_contribution"] += value
+            stats["abs_total"] += abs(value)
+            if action == "BUY":
+                stats["buy_count"] += 1
+            else:
+                stats["sell_count"] += 1
+            asset_signal[product_id][signal_name] += value
+
+    # Build result
+    signals = []
+    for name, stats in signal_stats.items():
+        avg = stats["total_contribution"] / stats["count"] if stats["count"] > 0 else 0
+        signals.append({
+            "signal": name,
+            "trade_count": stats["count"],
+            "avg_contribution": round(avg, 6),
+            "total_contribution": round(stats["total_contribution"], 6),
+            "abs_total": round(stats["abs_total"], 6),
+            "buy_count": stats["buy_count"],
+            "sell_count": stats["sell_count"],
+        })
+
+    # Sort by absolute total contribution (most impactful first)
+    signals.sort(key=lambda x: x["abs_total"], reverse=True)
+
+    # Top assets by signal
+    asset_breakdown = []
+    for product_id, sig_map in asset_signal.items():
+        top_signal = max(sig_map.items(), key=lambda x: abs(x[1])) if sig_map else ("none", 0)
+        asset_breakdown.append({
+            "product_id": product_id,
+            "top_signal": top_signal[0],
+            "top_signal_value": round(top_signal[1], 6),
+            "signal_count": len(sig_map),
+        })
+    asset_breakdown.sort(key=lambda x: abs(x["top_signal_value"]), reverse=True)
+
+    return _sanitize_floats({
+        "window_hours": hours,
+        "total_decisions": total_decisions,
+        "signals": signals,
+        "asset_breakdown": asset_breakdown,
+    })
