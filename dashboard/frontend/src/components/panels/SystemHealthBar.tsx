@@ -4,7 +4,7 @@ import { api } from '../../api';
 import { formatCurrency, formatUptime } from '../../utils/formatters';
 import type { Exposure, RegimeStatus } from '../../types';
 
-const INITIAL_CAPITAL = 410_000;
+const INITIAL_CAPITAL = 10_000;
 
 type Health = 'green' | 'yellow' | 'red';
 

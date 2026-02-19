@@ -119,14 +119,15 @@ export default function ActivityFeed() {
       };
     } else if (msg.channel === 'risk.gateway') {
       const d = msg.data;
-      const verdict = d.blocked ? 'BLOCKED' : 'PASS';
+      const isBlocked = d.verdict && d.verdict !== 'OK' && d.verdict !== 'gateway_disabled' && d.verdict !== 'not_evaluated';
+      const verdictLabel = isBlocked ? 'BLOCKED' : 'PASS';
       item = {
         id: `ws-gw-${msg.ts}-${Math.random().toString(36).slice(2, 6)}`,
         timestamp: msg.ts,
         type: 'risk',
-        message: `Risk ${verdict}: ${d.product_id || ''} | VAE: ${Number(d.vae_loss || 0).toFixed(4)}`,
-        color: d.blocked ? '#ff4757' : '#a855f7',
-        priority: d.blocked ? 'high' : 'medium',
+        message: `Risk ${verdictLabel}: ${d.product_id || ''} ${d.action || ''} | VAE: ${Number(d.vae_loss || 0).toFixed(4)}`,
+        color: isBlocked ? '#ff4757' : '#a855f7',
+        priority: isBlocked ? 'high' : 'medium',
       };
     } else if (msg.channel === 'risk.alert') {
       item = {
