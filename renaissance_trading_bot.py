@@ -1484,7 +1484,7 @@ class RenaissanceTradingBot:
                     target = p_id
                     if base != target:
                         ll_data = self.correlation_engine.calculate_lead_lag(base, target)
-                        signals['lead_lag'] = ll_data.get('lead_lag_score', 0.0)
+                        signals['lead_lag'] = ll_data.get('directional_signal', 0.0)
                         market_data['lead_lag_alpha'] = ll_data
             except Exception as e:
                 self.logger.debug(f"Lead-lag signal failed: {e}")

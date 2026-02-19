@@ -355,6 +355,15 @@ class EnhancedPositionManager:
             # Calculate position value
             position_value = abs(entry_price * size)
 
+            # Anti-stacking: reject if same product+side position already exists
+            position_side_enum = PositionSide.LONG if side == "LONG" else PositionSide.SHORT
+            with self._lock:
+                for existing in self.positions.values():
+                    if (existing.product_id == product_id
+                            and existing.side == position_side_enum
+                            and existing.status == PositionStatus.OPEN):
+                        return False, f"Anti-stacking: already have {side} on {product_id}", None
+
             # Check risk limits
             risk_check_passed, risk_violations = self._check_risk_limits(position_value, product_id)
             if not risk_check_passed:

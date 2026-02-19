@@ -83,9 +83,23 @@ class CrossAssetCorrelationEngine:
         best_lag = lags[best_lag_idx]
         best_corr = corrs[best_lag_idx]
         
+        # Compute directional signal: if base leads target, use base's recent
+        # return (scaled by correlation strength) as a predictor of target's
+        # next move.  When base lags target, no actionable signal.
+        directional_signal = 0.0
+        if best_lag > 0 and abs(best_corr) > 0.2:
+            # base leads target — base's recent move predicts target's next move
+            recent_base_return = float(b_ret[-1]) if len(b_ret) > 0 else 0.0
+            # Scale: correlation-strength × base return, capped to [-1, 1]
+            directional_signal = float(np.clip(
+                best_corr * recent_base_return * 50.0,  # 50x to normalise ~2% returns
+                -1.0, 1.0
+            ))
+
         return {
             "correlation": float(correlation),
             "lead_lag_score": float(best_corr),
+            "directional_signal": directional_signal,
             "lag_periods": int(best_lag),
             "is_leading": best_lag > 0 and abs(best_corr) > 0.6,
             "timestamp": datetime.now(timezone.utc)
