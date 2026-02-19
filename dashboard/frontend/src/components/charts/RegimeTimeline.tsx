@@ -7,7 +7,10 @@ export default function RegimeTimeline() {
   const [history, setHistory] = useState<Decision[]>([]);
 
   useEffect(() => {
-    api.regime().then(r => setHistory((r.history || []).slice(0, 100).reverse())).catch(() => {});
+    const fetch = () => api.regime().then(r => setHistory((r.history || []).slice(0, 100).reverse())).catch(() => {});
+    fetch();
+    const id = setInterval(fetch, 15_000);
+    return () => clearInterval(id);
   }, []);
 
   if (history.length === 0) {

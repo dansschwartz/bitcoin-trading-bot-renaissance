@@ -12,7 +12,7 @@ from datetime import datetime
 class ConfluenceEngine:
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
-        # Institutional "Confluence Rules" based on historical Renaissance-style research
+        # Confluence rules — signals must match those actually generated in the pipeline
         self.rules = [
             {
                 'name': 'OrderFlow_Technical_Convergence',
@@ -21,23 +21,29 @@ class ConfluenceEngine:
                 'boost': 0.15
             },
             {
-                'name': 'Microstructure_Exhaustion',
-                'signals': ['vpin', 'bollinger'],
+                'name': 'Bollinger_Volume_MeanReversion',
+                'signals': ['bollinger', 'volume'],
                 'logic': 'divergence',
                 'boost': 0.12
             },
             {
-                'name': 'LeadLag_StatArb_Confirmation',
-                'signals': ['lead_lag', 'stat_arb'],
+                'name': 'StatArb_OrderFlow_Confirmation',
+                'signals': ['stat_arb', 'order_flow'],
                 'logic': 'high_correlation',
                 'boost': 0.18
             },
             {
-                'name': 'Fractal_Quantum_Resonance',
-                'signals': ['fractal', 'quantum'],
-                'logic': 'both_strong',
+                'name': 'ML_Technical_Agreement',
+                'signals': ['ml_ensemble', 'macd', 'bollinger'],
+                'logic': 'all_same_sign',
+                'boost': 0.15
+            },
+            {
+                'name': 'Multi_Signal_Alignment',
+                'signals': ['order_flow', 'macd', 'rsi', 'bollinger'],
+                'logic': 'all_same_sign',
                 'boost': 0.20
-            }
+            },
         ]
         self.logger.info("🏛️ Confluence Engine initialized: Non-linear Meta-Learning ready.")
 
@@ -70,11 +76,19 @@ class ConfluenceEngine:
             except:
                 hardened_signals[k] = 0.0
 
+        evaluated_rules = []
         for rule in self.rules:
             try:
                 boost_val = self._evaluate_rule(rule, hardened_signals)
-                if boost_val > 0:
-                    active_rules.append(rule['name'])
+                fired = boost_val > 0
+                evaluated_rules.append({
+                    'name': rule['name'],
+                    'signals': rule['signals'],
+                    'boost': float(rule['boost']),
+                    'fired': fired,
+                })
+                if fired:
+                    active_rules.append({'name': rule['name'], 'boost': float(boost_val)})
                     total_boost += float(boost_val)
             except Exception as e:
                 self.logger.warning(f"Error evaluating rule {rule.get('name')}: {e}")
@@ -85,6 +99,8 @@ class ConfluenceEngine:
         return {
             'total_confluence_boost': float(total_boost),
             'active_rules': active_rules,
+            'evaluated_rules': evaluated_rules,
+            'signal_count': len(hardened_signals),
             'timestamp': datetime.now().isoformat()
         }
 
@@ -102,10 +118,10 @@ class ConfluenceEngine:
 
             # 2. Divergence (Mean Reversion)
             elif rule['logic'] == 'divergence':
-                # e.g., High VPIN (toxicity) + Bollinger touch
-                vpin = signals.get('vpin', 0.5)
+                # Bollinger band extreme + volume confirmation
                 boll = signals.get('bollinger', 0.0)
-                if vpin > 0.7 and abs(boll) > 0.8:
+                vol = signals.get('volume', 0.0)
+                if abs(boll) > 0.6 and np.sign(boll) != np.sign(vol):
                     return rule['boost']
 
             # 3. High Correlation (Confirmation)

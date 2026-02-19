@@ -10,7 +10,7 @@ export default function PredictionHistory() {
   const [models, setModels] = useState<string[]>([]);
 
   useEffect(() => {
-    api.predictionHistory(24).then((preds) => {
+    const fetch = () => api.predictionHistory(24).then((preds) => {
       // Group by timestamp, pivot model names into columns
       const modelSet = new Set<string>();
       const byTime = new Map<string, Record<string, number | string>>();
@@ -25,6 +25,9 @@ export default function PredictionHistory() {
       setModels(Array.from(modelSet));
       setData(Array.from(byTime.values()).reverse());
     }).catch(() => {});
+    fetch();
+    const id = setInterval(fetch, 30_000);
+    return () => clearInterval(id);
   }, []);
 
   if (data.length === 0) {

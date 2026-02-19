@@ -15,8 +15,9 @@ export default function VAEGauge() {
   }, []);
 
   const latest = data.length > 0 ? data[data.length - 1].vae_loss : null;
-  // Normalize VAE loss: typical range 0-0.5, anything > 0.3 is concerning
-  const normalized = latest != null ? Math.min(latest / 0.5, 1) : 0;
+  const ANOMALY_THRESHOLD = 5.0;
+  // Normalize VAE loss: 0 → 0, threshold → 1.0
+  const normalized = latest != null ? Math.min(latest / ANOMALY_THRESHOLD, 1) : 0;
   const gaugeColor = normalized > 0.6 ? '#ff4757' : normalized > 0.3 ? '#fbbf24' : '#00d395';
 
   return (
@@ -38,7 +39,7 @@ export default function VAEGauge() {
                     <XAxis dataKey="timestamp" tickFormatter={formatTimestamp} tick={{ fontSize: 8, fill: '#6b7280' }} axisLine={false} tickLine={false} hide />
                     <YAxis tick={{ fontSize: 9, fill: '#6b7280' }} axisLine={false} tickLine={false} width={30} />
                     <Tooltip contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 11, color: '#e5e7eb' }} labelFormatter={formatTimestamp} />
-                    <ReferenceLine y={0.3} stroke="#fbbf24" strokeDasharray="3 3" />
+                    <ReferenceLine y={ANOMALY_THRESHOLD} stroke="#fbbf24" strokeDasharray="3 3" />
                     <Line type="monotone" dataKey="vae_loss" stroke="#a855f7" dot={false} strokeWidth={1.5} />
                   </LineChart>
                 </ResponsiveContainer>
@@ -48,7 +49,7 @@ export default function VAEGauge() {
             </div>
           </div>
           <p className="text-[10px] text-gray-600 mt-2">
-            Latest reconstruction error: {latest != null ? latest.toFixed(6) : '--'} | Threshold: 0.3
+            Latest reconstruction error: {latest != null ? latest.toFixed(4) : '--'} | Threshold: {ANOMALY_THRESHOLD}
           </p>
         </>
       )}
