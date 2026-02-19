@@ -576,6 +576,7 @@ class RenaissanceTradingBot:
         # Initialize Coinbase Client & Position Manager
         cb_config = self.config.get("coinbase", {})
         paper_mode = self.config.get("trading", {}).get("paper_trading", True)
+        self.paper_trading = paper_mode
         self.coinbase_client = EnhancedCoinbaseClient(
             credentials=CoinbaseCredentials(
                 api_key=os.environ.get(cb_config.get("api_key_env", "CB_API_KEY"), ""),

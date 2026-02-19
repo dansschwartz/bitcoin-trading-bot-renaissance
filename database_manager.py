@@ -303,6 +303,10 @@ class DatabaseManager:
                         return obj.isoformat()
                     if isinstance(obj, np.ndarray):
                         return obj.tolist()
+                    if isinstance(obj, (np.bool_, np.integer)):
+                        return int(obj)
+                    if isinstance(obj, np.floating):
+                        return float(obj)
                     raise TypeError(f"Type {type(obj)} not serializable")
 
                 # Extract expanded metrics
