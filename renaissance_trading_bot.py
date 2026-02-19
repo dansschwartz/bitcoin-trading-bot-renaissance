@@ -1241,6 +1241,19 @@ class RenaissanceTradingBot:
         self._background_tasks.append(task)
         return task
 
+    @staticmethod
+    def _compute_realized_pnl(entry_price: float, close_price: float,
+                               size: float, side: str) -> float:
+        """Compute realized PnL from entry/close prices and position side."""
+        if entry_price <= 0 or close_price <= 0 or size <= 0:
+            return 0.0
+        side_upper = side.upper() if isinstance(side, str) else str(side).upper()
+        if side_upper in ("LONG", "BUY"):
+            return (close_price - entry_price) * size
+        elif side_upper in ("SHORT", "SELL"):
+            return (entry_price - close_price) * size
+        return 0.0
+
     async def _shutdown(self):
         """Cancel background tasks and cleanup resources."""
         self.logger.info("Shutting down - cancelling background tasks...")
@@ -1733,8 +1746,10 @@ class RenaissanceTradingBot:
                                 pos.position_id, reason=f"Signal reversal: {pos_side} -> {action}"
                             )
                             if close_ok:
-                                _rpnl = getattr(pos, 'realized_pnl', 0.0) or 0.0
-                                _cpx = getattr(pos, 'current_price', 0.0) or current_price
+                                _cpx = current_price
+                                _rpnl = self._compute_realized_pnl(
+                                    pos.entry_price, _cpx, pos.size, pos_side
+                                )
                                 self._track_task(
                                     self.db_manager.close_position_record(
                                         pos.position_id,
@@ -2459,8 +2474,11 @@ class RenaissanceTradingBot:
                     for pos in all_positions:
                         ok, _ = self.position_manager.close_position(pos.position_id, reason="Circuit breaker: 15% drawdown")
                         if ok:
-                            _rpnl = getattr(pos, 'realized_pnl', 0.0) or 0.0
                             _cpx = getattr(pos, 'current_price', 0.0) or 0.0
+                            _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
+                            _rpnl = self._compute_realized_pnl(
+                                pos.entry_price, _cpx, pos.size, _side
+                            )
                             self._track_task(self.db_manager.close_position_record(
                                 pos.position_id,
                                 close_price=float(_cpx),
@@ -2505,8 +2523,11 @@ class RenaissanceTradingBot:
                                 worst_pos.position_id, reason="Exposure limit exceeded"
                             )
                             if ok:
-                                _rpnl = getattr(worst_pos, 'realized_pnl', 0.0) or 0.0
                                 _cpx = getattr(worst_pos, 'current_price', 0.0) or 0.0
+                                _side = worst_pos.side.value if hasattr(worst_pos.side, 'value') else str(worst_pos.side)
+                                _rpnl = self._compute_realized_pnl(
+                                    worst_pos.entry_price, _cpx, worst_pos.size, _side
+                                )
                                 self._track_task(self.db_manager.close_position_record(
                                     worst_pos.position_id,
                                     close_price=float(_cpx),
@@ -2601,6 +2622,10 @@ class RenaissanceTradingBot:
                 # Feed price to paper trader so fills use correct price
                 if current_price > 0 and hasattr(self.coinbase_client, 'paper_trader') and self.coinbase_client.paper_trader:
                     self.coinbase_client.paper_trader.update_price(product_id, current_price)
+
+                # Update position manager with current price (required for PnL calc)
+                if current_price > 0:
+                    self.position_manager.update_positions({product_id: current_price})
 
                 # ── Signal Scorecard: evaluate last cycle's predictions ──
                 if product_id in self._pending_predictions and current_price > 0:
@@ -3331,7 +3356,10 @@ class RenaissanceTradingBot:
                                 pos.position_id, reason=f"Exit engine: {exit_decision['reason']}"
                             )
                             if close_ok:
-                                _rpnl = getattr(pos, 'realized_pnl', 0.0) or 0.0
+                                _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
+                                _rpnl = self._compute_realized_pnl(
+                                    pos.entry_price, current_price, pos.size, _side
+                                )
                                 self._track_task(self.db_manager.close_position_record(
                                     pos.position_id,
                                     close_price=float(current_price),
@@ -3411,14 +3439,20 @@ class RenaissanceTradingBot:
                                         _rr.position_id, reason=f"ReEval: {_rr.reason_code}"
                                     )
                                     if _close_ok:
-                                        # Update DB record with P&L data
+                                        # Compute realized PnL from entry/exit prices
                                         _rr_pos = next((p for p in _reeval_positions_for_pid if p.position_id == _rr.position_id), None)
-                                        _rr_rpnl = getattr(_rr_pos, 'realized_pnl', 0.0) if _rr_pos else 0.0
+                                        if _rr_pos:
+                                            _rr_side = _rr_pos.side.value if hasattr(_rr_pos.side, 'value') else str(_rr_pos.side)
+                                            _rr_rpnl = self._compute_realized_pnl(
+                                                _rr_pos.entry_price, current_price, _rr_pos.size, _rr_side
+                                            )
+                                        else:
+                                            _rr_rpnl = 0.0
                                         self._track_task(
                                             self.db_manager.close_position_record(
                                                 _rr.position_id,
                                                 close_price=float(current_price),
-                                                realized_pnl=float(_rr_rpnl or 0.0),
+                                                realized_pnl=float(_rr_rpnl),
                                                 exit_reason=f"reeval:{_rr.reason_code}",
                                             )
                                         )
