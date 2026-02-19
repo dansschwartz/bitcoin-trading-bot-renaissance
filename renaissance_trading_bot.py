@@ -995,8 +995,8 @@ class RenaissanceTradingBot:
                 self.logger.warning(f"Multi-exchange bridge init failed: {e}")
 
         # Step 8: Dynamic Thresholds (calibrated to actual signal distribution)
-        self.buy_threshold = 0.04
-        self.sell_threshold = -0.04
+        self.buy_threshold = 0.01
+        self.sell_threshold = -0.01
         self.adaptive_thresholds = self.config.get("adaptive_thresholds", True)
         self.breakout_candidates = []
         self.scan_cycle_count = 0
@@ -1075,6 +1075,35 @@ class RenaissanceTradingBot:
             self.logger.debug(f"DB bar load failed for {product_id}: {e}")
             import pandas as _pd
             return _pd.DataFrame()
+
+    def _load_candles_from_db(self, product_id: str, limit: int = 200) -> List:
+        """Load historical bars from five_minute_bars as PriceData objects for tech indicator bootstrap."""
+        try:
+            import sqlite3
+            from enhanced_technical_indicators import PriceData
+            db_path = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+            conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            rows = conn.execute(
+                "SELECT bar_start, open, high, low, close, volume "
+                "FROM five_minute_bars WHERE pair=? ORDER BY bar_start ASC LIMIT ?",
+                (product_id, limit)
+            ).fetchall()
+            conn.close()
+            if not rows:
+                return []
+            candles = []
+            for row in rows:
+                ts, o, h, l, c, v = row
+                candles.append(PriceData(
+                    timestamp=datetime.fromtimestamp(ts),
+                    open=float(o), high=float(h), low=float(l),
+                    close=float(c), volume=float(v or 0),
+                ))
+            self.logger.info(f"Loaded {len(candles)} bars from DB for {product_id}")
+            return candles
+        except Exception as e:
+            self.logger.warning(f"DB candle load failed for {product_id}: {e}")
+            return []
 
     def _setup_logging(self, config: Dict[str, Any]) -> logging.Logger:
         """Setup comprehensive logging"""
@@ -1597,8 +1626,8 @@ class RenaissanceTradingBot:
             pass  # Don't let cost pre-screen crash the decision pipeline
 
         # Calculate confidence based on signal strength and directional consensus
-        # signal_strength: rescale so that typical max (0.10) maps to 1.0
-        signal_strength = min(abs(weighted_signal) / 0.10, 1.0)
+        # signal_strength: rescale so that typical max (0.05) maps to 1.0
+        signal_strength = min(abs(weighted_signal) / 0.05, 1.0)
 
         # Directional consensus: fraction of non-trivial signals agreeing on direction
         raw_contribs = [v for v in signal_contributions.values() if abs(v) > 0.0001]
@@ -2439,6 +2468,9 @@ class RenaissanceTradingBot:
                         candles = await asyncio.to_thread(
                             self.market_data_provider.fetch_candle_history, pid
                         )
+                        # Fallback: if Coinbase API returns nothing, load from DB
+                        if not candles:
+                            candles = self._load_candles_from_db(pid, limit=200)
                         if candles:
                             pid_tech = self._get_tech(pid)
                             for candle in candles:
@@ -2461,6 +2493,8 @@ class RenaissanceTradingBot:
                             # Try initial GARCH fit with preloaded data
                             if self.garch_engine.should_refit(pid):
                                 self.garch_engine.fit_model(pid)
+                        else:
+                            self.logger.warning(f"No candle history available for {pid} (API + DB both empty)")
                     except Exception as e:
                         self.logger.warning(f"History preload failed for {pid}: {e}")
 
@@ -4291,19 +4325,19 @@ class RenaissanceTradingBot:
             vol_regime = latest_tech.volatility_regime if latest_tech else None
             
             # Base thresholds — calibrated to actual signal distribution
-            # Typical weighted signals: 0.003-0.01, occasional spikes: 0.02-0.06
-            self.buy_threshold = 0.04
-            self.sell_threshold = -0.04
+            # Typical weighted signals: 0.003-0.03, occasional spikes: 0.03-0.06
+            self.buy_threshold = 0.01
+            self.sell_threshold = -0.01
 
             # Adjust based on volatility
             if vol_regime == "high_volatility" or vol_regime == "extreme_volatility":
                 # Increase thresholds in high volatility to avoid fakeouts
-                self.buy_threshold = 0.06
-                self.sell_threshold = -0.06
+                self.buy_threshold = 0.02
+                self.sell_threshold = -0.02
             elif vol_regime == "low_volatility":
                 # Decrease thresholds in low volatility to catch smaller moves
-                self.buy_threshold = 0.025
-                self.sell_threshold = -0.025
+                self.buy_threshold = 0.005
+                self.sell_threshold = -0.005
                 
             self.logger.info(f"Dynamic Thresholds updated: Buy {self.buy_threshold:.2f}, Sell {self.sell_threshold:.2f} (Regime: {vol_regime})")
         except Exception as e:

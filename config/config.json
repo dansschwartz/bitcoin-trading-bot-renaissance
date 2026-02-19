@@ -15,7 +15,7 @@
     "risk_management": {
         "daily_loss_limit": 500,
         "position_limit": 1000,
-        "min_confidence": 0.5
+        "min_confidence": 0.25
     },
     "regime_overlay": {
         "enabled": true,
@@ -48,22 +48,22 @@
         ]
     },
     "signal_weights": {
-        "order_flow": 0.007613813280117693,
-        "order_book": 0.032680472767032134,
-        "volume": 0.14068437618029928,
-        "macd": 0.15496318235221765,
-        "rsi": 0.037643372592612426,
-        "bollinger": 0.07248941453296646,
-        "alternative": 0.011100418313305157,
-        "stat_arb": 0.011507242928902843,
-        "volume_profile": 0.0803582068950834,
-        "fractal": 0.13955429278881362,
-        "entropy": 0.08971290128680347,
-        "quantum": 0.04864185726833248,
-        "lead_lag": 0.008935834058516492,
-        "correlation_divergence": 0.11832661008643883,
-        "garch_vol": 0.03335066342649874,
-        "multi_exchange": 0.012437341242059282
+        "order_flow": 0.00317364444602137,
+        "order_book": 0.0909124777743969,
+        "volume": 0.17883566229703052,
+        "macd": 0.08848198026946116,
+        "rsi": 0.07878833642491184,
+        "bollinger": 0.0070244387575883055,
+        "alternative": 0.004452542594520341,
+        "stat_arb": 0.15248325336913437,
+        "volume_profile": 0.007591975294985745,
+        "fractal": 0.08244468976906798,
+        "entropy": 0.08957588307519129,
+        "quantum": 0.007591975294985745,
+        "lead_lag": 0.0034624813653345078,
+        "correlation_divergence": 0.009369799629734301,
+        "garch_vol": 0.10824113640367657,
+        "multi_exchange": 0.08756972323395915
     },
     "weight_lock": false,
     "mean_reversion": {
