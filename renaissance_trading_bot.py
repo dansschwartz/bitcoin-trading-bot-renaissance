@@ -3515,13 +3515,14 @@ class RenaissanceTradingBot:
                     if self.multi_exchange_bridge:
                         self._track_task(self.multi_exchange_bridge.update_funding_rates())
 
-                    # Periodic position reconciliation
-                    recon = self.position_manager.reconcile_with_exchange()
-                    if recon.get("status") == "MISMATCH":
-                        self._track_task(
-                            self.alert_manager.send_alert("CRITICAL", "Position Mismatch",
-                                f"{len(recon['discrepancies'])} discrepancies detected")
-                        )
+                    # Periodic position reconciliation (skip in paper trading — no real exchange positions)
+                    if not self.paper_trading:
+                        recon = self.position_manager.reconcile_with_exchange()
+                        if recon.get("status") == "MISMATCH":
+                            self._track_task(
+                                self.alert_manager.send_alert("CRITICAL", "Position Mismatch",
+                                    f"{len(recon['discrepancies'])} discrepancies detected")
+                            )
                     
                     # Run Self-Reinforcing Learning (Step 19)
                     if self.real_time_pipeline.enabled:
@@ -4138,13 +4139,14 @@ class RenaissanceTradingBot:
                     f"net_position={net_position:.6f}, daily_pnl=${daily_pnl:.2f}"
                 )
 
-            # Reconcile with exchange after restoring state
-            recon = self.position_manager.reconcile_with_exchange()
-            if recon.get("status") == "MISMATCH":
-                asyncio.ensure_future(
-                    self.alert_manager.send_alert("CRITICAL", "Position Mismatch",
-                        f"{len(recon['discrepancies'])} discrepancies found on startup")
-                )
+            # Reconcile with exchange after restoring state (skip in paper trading)
+            if not self.paper_trading:
+                recon = self.position_manager.reconcile_with_exchange()
+                if recon.get("status") == "MISMATCH":
+                    asyncio.ensure_future(
+                        self.alert_manager.send_alert("CRITICAL", "Position Mismatch",
+                            f"{len(recon['discrepancies'])} discrepancies found on startup")
+                    )
         except Exception as e:
             self.logger.warning(f"State recovery skipped: {e}")
 
