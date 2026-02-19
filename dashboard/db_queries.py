@@ -222,37 +222,46 @@ def get_position_summary_stats(db_path: str) -> Dict[str, Any]:
 # ─── Analytics ────────────────────────────────────────────────────────────
 
 def get_equity_curve(db_path: str, hours: int = 24) -> List[Dict[str, Any]]:
-    """Equity curve from trades — cumulative realized P&L anchored to starting capital."""
+    """Equity curve from closed positions — cumulative realized P&L anchored to starting capital."""
     with _conn(db_path) as c:
+        # Get position closes with recomputed P&L
         rows = c.execute(
-            """SELECT timestamp, side, size, price
-               FROM trades
-               WHERE datetime(timestamp) > datetime('now', ? || ' hours')
-               ORDER BY timestamp ASC""",
+            """SELECT closed_at as timestamp, product_id, side, size,
+                      entry_price, close_price,
+                      CASE WHEN side IN ('BUY','LONG')
+                           THEN (close_price - entry_price) * size
+                           ELSE (entry_price - close_price) * size
+                      END as pnl
+               FROM open_positions
+               WHERE status = 'CLOSED'
+                 AND close_price IS NOT NULL AND close_price > 0
+                 AND closed_at IS NOT NULL
+                 AND datetime(closed_at) > datetime('now', ? || ' hours')
+               ORDER BY closed_at ASC""",
             (f"-{hours}",),
         ).fetchall()
         data = _rows_to_dicts(rows)
 
-        # Compute realized P&L by pairing BUY/SELL trades per product
         cumulative_pnl = 0.0
+        result: List[Dict[str, Any]] = []
         for row in data:
-            side = row.get("side", "")
-            size = row.get("size", 0.0)
-            price = row.get("price", 0.0)
-            if side == "SELL":
-                cumulative_pnl += size * price
-            elif side == "BUY":
-                cumulative_pnl -= size * price
-            row["pnl_delta"] = cumulative_pnl - (data[data.index(row) - 1].get("cumulative_pnl", 0.0) if data.index(row) > 0 else 0.0)
-            row["cumulative_pnl"] = round(cumulative_pnl, 2)
-            row["equity"] = round(INITIAL_CAPITAL + cumulative_pnl, 2)
+            pnl_delta = row.get("pnl", 0.0) or 0.0
+            cumulative_pnl += pnl_delta
+            result.append({
+                "timestamp": row["timestamp"],
+                "side": row.get("side", ""),
+                "size": row.get("size", 0),
+                "price": row.get("close_price", 0),
+                "pnl_delta": round(pnl_delta, 4),
+                "cumulative_pnl": round(cumulative_pnl, 2),
+                "equity": round(INITIAL_CAPITAL + cumulative_pnl, 2),
+            })
 
         # Append current unrealized P&L as final point
         unrealized = _compute_total_unrealized_pnl(c)
-        if data:
-            last = data[-1]
+        if result:
             total_equity = INITIAL_CAPITAL + cumulative_pnl + unrealized
-            data.append({
+            result.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "side": "MARK",
                 "size": 0,
@@ -262,7 +271,7 @@ def get_equity_curve(db_path: str, hours: int = 24) -> List[Dict[str, Any]]:
                 "equity": round(total_equity, 2),
             })
         elif unrealized != 0.0:
-            data.append({
+            result.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "side": "MARK",
                 "size": 0,
@@ -272,7 +281,7 @@ def get_equity_curve(db_path: str, hours: int = 24) -> List[Dict[str, Any]]:
                 "equity": round(INITIAL_CAPITAL + unrealized, 2),
             })
 
-        return data
+        return result
 
 
 def _is_long_side(side: str) -> bool:
@@ -310,38 +319,48 @@ def _compute_total_unrealized_pnl(conn) -> float:
 
 def get_pnl_summary(db_path: str, hours: int = 24) -> Dict[str, Any]:
     with _conn(db_path) as c:
-        row = c.execute(
-            """SELECT
-                 COUNT(*) as total_trades,
-                 COALESCE(SUM(CASE WHEN side='SELL' THEN size*price
-                                   WHEN side='BUY' THEN -size*price
-                                   ELSE 0 END), 0.0) as realized_pnl,
-                 COALESCE(AVG(slippage), 0.0) as avg_slippage
+        # Trade count + slippage from trades table
+        trade_row = c.execute(
+            """SELECT COUNT(*) as total_trades,
+                      COALESCE(AVG(slippage), 0.0) as avg_slippage
                FROM trades
                WHERE datetime(timestamp) > datetime('now', ? || ' hours')""",
             (f"-{hours}",),
         ).fetchone()
-        total = row["total_trades"] or 0
+        total = trade_row["total_trades"] or 0
 
-        # Compute unrealized P&L from open positions
+        # Realized P&L from closed positions (recomputed from entry/close prices)
+        realized_row = c.execute(
+            """SELECT COALESCE(SUM(
+                   CASE WHEN side IN ('BUY','LONG')
+                        THEN (close_price - entry_price) * size
+                        ELSE (entry_price - close_price) * size
+                   END), 0.0) as realized_pnl
+               FROM open_positions
+               WHERE status = 'CLOSED'
+                 AND close_price IS NOT NULL AND close_price > 0
+                 AND datetime(closed_at) > datetime('now', ? || ' hours')""",
+            (f"-{hours}",),
+        ).fetchone()
+        realized = realized_row["realized_pnl"] or 0.0
+
+        # Unrealized P&L from open positions
         unrealized = _compute_total_unrealized_pnl(c)
 
-        # Win rate: pair BUY→SELL round-trips per product and check if profitable.
-        # A "round trip" is a BUY followed by a SELL on the same product.
-        # Fall back to counting positions with positive unrealized P&L if no round trips.
+        # Win rate from closed positions
         round_trips = _compute_round_trip_stats(c, hours)
 
         return {
             "total_trades": total,
-            "realized_pnl": round(row["realized_pnl"], 2) if row["realized_pnl"] else 0.0,
+            "realized_pnl": round(realized, 2),
             "unrealized_pnl": round(unrealized, 2),
-            "total_pnl": round((row["realized_pnl"] or 0.0) + unrealized, 2),
-            "avg_slippage": round(row["avg_slippage"], 6) if row["avg_slippage"] else 0.0,
+            "total_pnl": round(realized + unrealized, 2),
+            "avg_slippage": round(trade_row["avg_slippage"], 6) if trade_row["avg_slippage"] else 0.0,
             "win_rate": round(round_trips["win_rate"], 4),
             "total_round_trips": round_trips["total"],
             "winning_round_trips": round_trips["wins"],
             "initial_capital": INITIAL_CAPITAL,
-            "current_equity": round(INITIAL_CAPITAL + (row["realized_pnl"] or 0.0) + unrealized, 2),
+            "current_equity": round(INITIAL_CAPITAL + realized + unrealized, 2),
         }
 
 
@@ -527,16 +546,20 @@ def get_vae_history(db_path: str, limit: int = 200) -> List[Dict[str, Any]]:
 # ─── Risk ─────────────────────────────────────────────────────────────────
 
 def get_risk_metrics(db_path: str) -> Dict[str, Any]:
-    """Compute risk metrics from trade history, anchored to initial capital."""
+    """Compute risk metrics from closed position P&L, anchored to initial capital."""
     with _conn(db_path) as c:
-        # Daily PnL for drawdown calc
+        # Daily PnL from closed positions (recomputed from entry/close prices)
         rows = c.execute(
-            """SELECT date(timestamp) as dt,
-                      SUM(CASE WHEN side='SELL' THEN size*price
-                               WHEN side='BUY' THEN -size*price
-                               ELSE 0 END) as daily_pnl
-               FROM trades
-               GROUP BY date(timestamp)
+            """SELECT date(closed_at) as dt,
+                      SUM(CASE WHEN side IN ('BUY','LONG')
+                               THEN (close_price - entry_price) * size
+                               ELSE (entry_price - close_price) * size
+                          END) as daily_pnl
+               FROM open_positions
+               WHERE status = 'CLOSED'
+                 AND close_price IS NOT NULL AND close_price > 0
+                 AND closed_at IS NOT NULL
+               GROUP BY date(closed_at)
                ORDER BY dt ASC"""
         ).fetchall()
 
