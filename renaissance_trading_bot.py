@@ -1138,6 +1138,7 @@ class RenaissanceTradingBot:
         log_path = (Path(__file__).resolve().parent / log_file).resolve()
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Use force=True to override any handlers set by imports
         logging.basicConfig(
             level=getattr(logging, str(log_level).upper(), logging.INFO),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -1146,7 +1147,8 @@ class RenaissanceTradingBot:
                     log_path, maxBytes=50 * 1024 * 1024, backupCount=5
                 ),
                 logging.StreamHandler()
-            ]
+            ],
+            force=True,
         )
 
         # Apply secret masking to all handlers
