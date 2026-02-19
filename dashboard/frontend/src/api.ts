@@ -86,6 +86,9 @@ export const api = {
   arbSummary: () => get<ArbSummary>('/api/arbitrage/summary'),
   arbWallet: () => get<ArbWallet>('/api/arbitrage/wallet'),
 
+  // Devil Tracker
+  devilSummary: (hours = 24) => get<Record<string, unknown>>(`/api/devil/summary?hours=${hours}`),
+
   // Agents (Doc 15)
   agentStatuses: () => get<Record<string, unknown>[]>('/api/agents/status'),
   agentEvents: (limit = 100, agent?: string) =>

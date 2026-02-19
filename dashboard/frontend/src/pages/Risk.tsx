@@ -3,6 +3,7 @@ import PageShell from '../components/layout/PageShell';
 import ExposurePanel from '../components/panels/ExposurePanel';
 import RiskGatewayLog from '../components/panels/RiskGatewayLog';
 import AlertsPanel from '../components/panels/AlertsPanel';
+import DevilTrackerPanel from '../components/panels/DevilTrackerPanel';
 import MetricCard from '../components/cards/MetricCard';
 import ConditionalPanel from '../components/shared/ConditionalPanel';
 import { api } from '../api';
@@ -73,6 +74,9 @@ export default function Risk() {
         <ExposurePanel />
         <AlertsPanel />
       </div>
+
+      {/* Cost Leakage (Devil Tracker) */}
+      <DevilTrackerPanel />
 
       {/* Gateway Log */}
       <ConditionalPanel flag="risk_gateway" fallback={<RiskGatewayLog />}>
