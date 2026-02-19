@@ -499,11 +499,14 @@ def get_return_distribution(db_path: str) -> List[Dict[str, Any]]:
     with _conn(db_path) as c:
         rows = c.execute(
             """SELECT
-                 CASE WHEN side='SELL' THEN size*price
-                      WHEN side='BUY' THEN -size*price
-                      ELSE 0 END AS trade_pnl
-               FROM trades
-               ORDER BY id DESC
+                 CASE WHEN side IN ('BUY','LONG')
+                      THEN (close_price - entry_price) * size
+                      ELSE (entry_price - close_price) * size
+                 END AS trade_pnl
+               FROM open_positions
+               WHERE status = 'CLOSED'
+                 AND close_price IS NOT NULL AND close_price > 0
+               ORDER BY rowid DESC
                LIMIT 500"""
         ).fetchall()
         return _rows_to_dicts(rows)
@@ -513,13 +516,17 @@ def get_calendar_pnl(db_path: str) -> List[Dict[str, Any]]:
     with _conn(db_path) as c:
         rows = c.execute(
             """SELECT
-                 date(timestamp) as date,
-                 SUM(CASE WHEN side='SELL' THEN size*price
-                          WHEN side='BUY' THEN -size*price
-                          ELSE 0 END) as daily_pnl,
+                 date(closed_at) as date,
+                 SUM(CASE WHEN side IN ('BUY','LONG')
+                          THEN (close_price - entry_price) * size
+                          ELSE (entry_price - close_price) * size
+                     END) as daily_pnl,
                  COUNT(*) as trade_count
-               FROM trades
-               GROUP BY date(timestamp)
+               FROM open_positions
+               WHERE status = 'CLOSED'
+                 AND close_price IS NOT NULL AND close_price > 0
+                 AND closed_at IS NOT NULL
+               GROUP BY date(closed_at)
                ORDER BY date DESC
                LIMIT 90"""
         ).fetchall()
@@ -530,13 +537,17 @@ def get_hourly_pnl(db_path: str) -> List[Dict[str, Any]]:
     with _conn(db_path) as c:
         rows = c.execute(
             """SELECT
-                 CAST(strftime('%H', timestamp) AS INTEGER) as hour,
-                 AVG(CASE WHEN side='SELL' THEN size*price
-                          WHEN side='BUY' THEN -size*price
-                          ELSE 0 END) as avg_pnl,
+                 CAST(strftime('%H', closed_at) AS INTEGER) as hour,
+                 AVG(CASE WHEN side IN ('BUY','LONG')
+                          THEN (close_price - entry_price) * size
+                          ELSE (entry_price - close_price) * size
+                     END) as avg_pnl,
                  COUNT(*) as trade_count
-               FROM trades
-               GROUP BY strftime('%H', timestamp)
+               FROM open_positions
+               WHERE status = 'CLOSED'
+                 AND close_price IS NOT NULL AND close_price > 0
+                 AND closed_at IS NOT NULL
+               GROUP BY strftime('%H', closed_at)
                ORDER BY hour"""
         ).fetchall()
         return _rows_to_dicts(rows)
