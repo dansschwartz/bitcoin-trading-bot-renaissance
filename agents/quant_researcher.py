@@ -51,7 +51,27 @@ class QuantResearcherAgent(BaseAgent):
         self.researcher_cfg = config.get("quant_researcher", {})
         self.max_proposals = self.researcher_cfg.get("max_proposals_per_week", 5)
         self.max_session_minutes = self.researcher_cfg.get("max_session_minutes", 120)
+        self.model = self.researcher_cfg.get("model", "sonnet")
         self._state = "idle"
+        self._project_root = Path(self.db_path).resolve().parent.parent
+        self._claude_available = self._check_claude_available()
+
+    def _check_claude_available(self) -> bool:
+        """Check if the claude CLI is available on PATH."""
+        try:
+            result = subprocess.run(
+                ["claude", "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            version = (result.stdout or "").strip()
+            self.logger.info("Claude CLI available: %s", version or "unknown version")
+            return True
+        except FileNotFoundError:
+            self.logger.info("Claude CLI not found on PATH — research sessions will skip Claude launch")
+            return False
+        except Exception as exc:
+            self.logger.debug("Claude CLI check failed: %s", exc)
+            return False
 
     def get_status(self) -> Dict[str, Any]:
         status = self._base_status()
@@ -167,7 +187,7 @@ class QuantResearcherAgent(BaseAgent):
     def _prepare_session(self, report: Dict[str, Any]) -> Path:
         """Write report + prompt to a session directory."""
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        session_dir = Path(self.db_path).parent.parent / "data" / "research_sessions" / ts
+        session_dir = self._project_root / "data" / "research_sessions" / ts
         session_dir.mkdir(parents=True, exist_ok=True)
 
         # Write report
@@ -176,18 +196,32 @@ class QuantResearcherAgent(BaseAgent):
         )
 
         # Build and write research prompt
-        prompt = self._build_research_prompt(report)
+        prompt = self._build_research_prompt(
+            report,
+            session_dir=session_dir,
+            project_root=self._project_root,
+        )
         (session_dir / "research_prompt.md").write_text(prompt)
 
         self.logger.info("Research session prepared at %s", session_dir)
         return session_dir
 
-    def _build_research_prompt(self, report: Dict[str, Any]) -> str:
+    def _build_research_prompt(
+        self,
+        report: Dict[str, Any],
+        session_dir: Optional[Path] = None,
+        project_root: Optional[Path] = None,
+    ) -> str:
         """Build the research prompt for Claude Code."""
         summary = report.get("summary", {})
         signals = report.get("signals", {})
         regimes = report.get("regimes", {})
         config_snap = report.get("config_snapshot", {})
+
+        if project_root is None:
+            project_root = self._project_root
+        db_path_abs = Path(self.db_path).resolve()
+        config_path_abs = (project_root / "config" / "config.json").resolve()
 
         # Identify focus areas
         focus_areas: List[str] = []
@@ -207,7 +241,16 @@ class QuantResearcherAgent(BaseAgent):
         if win_rate < 0.5:
             focus_areas.append(f"Win rate below 50%: {win_rate:.1%}")
 
+        output_dir_str = str(session_dir) if session_dir else "data/research_sessions/<timestamp>"
+
         prompt = f"""# Weekly Quant Research Session
+
+## System Paths
+- **Project root:** `{project_root}`
+- **Database:** `{db_path_abs}` (read-only for analysis)
+- **Config:** `{config_path_abs}`
+- **Output dir:** `{output_dir_str}`
+- **Models dir:** `{project_root / 'models' / 'trained'}`
 
 ## Performance Summary (last 7 days)
 - Total P&L: ${summary.get('total_pnl', 0):.2f}
@@ -230,11 +273,23 @@ class QuantResearcherAgent(BaseAgent):
 ```
 
 ## Your Task
-Analyze the weekly report at `weekly_report.json` in this directory.
-You may also query the database at `data/renaissance_bot.db` (read-only)
-and read source code to understand the system.
+Analyze the weekly report at `{output_dir_str}/weekly_report.json`.
+Query the database for deeper analysis:
+```bash
+sqlite3 "{db_path_abs}" "SELECT ..."
+```
+Read source code at `{project_root}` to understand the system.
 
-Produce a file `proposals.json` with up to {self.max_proposals} improvement proposals.
+Produce a file `proposals.json` in `{output_dir_str}` with up to {self.max_proposals} improvement proposals.
+
+## Model Retraining
+If model accuracy is below target (< 52%), you may propose a `model_retrain` deployment.
+Set `"deployment_mode": "model_retrain"` and include retrain arguments in `config_changes`:
+```json
+{{"retrain_args": {{"epochs": 50, "rolling_days": 180, "full_history": false}}}}
+```
+The system will run `retrain_weekly()` automatically. Retraining has its own safety gate
+(new model must beat old by >= -1% accuracy).
 
 ## Hard Safety Limits (CANNOT be changed)
 - PAPER_TRADING_ONLY = True
@@ -248,6 +303,7 @@ Produce a file `proposals.json` with up to {self.max_proposals} improvement prop
 - `modify_existing` — change existing module behavior (24h sandbox, no approval)
 - `new_feature` — add new capability (72h sandbox, human approval required)
 - `new_strategy` — add new trading strategy (168h sandbox, human approval required)
+- `model_retrain` — retrain ML models (no sandbox, has own safety gate)
 
 ## Output Format (proposals.json)
 ```json
@@ -287,13 +343,14 @@ because they deploy immediately without sandbox overhead.
                 [
                     "claude",
                     "--print",
+                    "--model", self.model,
                     "--max-turns", "50",
                     "-p", prompt_file.read_text(),
                 ],
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
-                cwd=str(session_dir),
+                cwd=str(self._project_root),
             )
 
             # Save raw output
@@ -409,6 +466,7 @@ def _main() -> None:
 
     parser = argparse.ArgumentParser(description="Quant Researcher Agent")
     parser.add_argument("--manual", action="store_true", help="Run one research cycle manually")
+    parser.add_argument("--no-claude", action="store_true", help="Skip Claude Code launch (report only)")
     parser.add_argument("--report-only", action="store_true", help="Only compile report, no Claude Code")
     parser.add_argument("--db", default="data/renaissance_bot.db", help="DB path")
     parser.add_argument("--config", default="config/config.json", help="Config path")
@@ -437,10 +495,11 @@ def _main() -> None:
         ensure_agent_tables(args.db)
 
         bus = EventBus()
-        # Override: disable Claude Code launch for manual test
         config_copy = dict(config)
         config_copy.setdefault("quant_researcher", {})
-        config_copy["quant_researcher"]["enabled"] = False
+        # --no-claude disables Claude launch; --manual alone respects config
+        if args.no_claude:
+            config_copy["quant_researcher"]["enabled"] = False
 
         researcher = QuantResearcherAgent(
             event_bus=bus,
@@ -448,8 +507,10 @@ def _main() -> None:
             config=config_copy,
         )
         asyncio.run(researcher.run_weekly_research())
-        print("\nManual research cycle complete (Claude Code disabled).")
-        print("To enable Claude Code, set quant_researcher.enabled=true in config.")
+        claude_status = "disabled (--no-claude)" if args.no_claude else (
+            "enabled" if config_copy["quant_researcher"].get("enabled") else "disabled (config)"
+        )
+        print(f"\nManual research cycle complete (Claude Code: {claude_status}).")
 
 
 if __name__ == "__main__":

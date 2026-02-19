@@ -189,6 +189,35 @@ def insert_proposal(db_path: str, proposal_dict: Dict[str, Any]) -> int:
     return proposal_id
 
 
+def insert_model_ledger(
+    db_path: str,
+    model_name: str,
+    model_version: str,
+    accuracy: Optional[float] = None,
+    sharpe: Optional[float] = None,
+    max_drawdown: Optional[float] = None,
+    file_path: Optional[str] = None,
+    file_hash: Optional[str] = None,
+    status: str = "active",
+    proposal_id: Optional[int] = None,
+) -> int:
+    """Insert one row into model_ledger and return its id."""
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    cur = conn.execute(
+        """INSERT INTO model_ledger
+           (model_name, model_version, accuracy, sharpe, max_drawdown,
+            file_path, file_hash, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (model_name, model_version, accuracy, sharpe, max_drawdown,
+         file_path, file_hash, status),
+    )
+    row_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    logger.debug("model_ledger: inserted %s v=%s (id=%d)", model_name, model_version, row_id)
+    return row_id
+
+
 def log_improvement(
     db_path: str,
     proposal_id: Optional[int],

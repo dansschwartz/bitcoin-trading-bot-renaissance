@@ -4172,10 +4172,12 @@ class RenaissanceTradingBot:
             self.logger.info("Launching regime detector loop (every 5 min, observation mode)...")
             self._track_task(self._run_regime_detector_loop())
 
-        # ── Doc 15: Agent weekly research loop ──
+        # ── Doc 15: Agent weekly research loop + deployment loop ──
         if self.agent_coordinator:
             self.logger.info("Launching agent weekly research check loop...")
             self._track_task(self.agent_coordinator.run_weekly_check_loop())
+            self.logger.info("Launching agent deployment loop...")
+            self._track_task(self.agent_coordinator.run_deployment_loop())
 
         # ── Gap 5 fix: Unified Telegram Reporting ──
         if self.monitoring_alert_manager:

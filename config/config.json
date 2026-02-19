@@ -48,22 +48,22 @@
         ]
     },
     "signal_weights": {
-        "order_flow": 0.00317364444602137,
-        "order_book": 0.0909124777743969,
-        "volume": 0.17883566229703052,
-        "macd": 0.08848198026946116,
-        "rsi": 0.07878833642491184,
-        "bollinger": 0.0070244387575883055,
-        "alternative": 0.004452542594520341,
-        "stat_arb": 0.15248325336913437,
-        "volume_profile": 0.007591975294985745,
-        "fractal": 0.08244468976906798,
-        "entropy": 0.08957588307519129,
-        "quantum": 0.007591975294985745,
-        "lead_lag": 0.0034624813653345078,
-        "correlation_divergence": 0.009369799629734301,
-        "garch_vol": 0.10824113640367657,
-        "multi_exchange": 0.08756972323395915
+        "order_flow": 0.01166289376345909,
+        "order_book": 0.008497422587618408,
+        "volume": 0.007472421050777169,
+        "macd": 0.008458792602153719,
+        "rsi": 0.008327159540880473,
+        "bollinger": 0.007188320888951191,
+        "alternative": 0.010869749459504611,
+        "stat_arb": 0.058163574377919004,
+        "volume_profile": 0.008949996151721767,
+        "fractal": 0.010667477558185964,
+        "entropy": 0.007472421050777169,
+        "quantum": 0.010925139632418486,
+        "lead_lag": 0.8140947149497615,
+        "correlation_divergence": 0.007590542680752862,
+        "garch_vol": 0.011508411885080514,
+        "multi_exchange": 0.008150961820038093
     },
     "weight_lock": false,
     "mean_reversion": {
@@ -530,6 +530,14 @@
         "schedule_day": "sunday",
         "schedule_hour_utc": 2,
         "max_session_minutes": 120,
-        "max_proposals_per_week": 5
+        "max_proposals_per_week": 5,
+        "model": "sonnet"
+    },
+    "model_retraining": {
+        "enabled": true,
+        "schedule_day": "saturday",
+        "schedule_hour_utc": 6,
+        "epochs": 50,
+        "rolling_days": 180
     }
 }

@@ -1,11 +1,14 @@
-"""AgentCoordinator — instantiates agents, wires event subscriptions, orchestrates weekly research."""
+"""AgentCoordinator — instantiates agents, wires event subscriptions, orchestrates weekly research and deployment."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import sqlite3
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agents.base import BaseAgent
@@ -18,6 +21,15 @@ from agents.portfolio_agent import PortfolioAgent
 from agents.monitoring_agent import MonitoringAgent
 from agents.meta_agent import MetaAgent
 from agents.db_schema import ensure_agent_tables, log_agent_event
+from agents.deployment_monitor import DeploymentMonitor
+from agents.config_deployer import ConfigDeployer
+from agents.model_retrainer import ModelRetrainer
+from agents.proposal import (
+    DeploymentMode,
+    ProposalStatus,
+    REQUIRES_APPROVAL,
+    SANDBOX_HOURS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +59,14 @@ class AgentCoordinator:
 
         # Ensure agent DB tables exist
         ensure_agent_tables(db_path)
+
+        # ── Deployment infrastructure ──
+        config_path = str(Path(db_path).resolve().parent.parent / "config" / "config.json")
+        models_dir = str(Path(db_path).resolve().parent.parent / "models" / "trained")
+        self.config_deployer = ConfigDeployer(config_path)
+        self.deployment_monitor = DeploymentMonitor(db_path, config)
+        self.model_retrainer = ModelRetrainer(db_path, models_dir, self.event_bus)
+        self._active_backups: Dict[int, str] = {}  # proposal_id -> backup_path
 
         # ── Instantiate agents ──
         common = dict(event_bus=self.event_bus, db_path=db_path, config=config)
@@ -165,32 +185,46 @@ class AgentCoordinator:
     # ── Weekly research loop ──
 
     async def run_weekly_check_loop(self) -> None:
-        """Background task: checks hourly if it's time for weekly research.
+        """Background task: checks hourly if it's time for weekly research or retraining.
 
         The actual research is handled by QuantResearcherAgent (Phase D).
-        This loop just triggers it at the configured schedule.
+        Model retraining is handled by ModelRetrainer.
         """
         researcher_cfg = self.config.get("quant_researcher", {})
-        if not researcher_cfg.get("enabled", False):
-            self.logger.info("AgentCoordinator: quant_researcher disabled, weekly loop idle")
-            # Still run loop but skip research
-            while True:
-                await asyncio.sleep(3600)
-                continue
+        retrain_cfg = self.config.get("model_retraining", {})
 
-        schedule_day = researcher_cfg.get("schedule_day", "sunday").lower()
-        schedule_hour = researcher_cfg.get("schedule_hour_utc", 2)
         day_map = {
             "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
             "friday": 4, "saturday": 5, "sunday": 6,
         }
-        target_day = day_map.get(schedule_day, 6)
-        last_run_week: Optional[int] = None
 
-        self.logger.info(
-            "AgentCoordinator: weekly research scheduled for %s %02d:00 UTC",
-            schedule_day, schedule_hour,
-        )
+        # Research schedule
+        research_enabled = researcher_cfg.get("enabled", False)
+        research_day = day_map.get(researcher_cfg.get("schedule_day", "sunday").lower(), 6)
+        research_hour = researcher_cfg.get("schedule_hour_utc", 2)
+        last_research_week: Optional[int] = None
+
+        # Retraining schedule
+        retrain_enabled = retrain_cfg.get("enabled", False)
+        retrain_day = day_map.get(retrain_cfg.get("schedule_day", "saturday").lower(), 5)
+        retrain_hour = retrain_cfg.get("schedule_hour_utc", 6)
+        last_retrain_week: Optional[int] = None
+
+        if research_enabled:
+            self.logger.info(
+                "AgentCoordinator: weekly research scheduled for %s %02d:00 UTC",
+                researcher_cfg.get("schedule_day", "sunday"), research_hour,
+            )
+        else:
+            self.logger.info("AgentCoordinator: quant_researcher disabled")
+
+        if retrain_enabled:
+            self.logger.info(
+                "AgentCoordinator: weekly retraining scheduled for %s %02d:00 UTC",
+                retrain_cfg.get("schedule_day", "saturday"), retrain_hour,
+            )
+        else:
+            self.logger.info("AgentCoordinator: model_retraining disabled")
 
         while True:
             try:
@@ -198,13 +232,15 @@ class AgentCoordinator:
                 now = datetime.now(timezone.utc)
                 iso_week = now.isocalendar()[1]
 
+                # ── Weekly research ──
                 if (
-                    now.weekday() == target_day
-                    and now.hour == schedule_hour
-                    and iso_week != last_run_week
+                    research_enabled
+                    and now.weekday() == research_day
+                    and now.hour == research_hour
+                    and iso_week != last_research_week
                 ):
                     self.logger.info("AgentCoordinator: triggering weekly research")
-                    last_run_week = iso_week
+                    last_research_week = iso_week
                     try:
                         from agents.quant_researcher import QuantResearcherAgent
                         researcher = QuantResearcherAgent(
@@ -224,11 +260,251 @@ class AgentCoordinator:
                             payload={"error": str(exc)},
                             severity="error",
                         )
+
+                # ── Weekly model retraining ──
+                if (
+                    retrain_enabled
+                    and now.weekday() == retrain_day
+                    and now.hour == retrain_hour
+                    and iso_week != last_retrain_week
+                    and not self.model_retrainer.is_running
+                ):
+                    self.logger.info("AgentCoordinator: triggering scheduled model retraining")
+                    last_retrain_week = iso_week
+                    asyncio.create_task(
+                        self._run_model_retrain(
+                            proposal_id=None,  # scheduled, not from proposal
+                            retrain_args={
+                                "epochs": retrain_cfg.get("epochs", 50),
+                                "rolling_days": retrain_cfg.get("rolling_days", 180),
+                            },
+                        )
+                    )
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 self.logger.error("Weekly check loop error: %s", exc)
                 await asyncio.sleep(60)
+
+    # ── Deployment loop ──
+
+    async def run_deployment_loop(self) -> None:
+        """Background task: every 5 min, process pending deployments and check sandboxes."""
+        self.logger.info("AgentCoordinator: deployment loop started (every 5 min)")
+        while True:
+            try:
+                await asyncio.sleep(300)  # 5 minutes
+                await self._process_pending_deployments()
+                await self._check_completed_sandboxes()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                self.logger.error("Deployment loop error: %s", exc)
+                await asyncio.sleep(60)
+
+    async def _process_pending_deployments(self) -> None:
+        """Find safety_passed proposals and deploy/sandbox/retrain them."""
+        try:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro", uri=True, timeout=5.0,
+            )
+            rows = conn.execute(
+                """SELECT id, title, deployment_mode, config_changes
+                   FROM proposals WHERE status = ?""",
+                (ProposalStatus.SAFETY_PASSED.value,),
+            ).fetchall()
+            conn.close()
+        except Exception as exc:
+            self.logger.debug("_process_pending_deployments query failed: %s", exc)
+            return
+
+        for row in rows:
+            proposal_id, title, mode_str, config_changes_json = row
+            config_changes = json.loads(config_changes_json) if config_changes_json else {}
+
+            try:
+                mode = DeploymentMode(mode_str)
+            except ValueError:
+                self.logger.warning("Unknown deployment mode '%s' for proposal %d", mode_str, proposal_id)
+                continue
+
+            self.logger.info(
+                "Processing proposal %d '%s' (mode=%s)", proposal_id, title, mode_str,
+            )
+
+            try:
+                if mode == DeploymentMode.MODEL_RETRAIN:
+                    # Launch retraining in background
+                    retrain_args = config_changes.get("retrain_args", {})
+                    asyncio.create_task(
+                        self._run_model_retrain(proposal_id, retrain_args)
+                    )
+                    self._update_proposal_status(proposal_id, ProposalStatus.SANDBOXING)
+
+                elif mode == DeploymentMode.PARAMETER_TUNE:
+                    # Deploy immediately (no sandbox, no approval)
+                    backup_path, _ = self.config_deployer.apply_changes(config_changes, proposal_id)
+                    self._active_backups[proposal_id] = str(backup_path)
+                    self.deployment_monitor.deploy_proposal(proposal_id)
+                    self.logger.info("Proposal %d deployed immediately (parameter_tune)", proposal_id)
+
+                elif REQUIRES_APPROVAL.get(mode, True):
+                    # Needs human approval first
+                    self._update_proposal_status(proposal_id, ProposalStatus.AWAITING_APPROVAL)
+                    self.logger.info("Proposal %d awaiting human approval (mode=%s)", proposal_id, mode_str)
+
+                else:
+                    # Apply config + start sandbox (MODIFY_EXISTING)
+                    backup_path, _ = self.config_deployer.apply_changes(config_changes, proposal_id)
+                    self._active_backups[proposal_id] = str(backup_path)
+                    # Create a minimal Proposal object for the monitor
+                    from agents.proposal import Proposal
+                    p = Proposal(
+                        title=title,
+                        description="",
+                        category="",
+                        deployment_mode=mode,
+                        proposal_id=proposal_id,
+                    )
+                    self.deployment_monitor.start_sandbox(p)
+                    self.logger.info("Proposal %d deployed to sandbox (%dh)", proposal_id, SANDBOX_HOURS.get(mode, 24))
+
+            except Exception as exc:
+                self.logger.error("Failed to process proposal %d: %s", proposal_id, exc)
+                log_agent_event(
+                    self.db_path,
+                    agent_name="coordinator",
+                    event_type="deployment_error",
+                    channel="coordinator.deploy",
+                    payload={"proposal_id": proposal_id, "error": str(exc)},
+                    severity="error",
+                )
+
+    async def _check_completed_sandboxes(self) -> None:
+        """Check for sandboxes that have ended and decide deploy vs rollback."""
+        completed = self.deployment_monitor.check_sandbox_completion()
+        if not completed:
+            return
+
+        for item in completed:
+            proposal_id = item["id"]
+            sandbox_start = item.get("sandbox_start", "")
+
+            try:
+                metrics_before = self._get_baseline_metrics(sandbox_start)
+                metrics_after = self._get_current_metrics()
+
+                result = self.deployment_monitor.evaluate_sandbox_result(
+                    proposal_id, metrics_before, metrics_after,
+                )
+
+                if result["action"] == "deploy":
+                    self.deployment_monitor.deploy_proposal(proposal_id)
+                    self.logger.info(
+                        "Proposal %d promoted from sandbox to deployed", proposal_id,
+                    )
+                else:
+                    reason = "; ".join(result.get("reasons", ["metric degradation"]))
+                    # Rollback config
+                    if proposal_id in self._active_backups:
+                        self.config_deployer.restore(Path(self._active_backups[proposal_id]))
+                        del self._active_backups[proposal_id]
+                    else:
+                        self.config_deployer.rollback_proposal(proposal_id)
+                    self.deployment_monitor.rollback_proposal(proposal_id, reason)
+                    self.logger.warning(
+                        "Proposal %d rolled back: %s", proposal_id, reason,
+                    )
+
+            except Exception as exc:
+                self.logger.error("Sandbox evaluation failed for proposal %d: %s", proposal_id, exc)
+
+    async def _run_model_retrain(
+        self, proposal_id: int, retrain_args: Dict[str, Any],
+    ) -> None:
+        """Run model retraining and deploy/rollback based on result."""
+        self.logger.info("Starting model retraining for proposal %d", proposal_id)
+        try:
+            result = await self.model_retrainer.run_retraining(
+                proposal_id=proposal_id,
+                epochs=retrain_args.get("epochs", 50),
+                rolling_days=retrain_args.get("rolling_days", 180),
+                full_history=retrain_args.get("full_history", False),
+            )
+
+            exit_code = result.get("exit_code", 1)
+            if exit_code == 0:
+                self.deployment_monitor.deploy_proposal(proposal_id)
+                self.logger.info("Model retraining succeeded — proposal %d deployed", proposal_id)
+            else:
+                error_msg = result.get("error", f"exit_code={exit_code}")
+                self.deployment_monitor.rollback_proposal(proposal_id, f"retrain failed: {error_msg}")
+                self.logger.warning("Model retraining failed — proposal %d rolled back", proposal_id)
+
+        except Exception as exc:
+            self.logger.error("Model retrain task failed for proposal %d: %s", proposal_id, exc)
+            self.deployment_monitor.rollback_proposal(proposal_id, f"exception: {exc}")
+
+    def _update_proposal_status(self, proposal_id: int, status: ProposalStatus) -> None:
+        """Update a proposal's status in the DB."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            conn.execute(
+                "UPDATE proposals SET status=?, updated_at=? WHERE id=?",
+                (status.value, now, proposal_id),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            self.logger.debug("_update_proposal_status failed: %s", exc)
+
+    def _get_baseline_metrics(self, sandbox_start: str) -> Dict[str, float]:
+        """Get performance metrics from before the sandbox started."""
+        try:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro", uri=True, timeout=5.0,
+            )
+            row = conn.execute(
+                """SELECT AVG(sharpe) as sharpe, MAX(max_drawdown) as drawdown,
+                          AVG(win_rate) as win_rate
+                   FROM daily_performance WHERE date < ?""",
+                (sandbox_start[:10],),  # use date part
+            ).fetchone()
+            conn.close()
+            if row and row[0] is not None:
+                return {
+                    "sharpe": row[0] or 0.0,
+                    "drawdown": row[1] or 0.0,
+                    "win_rate": row[2] or 0.0,
+                }
+        except Exception as exc:
+            self.logger.debug("_get_baseline_metrics failed: %s", exc)
+        return {"sharpe": 0.0, "drawdown": 0.05, "win_rate": 0.5}
+
+    def _get_current_metrics(self) -> Dict[str, float]:
+        """Get recent performance metrics (last 7 days)."""
+        try:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro", uri=True, timeout=5.0,
+            )
+            row = conn.execute(
+                """SELECT AVG(sharpe) as sharpe, MAX(max_drawdown) as drawdown,
+                          AVG(win_rate) as win_rate
+                   FROM daily_performance
+                   ORDER BY date DESC LIMIT 7"""
+            ).fetchone()
+            conn.close()
+            if row and row[0] is not None:
+                return {
+                    "sharpe": row[0] or 0.0,
+                    "drawdown": row[1] or 0.0,
+                    "win_rate": row[2] or 0.0,
+                }
+        except Exception as exc:
+            self.logger.debug("_get_current_metrics failed: %s", exc)
+        return {"sharpe": 0.0, "drawdown": 0.05, "win_rate": 0.5}
 
     # ── Internal event handlers ──
 
