@@ -17,7 +17,7 @@
 #        sudo systemctl start renaissance-dashboard
 #
 # What this script does:
-#   - Installs Python 3.11, git, tmux, sqlite3
+#   - Installs Python 3.12 (default on Ubuntu 24.04), git, tmux, sqlite3
 #   - Creates 'botuser' user (if not exists)
 #   - Clones the repo
 #   - Sets up Python venv and installs dependencies
@@ -33,7 +33,7 @@ REPO_URL="https://github.com/dansschwartz/bitcoin-trading-bot-renaissance.git"
 BOT_USER="botuser"
 BOT_HOME="/home/${BOT_USER}"
 APP_DIR="${BOT_HOME}/bitcoin-trading-bot-renaissance"
-PYTHON="python3.11"
+PYTHON="python3"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'
@@ -58,7 +58,7 @@ apt update -qq && apt upgrade -y -qq
 
 info "Installing dependencies..."
 apt install -y -qq \
-    python3.11 python3.11-venv python3.11-dev \
+    python3 python3-venv python3-dev \
     python3-pip git tmux sqlite3 curl ufw \
     build-essential libffi-dev libssl-dev
 
