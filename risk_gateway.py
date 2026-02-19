@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 from renaissance_engine_core import RiskManager as RenaissanceRiskManager
 from vae_anomaly_detector import VariationalAutoEncoder
+from ml_model_loader import INPUT_DIM as ML_INPUT_DIM
 
 VAE_WEIGHTS_PATH = "models/trained/vae_anomaly_detector.pth"
 
@@ -33,11 +34,11 @@ class RiskGateway:
 
         self.risk_manager = RenaissanceRiskManager()
 
-        # VAE Anomaly Detector — 83 features matching ml_model_loader pipeline
+        # VAE Anomaly Detector — dimension must match ml_model_loader pipeline
         self.anomaly_threshold = float(config.get("anomaly_threshold", 2.5))
         self.vae = None
         try:
-            self.vae = VariationalAutoEncoder(input_dim=83, latent_dim=32)
+            self.vae = VariationalAutoEncoder(input_dim=ML_INPUT_DIM, latent_dim=32)
             if os.path.exists(VAE_WEIGHTS_PATH):
                 state = torch.load(VAE_WEIGHTS_PATH, map_location='cpu', weights_only=True)
                 self.vae.load_state_dict(state)

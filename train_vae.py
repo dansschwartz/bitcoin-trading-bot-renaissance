@@ -36,7 +36,7 @@ logger = logging.getLogger("train_vae")
 
 DB_PATH = "data/renaissance_bot.db"
 OUTPUT_PATH = "models/trained/vae_anomaly_detector.pth"
-INPUT_DIM = ML_INPUT_DIM  # 98 (from ml_model_loader)
+INPUT_DIM = ML_INPUT_DIM  # from ml_model_loader (currently 98)
 LATENT_DIM = 32
 SEQ_LEN = 30  # Must match build_feature_sequence default
 

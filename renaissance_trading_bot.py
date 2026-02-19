@@ -1786,6 +1786,15 @@ class RenaissanceTradingBot:
         # Gate through VAE Anomaly Detection
         vae_loss = 0.0
         gate_reason = "not_evaluated"
+        feature_vector = ml_package.feature_vector if ml_package else None
+
+        # Always compute VAE loss for monitoring (even on HOLD)
+        if feature_vector is not None and self.risk_gateway.vae_trained and self.risk_gateway.vae is not None:
+            try:
+                _, vae_loss = self.risk_gateway._check_anomaly(feature_vector)
+            except Exception:
+                pass
+
         if action != 'HOLD':
             portfolio_data = {
                 'total_value': self.position_limit,
@@ -1793,7 +1802,6 @@ class RenaissanceTradingBot:
                 'positions': {'BTC': self.current_position},
                 'current_price': current_price
             }
-            feature_vector = ml_package.feature_vector if ml_package else None
             is_allowed, vae_loss, gate_reason = self.risk_gateway.assess_trade(
                 action=action,
                 amount=0,  # We don't know size yet; gate on action only

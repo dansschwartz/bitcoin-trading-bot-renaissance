@@ -504,12 +504,16 @@ class MLIntegrationBridge:
                 self.performance_metrics['ml_prediction_count']
             )
 
+            # Extract last-row feature vector for VAE anomaly detection
+            last_feature_vector = features[-1, :] if features is not None and features.ndim == 2 else None
+
             return MLSignalPackage(
                 primary_signals=ml_signals,
                 ml_predictions=ml_predictions,
                 ensemble_score=ensemble_score,
                 confidence_score=confidence_score,
                 fractal_insights=fractal_insights,
+                feature_vector=last_feature_vector,
                 timestamp=datetime.now(),
                 processing_time_ms=processing_time
             )
