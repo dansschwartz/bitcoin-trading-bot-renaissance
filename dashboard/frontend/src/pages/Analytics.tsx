@@ -65,7 +65,7 @@ function HourlyHeatmap() {
           <BarChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
             <XAxis dataKey="hour" tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} />
             <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} />
-            <Tooltip contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12 }} />
+            <Tooltip contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }} />
             <Bar dataKey="avg_pnl" radius={[4, 4, 0, 0]}>
               {data.map((d, i) => (
                 <Cell key={i} fill={d.avg_pnl >= 0 ? '#00d395' : '#ff4757'} fillOpacity={0.7} />

@@ -116,7 +116,7 @@ export default function EquityCurve() {
                 width={60}
               />
               <Tooltip
-                contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12 }}
+                contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
                 labelFormatter={formatTimestamp}
                 formatter={(value: number, name: string) => [
                   formatCurrency(value),

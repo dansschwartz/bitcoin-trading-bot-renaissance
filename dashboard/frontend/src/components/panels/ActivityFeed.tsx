@@ -220,7 +220,9 @@ export default function ActivityFeed() {
                   <p className="text-xs font-mono text-gray-300 truncate">{item.message}</p>
                   <span className="text-[10px] text-gray-600 shrink-0">{formatTimestamp(item.timestamp)}</span>
                 </div>
-                <span className="text-[9px] text-gray-700 uppercase">{item.type}</span>
+                {item.type !== 'decision' && item.type !== 'cycle' && (
+                  <span className="text-[9px] text-gray-700 uppercase">{item.type}</span>
+                )}
               </div>
             </div>
           ))

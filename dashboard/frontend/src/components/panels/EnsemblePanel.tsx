@@ -40,7 +40,7 @@ export default function EnsemblePanel() {
           <BarChart data={chartData} layout="vertical" margin={{ left: 60, right: 10, top: 5, bottom: 5 }}>
             <XAxis type="number" domain={[-1, 1]} tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} />
             <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
-            <Tooltip contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12 }} />
+            <Tooltip contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }} />
             <Bar dataKey="prediction" radius={[0, 4, 4, 0]}>
               {chartData.map((d, i) => (
                 <Cell key={i} fill={d.prediction >= 0 ? '#00d395' : '#ff4757'} fillOpacity={0.8} />

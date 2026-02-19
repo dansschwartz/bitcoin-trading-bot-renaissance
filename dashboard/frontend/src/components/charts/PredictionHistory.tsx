@@ -31,8 +31,9 @@ export default function PredictionHistory() {
     return (
       <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
         <h3 className="text-sm font-medium text-gray-300 mb-3">ML Prediction History</h3>
-        <div className="h-48 flex items-center justify-center text-gray-600 text-sm">
-          No predictions yet
+        <div className="h-48 flex flex-col items-center justify-center text-gray-600 text-sm gap-2">
+          <span>Collecting predictions...</span>
+          <span className="text-xs text-gray-700">ML models log predictions each trading cycle</span>
         </div>
       </div>
     );
@@ -47,7 +48,7 @@ export default function PredictionHistory() {
             <XAxis dataKey="timestamp" tickFormatter={formatTimestamp} tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} />
             <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} domain={[-1, 1]} />
             <Tooltip
-              contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12 }}
+              contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
               labelFormatter={formatTimestamp}
             />
             <Legend wrapperStyle={{ fontSize: 10 }} />

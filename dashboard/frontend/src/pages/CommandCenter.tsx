@@ -29,7 +29,7 @@ export default function CommandCenter() {
         />
         <MetricCard
           title="Avg Slippage"
-          value={pnl ? `${(pnl.avg_slippage * 100).toFixed(3)}%` : '--'}
+          value={status?.paper_trading ? 'N/A (paper)' : pnl ? `${(pnl.avg_slippage * 100).toFixed(3)}%` : '--'}
           subtitle={`${pnl?.total_trades ?? 0} trades (24h)`}
         />
       </div>

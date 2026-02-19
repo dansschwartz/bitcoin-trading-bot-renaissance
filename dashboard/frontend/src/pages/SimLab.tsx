@@ -16,6 +16,7 @@ const CHART_TOOLTIP_STYLE = {
   border: '1px solid #243049',
   borderRadius: 8,
   fontSize: 12,
+  color: '#e5e7eb',
 };
 
 type SortField = 'id' | 'timestamp' | 'total_trades' | 'realized_pnl' | 'sharpe_ratio' | 'max_drawdown' | 'win_rate';
