@@ -16,6 +16,8 @@ import type {
   PnLSummary, RegimePerformance, CalendarPnL, HourlyPnL, MLPrediction,
   EnsembleStatus, RegimeStatus, VAEPoint, RiskMetrics, Exposure,
   RiskGatewayEntry, TimeRange, BacktestRun, BacktestComparison,
+  ClosedPosition, PositionSummary, ArbStatus, ArbTrade, ArbSignal, ArbSummary,
+  ArbWallet,
 } from './types';
 
 export const api = {
@@ -69,6 +71,20 @@ export const api = {
   backtestRuns: () => get<BacktestRun[]>('/api/backtest/runs'),
   backtestResult: (id: number) => get<BacktestRun>(`/api/backtest/runs/${id}`),
   backtestCompare: (id: number) => get<BacktestComparison>(`/api/backtest/compare/${id}`),
+
+  // Positions (round-trip P&L)
+  closedPositions: (limit = 50, offset = 0) =>
+    get<ClosedPosition[]>(`/api/positions/closed?limit=${limit}&offset=${offset}`),
+  positionSummary: () => get<PositionSummary>('/api/positions/summary'),
+
+  // Arbitrage
+  arbStatus: () => get<ArbStatus>('/api/arbitrage/status'),
+  arbTrades: (limit = 50, offset = 0, strategy?: string) =>
+    get<ArbTrade[]>(`/api/arbitrage/trades?limit=${limit}&offset=${offset}${strategy ? `&strategy=${strategy}` : ''}`),
+  arbSignals: (limit = 100, strategy?: string) =>
+    get<ArbSignal[]>(`/api/arbitrage/signals?limit=${limit}${strategy ? `&strategy=${strategy}` : ''}`),
+  arbSummary: () => get<ArbSummary>('/api/arbitrage/summary'),
+  arbWallet: () => get<ArbWallet>('/api/arbitrage/wallet'),
 
   // Agents (Doc 15)
   agentStatuses: () => get<Record<string, unknown>[]>('/api/agents/status'),

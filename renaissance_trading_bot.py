@@ -963,7 +963,7 @@ class RenaissanceTradingBot:
                 self.logger.info(f"Real-time dashboard started on {dash_host}:{dash_port}")
             except Exception as e:
                 self.logger.warning(f"Failed to start real-time dashboard: {e}")
-        
+
         # Multi-Exchange Arbitrage Engine
         self.arbitrage_enabled = self.config.get("arbitrage", {}).get("enabled", False)
         self.arbitrage_orchestrator = None
@@ -974,6 +974,9 @@ class RenaissanceTradingBot:
                 )
                 self.arbitrage_orchestrator = ArbitrageOrchestrator(config_path=arb_config_path)
                 self.logger.info("Arbitrage engine initialized (will start with trading loop)")
+                # Wire orchestrator to dashboard for API access
+                if hasattr(self, '_dashboard_app') and self._dashboard_app:
+                    self._dashboard_app.state.arb_orchestrator = self.arbitrage_orchestrator
             except Exception as e:
                 self.logger.warning(f"Arbitrage engine init failed: {e}")
                 self.arbitrage_orchestrator = None
@@ -1709,8 +1712,15 @@ class RenaissanceTradingBot:
                                 pos.position_id, reason=f"Signal reversal: {pos_side} -> {action}"
                             )
                             if close_ok:
+                                _rpnl = getattr(pos, 'realized_pnl', 0.0) or 0.0
+                                _cpx = getattr(pos, 'current_price', 0.0) or current_price
                                 self._track_task(
-                                    self.db_manager.close_position_record(pos.position_id)
+                                    self.db_manager.close_position_record(
+                                        pos.position_id,
+                                        close_price=float(_cpx),
+                                        realized_pnl=float(_rpnl),
+                                        exit_reason="signal_reversal",
+                                    )
                                 )
                             self.logger.info(
                                 f"SIGNAL REVERSAL: {product_id} closed {pos_side} position — {close_msg}"
@@ -2416,7 +2426,14 @@ class RenaissanceTradingBot:
                     for pos in all_positions:
                         ok, _ = self.position_manager.close_position(pos.position_id, reason="Circuit breaker: 15% drawdown")
                         if ok:
-                            self._track_task(self.db_manager.close_position_record(pos.position_id))
+                            _rpnl = getattr(pos, 'realized_pnl', 0.0) or 0.0
+                            _cpx = getattr(pos, 'current_price', 0.0) or 0.0
+                            self._track_task(self.db_manager.close_position_record(
+                                pos.position_id,
+                                close_price=float(_cpx),
+                                realized_pnl=float(_rpnl),
+                                exit_reason="circuit_breaker",
+                            ))
                 except Exception as cb_err:
                     self.logger.error(f"Circuit breaker close-all failed: {cb_err}")
                 self._drawdown_exits_only = True
@@ -2455,7 +2472,14 @@ class RenaissanceTradingBot:
                                 worst_pos.position_id, reason="Exposure limit exceeded"
                             )
                             if ok:
-                                self._track_task(self.db_manager.close_position_record(worst_pos.position_id))
+                                _rpnl = getattr(worst_pos, 'realized_pnl', 0.0) or 0.0
+                                _cpx = getattr(worst_pos, 'current_price', 0.0) or 0.0
+                                self._track_task(self.db_manager.close_position_record(
+                                    worst_pos.position_id,
+                                    close_price=float(_cpx),
+                                    realized_pnl=float(_rpnl),
+                                    exit_reason="exposure_limit",
+                                ))
                             self.logger.info(f"EXPOSURE CLOSE: {worst_pos.position_id}")
             except Exception as exp_err:
                 self.logger.debug(f"Exposure monitor error: {exp_err}")
@@ -3274,7 +3298,13 @@ class RenaissanceTradingBot:
                                 pos.position_id, reason=f"Exit engine: {exit_decision['reason']}"
                             )
                             if close_ok:
-                                self._track_task(self.db_manager.close_position_record(pos.position_id))
+                                _rpnl = getattr(pos, 'realized_pnl', 0.0) or 0.0
+                                self._track_task(self.db_manager.close_position_record(
+                                    pos.position_id,
+                                    close_price=float(current_price),
+                                    realized_pnl=float(_rpnl),
+                                    exit_reason=f"exit_engine:{exit_decision['reason']}",
+                                ))
                                 self.logger.info(f"EXIT EXECUTED: {pos.position_id} — {close_msg}")
                                 # Record trade PnL for health monitor
                                 if self.health_monitor and pos.entry_price > 0:
@@ -3348,9 +3378,16 @@ class RenaissanceTradingBot:
                                         _rr.position_id, reason=f"ReEval: {_rr.reason_code}"
                                     )
                                     if _close_ok:
-                                        # Update DB record too
+                                        # Update DB record with P&L data
+                                        _rr_pos = next((p for p in _reeval_positions_for_pid if p.position_id == _rr.position_id), None)
+                                        _rr_rpnl = getattr(_rr_pos, 'realized_pnl', 0.0) if _rr_pos else 0.0
                                         self._track_task(
-                                            self.db_manager.close_position_record(_rr.position_id)
+                                            self.db_manager.close_position_record(
+                                                _rr.position_id,
+                                                close_price=float(current_price),
+                                                realized_pnl=float(_rr_rpnl or 0.0),
+                                                exit_reason=f"reeval:{_rr.reason_code}",
+                                            )
                                         )
                                         self.logger.warning(
                                             f"REEVAL CLOSE: {_rr.position_id} — {_rr.reason_code} "

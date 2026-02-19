@@ -166,6 +166,59 @@ def get_trade_lifecycle(db_path: str, trade_id: int) -> Dict[str, Any]:
     return {"trade": trade, "context_decisions": decisions}
 
 
+# ─── Closed Positions (round-trip P&L) ────────────────────────────────────
+
+def get_closed_positions(
+    db_path: str, limit: int = 50, offset: int = 0
+) -> List[Dict[str, Any]]:
+    """Return closed positions with exit data (round-trip P&L tracking)."""
+    with _conn(db_path) as c:
+        rows = c.execute(
+            """SELECT position_id, product_id, side, size, entry_price,
+                      close_price, opened_at, closed_at, realized_pnl,
+                      exit_reason, hold_duration_seconds
+               FROM open_positions
+               WHERE status = 'CLOSED'
+               ORDER BY closed_at DESC NULLS LAST, rowid DESC
+               LIMIT ? OFFSET ?""",
+            (limit, offset),
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def get_position_summary_stats(db_path: str) -> Dict[str, Any]:
+    """Aggregate stats from closed positions with realized P&L data."""
+    with _conn(db_path) as c:
+        row = c.execute(
+            """SELECT
+                 COUNT(*) as total_closed,
+                 SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
+                 SUM(CASE WHEN realized_pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                 COALESCE(SUM(realized_pnl), 0.0) as total_realized_pnl,
+                 COALESCE(AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl END), 0.0) as avg_win,
+                 COALESCE(AVG(CASE WHEN realized_pnl <= 0 THEN realized_pnl END), 0.0) as avg_loss,
+                 COALESCE(MAX(realized_pnl), 0.0) as largest_win,
+                 COALESCE(MIN(realized_pnl), 0.0) as largest_loss,
+                 COALESCE(AVG(hold_duration_seconds), 0.0) as avg_hold_seconds
+               FROM open_positions
+               WHERE status = 'CLOSED' AND realized_pnl IS NOT NULL"""
+        ).fetchone()
+        total = row["total_closed"] or 0
+        wins = row["wins"] or 0
+        return {
+            "total_closed": total,
+            "wins": wins,
+            "losses": row["losses"] or 0,
+            "win_rate": round(wins / total, 4) if total > 0 else 0.0,
+            "total_realized_pnl": round(row["total_realized_pnl"], 2),
+            "avg_win": round(row["avg_win"], 2),
+            "avg_loss": round(row["avg_loss"], 2),
+            "largest_win": round(row["largest_win"], 2),
+            "largest_loss": round(row["largest_loss"], 2),
+            "avg_hold_seconds": round(row["avg_hold_seconds"], 1),
+        }
+
+
 # ─── Analytics ────────────────────────────────────────────────────────────
 
 def get_equity_curve(db_path: str, hours: int = 24) -> List[Dict[str, Any]]:

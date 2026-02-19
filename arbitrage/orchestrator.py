@@ -374,6 +374,49 @@ class ArbitrageOrchestrator:
                     f"Exposure: ${risk_status['total_exposure_usd']:.2f}")
         logger.info("=" * 60)
 
+    def get_full_status(self) -> dict:
+        """Aggregate status from all subsystems for dashboard consumption."""
+        uptime = (datetime.utcnow() - self._start_time).total_seconds() if self._start_time else 0
+        try:
+            book_status = self.book_manager.get_status()
+        except Exception:
+            book_status = {}
+        try:
+            cross_stats = self.cross_exchange_detector.get_stats()
+        except Exception:
+            cross_stats = {}
+        try:
+            executor_stats = self.executor.get_stats()
+        except Exception:
+            executor_stats = {}
+        try:
+            funding_stats = self.funding_arb.get_stats()
+        except Exception:
+            funding_stats = {}
+        try:
+            tri_stats = self.triangular_arb.get_stats()
+        except Exception:
+            tri_stats = {}
+        try:
+            risk_status = self.risk_engine.get_status()
+        except Exception:
+            risk_status = {}
+        try:
+            tracker_summary = self.tracker.get_summary()
+        except Exception:
+            tracker_summary = {}
+        return {
+            "running": self._running,
+            "uptime_seconds": round(uptime, 1),
+            "book_status": book_status,
+            "cross_exchange": cross_stats,
+            "executor": executor_stats,
+            "funding": funding_stats,
+            "triangular": tri_stats,
+            "risk": risk_status,
+            "tracker_summary": tracker_summary,
+        }
+
     def _log_final_summary(self):
         summary = self.tracker.get_summary()
         logger.info("")

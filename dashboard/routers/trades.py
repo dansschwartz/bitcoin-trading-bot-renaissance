@@ -31,6 +31,20 @@ async def open_positions(request: Request):
     return positions
 
 
+@router.get("/positions/closed")
+async def closed_positions(request: Request, limit: int = 50, offset: int = 0):
+    """Round-trip closed positions with P&L, exit reason, and hold time."""
+    db = request.app.state.dashboard_config.db_path
+    return db_queries.get_closed_positions(db, limit=min(limit, 500), offset=offset)
+
+
+@router.get("/positions/summary")
+async def position_summary(request: Request):
+    """Aggregate stats from closed positions: win rate, P&L, avg win/loss."""
+    db = request.app.state.dashboard_config.db_path
+    return db_queries.get_position_summary_stats(db)
+
+
 @router.get("/trades/closed")
 async def closed_trades(request: Request, limit: int = 50, offset: int = 0):
     db = request.app.state.dashboard_config.db_path

@@ -1,0 +1,231 @@
+"""Arbitrage dashboard endpoints — reads from data/arbitrage.db and live orchestrator."""
+
+import logging
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Request
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/arbitrage", tags=["arbitrage"])
+
+ARB_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "arbitrage.db"
+
+
+@contextmanager
+def _arb_conn():
+    """Connect to arbitrage.db (separate from main bot DB)."""
+    conn = sqlite3.connect(str(ARB_DB_PATH), timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        yield conn
+    finally:
+        conn.close()
+
+
+def _rows_to_dicts(rows) -> List[Dict[str, Any]]:
+    return [dict(r) for r in rows]
+
+
+@router.get("/status")
+async def arb_status(request: Request):
+    """Live arbitrage engine status from orchestrator, with DB fallback."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch and hasattr(orch, "get_full_status"):
+        try:
+            status = orch.get_full_status()
+            # Convert Decimal objects to float for JSON serialization
+            return _sanitize_for_json(status)
+        except Exception as e:
+            logger.debug(f"Live status error: {e}")
+
+    # Fallback: summary from DB
+    try:
+        with _arb_conn() as c:
+            total = c.execute("SELECT COUNT(*) as cnt FROM arb_trades").fetchone()["cnt"]
+            filled = c.execute(
+                "SELECT COUNT(*) as cnt FROM arb_trades WHERE status = 'filled'"
+            ).fetchone()["cnt"]
+            profit = c.execute(
+                "SELECT COALESCE(SUM(actual_profit_usd), 0) as p FROM arb_trades WHERE status = 'filled'"
+            ).fetchone()["p"]
+            return {
+                "running": False,
+                "uptime_seconds": 0,
+                "db_summary": {
+                    "total_trades": total,
+                    "filled_trades": filled,
+                    "total_profit_usd": round(float(profit), 4),
+                },
+            }
+    except Exception:
+        return {"running": False, "error": "arbitrage.db not found"}
+
+
+@router.get("/trades")
+async def arb_trades(
+    request: Request, limit: int = 50, offset: int = 0, strategy: Optional[str] = None
+):
+    """Recent arbitrage trades from arb_trades table."""
+    try:
+        with _arb_conn() as c:
+            if strategy:
+                rows = c.execute(
+                    """SELECT * FROM arb_trades
+                       WHERE strategy = ?
+                       ORDER BY id DESC LIMIT ? OFFSET ?""",
+                    (strategy, min(limit, 500), offset),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM arb_trades ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (min(limit, 500), offset),
+                ).fetchall()
+            return _rows_to_dicts(rows)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/signals")
+async def arb_signals(
+    request: Request, limit: int = 100, strategy: Optional[str] = None
+):
+    """Recent arbitrage signals."""
+    try:
+        with _arb_conn() as c:
+            if strategy:
+                rows = c.execute(
+                    """SELECT * FROM arb_signals
+                       WHERE strategy = ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (strategy, min(limit, 500)),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM arb_signals ORDER BY id DESC LIMIT ?",
+                    (min(limit, 500),),
+                ).fetchall()
+            return _rows_to_dicts(rows)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/summary")
+async def arb_summary(request: Request):
+    """Aggregate stats from arb_trades: total, P&L by strategy, win rate."""
+    try:
+        with _arb_conn() as c:
+            total = c.execute("SELECT COUNT(*) as cnt FROM arb_trades").fetchone()["cnt"]
+            filled = c.execute(
+                "SELECT COUNT(*) as cnt FROM arb_trades WHERE status = 'filled'"
+            ).fetchone()["cnt"]
+
+            # P&L
+            profit_row = c.execute(
+                """SELECT
+                     COALESCE(SUM(actual_profit_usd), 0) as total_profit,
+                     COALESCE(SUM(CASE WHEN actual_profit_usd > 0 THEN 1 ELSE 0 END), 0) as wins,
+                     COALESCE(SUM(CASE WHEN actual_profit_usd <= 0 THEN 1 ELSE 0 END), 0) as losses
+                   FROM arb_trades WHERE status = 'filled'"""
+            ).fetchone()
+            wins = profit_row["wins"] or 0
+            losses = profit_row["losses"] or 0
+
+            # By strategy
+            strategy_rows = c.execute(
+                """SELECT strategy,
+                          COUNT(*) as trades,
+                          COALESCE(SUM(actual_profit_usd), 0) as profit,
+                          SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) as fills
+                   FROM arb_trades GROUP BY strategy"""
+            ).fetchall()
+
+            # Signals
+            signal_total = 0
+            signal_approved = 0
+            try:
+                sr = c.execute(
+                    """SELECT COUNT(*) as total,
+                              SUM(CASE WHEN approved = 1 THEN 1 ELSE 0 END) as approved
+                       FROM arb_signals"""
+                ).fetchone()
+                signal_total = sr["total"] or 0
+                signal_approved = sr["approved"] or 0
+            except Exception:
+                pass
+
+            # Today's P&L
+            daily_row = c.execute(
+                """SELECT COALESCE(SUM(actual_profit_usd), 0) as daily
+                   FROM arb_trades
+                   WHERE date(timestamp) = date('now') AND status = 'filled'"""
+            ).fetchone()
+
+            return {
+                "total_trades": total,
+                "filled_trades": filled,
+                "total_profit_usd": round(float(profit_row["total_profit"]), 4),
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(wins / (wins + losses), 4) if (wins + losses) > 0 else 0.0,
+                "signals_total": signal_total,
+                "signals_approved": signal_approved,
+                "daily_pnl_usd": round(float(daily_row["daily"]), 4),
+                "by_strategy": [
+                    {
+                        "strategy": r["strategy"],
+                        "trades": r["trades"],
+                        "fills": r["fills"],
+                        "profit_usd": round(float(r["profit"]), 4),
+                    }
+                    for r in strategy_rows
+                ],
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/wallet")
+async def arb_wallet(request: Request):
+    """Arbitrage wallet balance and allocation."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    initial_balance = 5000.0  # Arbitrage wallet starting balance
+
+    # Calculate realized P&L from arb trades
+    total_profit = 0.0
+    try:
+        with _arb_conn() as c:
+            row = c.execute(
+                "SELECT COALESCE(SUM(actual_profit_usd), 0) as p FROM arb_trades WHERE status = 'filled'"
+            ).fetchone()
+            total_profit = float(row["p"])
+    except Exception:
+        pass
+
+    current_balance = initial_balance + total_profit
+
+    return {
+        "initial_balance": initial_balance,
+        "current_balance": round(current_balance, 2),
+        "total_realized_pnl": round(total_profit, 4),
+        "return_pct": round((total_profit / initial_balance) * 100, 4) if initial_balance > 0 else 0.0,
+    }
+
+
+def _sanitize_for_json(obj):
+    """Convert Decimal and other non-JSON types to float/str."""
+    from decimal import Decimal
+    import math
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj

@@ -3,6 +3,7 @@ import OpenPositionsTable from '../components/tables/OpenPositionsTable';
 import ClosedPositionsTable from '../components/tables/ClosedPositionsTable';
 import ExposurePanel from '../components/panels/ExposurePanel';
 import AssetSummaryPanel from '../components/panels/AssetSummaryPanel';
+import PositionSummaryCards from '../components/cards/PositionSummaryCards';
 
 export default function Positions() {
   return (
@@ -16,6 +17,9 @@ export default function Positions() {
         </div>
         <ExposurePanel />
       </div>
+
+      {/* Round-trip position summary cards */}
+      <PositionSummaryCards />
 
       <ClosedPositionsTable />
     </PageShell>

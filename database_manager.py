@@ -111,6 +111,19 @@ class DatabaseManager:
                 stop_loss_price REAL, take_profit_price REAL,
                 opened_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'OPEN')''')
 
+            # Add P&L tracking columns (backward-compatible migration)
+            for col_def in [
+                "close_price REAL",
+                "closed_at TEXT",
+                "realized_pnl REAL",
+                "exit_reason TEXT",
+                "hold_duration_seconds REAL",
+            ]:
+                try:
+                    cursor.execute(f"ALTER TABLE open_positions ADD COLUMN {col_def}")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
             # Medallion Intelligence: Expanded data capture tables
             cursor.execute('''CREATE TABLE IF NOT EXISTS funding_rate_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -409,14 +422,40 @@ class DatabaseManager:
         except Exception as e:
             self.logger.error(f"Error saving position: {e}")
 
-    async def close_position_record(self, position_id: str):
-        """Mark a position as CLOSED in the database."""
+    async def close_position_record(
+        self,
+        position_id: str,
+        close_price: float = 0.0,
+        realized_pnl: float = 0.0,
+        exit_reason: str = "",
+    ) -> None:
+        """Mark a position as CLOSED and persist exit data (price, P&L, reason, hold time)."""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                # Compute hold duration from opened_at
+                hold_duration: float = 0.0
+                row = cursor.execute(
+                    "SELECT opened_at FROM open_positions WHERE position_id = ?",
+                    (position_id,),
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        opened = datetime.fromisoformat(row[0])
+                        hold_duration = (datetime.now(timezone.utc) - opened.replace(tzinfo=timezone.utc)).total_seconds()
+                    except (ValueError, TypeError):
+                        pass
+                closed_at = datetime.now(timezone.utc).isoformat()
                 cursor.execute(
-                    "UPDATE open_positions SET status = 'CLOSED' WHERE position_id = ?",
-                    (position_id,)
+                    """UPDATE open_positions
+                       SET status = 'CLOSED',
+                           close_price = ?,
+                           closed_at = ?,
+                           realized_pnl = ?,
+                           exit_reason = ?,
+                           hold_duration_seconds = ?
+                       WHERE position_id = ?""",
+                    (close_price, closed_at, realized_pnl, exit_reason, hold_duration, position_id),
                 )
                 conn.commit()
         except Exception as e:

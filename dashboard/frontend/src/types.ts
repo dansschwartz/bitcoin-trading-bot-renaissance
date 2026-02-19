@@ -232,3 +232,97 @@ export interface BacktestComparison {
 // ─── Time Range ──────────────────────────────────────────────────────────
 
 export type TimeRange = '1H' | '4H' | '1D' | '1W' | '1M' | 'ALL';
+
+// ─── Closed Positions (round-trip P&L) ──────────────────────────────────
+
+export interface ClosedPosition {
+  position_id: string;
+  product_id: string;
+  side: string;
+  size: number;
+  entry_price: number;
+  close_price: number | null;
+  opened_at: string;
+  closed_at: string | null;
+  realized_pnl: number | null;
+  exit_reason: string | null;
+  hold_duration_seconds: number | null;
+}
+
+export interface PositionSummary {
+  total_closed: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_realized_pnl: number;
+  avg_win: number;
+  avg_loss: number;
+  largest_win: number;
+  largest_loss: number;
+  avg_hold_seconds: number;
+}
+
+// ─── Arbitrage ──────────────────────────────────────────────────────────
+
+export interface ArbStatus {
+  running: boolean;
+  uptime_seconds: number;
+  book_status?: Record<string, unknown>;
+  cross_exchange?: Record<string, unknown>;
+  executor?: Record<string, unknown>;
+  funding?: Record<string, unknown>;
+  triangular?: Record<string, unknown>;
+  risk?: Record<string, unknown>;
+  tracker_summary?: Record<string, unknown>;
+  db_summary?: Record<string, unknown>;
+}
+
+export interface ArbTrade {
+  id: number;
+  trade_id: string;
+  strategy: string;
+  symbol: string;
+  buy_exchange: string;
+  sell_exchange: string;
+  status: string;
+  buy_price: number;
+  sell_price: number;
+  quantity: number;
+  gross_spread_bps: number;
+  net_spread_bps: number;
+  expected_profit_usd: number;
+  actual_profit_usd: number;
+  timestamp: string;
+}
+
+export interface ArbSignal {
+  id: number;
+  signal_id: string;
+  strategy: string;
+  symbol: string;
+  gross_spread_bps: number;
+  net_spread_bps: number;
+  approved: number;
+  executed: number;
+  timestamp: string;
+}
+
+export interface ArbSummary {
+  total_trades: number;
+  filled_trades: number;
+  total_profit_usd: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  signals_total: number;
+  signals_approved: number;
+  daily_pnl_usd: number;
+  by_strategy: { strategy: string; trades: number; fills: number; profit_usd: number }[];
+}
+
+export interface ArbWallet {
+  initial_balance: number;
+  current_balance: number;
+  total_realized_pnl: number;
+  return_pct: number;
+}
