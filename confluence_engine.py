@@ -7,7 +7,7 @@ that is more predictive than the sum of its parts.
 import numpy as np
 import logging
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 class ConfluenceEngine:
     def __init__(self, logger: Optional[logging.Logger] = None):
@@ -101,7 +101,7 @@ class ConfluenceEngine:
             'active_rules': active_rules,
             'evaluated_rules': evaluated_rules,
             'signal_count': len(hardened_signals),
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }
 
     def _evaluate_rule(self, rule: Dict[str, Any], signals: Dict[str, float]) -> float:
