@@ -598,11 +598,11 @@ def get_risk_metrics(db_path: str) -> Dict[str, Any]:
 def get_risk_gateway_log(db_path: str, limit: int = 100) -> List[Dict[str, Any]]:
     """Decisions with risk gateway context — VAE loss + regime + action taken."""
     with _conn(db_path) as c:
-        # Include all trade decisions (BUY/SELL), not just those with vae_loss
+        # Include all decisions that have vae_loss OR are BUY/SELL
         rows = c.execute(
             """SELECT id, timestamp, product_id, action, confidence, vae_loss, hmm_regime
                FROM decisions
-               WHERE action IN ('BUY', 'SELL')
+               WHERE action IN ('BUY', 'SELL') OR vae_loss IS NOT NULL
                ORDER BY id DESC
                LIMIT ?""",
             (limit,),
@@ -610,14 +610,14 @@ def get_risk_gateway_log(db_path: str, limit: int = 100) -> List[Dict[str, Any]]
         results = _rows_to_dicts(rows)
         for r in results:
             r["hmm_regime"] = _map_regime(r.get("hmm_regime"))
-            # Determine gateway verdict: PASS if trade was executed, BLOCK if not
-            # vae_loss being high (> 0.3) means gateway would have blocked
             vae = r.get("vae_loss")
-            if vae is not None:
-                r["gateway_verdict"] = "PASS" if vae < 0.3 else "BLOCK"
+            if vae is not None and vae > 0:
+                # Gateway was active — high loss = would have blocked
+                r["gateway_verdict"] = "BLOCK" if vae > 0.3 else "PASS"
             else:
-                r["gateway_verdict"] = "PASS"  # No VAE = no gateway = allowed through
-                r["vae_loss"] = 0.0  # Default for display
+                # BUY/SELL with no VAE = gateway disabled or no features
+                r["gateway_verdict"] = "PASS"
+                r["vae_loss"] = 0.0
         return results
 
 

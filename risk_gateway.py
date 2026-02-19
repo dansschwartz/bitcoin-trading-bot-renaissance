@@ -28,6 +28,8 @@ class RiskGateway:
 
         self._last_vae_loss = 0.0
         self.vae_trained = False
+        self.pass_count = 0
+        self.reject_count = 0
 
         self.risk_manager = RenaissanceRiskManager()
 
@@ -52,10 +54,15 @@ class RiskGateway:
 
     def assess_trade(self, action: str, amount: float, current_price: float,
                      portfolio_data: Dict[str, Any],
-                     feature_vector: Optional[np.ndarray] = None) -> bool:
-        """Assess if a trade is compliant with risk limits."""
+                     feature_vector: Optional[np.ndarray] = None) -> Tuple[bool, float, str]:
+        """Assess if a trade is compliant with risk limits.
+
+        Returns:
+            Tuple of (is_allowed, vae_loss, reason)
+        """
         if not self.enabled:
-            return True
+            self.pass_count += 1
+            return True, self._last_vae_loss, "gateway_disabled"
 
         try:
             # VAE Anomaly Check (only if trained weights loaded)
@@ -63,20 +70,24 @@ class RiskGateway:
                 is_anomaly, score = self._check_anomaly(feature_vector)
                 if is_anomaly:
                     self.logger.warning(f"ANOMALY DETECTED (score={score:.4f}). Blocking {action}.")
-                    return False
+                    self.reject_count += 1
+                    return False, score, "vae_anomaly"
 
             # Basic portfolio risk checks
             daily_pnl = portfolio_data.get('daily_pnl', 0.0)
             total_value = portfolio_data.get('total_value', 0.0)
             if total_value > 0 and abs(daily_pnl) / total_value > 0.15:
                 self.logger.warning(f"Risk check: daily drawdown {abs(daily_pnl)/total_value:.1%} exceeds 15%")
-                return False
+                self.reject_count += 1
+                return False, self._last_vae_loss, "daily_drawdown_limit"
 
-            return True
+            self.pass_count += 1
+            return True, self._last_vae_loss, "OK"
 
         except Exception as e:
             self.logger.error(f"Risk assessment failed: {e}")
-            return self.fail_open
+            self.pass_count += 1
+            return self.fail_open, self._last_vae_loss, f"error:{e}"
 
     def _check_anomaly(self, feature_vector: np.ndarray) -> Tuple[bool, float]:
         """VAE reconstruction error as anomaly score."""

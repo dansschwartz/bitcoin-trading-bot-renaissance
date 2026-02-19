@@ -1763,6 +1763,8 @@ class RenaissanceTradingBot:
             self.logger.warning(f"Daily loss limit reached: ${self.daily_pnl}")
 
         # Gate through VAE Anomaly Detection
+        vae_loss = 0.0
+        gate_reason = "not_evaluated"
         if action != 'HOLD':
             portfolio_data = {
                 'total_value': self.position_limit,
@@ -1771,7 +1773,7 @@ class RenaissanceTradingBot:
                 'current_price': current_price
             }
             feature_vector = ml_package.feature_vector if ml_package else None
-            is_allowed = self.risk_gateway.assess_trade(
+            is_allowed, vae_loss, gate_reason = self.risk_gateway.assess_trade(
                 action=action,
                 amount=0,  # We don't know size yet; gate on action only
                 current_price=current_price,
@@ -1779,7 +1781,7 @@ class RenaissanceTradingBot:
                 feature_vector=feature_vector
             )
             if not is_allowed:
-                self.logger.warning(f"Risk Gateway BLOCKED {action} order (VAE Anomaly or Risk limit)")
+                self.logger.warning(f"Risk Gateway BLOCKED {action} order (reason={gate_reason}, vae_loss={vae_loss:.4f})")
                 action = 'HOLD'
 
         # ── Renaissance Position Sizing (Kelly + cost gate + vol normalization) ──
@@ -2041,6 +2043,8 @@ class RenaissanceTradingBot:
             'signal_contributions': signal_contributions,
             'current_price': current_price,
             'ml_risk_assessment': risk_assessment,
+            'vae_loss': vae_loss,
+            'risk_gateway_reason': gate_reason,
             'risk_check': {
                 'daily_pnl': self.daily_pnl,
                 'daily_limit': self.daily_loss_limit,
@@ -3549,7 +3553,11 @@ class RenaissanceTradingBot:
                     if hasattr(self, 'risk_gateway') and self.risk_gateway:
                         self._track_task(self.dashboard_emitter.emit("risk.gateway", {
                             "product_id": product_id,
+                            "action": decision.action,
                             "vae_loss": float(decision.reasoning.get('vae_loss', 0.0) or 0.0),
+                            "verdict": decision.reasoning.get('risk_gateway_reason', 'unknown'),
+                            "pass_count": self.risk_gateway.pass_count,
+                            "reject_count": self.risk_gateway.reject_count,
                         }))
                     if market_data.get('confluence_data'):
                         self._track_task(self.dashboard_emitter.emit("confluence", market_data['confluence_data']))
@@ -3558,6 +3566,17 @@ class RenaissanceTradingBot:
 
             cycle_time = time.time() - cycle_start
             self.logger.info(f"Total cycle completed in {cycle_time:.2f}s")
+
+            # ── Risk Alert Evaluation (emit to dashboard) ──
+            try:
+                from dashboard.db_queries import evaluate_risk_alerts
+                db_path = str(self.db_manager.db_path) if hasattr(self.db_manager, 'db_path') else "data/renaissance_bot.db"
+                risk_alerts = evaluate_risk_alerts(db_path)
+                for alert in risk_alerts:
+                    self._track_task(self.dashboard_emitter.emit("risk.alert", alert))
+                    self.logger.warning(f"RISK ALERT [{alert['severity']}]: {alert['message']}")
+            except Exception as _ra:
+                self.logger.debug(f"Risk alert evaluation error: {_ra}")
 
             # ── Doc 15: Agent cycle hook ──
             if self.agent_coordinator:
