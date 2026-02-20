@@ -34,8 +34,8 @@ pairs:
 cross_exchange:
   min_net_spread_bps: 1.0
   signal_ttl_seconds: 5
-  min_trade_usd: 50
-  max_trade_usd: 500
+  min_trade_usd: 100
+  max_trade_usd: 1000
   scan_interval_ms: 100
   fill_timeout_seconds: 3
   emergency_close_seconds: 5
@@ -57,8 +57,8 @@ triangular:
     - BTC
     - ETH
   scan_interval_ms: 5000            # Reduced from 500ms — save API rate limits
-  max_trade_usd: 200
-  observation_mode: true            # Log opportunities but don't execute
+  max_trade_usd: 500
+  observation_mode: false           # Execute triangular arb trades
   max_signals_per_cycle: 3          # Max signals per 60s window
 
 inventory:
@@ -88,7 +88,7 @@ risk:
 paper_trading:
   enabled: true
   simulated_latency_ms: 50
-  simulated_fill_rate: 0.85
+  simulated_fill_rate: 0.95         # Raised from 0.85 — paper trading fill rate
 
 logging:
   level: INFO

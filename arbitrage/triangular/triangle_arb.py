@@ -38,16 +38,29 @@ class TriangularArbitrage:
 
     MIN_NET_PROFIT_BPS = Decimal('3.0')   # Raised from 0.5 — must clear round-trip costs
     SCAN_INTERVAL_SECONDS = 5.0           # Reduced from 0.5s — save API rate limits
-    MAX_TRADE_USD = Decimal('200')        # Smaller for triangular (thinner books)
+    MAX_TRADE_USD = Decimal('500')        # Configurable via YAML
     START_CURRENCIES = ["USDT", "BTC", "ETH"]
     MAX_SIGNALS_PER_CYCLE = 3             # Max signals pushed per 60s cycle
-    OBSERVATION_MODE = True               # Log opportunities but don't execute
+    OBSERVATION_MODE = False              # Execute trades (was True)
 
-    def __init__(self, mexc_client, cost_model, risk_engine, signal_queue: asyncio.Queue):
+    def __init__(self, mexc_client, cost_model, risk_engine, signal_queue: asyncio.Queue,
+                 config: Optional[dict] = None):
         self.client = mexc_client
         self.costs = cost_model
         self.risk = risk_engine
         self.signal_queue = signal_queue
+
+        # Override class defaults from config if provided
+        if config:
+            tri_cfg = config.get('triangular', {})
+            if 'observation_mode' in tri_cfg:
+                self.OBSERVATION_MODE = tri_cfg['observation_mode']
+            if 'max_trade_usd' in tri_cfg:
+                self.MAX_TRADE_USD = Decimal(str(tri_cfg['max_trade_usd']))
+            if 'min_net_profit_bps' in tri_cfg:
+                self.MIN_NET_PROFIT_BPS = Decimal(str(tri_cfg['min_net_profit_bps']))
+            if 'max_signals_per_cycle' in tri_cfg:
+                self.MAX_SIGNALS_PER_CYCLE = tri_cfg['max_signals_per_cycle']
         self._running = False
         self._scan_count = 0
         self._opportunities_found = 0

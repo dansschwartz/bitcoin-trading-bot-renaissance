@@ -57,14 +57,27 @@ class CrossExchangeDetector:
 
     MIN_NET_SPREAD_BPS = Decimal('1.0')   # 1 bps minimum profit
     SIGNAL_TTL_SECONDS = 5
-    MIN_TRADE_USD = Decimal('50')
-    MAX_TRADE_USD = Decimal('500')
+    MIN_TRADE_USD = Decimal('100')
+    MAX_TRADE_USD = Decimal('1000')
 
-    def __init__(self, book_manager, cost_model, risk_engine, signal_queue: asyncio.Queue):
+    def __init__(self, book_manager, cost_model, risk_engine, signal_queue: asyncio.Queue,
+                 config: Optional[dict] = None):
         self.books = book_manager
         self.costs = cost_model
         self.risk = risk_engine
         self.signal_queue = signal_queue
+
+        # Override from config
+        if config:
+            cx_cfg = config.get('cross_exchange', {})
+            if 'min_trade_usd' in cx_cfg:
+                self.MIN_TRADE_USD = Decimal(str(cx_cfg['min_trade_usd']))
+            if 'max_trade_usd' in cx_cfg:
+                self.MAX_TRADE_USD = Decimal(str(cx_cfg['max_trade_usd']))
+            if 'min_net_spread_bps' in cx_cfg:
+                self.MIN_NET_SPREAD_BPS = Decimal(str(cx_cfg['min_net_spread_bps']))
+            if 'signal_ttl_seconds' in cx_cfg:
+                self.SIGNAL_TTL_SECONDS = cx_cfg['signal_ttl_seconds']
         self._running = False
         self._scan_count = 0
         self._signals_generated = 0

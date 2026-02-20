@@ -42,7 +42,7 @@ from performance_attribution_engine import PerformanceAttributionEngine
 
 # Order Execution & Position Management
 from coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
-from position_manager import EnhancedPositionManager, RiskLimits
+from position_manager import EnhancedPositionManager, RiskLimits, PositionStatus
 from alert_manager import AlertManager
 from coinbase_advanced_client import CoinbaseAdvancedClient
 from logger import SecretMaskingFilter
@@ -1738,7 +1738,7 @@ class RenaissanceTradingBot:
                     with self.position_manager._lock:
                         matching_positions = [
                             pos for pos in self.position_manager.positions.values()
-                            if pos.product_id == product_id
+                            if pos.product_id == product_id and pos.status == PositionStatus.OPEN
                         ]
                     for pos in matching_positions:
                         pos_side = pos.side.value.upper()
@@ -1767,8 +1767,9 @@ class RenaissanceTradingBot:
                             # Don't also open a new opposing position — just exit
                             action = 'HOLD'
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.error(f"NETTING CHECK FAILED for {product_id}: {e} — blocking trade for safety")
+                    action = 'HOLD'
 
             # 4. Already positioned — don't stack same-direction positions
             if action != 'HOLD':
@@ -1776,7 +1777,9 @@ class RenaissanceTradingBot:
                     with self.position_manager._lock:
                         same_dir = [
                             pos for pos in self.position_manager.positions.values()
-                            if pos.product_id == product_id and (
+                            if pos.product_id == product_id
+                            and pos.status == PositionStatus.OPEN
+                            and (
                                 (pos.side.value.upper() == 'LONG' and action == 'BUY') or
                                 (pos.side.value.upper() == 'SHORT' and action == 'SELL')
                             )
@@ -1787,8 +1790,9 @@ class RenaissanceTradingBot:
                             f"{same_dir[0].side.value} position(s) — holding"
                         )
                         action = 'HOLD'
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.error(f"ANTI-STACK CHECK FAILED for {product_id}: {e} — blocking trade for safety")
+                    action = 'HOLD'
 
         # ML-Enhanced Risk Assessment (Regime Gate)
         risk_assessment = self.risk_manager.assess_risk_regime(ml_package)
@@ -4151,6 +4155,78 @@ class RenaissanceTradingBot:
         except Exception as e:
             self.logger.warning(f"State recovery skipped: {e}")
 
+    async def _deduplicate_positions_on_startup(self) -> None:
+        """Close duplicate and opposing positions found after DB restore.
+
+        Rules:
+        1. If multiple same-side positions exist for a product, keep the newest, close the rest.
+        2. If opposing positions exist for a product (LONG + SHORT), close both and go flat.
+        """
+        from position_manager import PositionSide, PositionStatus
+        from collections import defaultdict
+
+        # Group open positions by product_id
+        by_product: Dict[str, List] = defaultdict(list)
+        with self.position_manager._lock:
+            for pos in list(self.position_manager.positions.values()):
+                if pos.status == PositionStatus.OPEN:
+                    by_product[pos.product_id].append(pos)
+
+        closed_count = 0
+        for product_id, positions in by_product.items():
+            longs = [p for p in positions if p.side == PositionSide.LONG]
+            shorts = [p for p in positions if p.side == PositionSide.SHORT]
+
+            # Rule 2: Opposing positions — close ALL (go flat)
+            if longs and shorts:
+                self.logger.warning(
+                    f"STARTUP DEDUP: {product_id} has {len(longs)} LONG + {len(shorts)} SHORT — closing all (go flat)"
+                )
+                for pos in longs + shorts:
+                    ok, msg = self.position_manager.close_position(
+                        pos.position_id, reason="startup_dedup_opposing"
+                    )
+                    if ok:
+                        self._track_task(
+                            self.db_manager.close_position_record(
+                                pos.position_id,
+                                close_price=float(pos.current_price),
+                                realized_pnl=0.0,
+                                exit_reason="startup_dedup_opposing",
+                            )
+                        )
+                        closed_count += 1
+                continue
+
+            # Rule 1: Duplicate same-side — keep newest, close rest
+            for group in [longs, shorts]:
+                if len(group) > 1:
+                    # Sort by entry_time descending (newest first)
+                    group.sort(key=lambda p: p.entry_time, reverse=True)
+                    keep = group[0]
+                    dupes = group[1:]
+                    self.logger.warning(
+                        f"STARTUP DEDUP: {product_id} has {len(group)} {keep.side.value} positions — "
+                        f"keeping {keep.position_id}, closing {len(dupes)} duplicates"
+                    )
+                    for pos in dupes:
+                        ok, msg = self.position_manager.close_position(
+                            pos.position_id, reason="startup_dedup_duplicate"
+                        )
+                        if ok:
+                            self._track_task(
+                                self.db_manager.close_position_record(
+                                    pos.position_id,
+                                    close_price=float(pos.current_price),
+                                    realized_pnl=0.0,
+                                    exit_reason="startup_dedup_duplicate",
+                                )
+                            )
+                            closed_count += 1
+
+        if closed_count > 0:
+            self.logger.info(f"STARTUP DEDUP: closed {closed_count} duplicate/opposing positions")
+
     async def run_continuous_trading(self, cycle_interval: int = 300):
         """Run continuous Renaissance trading (default 5-minute cycles)"""
         self.logger.info(f"Starting continuous Renaissance trading with {cycle_interval}s cycles")
@@ -4213,6 +4289,9 @@ class RenaissanceTradingBot:
                 self.logger.warning(f"Paper mode position restore failed: {e}")
             self.position_manager.daily_pnl = 0.0
             self.daily_pnl = 0.0
+
+        # ── Startup deduplication: close duplicate/opposing positions from DB ──
+        await self._deduplicate_positions_on_startup()
 
         # ── Module A: Set RUNNING state ──
         if self.state_manager:

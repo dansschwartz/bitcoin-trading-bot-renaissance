@@ -83,6 +83,7 @@ class ArbitrageOrchestrator:
         # Strategies
         self.cross_exchange_detector = CrossExchangeDetector(
             self.book_manager, self.cost_model, self.risk_engine, self.signal_queue,
+            config=self.config,
         )
         self.executor = ArbitrageExecutor(
             self.mexc, self.binance, self.cost_model, self.risk_engine,
@@ -92,6 +93,7 @@ class ArbitrageOrchestrator:
         )
         self.triangular_arb = TriangularArbitrage(
             self.mexc, self.cost_model, self.risk_engine, self.signal_queue,
+            config=self.config,
         )
 
         # Support modules
