@@ -165,9 +165,16 @@ class PerformanceTracker:
         leg_symbols = [leg.symbol for leg in result.legs] if result.legs else []
         symbol = "→".join(leg_symbols) if leg_symbols else "triangular"
 
+        # For failed/unwound trades, profit_usd = end(0) - start(500) = -500
+        # which is wrong — the unwind recovers capital. Use 0 for non-filled.
+        if result.status != "filled":
+            effective_profit = Decimal('0')
+        else:
+            effective_profit = result.profit_usd
+
         # Spread / cost in bps (relative to start amount)
         start = float(result.start_amount) if result.start_amount else 1.0
-        profit = float(result.profit_usd)
+        profit = float(effective_profit)
         fees = float(result.total_fees_usd)
         spread_bps = (profit / start) * 10000 if start > 0 else 0.0
         cost_bps = (fees / start) * 10000 if start > 0 else 0.0
