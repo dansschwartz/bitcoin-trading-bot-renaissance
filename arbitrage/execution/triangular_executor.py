@@ -97,6 +97,37 @@ class TriangularExecutor:
         books, precisions = await self._pre_fetch_all(symbols, path)
         pre_fetch_ms = (time.monotonic() - pre_fetch_start) * 1000
 
+        # === PRE-EXECUTION ROUNDING CHECK ===
+        # Simulate rounding at each leg's precision to estimate worst-case
+        # rounding loss. Skip cycle if rounding eats >50% of expected profit.
+        sim_amount = current_amount
+        for symbol, side, _ in path:
+            qty_prec = precisions.get(symbol, (8, 8))[1]
+            price_prec = precisions.get(symbol, (8, 8))[0]
+            price_side = 'bid' if side == 'buy' else 'ask'
+            price = books.get((symbol, price_side))
+            if not price or price <= 0:
+                break  # Can't simulate — let execution handle the error
+            if side == 'buy':
+                raw_qty = sim_amount / price
+                rounded_qty = self._round_decimal(raw_qty, qty_prec)
+                sim_amount = rounded_qty  # received base
+            else:
+                rounded_qty = self._round_decimal(sim_amount, qty_prec)
+                rounded_price = self._round_decimal(price, price_prec)
+                sim_amount = rounded_qty * rounded_price  # received quote
+        else:
+            rounding_loss = initial_amount - sim_amount
+            if rounding_loss > Decimal('0') and rounding_loss > initial_amount * Decimal('0.0005'):
+                logger.warning(
+                    f"TRI SKIP {trade_id}: rounding loss ${float(rounding_loss):.4f} "
+                    f"({float(rounding_loss / initial_amount * 10000):.1f} bps) "
+                    f"on {' -> '.join(s[0] for s in path)}"
+                )
+                self._trade_count -= 1  # Don't count skips in stats
+                return self._build_result(trade_id, "skipped", [], initial_amount,
+                                          Decimal('0'), start_time)
+
         logger.info(
             f"TRI EXECUTE {trade_id}: {' -> '.join(s[0] for s in path)} -> {start_currency} "
             f"| Starting: {float(current_amount):.8f} {start_currency} (${float(trade_usd):.2f}) "

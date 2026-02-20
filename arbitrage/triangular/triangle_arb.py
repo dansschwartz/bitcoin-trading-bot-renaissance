@@ -43,6 +43,11 @@ class TriangularArbitrage:
     MAX_SIGNALS_PER_CYCLE = 3             # Max signals pushed per 60s cycle
     OBSERVATION_MODE = False              # Execute trades (was True)
 
+    # Pairs with low precision that cause structural rounding losses.
+    # BTC/ETH-quote pairs have ~8 decimal places of price but only 2-4
+    # decimals of quantity precision, so rounding eats the entire edge.
+    BLOCKED_QUOTE_CURRENCIES = {"BTC", "ETH"}
+
     def __init__(self, mexc_client, cost_model, risk_engine, signal_queue: asyncio.Queue,
                  config: Optional[dict] = None, tracker=None):
         self.client = mexc_client
@@ -255,6 +260,15 @@ class TriangularArbitrage:
                     net_profit_bps = profit_bps - total_fee_bps
 
                     if net_profit_bps > self.MIN_NET_PROFIT_BPS:
+                        # Skip cycles with blocked quote currencies (low precision → rounding losses)
+                        leg_symbols = [edge_1['symbol'], edge_2['symbol'], edge_3['symbol']]
+                        has_blocked = any(
+                            sym.split('/')[1] in self.BLOCKED_QUOTE_CURRENCIES
+                            for sym in leg_symbols if '/' in sym
+                        )
+                        if has_blocked:
+                            continue
+
                         opportunities.append(TrianglePath(
                             start_currency=start,
                             path=[
