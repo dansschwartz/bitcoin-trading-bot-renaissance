@@ -613,19 +613,58 @@ class MEXCClient(ExchangeClient):
         )
 
     def _paper_fill(self, order: OrderRequest) -> OrderResult:
-        """Simulate a fill for paper trading."""
+        """Simulate a fill for paper trading with realistic fee model.
+
+        Fee rules (MEXC spot):
+          MARKET      → taker (0.05%)
+          LIMIT_MAKER → maker (0.00%, post-only guaranteed)
+          LIMIT       → taker if price crosses spread, maker otherwise
+                        (no book data → assume taker, conservative)
+
+        Fee denomination matches the received currency so the
+        triangular executor's ``quantity_out -= fee_amount`` is correct:
+          BUY  → fee in base  (qty * rate)
+          SELL → fee in quote (qty * price * rate)
+        """
         book = self._last_books.get(order.symbol)
+
+        # --- Fill price ---
         if order.order_type == OrderType.MARKET:
             if book:
                 fill_price = book.best_ask if order.side == OrderSide.BUY else book.best_bid
             else:
                 fill_price = order.price or Decimal('0')
-            fee = order.quantity * (fill_price or Decimal('0')) * Decimal('0.0005')  # Taker fee
         else:
             fill_price = order.price
-            fee = Decimal('0')  # Maker fee = 0% on MEXC
 
-        # Simulate 85% maker fill rate
+        # --- Fee rate ---
+        MAKER_FEE = Decimal('0')       # 0.00% — MEXC spot maker
+        TAKER_FEE = Decimal('0.0005')  # 0.05% — MEXC spot taker
+
+        if order.order_type == OrderType.MARKET:
+            fee_rate = TAKER_FEE
+        elif order.order_type == OrderType.LIMIT_MAKER:
+            fee_rate = MAKER_FEE  # Post-only = guaranteed maker
+        else:
+            # LIMIT: crosses spread → taker, rests in book → maker
+            crosses_spread = False
+            if book and fill_price:
+                if order.side == OrderSide.BUY and book.best_ask and fill_price >= book.best_ask:
+                    crosses_spread = True
+                elif order.side == OrderSide.SELL and book.best_bid and fill_price <= book.best_bid:
+                    crosses_spread = True
+            elif fill_price:
+                # No book data — conservatively assume taker
+                crosses_spread = True
+            fee_rate = TAKER_FEE if crosses_spread else MAKER_FEE
+
+        # --- Fee in received-currency denomination ---
+        if order.side == OrderSide.BUY:
+            fee = order.quantity * fee_rate                                    # base units
+        else:
+            fee = order.quantity * (fill_price or Decimal('0')) * fee_rate     # quote units
+
+        # Simulate 85% maker fill rate for LIMIT_MAKER
         import random
         if order.order_type == OrderType.LIMIT_MAKER and random.random() > 0.85:
             return OrderResult(

@@ -445,6 +445,12 @@ class BinanceClient(ExchangeClient):
         )
 
     def _paper_fill(self, order: OrderRequest) -> OrderResult:
+        """Simulate a fill with realistic Binance fee model.
+
+        Fee denomination matches received currency:
+          BUY  → fee in base  (qty * rate)
+          SELL → fee in quote (qty * price * rate)
+        """
         book = self._last_books.get(order.symbol)
         if order.order_type == OrderType.MARKET:
             fill_price = (book.best_ask if order.side == OrderSide.BUY else book.best_bid) if book else order.price
@@ -453,7 +459,10 @@ class BinanceClient(ExchangeClient):
             fill_price = order.price
             fee_rate = Decimal('0.00075') if self.bnb_fee_discount else Decimal('0.001')
 
-        fee = order.quantity * (fill_price or Decimal('0')) * fee_rate
+        if order.side == OrderSide.BUY:
+            fee = order.quantity * fee_rate                                    # base units
+        else:
+            fee = order.quantity * (fill_price or Decimal('0')) * fee_rate     # quote units
 
         import random
         if order.order_type == OrderType.LIMIT_MAKER and random.random() > 0.90:
