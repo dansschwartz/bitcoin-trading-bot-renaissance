@@ -85,6 +85,12 @@ class TriangularArbitrage:
         self._cycle_start: Optional[datetime] = None
         self._pair_graph: Dict[str, Dict[str, dict]] = defaultdict(dict)
 
+        # Competition detector — rolling window of edge sizes
+        self._edge_history: List[Tuple[datetime, float]] = []  # (timestamp, profit_bps)
+        self._edge_window_minutes = 60  # Track last 60 min
+        self._edge_alert_threshold_bps = 4.0  # Warn if median drops below this
+        self._edge_alert_logged = False
+
     async def run(self):
         self._running = True
         logger.info("TriangularArbitrage scanner started")
@@ -109,6 +115,9 @@ class TriangularArbitrage:
 
                 # Scan for profitable triangles
                 opportunities = self._find_profitable_cycles(tickers)
+
+                # Competition detector: record edge sizes
+                self._record_edges(opportunities)
 
                 # Rate-limit: reset cycle counter every 60s
                 now = datetime.utcnow()
@@ -284,6 +293,59 @@ class TriangularArbitrage:
         opportunities.sort(key=lambda x: x.profit_bps, reverse=True)
         return opportunities
 
+    # --- Competition Detector ---
+
+    def _record_edges(self, opportunities: List[TrianglePath]) -> None:
+        """Record edge sizes from detected opportunities for trend analysis."""
+        now = datetime.utcnow()
+        for opp in opportunities:
+            self._edge_history.append((now, float(opp.profit_bps)))
+
+        # Prune entries older than the window
+        cutoff = now - timedelta(minutes=self._edge_window_minutes)
+        while self._edge_history and self._edge_history[0][0] < cutoff:
+            self._edge_history.pop(0)
+
+        # Check for competition warning
+        competition = self._get_competition_stats()
+        if competition["sample_count"] >= 20:
+            median = competition["median_edge_bps"]
+            if median < self._edge_alert_threshold_bps and not self._edge_alert_logged:
+                logger.warning(
+                    f"COMPETITION ALERT: median edge dropped to {median:.1f} bps "
+                    f"(threshold: {self._edge_alert_threshold_bps} bps) over last "
+                    f"{self._edge_window_minutes} min — {competition['sample_count']} samples. "
+                    f"Consider reducing position size."
+                )
+                self._edge_alert_logged = True
+            elif median >= self._edge_alert_threshold_bps:
+                self._edge_alert_logged = False  # Reset alert
+
+    def _get_competition_stats(self) -> dict:
+        """Compute edge size statistics for competition detection."""
+        if not self._edge_history:
+            return {
+                "sample_count": 0, "median_edge_bps": 0.0,
+                "mean_edge_bps": 0.0, "min_edge_bps": 0.0,
+                "max_edge_bps": 0.0, "window_minutes": self._edge_window_minutes,
+                "alert_active": self._edge_alert_logged,
+            }
+
+        edges = [e[1] for e in self._edge_history]
+        edges_sorted = sorted(edges)
+        n = len(edges_sorted)
+        median = edges_sorted[n // 2] if n % 2 else (edges_sorted[n // 2 - 1] + edges_sorted[n // 2]) / 2
+
+        return {
+            "sample_count": n,
+            "median_edge_bps": round(median, 2),
+            "mean_edge_bps": round(sum(edges) / n, 2),
+            "min_edge_bps": round(min(edges), 2),
+            "max_edge_bps": round(max(edges), 2),
+            "window_minutes": self._edge_window_minutes,
+            "alert_active": self._edge_alert_logged,
+        }
+
     def get_stats(self) -> dict:
         exec_stats = self.tri_executor.get_stats() if self.tri_executor else {}
         return {
@@ -298,4 +360,5 @@ class TriangularArbitrage:
             "graph_currencies": len(self._pair_graph),
             "graph_edges": sum(len(v) for v in self._pair_graph.values()),
             "executor": exec_stats,
+            "competition": self._get_competition_stats(),
         }

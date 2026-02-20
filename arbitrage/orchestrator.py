@@ -179,6 +179,7 @@ class ArbitrageOrchestrator:
             asyncio.create_task(self._run_monitoring(), name="monitoring"),
             asyncio.create_task(self._run_inventory_checks(), name="inventory"),
             asyncio.create_task(self._subscribe_trade_feeds(), name="trade_feeds"),
+            asyncio.create_task(self._run_fee_monitor(), name="fee_monitor"),
         ]
 
         logger.info(f"All {len(tasks)} subsystems launched")
@@ -297,6 +298,54 @@ class ArbitrageOrchestrator:
                 logger.debug(f"Inventory check error: {e}")
             await asyncio.sleep(interval)
 
+    async def _run_fee_monitor(self):
+        """Periodically verify MEXC maker fee is still 0%.
+
+        The entire triangular arb strategy depends on 0% maker fees.
+        If MEXC changes their fee policy, we must pause immediately.
+        Checks every hour, logs every check, and pauses tri-arb on change.
+        """
+        await asyncio.sleep(60)  # Let other systems stabilize first
+        check_interval = 3600  # 1 hour
+        consecutive_failures = 0
+
+        while self._running:
+            try:
+                fees = await self.mexc.get_trading_fees("BTC/USDT")
+                maker_fee = fees.get("maker", Decimal('0'))
+
+                if maker_fee == Decimal('0'):
+                    logger.info(
+                        f"FEE CHECK OK: MEXC maker fee = {float(maker_fee)*100:.3f}% "
+                        f"(triangular arb edge intact)"
+                    )
+                    consecutive_failures = 0
+
+                    # Re-enable tri-arb if it was paused by a previous alert
+                    if self.triangular_arb.OBSERVATION_MODE and hasattr(self, '_fee_paused'):
+                        self.triangular_arb.OBSERVATION_MODE = False
+                        del self._fee_paused
+                        logger.info("FEE CHECK: maker fee restored to 0% — triangular arb re-enabled")
+                else:
+                    fee_bps = float(maker_fee) * 10000
+                    logger.critical(
+                        f"FEE ALERT: MEXC maker fee changed to {float(maker_fee)*100:.3f}% "
+                        f"({fee_bps:.1f} bps)! Triangular arb edge may be destroyed. "
+                        f"Pausing triangular execution."
+                    )
+                    # Pause triangular arb by switching to observation mode
+                    self.triangular_arb.OBSERVATION_MODE = True
+                    self._fee_paused = True
+
+            except Exception as e:
+                consecutive_failures += 1
+                if consecutive_failures <= 3:
+                    logger.warning(f"FEE CHECK FAILED (attempt {consecutive_failures}): {e}")
+                else:
+                    logger.debug(f"FEE CHECK FAILED (attempt {consecutive_failures}): {e}")
+
+            await asyncio.sleep(check_interval)
+
     # --- BarAggregator + Trade Feeds ---
 
     def _init_bar_aggregator(self):
@@ -386,6 +435,13 @@ class ArbitrageOrchestrator:
                     f"Collected: ${funding_stats['total_funding_collected_usd']:.2f}")
         logger.info(f"  Triangular: {tri_stats['scan_count']} scans | "
                     f"{tri_stats['opportunities_found']} opportunities")
+        comp = tri_stats.get('competition', {})
+        if comp.get('sample_count', 0) > 0:
+            logger.info(f"  Competition: median={comp['median_edge_bps']:.1f}bps "
+                        f"mean={comp['mean_edge_bps']:.1f}bps "
+                        f"range=[{comp['min_edge_bps']:.1f}-{comp['max_edge_bps']:.1f}] "
+                        f"samples={comp['sample_count']} "
+                        f"{'ALERT' if comp.get('alert_active') else 'OK'}")
         logger.info(f"  Risk: {'HALTED' if risk_status['halted'] else 'OK'} | "
                     f"Daily PnL: ${risk_status['daily_pnl_usd']:.2f} | "
                     f"Exposure: ${risk_status['total_exposure_usd']:.2f}")
