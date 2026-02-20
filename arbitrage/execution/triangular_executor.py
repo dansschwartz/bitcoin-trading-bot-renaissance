@@ -107,11 +107,13 @@ class TriangularExecutor:
             leg_num = i + 1
             base, quote = symbol.split('/')
 
-            # Use pre-fetched price if available, otherwise fetch fresh
-            price = books.get((symbol, 'ask' if side == 'buy' else 'bid'))
+            # Use pre-fetched price — LIMIT_MAKER rests in book:
+            #   BUY at bid (top of bid book), SELL at ask (top of ask book)
+            price_side = 'bid' if side == 'buy' else 'ask'
+            price = books.get((symbol, price_side))
             if price is None or price <= 0:
                 # Fallback: fetch fresh price for this leg
-                price = await self._get_price(symbol, 'ask' if side == 'buy' else 'bid')
+                price = await self._get_price(symbol, price_side)
 
             if price is None or price <= 0:
                 logger.error(f"TRI LEG {leg_num} FAILED: no price for {symbol}")
@@ -143,7 +145,7 @@ class TriangularExecutor:
                 exchange="mexc",
                 symbol=symbol,
                 side=order_side,
-                order_type=OrderType.LIMIT,
+                order_type=OrderType.LIMIT_MAKER,  # Post-only → 0% maker fee on MEXC
                 quantity=quantity,
                 price=rounded_price,
                 time_in_force=TimeInForce.GTC,
@@ -260,7 +262,7 @@ class TriangularExecutor:
 
         tasks = []
         for symbol, side, _ in path:
-            price_side = 'ask' if side == 'buy' else 'bid'
+            price_side = 'bid' if side == 'buy' else 'ask'  # LIMIT_MAKER: rest in book
             tasks.append(fetch_book(symbol, price_side))
             if symbol not in self._precision_cache:
                 tasks.append(fetch_precision(symbol))
