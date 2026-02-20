@@ -74,12 +74,26 @@ class TriangularExecutor:
         start_time = time.monotonic()
 
         legs: List[TriLegResult] = []
-        current_amount = trade_usd  # Start with this many units of start_currency
+
+        # Convert USD amount to start_currency if not already USD-pegged
+        if start_currency in ("USDT", "USDC", "BUSD"):
+            current_amount = trade_usd
+        else:
+            # Get price of start_currency in USDT to convert
+            usd_price = await self._get_price(f"{start_currency}/USDT", 'bid')
+            if usd_price and usd_price > 0:
+                current_amount = trade_usd / usd_price
+            else:
+                logger.error(f"Cannot convert ${float(trade_usd)} to {start_currency}")
+                return self._build_result(trade_id, "failed", [], trade_usd,
+                                          Decimal('0'), start_time)
+
         current_currency = start_currency
+        initial_amount = current_amount  # Save for profit calculation
 
         logger.info(
             f"TRI EXECUTE {trade_id}: {' -> '.join(s[0] for s in path)} -> {start_currency} "
-            f"| Starting: {float(trade_usd):.2f} {start_currency}"
+            f"| Starting: {float(current_amount):.8f} {start_currency} (${float(trade_usd):.2f})"
         )
 
         for i, (symbol, side, next_currency) in enumerate(path):
@@ -127,15 +141,16 @@ class TriangularExecutor:
                     return self._build_result(trade_id, "failed", legs, trade_usd,
                                               Decimal('0'), start_time)
 
-            # Place the order
+            # Place the order — use LIMIT (not LIMIT_MAKER) to avoid rejection
+            # when price moves. On MEXC, even taker fee is only 0.05% for spot.
             order = OrderRequest(
                 exchange="mexc",
                 symbol=symbol,
                 side=order_side,
-                order_type=OrderType.LIMIT_MAKER,
+                order_type=OrderType.LIMIT,
                 quantity=quantity,
                 price=await self._round_price(symbol, price),
-                time_in_force=TimeInForce.GTX,
+                time_in_force=TimeInForce.GTC,
                 client_order_id=f"{trade_id}_leg{leg_num}",
             )
 
@@ -196,20 +211,20 @@ class TriangularExecutor:
             current_currency = next_currency
 
         # All 3 legs completed!
-        profit = current_amount - trade_usd
+        profit = current_amount - initial_amount
         self._fill_count += 1
         self._total_profit += profit
 
         logger.info(
             f"TRI COMPLETE {trade_id}: "
-            f"Started {float(trade_usd):.2f} {start_currency} -> "
-            f"Ended {float(current_amount):.6f} {start_currency} | "
-            f"Profit: ${float(profit):.4f} | "
+            f"Started {float(initial_amount):.8f} {start_currency} -> "
+            f"Ended {float(current_amount):.8f} {start_currency} | "
+            f"Profit: {float(profit):.8f} {start_currency} | "
             f"Time: {(time.monotonic() - start_time) * 1000:.0f}ms"
         )
 
         result = self._build_result(
-            trade_id, "filled", legs, trade_usd, current_amount, start_time
+            trade_id, "filled", legs, initial_amount, current_amount, start_time
         )
         self._completed.append(result)
         return result

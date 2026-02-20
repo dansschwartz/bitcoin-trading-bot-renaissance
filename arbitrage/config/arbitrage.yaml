@@ -54,8 +54,6 @@ triangular:
   exchange: mexc
   start_currencies:
     - USDT
-    - BTC
-    - ETH
   scan_interval_ms: 5000            # Reduced from 500ms — save API rate limits
   max_trade_usd: 500
   observation_mode: false           # 3-leg executor now handles triangular trades directly

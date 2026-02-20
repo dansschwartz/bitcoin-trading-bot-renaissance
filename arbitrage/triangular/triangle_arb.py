@@ -65,6 +65,8 @@ class TriangularArbitrage:
                 self.MIN_NET_PROFIT_BPS = Decimal(str(tri_cfg['min_net_profit_bps']))
             if 'max_signals_per_cycle' in tri_cfg:
                 self.MAX_SIGNALS_PER_CYCLE = tri_cfg['max_signals_per_cycle']
+            if 'start_currencies' in tri_cfg:
+                self.START_CURRENCIES = tri_cfg['start_currencies']
         self._running = False
         self._scan_count = 0
         self._opportunities_found = 0
