@@ -37,7 +37,7 @@ class UnifiedPairView:
     @property
     def is_fresh(self) -> bool:
         now = datetime.utcnow()
-        max_age = timedelta(seconds=3)  # 3s — WS ideal, REST fallback compatible
+        max_age = timedelta(seconds=10)  # 10s — tolerant of REST fallback polling
         return (
             (now - self.mexc_last_update) < max_age
             and (now - self.binance_last_update) < max_age
@@ -189,10 +189,11 @@ class UnifiedBookManager:
                     pass
 
     async def _validation_loop(self):
-        """Every 30s, validate local books against REST snapshots."""
+        """Every 30s, validate local books against REST snapshots on both exchanges."""
         while self._running:
             await asyncio.sleep(30)
             for pair in self.monitored_pairs:
+                # Validate + refresh MEXC
                 try:
                     rest_book = await self.mexc.get_order_book(pair, depth=20)
                     local_book = self.pairs[pair].mexc_book
@@ -203,10 +204,27 @@ class UnifiedBookManager:
                                 f"Book drift: {pair} MEXC local={local_book.best_bid} "
                                 f"rest={rest_book.best_bid}"
                             )
-                            self.pairs[pair].mexc_book = rest_book
-                            self.pairs[pair].mexc_last_update = datetime.utcnow()
+                    # Always refresh to keep books fresh (critical for REST fallback)
+                    self.pairs[pair].mexc_book = rest_book
+                    self.pairs[pair].mexc_last_update = datetime.utcnow()
                 except Exception as e:
-                    logger.debug(f"Validation error {pair}: {e}")
+                    logger.debug(f"MEXC validation error {pair}: {e}")
+
+                # Validate + refresh Binance
+                try:
+                    rest_book = await self.binance.get_order_book(pair, depth=20)
+                    local_book = self.pairs[pair].binance_book
+                    if local_book and rest_book and rest_book.best_bid and local_book.best_bid:
+                        diff = abs(local_book.best_bid - rest_book.best_bid)
+                        if rest_book.best_bid > 0 and diff / rest_book.best_bid > Decimal('0.001'):
+                            logger.warning(
+                                f"Book drift: {pair} Binance local={local_book.best_bid} "
+                                f"rest={rest_book.best_bid}"
+                            )
+                    self.pairs[pair].binance_book = rest_book
+                    self.pairs[pair].binance_last_update = datetime.utcnow()
+                except Exception as e:
+                    logger.debug(f"Binance validation error {pair}: {e}")
 
     def get_status(self) -> dict:
         fresh = sum(1 for v in self.pairs.values() if v.is_tradeable)

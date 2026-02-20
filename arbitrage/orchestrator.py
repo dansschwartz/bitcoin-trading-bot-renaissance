@@ -360,6 +360,21 @@ class ArbitrageOrchestrator:
         logger.info("=" * 60)
         logger.info(f"  Books: {book_status['tradeable_pairs']}/{book_status['total_pairs']} tradeable | "
                     f"Updates: {book_status['total_updates']}")
+        # Diagnostic: log why pairs aren't tradeable (first 3 only)
+        if book_status['tradeable_pairs'] == 0:
+            for pair, pdata in list(book_status.get('pairs', {}).items())[:3]:
+                view = self.book_manager.pairs.get(pair)
+                if view:
+                    m_ok = view.mexc_book is not None
+                    b_ok = view.binance_book is not None
+                    fresh = view.is_fresh if (m_ok and b_ok) else False
+                    m_bid = view.mexc_book.best_bid is not None if m_ok else False
+                    b_bid = view.binance_book.best_bid is not None if b_ok else False
+                    logger.info(
+                        f"    {pair}: mexc_book={m_ok} binance_book={b_ok} "
+                        f"fresh={fresh} mexc_bid={m_bid} binance_bid={b_bid} "
+                        f"updates=M:{pdata.get('mexc_updates',0)}/B:{pdata.get('binance_updates',0)}"
+                    )
         logger.info(f"  Detector: {detector_stats['scan_count']} scans | "
                     f"{detector_stats['signals_generated']} signals | "
                     f"{detector_stats['signals_approved']} approved")
