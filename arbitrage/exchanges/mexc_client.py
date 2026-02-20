@@ -13,6 +13,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Callable, Awaitable, Dict, List
 
+import aiohttp
 import ccxt.async_support as ccxt_async
 import websockets
 
@@ -85,8 +86,12 @@ class MEXCClient(ExchangeClient):
     # --- Market Data ---
 
     async def get_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        raw = await self._exchange.fetch_order_book(symbol, limit=depth)
-        return self._parse_order_book(raw, symbol)
+        """Fetch order book — tries ccxt first, falls back to direct REST."""
+        try:
+            raw = await self._exchange.fetch_order_book(symbol, limit=depth)
+            return self._parse_order_book(raw, symbol)
+        except Exception:
+            return await self._fetch_order_book_direct(symbol, depth)
 
     async def subscribe_order_book(
         self, symbol: str,
@@ -289,14 +294,15 @@ class MEXCClient(ExchangeClient):
             asyncio.get_event_loop().create_task(cb(trade))
 
     async def _rest_fallback_loop(self):
-        """REST polling fallback when WS fails repeatedly."""
+        """REST polling fallback when WS fails repeatedly.
+        Uses direct HTTP to bypass ccxt contract API issues.
+        """
         end_time = time.monotonic() + WS_FALLBACK_DURATION
         logger.info("MEXC entering REST fallback mode")
         while self._ws_running and time.monotonic() < end_time:
             async def _fetch_one(sym, cb):
                 try:
-                    raw = await self._exchange.fetch_order_book(sym, limit=20)
-                    book = self._parse_order_book(raw, sym)
+                    book = await self._fetch_order_book_direct(sym, depth=20)
                     self._last_books[sym] = book
                     await cb(book)
                 except Exception as e:
@@ -309,21 +315,31 @@ class MEXCClient(ExchangeClient):
         logger.info("MEXC REST fallback complete, retrying WebSocket")
 
     async def _rest_fallback_loop_permanent(self):
-        """Permanent REST polling when WS is geo-blocked."""
-        logger.info("MEXC running permanent REST polling (WS unavailable)")
+        """Permanent REST polling when WS is geo-blocked.
+        Uses direct HTTP to MEXC spot API to bypass ccxt contract API issues.
+        """
+        logger.info(f"MEXC running permanent REST polling (WS unavailable) — {len(self._ws_callbacks)} symbols")
+        poll_count = 0
+        error_count = 0
         while self._ws_running:
             async def _fetch_one(sym, cb):
                 try:
-                    raw = await self._exchange.fetch_order_book(sym, limit=20)
-                    book = self._parse_order_book(raw, sym)
+                    book = await self._fetch_order_book_direct(sym, depth=20)
                     self._last_books[sym] = book
                     await cb(book)
                 except Exception as e:
-                    logger.debug(f"MEXC REST poll error {sym}: {e}")
+                    logger.warning(f"MEXC REST poll error {sym}: {e}")
 
             tasks = [_fetch_one(s, c) for s, c in list(self._ws_callbacks.items())]
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                poll_count += 1
+                for r in results:
+                    if isinstance(r, Exception):
+                        error_count += 1
+                        logger.warning(f"MEXC REST gather exception: {r}")
+                if poll_count % 60 == 1:  # Log every ~30s
+                    logger.info(f"MEXC REST poll #{poll_count}: {len(tasks)} symbols, {error_count} total errors")
             await asyncio.sleep(0.5)
 
     # ========== Symbol Conversion ==========
@@ -499,6 +515,23 @@ class MEXCClient(ExchangeClient):
             'quantity_precision': 8, 'min_quantity': Decimal('0'),
             'min_notional': Decimal('0'),
         }
+
+    # --- Direct REST (bypasses ccxt, avoids contract API geo-block) ---
+
+    async def _fetch_order_book_direct(self, symbol: str, depth: int = 20) -> OrderBook:
+        """Fetch order book directly from MEXC spot REST API, bypassing ccxt."""
+        raw_sym = self._normalized_to_mexc_sym(symbol)
+        url = f"https://api.mexc.com/api/v3/depth?symbol={raw_sym}&limit={depth}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    raise Exception(f"MEXC REST {resp.status}: {await resp.text()}")
+                data = await resp.json()
+        bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:depth]]
+        asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get('asks', [])[:depth]]
+        ts = data.get('timestamp')
+        dt = datetime.utcfromtimestamp(ts / 1000) if ts else datetime.utcnow()
+        return OrderBook(exchange="mexc", symbol=symbol, timestamp=dt, bids=bids, asks=asks)
 
     # --- Helpers ---
 

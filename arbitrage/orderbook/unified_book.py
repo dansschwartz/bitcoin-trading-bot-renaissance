@@ -163,6 +163,8 @@ class UnifiedBookManager:
             self.pairs[pair].mexc_book = book
             self.pairs[pair].mexc_last_update = datetime.utcnow()
             self.pairs[pair].mexc_update_count += 1
+            if self.pairs[pair].mexc_update_count <= 3:
+                logger.info(f"MEXC book received for {pair}: bid={book.best_bid} ask={book.best_ask}")
             if self._bar_aggregator and book.best_bid and book.best_ask:
                 try:
                     self._bar_aggregator.on_orderbook_snapshot(
@@ -172,6 +174,8 @@ class UnifiedBookManager:
                     )
                 except Exception:
                     pass
+        else:
+            logger.warning(f"MEXC update for unknown pair {pair!r} (known: {list(self.pairs.keys())[:3]})")
 
     async def _on_binance_update(self, pair: str, book: OrderBook):
         if pair in self.pairs:
