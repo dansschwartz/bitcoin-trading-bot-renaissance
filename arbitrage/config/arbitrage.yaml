@@ -58,7 +58,7 @@ triangular:
     - ETH
   scan_interval_ms: 5000            # Reduced from 500ms — save API rate limits
   max_trade_usd: 500
-  observation_mode: false           # Execute triangular arb trades
+  observation_mode: true            # 3-leg execution not supported by 2-leg executor yet
   max_signals_per_cycle: 3          # Max signals per 60s window
 
 inventory:
