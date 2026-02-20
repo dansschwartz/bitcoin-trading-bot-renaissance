@@ -373,15 +373,46 @@ class MEXCClient(ExchangeClient):
         }
 
     async def get_all_tickers(self) -> Dict[str, dict]:
-        raw = await self._exchange.fetch_tickers()
+        """Fetch all tickers — tries ccxt first, falls back to direct REST."""
+        try:
+            raw = await self._exchange.fetch_tickers()
+            result = {}
+            for symbol, ticker in raw.items():
+                result[symbol] = {
+                    'symbol': symbol,
+                    'last_price': Decimal(str(ticker.get('last', 0) or 0)),
+                    'bid': Decimal(str(ticker.get('bid', 0) or 0)),
+                    'ask': Decimal(str(ticker.get('ask', 0) or 0)),
+                    'volume_24h': Decimal(str(ticker.get('baseVolume', 0) or 0)),
+                }
+            return result
+        except Exception as e:
+            logger.debug(f"ccxt fetch_tickers failed ({e}), using direct REST")
+            return await self._fetch_all_tickers_direct()
+
+    async def _fetch_all_tickers_direct(self) -> Dict[str, dict]:
+        """Fetch all tickers directly from MEXC spot REST API, bypassing ccxt."""
+        url = "https://api.mexc.com/api/v3/ticker/bookTicker"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    raise Exception(f"MEXC REST {resp.status}")
+                data = await resp.json()
         result = {}
-        for symbol, ticker in raw.items():
+        for t in data:
+            raw_sym = t.get('symbol', '')
+            symbol = self._mexc_sym_to_normalized(raw_sym)
+            if '/' not in symbol:
+                continue
+            bid = Decimal(str(t.get('bidPrice', '0') or '0'))
+            ask = Decimal(str(t.get('askPrice', '0') or '0'))
+            mid = (bid + ask) / 2 if bid > 0 and ask > 0 else Decimal('0')
             result[symbol] = {
                 'symbol': symbol,
-                'last_price': Decimal(str(ticker.get('last', 0) or 0)),
-                'bid': Decimal(str(ticker.get('bid', 0) or 0)),
-                'ask': Decimal(str(ticker.get('ask', 0) or 0)),
-                'volume_24h': Decimal(str(ticker.get('baseVolume', 0) or 0)),
+                'last_price': mid,
+                'bid': bid,
+                'ask': ask,
+                'volume_24h': Decimal('0'),  # bookTicker doesn't include volume
             }
         return result
 

@@ -77,10 +77,14 @@ class TriangularArbitrage:
         self._running = True
         logger.info("TriangularArbitrage scanner started")
 
-        # Build initial pair graph
-        if not await self._build_pair_graph():
-            logger.warning("TriangularArbitrage: pair graph unavailable (API blocked?), scanner disabled")
-            # Stay alive but don't scan — avoid 403 spam
+        # Build initial pair graph — retry up to 3 times
+        for attempt in range(3):
+            if await self._build_pair_graph():
+                break
+            logger.warning(f"TriangularArbitrage: pair graph build failed (attempt {attempt + 1}/3), retrying in 30s")
+            await asyncio.sleep(30)
+        else:
+            logger.warning("TriangularArbitrage: pair graph unavailable after 3 attempts, scanner disabled")
             while self._running:
                 await asyncio.sleep(300)
             return
