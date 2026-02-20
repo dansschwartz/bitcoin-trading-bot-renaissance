@@ -338,9 +338,9 @@ class MEXCClient(ExchangeClient):
                     if isinstance(r, Exception):
                         error_count += 1
                         logger.warning(f"MEXC REST gather exception: {r}")
-                if poll_count % 60 == 1:  # Log every ~30s
+                if poll_count % 20 == 1:  # Log every ~60s
                     logger.info(f"MEXC REST poll #{poll_count}: {len(tasks)} symbols, {error_count} total errors")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(3)  # 10 pairs × 1 req each = 10 req/3s ≈ 3.3 req/s (within MEXC limits)
 
     # ========== Symbol Conversion ==========
 

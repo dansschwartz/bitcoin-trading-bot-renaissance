@@ -78,7 +78,12 @@ class TriangularArbitrage:
         logger.info("TriangularArbitrage scanner started")
 
         # Build initial pair graph
-        await self._build_pair_graph()
+        if not await self._build_pair_graph():
+            logger.warning("TriangularArbitrage: pair graph unavailable (API blocked?), scanner disabled")
+            # Stay alive but don't scan — avoid 403 spam
+            while self._running:
+                await asyncio.sleep(300)
+            return
 
         while self._running:
             try:
@@ -185,15 +190,17 @@ class TriangularArbitrage:
     def stop(self):
         self._running = False
 
-    async def _build_pair_graph(self):
-        """Build adjacency graph of all trading pairs."""
+    async def _build_pair_graph(self) -> bool:
+        """Build adjacency graph of all trading pairs. Returns True on success."""
         try:
             tickers = await self.client.get_all_tickers()
             self._update_graph(tickers)
             logger.info(f"Pair graph built with {len(self._pair_graph)} currencies, "
                        f"{sum(len(v) for v in self._pair_graph.values())} edges")
+            return True
         except Exception as e:
             logger.error(f"Failed to build pair graph: {e}")
+            return False
 
     def _update_graph(self, tickers: Dict[str, dict]):
         """Update graph edges with latest prices."""

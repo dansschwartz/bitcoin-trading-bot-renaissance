@@ -35,7 +35,7 @@ cross_exchange:
   min_net_spread_bps: 1.0
   signal_ttl_seconds: 5
   min_trade_usd: 100
-  max_trade_usd: 1000
+  max_trade_usd: 500              # Must be ≤ risk.max_single_arb_usd
   scan_interval_ms: 100
   fill_timeout_seconds: 3
   emergency_close_seconds: 5
@@ -82,7 +82,7 @@ risk:
   max_trades_per_hour: 100
   max_consecutive_losses: 10
   max_api_latency_ms: 500
-  max_book_staleness_sec: 3
+  max_book_staleness_sec: 10        # Matches unified_book.py is_fresh window
   min_exchange_balance_usd: 100
 
 paper_trading:
