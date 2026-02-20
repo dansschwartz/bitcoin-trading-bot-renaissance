@@ -50,14 +50,14 @@ funding_rate:
   max_simultaneous_positions: 5
 
 triangular:
-  min_net_profit_bps: 3.0           # Raised from 0.5 — must clear round-trip costs
+  min_net_profit_bps: 5.0           # Must clear taker fees (3×0.05%=1.5bps) + slippage
   exchange: mexc
   start_currencies:
     - USDT
   scan_interval_ms: 5000            # Reduced from 500ms — save API rate limits
   max_trade_usd: 500
   observation_mode: false           # 3-leg executor now handles triangular trades directly
-  max_signals_per_cycle: 3          # Max signals per 60s window
+  max_signals_per_cycle: 2          # Max signals per 60s window — conservative
 
 inventory:
   target_allocation: 0.50
