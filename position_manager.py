@@ -61,9 +61,9 @@ class RiskLimits:
     max_drawdown_percentage: float = 15.0
     max_positions_per_product: int = 3
     max_total_positions: int = 5
-    stop_loss_percentage: float = 2.0
-    take_profit_percentage: float = 4.0
-    trailing_stop_percentage: float = 1.5
+    stop_loss_percentage: float = 3.0
+    take_profit_percentage: float = 6.0
+    trailing_stop_percentage: float = 2.0
     position_timeout_hours: int = 24
 
 

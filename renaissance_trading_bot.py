@@ -1715,7 +1715,7 @@ class RenaissanceTradingBot:
         if action != 'HOLD':
             cycle_num = getattr(self, 'scan_cycle_count', 0)
             last_trade = self._last_trade_cycle.get(product_id, -999)
-            min_hold_cycles = 5  # Must wait 5 cycles between trades on same asset
+            min_hold_cycles = 12  # Must wait 12 cycles (~60min) between trades on same asset
 
             # 1. Minimum hold period — don't trade if we just traded
             if cycle_num - last_trade < min_hold_cycles:
