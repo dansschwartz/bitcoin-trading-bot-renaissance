@@ -43,7 +43,7 @@ async def arb_status(request: Request):
         except Exception as e:
             logger.debug(f"Live status error: {e}")
 
-    # Fallback: summary from DB
+    # Fallback: summary from DB — check if bot is running by looking for recent arb activity
     try:
         with _arb_conn() as c:
             total = c.execute("SELECT COUNT(*) as cnt FROM arb_trades").fetchone()["cnt"]
@@ -53,8 +53,29 @@ async def arb_status(request: Request):
             profit = c.execute(
                 "SELECT COALESCE(SUM(actual_profit_usd), 0) as p FROM arb_trades WHERE status = 'filled'"
             ).fetchone()["p"]
+
+            # Check if the bot process is running by looking for the main DB heartbeat
+            bot_running = False
+            try:
+                main_db = ARB_DB_PATH.parent / "renaissance_bot.db"
+                if main_db.exists():
+                    mc = sqlite3.connect(f"file:{main_db}?mode=ro", uri=True, timeout=5.0)
+                    mc.row_factory = sqlite3.Row
+                    row = mc.execute(
+                        "SELECT MAX(timestamp) as ts FROM decisions"
+                    ).fetchone()
+                    mc.close()
+                    if row and row["ts"]:
+                        from datetime import datetime, timedelta, timezone
+                        last_decision = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
+                        # Bot is "running" if it made a decision in the last 10 minutes
+                        if datetime.now(timezone.utc) - last_decision < timedelta(minutes=10):
+                            bot_running = True
+            except Exception:
+                pass
+
             return {
-                "running": False,
+                "running": bot_running,
                 "uptime_seconds": 0,
                 "db_summary": {
                     "total_trades": total,
