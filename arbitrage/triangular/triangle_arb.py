@@ -50,6 +50,10 @@ class TriangularArbitrage:
         self.risk = risk_engine
         self.signal_queue = signal_queue
 
+        # Dedicated 3-leg executor (replaces routing through 2-leg signal queue)
+        from ..execution.triangular_executor import TriangularExecutor
+        self.tri_executor = TriangularExecutor(mexc_client)
+
         # Override class defaults from config if provided
         if config:
             tri_cfg = config.get('triangular', {})
@@ -126,63 +130,20 @@ class TriangularArbitrage:
                         logger.debug("Triangular arb rate limited, skipping")
                         continue
 
-                    # Create signal for execution
-                    from ..detector.cross_exchange import ArbitrageSignal
-                    first_leg = opp.path[0]
-                    first_symbol = first_leg[0]
+                    # Execute directly via 3-leg executor
+                    try:
+                        result = await self.tri_executor.execute(
+                            path=opp.path,
+                            start_currency=opp.start_currency,
+                            trade_usd=self.MAX_TRADE_USD,
+                        )
+                        self._signals_submitted += 1
+                        self._signals_this_cycle += 1
 
-                    # Get first-leg price from graph
-                    parts = first_symbol.split('/')
-                    if len(parts) == 2:
-                        base_c, quote_c = parts
-                        edge = self._pair_graph.get(quote_c, {}).get(base_c, {})
-                        first_price = Decimal('1') / edge.get('rate', Decimal('1')) if edge.get('rate') else Decimal('0')
-                        if first_price <= 0:
-                            edge2 = self._pair_graph.get(base_c, {}).get(quote_c, {})
-                            first_price = edge2.get('rate', Decimal('1'))
-                    else:
-                        first_price = Decimal('1')
-
-                    if first_price <= 0:
-                        continue
-
-                    max_qty = self.MAX_TRADE_USD / first_price
-
-                    # Pre-flight: check minimum quantity
-                    if max_qty <= 0:
-                        self._signals_skipped_size += 1
-                        continue
-
-                    signal = ArbitrageSignal(
-                        signal_id=f"tri_{opp.start_currency}_{self._scan_count}",
-                        signal_type="triangular",
-                        timestamp=datetime.utcnow(),
-                        symbol=first_symbol,
-                        buy_exchange="mexc",
-                        sell_exchange="mexc",
-                        buy_price=first_price,
-                        sell_price=first_price * opp.cycle_rate,
-                        gross_spread_bps=opp.profit_bps,
-                        total_cost_bps=Decimal('0'),
-                        net_spread_bps=opp.profit_bps,
-                        max_quantity=max_qty,
-                        recommended_quantity=max_qty,
-                        expected_profit_usd=self.MAX_TRADE_USD * opp.profit_bps / 10000,
-                        buy_fee_bps=Decimal('0'),
-                        sell_fee_bps=Decimal('0'),
-                        buy_slippage_bps=Decimal('0.5'),
-                        sell_slippage_bps=Decimal('0.5'),
-                        expires_at=datetime.utcnow() + timedelta(seconds=5),
-                        confidence=min(Decimal('0.8'), opp.profit_bps / 10),
-                    )
-
-                    if self.risk.approve_arbitrage(signal):
-                        try:
-                            self.signal_queue.put_nowait(signal)
-                            self._signals_submitted += 1
-                            self._signals_this_cycle += 1
-                        except asyncio.QueueFull:
-                            pass
+                        if result.status == "filled":
+                            self.risk.record_trade_result(result.profit_usd)
+                    except Exception as e:
+                        logger.error(f"Triangular execution error: {e}")
 
                 self._scan_count += 1
 
@@ -300,6 +261,7 @@ class TriangularArbitrage:
         return opportunities
 
     def get_stats(self) -> dict:
+        exec_stats = self.tri_executor.get_stats() if self.tri_executor else {}
         return {
             "scan_count": self._scan_count,
             "opportunities_found": self._opportunities_found,
@@ -311,4 +273,5 @@ class TriangularArbitrage:
             "min_profit_bps": float(self.MIN_NET_PROFIT_BPS),
             "graph_currencies": len(self._pair_graph),
             "graph_edges": sum(len(v) for v in self._pair_graph.values()),
+            "executor": exec_stats,
         }
