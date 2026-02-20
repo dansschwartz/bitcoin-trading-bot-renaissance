@@ -91,14 +91,14 @@ class ArbitrageOrchestrator:
         self.funding_arb = FundingRateArbitrage(
             self.mexc, self.binance, self.risk_engine,
         )
-        self.triangular_arb = TriangularArbitrage(
-            self.mexc, self.cost_model, self.risk_engine, self.signal_queue,
-            config=self.config,
-        )
-
-        # Support modules
+        # Support modules (tracker must be created before triangular_arb)
         self.inventory = InventoryManager(self.mexc, self.binance)
         self.tracker = PerformanceTracker()
+
+        self.triangular_arb = TriangularArbitrage(
+            self.mexc, self.cost_model, self.risk_engine, self.signal_queue,
+            config=self.config, tracker=self.tracker,
+        )
 
         self._running = False
         self._start_time: Optional[datetime] = None

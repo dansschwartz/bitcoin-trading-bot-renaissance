@@ -155,6 +155,93 @@ class PerformanceTracker:
         # Persist to SQLite
         self._persist_trade(trade)
 
+    def record_triangular_trade(self, result, opportunity=None) -> None:
+        """Record a completed triangular arbitrage execution.
+
+        Maps TriExecutionResult fields to the arb_trades schema so the
+        dashboard picks up triangular P&L automatically.
+        """
+        # Build a human-readable symbol from the leg symbols
+        leg_symbols = [leg.symbol for leg in result.legs] if result.legs else []
+        symbol = "→".join(leg_symbols) if leg_symbols else "triangular"
+
+        # Spread / cost in bps (relative to start amount)
+        start = float(result.start_amount) if result.start_amount else 1.0
+        profit = float(result.profit_usd)
+        fees = float(result.total_fees_usd)
+        spread_bps = (profit / start) * 10000 if start > 0 else 0.0
+        cost_bps = (fees / start) * 10000 if start > 0 else 0.0
+
+        # Extract leg-1 and leg-3 fill prices for buy_price / sell_price
+        buy_price = 0.0
+        sell_price = 0.0
+        if result.legs:
+            leg1 = result.legs[0]
+            if leg1.order_result and leg1.order_result.average_fill_price:
+                buy_price = float(leg1.order_result.average_fill_price)
+            if len(result.legs) >= 3:
+                leg3 = result.legs[2]
+                if leg3.order_result and leg3.order_result.average_fill_price:
+                    sell_price = float(leg3.order_result.average_fill_price)
+
+        trade = {
+            'trade_id': result.trade_id,
+            'strategy': 'triangular',
+            'symbol': symbol,
+            'buy_exchange': 'mexc',
+            'sell_exchange': 'mexc',
+            'status': result.status,
+            'buy_price': buy_price,
+            'sell_price': sell_price,
+            'quantity': float(result.start_amount),
+            'gross_spread_bps': spread_bps + cost_bps,  # before fees
+            'net_spread_bps': spread_bps,                # after fees
+            'expected_profit_usd': profit,
+            'actual_profit_usd': profit,
+            'buy_fee': fees / 2,
+            'sell_fee': fees / 2,
+            'estimated_cost_bps': cost_bps,
+            'realized_cost_bps': cost_bps,
+            'confidence': 1.0,
+            'timestamp': result.timestamp.isoformat(),
+        }
+
+        self._trades.append(trade)
+        self._total_trades += 1
+
+        if result.status == "filled":
+            profit_dec = result.profit_usd
+            self._total_profit += profit_dec
+
+            stats = self._by_strategy["triangular"]
+            stats['trades'] += 1
+            stats['profit_usd'] += profit
+            if profit > 0:
+                stats['wins'] += 1
+            else:
+                stats['losses'] += 1
+
+            # Pair stats
+            if symbol not in self._by_pair:
+                self._by_pair[symbol] = self._empty_stats()
+            pair_stats = self._by_pair[symbol]
+            pair_stats['trades'] += 1
+            pair_stats['profit_usd'] += profit
+            if profit > 0:
+                pair_stats['wins'] += 1
+            else:
+                pair_stats['losses'] += 1
+
+            # Hourly PnL
+            hour_key = datetime.utcnow().strftime("%Y-%m-%d %H:00")
+            self._hourly_pnl[hour_key] = self._hourly_pnl.get(hour_key, Decimal('0')) + profit_dec
+
+        self._persist_trade(trade)
+        logger.info(
+            f"Recorded triangular trade {result.trade_id}: "
+            f"status={result.status} profit=${profit:.4f}"
+        )
+
     def record_signal(self, signal, approved: bool, executed: bool):
         """Record a detected signal for analysis."""
         try:

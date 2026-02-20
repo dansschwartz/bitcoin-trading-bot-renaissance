@@ -44,7 +44,7 @@ class TriangularArbitrage:
     OBSERVATION_MODE = False              # Execute trades (was True)
 
     def __init__(self, mexc_client, cost_model, risk_engine, signal_queue: asyncio.Queue,
-                 config: Optional[dict] = None):
+                 config: Optional[dict] = None, tracker=None):
         self.client = mexc_client
         self.costs = cost_model
         self.risk = risk_engine
@@ -53,6 +53,7 @@ class TriangularArbitrage:
         # Dedicated 3-leg executor (replaces routing through 2-leg signal queue)
         from ..execution.triangular_executor import TriangularExecutor
         self.tri_executor = TriangularExecutor(mexc_client)
+        self.tracker = tracker
 
         # Override class defaults from config if provided
         if config:
@@ -144,6 +145,13 @@ class TriangularArbitrage:
 
                         if result.status == "filled":
                             self.risk.record_trade_result(result.profit_usd)
+
+                        # Persist to DB for dashboard visibility
+                        if self.tracker:
+                            try:
+                                self.tracker.record_triangular_trade(result, opportunity=opp)
+                            except Exception as track_err:
+                                logger.debug(f"Triangular trade tracking error: {track_err}")
                     except Exception as e:
                         logger.error(f"Triangular execution error: {e}")
 
