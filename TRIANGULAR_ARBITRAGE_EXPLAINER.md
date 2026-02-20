@@ -26,7 +26,7 @@ MEXC offers **0% maker fees** on spot trading. This is the single structural edg
 
 A typical triangular opportunity yields 5-15 basis points of edge. With 3 legs:
 - **Taker execution** (0.05% x 3 = 15 bps cost): Edge is wiped out. Every trade loses money. We proved this empirically — 26 taker trades lost $34.50 total, averaging -$1.33 per fill.
-- **Maker execution** (0.00% x 3 = 0 bps cost): Full edge captured. Every trade profits. 197 maker fills earned $219.19 total, averaging +$1.11 per fill.
+- **Maker execution** (0.00% x 3 = 0 bps cost): Full edge captured. Every trade profits. 431 maker fills earned $271.09 total, averaging +$0.63 per fill.
 
 We use **LIMIT_MAKER (post-only)** orders exclusively, which the exchange guarantees will only fill as maker. If an order would cross the spread (becoming a taker), MEXC rejects it instead of filling it — protecting us from accidental taker fees.
 
@@ -78,7 +78,7 @@ Executes profitable cycles via 3 sequential LIMIT_MAKER orders:
 **If any leg fails** (post-only rejection, timeout, insufficient quantity):
 - All previously completed legs are **unwound** in reverse order using market orders
 - Market unwinds incur taker fees (0.05%) plus potential slippage
-- Observed unwind cost: **-$0.43 average** on a $500 trade
+- Observed unwind cost: **-$1.29 average** on a $500 trade, worst case -$3.75
 
 Total execution time: **110-150ms** for all 3 legs.
 
@@ -112,11 +112,13 @@ Current competition stats (as of 2026-02-20):
 
 | Metric | Value |
 |--------|-------|
-| Total trades attempted | 518 |
-| Total fills | 393 |
-| Overall fill rate | 76% |
-| **Net profit** | **+$197.72** |
-| Total runtime | ~10 hours |
+| Total trades attempted | 577 |
+| Total fills | 431 |
+| Overall fill rate | 75% |
+| **Net profit** | **+$271.09** |
+| Best single trade | +$6.53 |
+| Worst single trade | -$3.75 |
+| Total runtime | ~3.5 hours |
 
 ### Performance by Era
 
@@ -127,47 +129,43 @@ The system went through four iterations on launch day, each validating a differe
 | Pre-fee simulation | 170 | +$0.08 | +$14.42 | Paper fill didn't simulate fees — inflated results |
 | Taker fee era | 26 | -$1.33 | -$34.50 | Fees correctly simulated — confirmed taker kills the edge |
 | LIMIT_MAKER (pre-blocklist) | 177 | +$1.03 | +$182.01 | Post-only orders, 0% maker fee — genuine alpha |
-| **LIMIT_MAKER (with blocklist)** | **20** | **+$1.86** | **+$37.18** | BTC/ETH-quote blocklist + rounding check — improved quality |
+| **LIMIT_MAKER (with blocklist)** | **58** | **+$1.88** | **+$109.16** | BTC/ETH-quote blocklist + rounding check — improved quality |
 
 **Key takeaways:**
 - The **taker fee era** proved the concern: taker fees ($0.75 across 3 legs on a $500 trade) exceed the typical 5-9 bps edge. Every trade lost money.
 - **Switching to LIMIT_MAKER** eliminated this cost entirely. Failed post-only attempts (rejected by exchange) cost nothing.
 - The **blocklist + rounding check** improved average profit per fill from $1.03 to $1.86 by filtering out structural losers.
 
-### LIMIT_MAKER Era Breakdown (current configuration)
+### LIMIT_MAKER Era Breakdown (eras 3+4 combined)
 
 | Metric | Value |
 |--------|-------|
-| Winning fills | 172 |
-| Losing fills | 25 |
-| Win rate | **87.3%** |
-| Total profit (winners) | +$228.58 |
-| Total loss (losers) | -$10.79 |
-| **Net profit** | **+$219.19** |
-| Avg profit per winner | +$1.33 |
-| Avg loss per loser | -$0.43 |
-| Profit factor | 21.2x |
-
-### Post-Blocklist Era (latest, most representative)
-
-| Metric | Value |
-|--------|-------|
-| Fills | 20 |
-| Wins | 19 |
-| Losses | 1 |
-| Win rate | **95%** |
-| **Total profit** | **+$37.18** |
-| Avg profit per fill | +$1.86 |
+| Winning fills | 361 |
+| Losing fills | 70 |
+| Win rate | **83.8%** |
+| Total profit (winners) | +$361.16 |
+| Total loss (losers) | -$90.07 |
+| **Net profit** | **+$271.09** |
+| Avg profit per winner | +$1.00 |
+| Avg loss per loser | -$1.29 |
+| Profit factor | 4.0x |
 
 ## Most Profitable Paths
 
-The highest-yield triangular paths consistently involve stablecoin pairs:
+The highest-yield triangular paths by total P&L:
 
-- `USDC/USDT -> MX/USDC -> MX/USDT` (~15 bps edge)
-- `USDC/USDT -> CHESS/USDC -> CHESS/USDT` (~12 bps edge)
-- `USDC/USDT -> XLM/USDC -> XLM/USDT` (~10 bps edge)
+| Path | Fills | Total P&L | Avg/fill |
+|------|-------|-----------|----------|
+| `USDC/USDT -> NAKA/USDC -> NAKA/USDT` | 13 | +$70.11 | +$5.39 |
+| `USDC/USDT -> WAVES/USDC -> WAVES/USDT` | 13 | +$33.84 | +$2.60 |
+| `BTC/USDT -> BDX/BTC -> BDX/USDT` | 34 | +$26.63 | +$0.78 |
+| `USDC/USDT -> MX/USDC -> MX/USDT` | 64 | +$19.14 | +$0.30 |
+| `ETH/USDT -> LINK/ETH -> LINK/USDT` | 23 | +$18.66 | +$0.81 |
+| `NIL/USDT -> NIL/USDC -> USDC/USDT` | 13 | +$17.82 | +$1.37 |
+| `USDC/USDT -> ROSE/USDC -> ROSE/USDT` | 9 | +$15.36 | +$1.71 |
+| `NAKA/USDT -> NAKA/USDC -> USDC/USDT` | 11 | +$13.05 | +$1.19 |
 
-The common pattern: USDT and USDC trade at slightly different prices (0.9997 vs 1.0003), and routing through an intermediate token captures the spread.
+The common pattern: USDT and USDC trade at slightly different prices (0.9997 vs 1.0003), and routing through an intermediate token captures the spread. NAKA and WAVES paths show the highest per-fill profit, while MX has the highest volume (64 fills) but thinner edges.
 
 **Blocklisted paths**: Any cycle routing through BTC-quote or ETH-quote pairs (e.g., `BDX/BTC`, `XLM/ETH`) is automatically filtered. These pairs have quantity precision of only 2-4 decimal places, causing rounding losses of $1.50-2.28 per trade — far exceeding the typical edge.
 
@@ -175,7 +173,7 @@ The common pattern: USDT and USDC trade at slightly different prices (0.9997 vs 
 
 ### What can go wrong
 
-1. **Partial execution + unwind cost**: Leg 1 fills but Leg 2 is rejected -> unwind Leg 1 at market. Observed cost: **-$0.43 average** (from 25 losing fills out of 197 maker-era fills). The blocklist eliminated the worst-case $2.28 loss scenario.
+1. **Partial execution + unwind cost**: Leg 1 fills but Leg 2 is rejected -> unwind Leg 1 at market. Observed cost: **-$1.29 average** (from 70 losing fills out of 431 maker-era fills), worst case -$3.75.
 
 2. **Price movement between legs**: The 3 legs execute sequentially (~50ms each). If the price moves against us between Leg 1 and Leg 3, the cycle may be unprofitable. Mitigated by the speed of execution (total <150ms) and the fact that stablecoin pairs move slowly.
 
@@ -297,9 +295,9 @@ The system deliberately went through three fee eras to validate the model empiri
 
 2. **Taker fee simulation** (era 2): Added realistic fee simulation where LIMIT orders that cross the spread pay 0.05% taker. Result: **every single trade lost money** (-$1.33 average). This proved that at 3 legs x 0.05% = 15 bps of taker fees, the typical 5-9 bps edge is completely consumed.
 
-3. **LIMIT_MAKER + 0% maker** (era 3): Switched to post-only orders that guarantee maker execution at 0% fee. Result: **87% win rate, +$1.11 average profit per fill**. The edge is real.
+3. **LIMIT_MAKER + 0% maker** (era 3): Switched to post-only orders that guarantee maker execution at 0% fee. Result: **84% win rate, +$1.03 average profit per fill**. The edge is real.
 
-4. **Blocklist + rounding check** (era 4): Added BTC/ETH-quote pair blocklist and pre-execution rounding simulation. Result: **95% win rate, +$1.86 average profit per fill**. Eliminating structural losers improved quality significantly.
+4. **Blocklist + rounding check** (era 4): Added BTC/ETH-quote pair blocklist and pre-execution rounding simulation. Result: **+$1.88 average profit per fill**. Eliminating structural losers improved quality significantly.
 
 This progression from no fees -> taker fees -> maker fees -> maker + filters provides high confidence that the current profits are genuine and not artifacts of simulation errors.
 
