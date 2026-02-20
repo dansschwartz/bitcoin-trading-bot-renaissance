@@ -486,30 +486,30 @@ class TrainedGRU(nn.Module):
 # MODEL 6: Meta-Ensemble  (stacking layer over 5 base models)
 # ══════════════════════════════════════════════════════════════════════════════
 
-N_BASE_MODELS = 5  # QT, BiLSTM, DilatedCNN, CNN, GRU (meta-ensemble uses these 5)
+N_BASE_MODELS = 6  # QT, BiLSTM, DilatedCNN, CNN, GRU, LightGBM
 BASE_MODEL_NAMES = [
-    'quantum_transformer', 'bidirectional_lstm', 'dilated_cnn', 'cnn', 'gru',
+    'quantum_transformer', 'bidirectional_lstm', 'dilated_cnn', 'cnn', 'gru', 'lightgbm',
 ]
-
-# LightGBM momentum lookback bars (must match train_lightgbm.py)
-LIGHTGBM_MOMENTUM_BARS = [1, 3, 6, 12, 24, 72]
 
 
 class TrainedMetaEnsemble(nn.Module):
     """Meta-learning stacking layer that learns which base models to trust.
 
-    Takes input_dim-dim market features + 5 base model predictions = (input_dim+5)-dim input.
+    Takes input_dim-dim market features + N base model predictions as input.
     Learns context-dependent model weighting: in trending markets, trust
     momentum models more; in choppy markets, trust mean-reversion models.
 
-    Input: (batch, input_dim+5) — first input_dim = features, last 5 = base model predictions
+    Input: (batch, input_dim + n_models)
     Output: (prediction, confidence) tuple
+
+    The n_models parameter auto-detects from saved weights when loading,
+    supporting both 5-model (legacy) and 6-model (with LightGBM) ensembles.
     """
 
-    def __init__(self, input_dim: int = INPUT_DIM):
+    def __init__(self, input_dim: int = INPUT_DIM, n_models: int = N_BASE_MODELS):
         super().__init__()
         self._input_dim = input_dim
-        n_models = N_BASE_MODELS  # 5
+        self._n_models = n_models
 
         # Feature extractor — understands market context
         self.feature_extractor = nn.Sequential(
@@ -526,7 +526,7 @@ class TrainedMetaEnsemble(nn.Module):
         self.weight_generator = nn.Sequential(
             nn.Linear(64, 32),          # 0
             nn.GELU(),                  # 1
-            nn.Linear(32, n_models),    # 2  → 5 weights
+            nn.Linear(32, n_models),    # 2  → n_models weights
         )
 
         # Final predictor — combines context + base predictions
@@ -546,21 +546,18 @@ class TrainedMetaEnsemble(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """x: (batch, input_dim+5) → prediction (batch, 1), confidence (batch, 1)
-
-        First input_dim dims are features, last 5 are base model predictions.
-        """
+        """x: (batch, input_dim + n_models) → prediction (batch, 1), confidence (batch, 1)"""
         features = x[:, :self._input_dim]
-        model_preds = x[:, self._input_dim:]  # (batch, 5)
+        model_preds = x[:, self._input_dim:]  # (batch, n_models)
 
         # Extract market context
         ctx = self.feature_extractor(features)  # (batch, 64)
 
         # Generate per-model attention weights
-        weights = F.softmax(self.weight_generator(ctx), dim=-1)  # (batch, 5)
+        weights = F.softmax(self.weight_generator(ctx), dim=-1)  # (batch, n_models)
 
         # Combine context + raw model predictions
-        combined = torch.cat([ctx, model_preds], dim=-1)  # (batch, 69)
+        combined = torch.cat([ctx, model_preds], dim=-1)  # (batch, 64 + n_models)
 
         # Final prediction (learns both from weighted combo and direct features)
         pred = self.final_predictor(combined)  # (batch, 1)
@@ -1163,7 +1160,16 @@ def load_trained_models(base_dir: str = '.', input_dim: int = INPUT_DIM) -> Dict
             detected_dim = _detect_input_dim(name, saved_sd)
             use_dim = detected_dim if detected_dim is not None else input_dim
 
-            model = model_cls(input_dim=use_dim)
+            # For meta_ensemble, detect n_models from saved weight_generator shape
+            if name == 'meta_ensemble':
+                wg_key = 'weight_generator.2.weight'
+                detected_n_models = saved_sd[wg_key].shape[0] if wg_key in saved_sd else N_BASE_MODELS
+                model = model_cls(input_dim=use_dim, n_models=detected_n_models)
+                if detected_n_models != N_BASE_MODELS:
+                    logger.info(f"Meta-ensemble: detected {detected_n_models} base models from saved weights "
+                                f"(current N_BASE_MODELS={N_BASE_MODELS})")
+            else:
+                model = model_cls(input_dim=use_dim)
             result = model.load_state_dict(saved_sd, strict=False)
 
             # Check for mismatches
@@ -1214,12 +1220,12 @@ def predict_with_models(
     features: np.ndarray,
     price_series: Optional[np.ndarray] = None,
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """Run inference on all loaded models.
+    """Run inference on all loaded models (5 DL + LightGBM + meta-ensemble).
 
     Args:
         models: dict from load_trained_models()
         features: (seq_len, INPUT_DIM) numpy array from build_feature_sequence()
-        price_series: Optional close prices for LightGBM momentum features
+        price_series: Optional close prices (unused, kept for API compat)
 
     Returns:
         (predictions, confidences) where:
@@ -1272,13 +1278,29 @@ def predict_with_models(
             with torch.no_grad():
                 meta_model = models['meta_ensemble']
                 meta_dim = meta_model._input_dim
-                # Build meta-ensemble input: last-timestep features + 5 base predictions
+                n_models = meta_model._n_models
+
+                # Build base model predictions list matching what the meta-ensemble expects
+                # If meta-ensemble was trained with 5 models, only pass the 5 DL predictions
+                # If trained with 6, include LightGBM
+                if n_models >= N_BASE_MODELS:
+                    # New 6-model meta-ensemble: pass all including lightgbm
+                    base_pred_list = [predictions.get(name, 0.0) for name in BASE_MODEL_NAMES]
+                else:
+                    # Legacy 5-model meta-ensemble: pass only DL predictions
+                    base_pred_list = [
+                        predictions.get(name, 0.0)
+                        for name in BASE_MODEL_NAMES if name != 'lightgbm'
+                    ]
+
+                # Ensure we have exactly n_models predictions
+                while len(base_pred_list) < n_models:
+                    base_pred_list.append(0.0)
+                base_pred_list = base_pred_list[:n_models]
+
                 feat_vec = torch.FloatTensor(features[-1, :meta_dim]).unsqueeze(0)  # (1, meta_dim)
-                base_preds = torch.FloatTensor([[
-                    predictions.get(name, 0.0)
-                    for name in BASE_MODEL_NAMES
-                ]])  # (1, 5)
-                meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, meta_dim+5)
+                base_preds = torch.FloatTensor([base_pred_list])  # (1, n_models)
+                meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, meta_dim + n_models)
                 pred, conf = meta_model(meta_input)
                 predictions['meta_ensemble'] = float(torch.tanh(pred[0, 0]))
                 confidences['meta_ensemble'] = float(conf[0, 0])
@@ -1332,35 +1354,78 @@ def _match_feature_dim(
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LIGHTGBM — gradient boosting model (non-PyTorch)
+# Trained in Colab with [last, mean, std] feature preparation → 294 features.
+# Trees find interaction effects and threshold rules that neural nets miss,
+# structurally diversifying the ensemble.
 # ══════════════════════════════════════════════════════════════════════════════
 
-LIGHTGBM_PATH = os.path.join('models', 'trained', 'lightgbm_model.txt')
+LIGHTGBM_PKL_PATH = os.path.join('models', 'trained', 'best_lightgbm_model.pkl')
+LIGHTGBM_TXT_PATH = os.path.join('models', 'trained', 'lightgbm_model.txt')
+LIGHTGBM_META_PATH = os.path.join('models', 'trained', 'lightgbm_meta.json')
 
 
 def load_lightgbm_model(base_dir: str = '.') -> Optional[object]:
-    """Load a trained LightGBM model from .txt file.
+    """Load a trained LightGBM model (pickle or Booster .txt format).
 
-    Returns the LightGBM Booster object, or None if not found/not installed.
+    Tries pickle format first (from Colab training), falls back to .txt Booster.
+    Returns the model object, or None if not found/not installed.
     """
-    full_path = os.path.join(base_dir, LIGHTGBM_PATH)
-    if not os.path.exists(full_path):
-        logger.debug(f"LightGBM model not found: {full_path}")
-        return None
+    import json as _json
+    import pickle as _pickle
 
-    try:
-        import lightgbm as lgb
-    except ImportError:
-        logger.debug("LightGBM not installed — skipping lightgbm model")
-        return None
+    # Try pickle format first (Colab-trained model)
+    pkl_path = os.path.join(base_dir, LIGHTGBM_PKL_PATH)
+    if os.path.exists(pkl_path):
+        try:
+            with open(pkl_path, 'rb') as f:
+                model = _pickle.load(f)
+            # Load metadata if available
+            meta_path = os.path.join(base_dir, LIGHTGBM_META_PATH)
+            meta = {}
+            if os.path.exists(meta_path):
+                with open(meta_path, 'r') as f:
+                    meta = _json.load(f)
+            logger.info(f"LightGBM model loaded (pkl): {pkl_path} "
+                        f"(best_iter={meta.get('best_iteration', '?')}, "
+                        f"test_acc={meta.get('test_accuracy', '?')})")
+            return model
+        except Exception as e:
+            logger.error(f"Failed to load LightGBM from pkl: {e}")
 
-    try:
-        model = lgb.Booster(model_file=full_path)
-        logger.info(f"LightGBM model loaded: {full_path} "
-                     f"({model.num_trees()} trees, {model.num_feature()} features)")
-        return model
-    except Exception as e:
-        logger.error(f"Failed to load LightGBM model: {e}")
-        return None
+    # Fallback: .txt Booster format
+    txt_path = os.path.join(base_dir, LIGHTGBM_TXT_PATH)
+    if os.path.exists(txt_path):
+        try:
+            import lightgbm as lgb
+            model = lgb.Booster(model_file=txt_path)
+            logger.info(f"LightGBM model loaded (txt): {txt_path} "
+                        f"({model.num_trees()} trees, {model.num_feature()} features)")
+            return model
+        except ImportError:
+            logger.debug("LightGBM not installed — skipping lightgbm model")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to load LightGBM from txt: {e}")
+            return None
+
+    logger.debug(f"LightGBM model not found at {pkl_path} or {txt_path}")
+    return None
+
+
+def _prepare_lgb_features(features: np.ndarray) -> np.ndarray:
+    """Convert (seq_len, INPUT_DIM) sequence to (1, INPUT_DIM*3) for LightGBM.
+
+    Concatenates:
+    - Last timestep features (most recent market state)
+    - Mean across window (trend context)
+    - Std across window (volatility context)
+
+    This matches the training pipeline's prepare_lgb_features().
+    """
+    last = features[-1, :]           # (INPUT_DIM,) — most recent bar
+    mean = features.mean(axis=0)     # (INPUT_DIM,) — window average
+    std = features.std(axis=0)       # (INPUT_DIM,) — window volatility
+    return np.concatenate([last, mean, std]).reshape(1, -1)  # (1, INPUT_DIM*3)
 
 
 def predict_lightgbm(
@@ -1371,10 +1436,9 @@ def predict_lightgbm(
     """Run inference on LightGBM model.
 
     Args:
-        model: LightGBM Booster from load_lightgbm_model()
+        model: LightGBM model from load_lightgbm_model()
         features: (seq_len, INPUT_DIM) array from build_feature_sequence()
-        price_series: Optional (N,) close price array for momentum computation.
-                      If None, momentum features are set to 0.
+        price_series: Unused (kept for API compatibility)
 
     Returns:
         (prediction, confidence) where:
@@ -1385,31 +1449,31 @@ def predict_lightgbm(
         return 0.0, 0.0
 
     try:
-        # Take the LAST bar's feature vector (flattened, not sequential)
-        bar_features = features[-1, :]  # (INPUT_DIM,)
+        # Flatten sequence to LightGBM format: [last, mean, std]
+        lgb_input = _prepare_lgb_features(features)  # (1, INPUT_DIM*3)
+        lgb_input = np.nan_to_num(lgb_input, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Multi-timeframe momentum from price series
-        if price_series is not None and len(price_series) > max(LIGHTGBM_MOMENTUM_BARS):
-            current_price = price_series[-1]
-            momentum_feats = []
-            for h in LIGHTGBM_MOMENTUM_BARS:
-                if current_price > 0 and len(price_series) > h:
-                    past_price = price_series[-(h + 1)]
-                    momentum_feats.append(current_price / past_price - 1.0 if past_price > 0 else 0.0)
-                else:
-                    momentum_feats.append(0.0)
-        else:
-            momentum_feats = [0.0] * len(LIGHTGBM_MOMENTUM_BARS)
+        # Auto-detect input format: if model expects more features than we have,
+        # pad with zeros; if fewer, truncate (handles legacy vs new format)
+        expected_features = None
+        if hasattr(model, 'num_feature'):
+            expected_features = model.num_feature()
+        elif hasattr(model, 'n_features_'):
+            expected_features = model.n_features_
 
-        # Combine: bar features + momentum
-        row = np.concatenate([bar_features, np.array(momentum_feats, dtype=np.float32)])
-        row = np.nan_to_num(row, nan=0.0, posinf=0.0, neginf=0.0)
+        if expected_features is not None:
+            n_have = lgb_input.shape[1]
+            if n_have < expected_features:
+                pad = np.zeros((1, expected_features - n_have), dtype=np.float32)
+                lgb_input = np.concatenate([lgb_input, pad], axis=1)
+            elif n_have > expected_features:
+                lgb_input = lgb_input[:, :expected_features]
 
         # LightGBM predict returns probability of class 1 (up)
-        prob = float(model.predict(row.reshape(1, -1))[0])
+        prob = float(model.predict(lgb_input)[0])
 
         # Map probability [0, 1] → prediction [-1, 1]
-        prediction = (prob - 0.5) * 2.0  # 0.5→0, 0.7→0.4, 0.3→-0.4
+        prediction = float(np.clip((prob - 0.5) * 2.0, -1.0, 1.0))
 
         # Confidence: how far from uncertain (0.5)
         confidence = abs(prob - 0.5) * 2.0  # 0.5→0, 0.7→0.4, 1.0→1.0
