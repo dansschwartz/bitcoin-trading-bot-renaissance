@@ -1,5 +1,19 @@
 # Triangular Arbitrage System — How It Works
 
+## Current Operating Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Trade size | **$750** per cycle |
+| Min edge threshold | 5.0 bps |
+| Order type | LIMIT_MAKER (post-only, 0% maker fee) |
+| Start currency | USDT only |
+| Rate limit | 2 executions per 60s window |
+| Blocklist | BTC-quote and ETH-quote pairs filtered |
+| Fill rate (observed) | ~75% |
+| Fee monitor | Hourly automated check |
+| Mode | **Paper trading** |
+
 ## What Is Triangular Arbitrage?
 
 Triangular arbitrage exploits price discrepancies between three trading pairs on the **same exchange** (MEXC). When three currency pairs form a cycle and the product of their exchange rates exceeds 1.0, there is a risk-free profit opportunity.
@@ -158,9 +172,9 @@ The highest-yield triangular paths by total P&L:
 |------|-------|-----------|----------|
 | `USDC/USDT -> NAKA/USDC -> NAKA/USDT` | 13 | +$70.11 | +$5.39 |
 | `USDC/USDT -> WAVES/USDC -> WAVES/USDT` | 13 | +$33.84 | +$2.60 |
-| `BTC/USDT -> BDX/BTC -> BDX/USDT` | 34 | +$26.63 | +$0.78 |
+| `BTC/USDT -> BDX/BTC -> BDX/USDT` *(pre-blocklist)* | 34 | +$26.63 | +$0.78 |
 | `USDC/USDT -> MX/USDC -> MX/USDT` | 64 | +$19.14 | +$0.30 |
-| `ETH/USDT -> LINK/ETH -> LINK/USDT` | 23 | +$18.66 | +$0.81 |
+| `ETH/USDT -> LINK/ETH -> LINK/USDT` *(pre-blocklist)* | 23 | +$18.66 | +$0.81 |
 | `NIL/USDT -> NIL/USDC -> USDC/USDT` | 13 | +$17.82 | +$1.37 |
 | `USDC/USDT -> ROSE/USDC -> ROSE/USDT` | 9 | +$15.36 | +$1.71 |
 | `NAKA/USDT -> NAKA/USDC -> USDC/USDT` | 11 | +$13.05 | +$1.19 |
@@ -193,32 +207,34 @@ The common pattern: USDT and USDC trade at slightly different prices (0.9997 vs 
 
 ## Capacity and Scaling
 
-Current trade size is **$500 per cycle**. Key considerations for scaling:
+Current trade size is **$750 per cycle** (increased from $500 after confirming stable performance). Key considerations for further scaling:
 
 - **Order book depth**: The stablecoin pairs (USDC/USDT) typically have $50K+ of depth at the top of book. Intermediate tokens (MX, CHESS) may have thinner books — at $1,000+ per trade, check that the maker order wouldn't consume more than 10% of the visible book.
-- **Fill rate impact**: Larger orders are less likely to fill as maker before the opportunity closes. Expect fill rate to decrease as trade size increases.
-- **Rate limiting**: Currently capped at 2 executions per 60-second window (configurable). At $500 per trade, that's ~$1,000/min maximum cycling through the strategy.
+- **Fill rate impact**: Larger orders are less likely to fill as maker before the opportunity closes. Expect fill rate to decrease as trade size increases. Monitor closely after each size increase.
+- **Rate limiting**: Currently capped at 2 executions per 60-second window (configurable). At $750 per trade, that's ~$1,500/min maximum cycling through the strategy.
 - **Diminishing returns**: The same 3-4 profitable paths are recycled. Scaling up trade size on the same paths may move the market, reducing the edge for subsequent trades.
 
-**Recommendation**: Before increasing trade size, collect 48+ hours of data at $500 to establish baseline fill rates and edge distribution. Then test $750, then $1,000, monitoring for fill rate degradation.
+**Scaling history**: $500 (initial) -> $750 (current). Next step: $1,000, contingent on fill rate remaining above 70% at $750.
 
 ## Paper Trading vs Live
 
 The system is currently **paper trading** — simulating fills against real order book data but not placing actual orders. The paper trading engine includes:
 
 - Realistic fee simulation (0% maker, 0.05% taker based on order type and spread crossing)
-- 95% fill rate simulation for LIMIT_MAKER orders
+- 75% fill rate simulation for LIMIT_MAKER orders (calibrated to match observed fill rate)
 - Correct fee denomination (BUY fees in base currency, SELL fees in quote currency)
 - Pre-execution rounding check (skips cycles where rounding loss > 5 bps)
+
+**Paper vs live fill rate**: The observed paper trading fill rate is ~75% (431 fills out of 577 attempts). The simulation fill rate has been calibrated to match this. However, live fill rates may differ — paper trading cannot fully replicate order queue position, book dynamics, or latency. Live testing is the only way to establish the true fill rate.
 
 **Before going live**, validate:
 1. Confirm MEXC still offers 0% maker fee on spot (hourly automated check is already running)
 2. Run paper trading for 48+ hours to establish baseline statistics
-3. Start with $100 trade size (not $500) to limit exposure during validation
-4. Monitor fill rates — real fill rates may differ from the 95% simulation
+3. Start with $100 trade size (not $750) to limit exposure during validation
+4. Monitor fill rates — real fill rates may differ from paper simulation
 5. Watch competition detector for edge compression over time
 
-## Safeguards (6 layers)
+## Safeguards (7 layers)
 
 | # | Safeguard | Location | What it does |
 |---|-----------|----------|--------------|
@@ -228,6 +244,7 @@ The system is currently **paper trading** — simulating fills against real orde
 | 4 | **Automatic unwind** | `triangular_executor.py` | Failed cycles are reversed via market orders to recover capital |
 | 5 | **Rate limiting** | `triangle_arb.py` | Max 2 executions per 60-second window |
 | 6 | **Fee monitor** | `orchestrator.py` | Hourly MEXC fee check. Auto-pauses tri-arb if maker fee changes from 0% |
+| 7 | **Daily drawdown limit** | `arb_risk.py` | Pauses all arb trading if daily P&L drops below -$100 (configurable via `risk.max_daily_loss_usd`) |
 
 ## Technical Details
 
@@ -247,10 +264,14 @@ Tunable parameters in `arbitrage/config/arbitrage.yaml`:
 ```yaml
 triangular:
   min_net_profit_bps: 5.0        # Minimum edge to execute
-  max_trade_usd: 500             # Trade size per cycle
+  max_trade_usd: 750             # Trade size per cycle
   max_signals_per_cycle: 2       # Rate limit per 60s window
   observation_mode: false        # Log-only mode without execution
   start_currencies: [USDT]       # Which currencies to start cycles from
+
+risk:
+  max_single_arb_usd: 750       # Must match triangular.max_trade_usd
+  max_daily_loss_usd: 100        # Daily drawdown limit — halts all arb
 ```
 
 ### Database Schema
@@ -307,6 +328,8 @@ This progression from no fees -> taker fees -> maker fees -> maker + filters pro
 
 2. **Paper trading fill rate may differ from live**: The 95% simulated fill rate for LIMIT_MAKER may be optimistic. Real-world fill rates depend on order book dynamics that paper trading can't fully replicate. Only live testing will establish the true fill rate.
 
-3. **Stale book data**: The scanner fetches tickers via REST every 5 seconds. Between fetches, prices may have moved. A WebSocket feed would provide sub-second updates but adds complexity.
+3. **Stale book data (highest-priority improvement)**: The scanner fetches tickers via REST every 5 seconds. Between fetches, prices may have moved. With execution taking 110-150ms but price data up to 5 seconds stale, many detected opportunities may already be gone by the time the executor pre-fetches fresh books. The observed 75% fill rate likely reflects this staleness — the executor's fresh pre-fetch discovers the opportunity has closed and the post-only order is rejected. **Upgrading to a WebSocket ticker feed would provide sub-second updates and likely improve fill rate significantly**, which directly translates to more profitable trades per hour.
 
 4. **No position tracking across restarts**: In-memory competition stats and executor stats reset on bot restart. Historical data is preserved in the database, but the rolling competition window starts fresh.
+
+5. **No strategy-level daily stop-loss**: The risk engine has a global `max_daily_loss_usd` ($100) that halts all arbitrage strategies. There is no separate daily drawdown limit for triangular arb alone. If tri-arb has a bad streak but cross-exchange is profitable, both get halted. A per-strategy daily stop-loss (e.g., pause tri-arb if its daily P&L drops below -$25) would be a useful addition.

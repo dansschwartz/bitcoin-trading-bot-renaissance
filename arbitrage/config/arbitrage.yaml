@@ -86,7 +86,7 @@ risk:
 paper_trading:
   enabled: true
   simulated_latency_ms: 50
-  simulated_fill_rate: 0.95         # Raised from 0.85 — paper trading fill rate
+  simulated_fill_rate: 0.75         # Calibrated to observed fill rate (431/577 = 75%)
 
 logging:
   level: INFO
