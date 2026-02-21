@@ -111,9 +111,9 @@ class ConfluenceEngine:
             
             # 1. All Same Sign (Trend Confirmation)
             if rule['logic'] == 'all_same_sign':
-                if len(rule_signals) >= 2 and all(s > 0.1 for s in rule_signals):
+                if len(rule_signals) >= 2 and all(s > 0.05 for s in rule_signals):
                     return rule['boost']
-                if len(rule_signals) >= 2 and all(s < -0.1 for s in rule_signals):
+                if len(rule_signals) >= 2 and all(s < -0.05 for s in rule_signals):
                     return rule['boost']
 
             # 2. Divergence (Mean Reversion)
@@ -121,19 +121,19 @@ class ConfluenceEngine:
                 # Bollinger band extreme + volume confirmation
                 boll = signals.get('bollinger', 0.0)
                 vol = signals.get('volume', 0.0)
-                if abs(boll) > 0.6 and np.sign(boll) != np.sign(vol):
+                if abs(boll) > 0.3 and np.sign(boll) != np.sign(vol):
                     return rule['boost']
 
             # 3. High Correlation (Confirmation)
             elif rule['logic'] == 'high_correlation':
                 s1 = signals.get(rule['signals'][0], 0.0)
                 s2 = signals.get(rule['signals'][1], 0.0)
-                if np.sign(s1) == np.sign(s2) and abs(s1) > 0.3 and abs(s2) > 0.3:
+                if np.sign(s1) == np.sign(s2) and abs(s1) > 0.15 and abs(s2) > 0.15:
                     return rule['boost']
 
             # 4. Both Strong (Alpha Multiplier)
             elif rule['logic'] == 'both_strong':
-                if all(abs(s) > 0.5 for s in rule_signals):
+                if all(abs(s) > 0.25 for s in rule_signals):
                     return rule['boost']
 
             return 0.0

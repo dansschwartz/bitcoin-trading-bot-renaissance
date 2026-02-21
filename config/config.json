@@ -533,6 +533,7 @@
         "max_proposals_per_week": 5,
         "model": "sonnet"
     },
+    "ml_signal_scale": 10.0,
     "model_retraining": {
         "enabled": true,
         "schedule_day": "saturday",

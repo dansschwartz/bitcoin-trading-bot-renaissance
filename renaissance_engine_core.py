@@ -20,6 +20,11 @@ class SignalFusion:
         self.confidence = 0.0
         self.contributing_signals = {}
         self.weights = {}
+        self._ml_signal_scale = 10.0  # Amplification for small ML predictions
+
+    def set_ml_signal_scale(self, scale: float) -> None:
+        """Set ML signal amplification factor (default 10.0)."""
+        self._ml_signal_scale = float(scale)
 
     def fuse_signals(self, signals: Dict[str, float], weights: Dict[str, float]) -> Tuple[float, float, Dict[str, Any]]:
         """Fuse multiple signals with weights"""
@@ -77,8 +82,9 @@ class SignalFusion:
         if not ml_package:
             return traditional_strength, traditional_confidence, traditional_metadata
 
-        # Extract ML insights
-        ml_strength = ml_package.ensemble_score
+        # Extract ML insights — scale small predictions to usable range
+        ml_scale = self._ml_signal_scale
+        ml_strength = float(np.clip(ml_package.ensemble_score * ml_scale, -1.0, 1.0))
         ml_confidence = ml_package.confidence_score
 
         # Combine traditional and ML signals

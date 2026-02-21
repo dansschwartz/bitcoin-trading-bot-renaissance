@@ -547,6 +547,7 @@ class RenaissanceTradingBot:
         
         # Unified Signal Fusion (Step 16+)
         self.signal_fusion = SignalFusion()
+        self.signal_fusion.set_ml_signal_scale(self.config.get("ml_signal_scale", 10.0))
         
         self.alternative_data_engine = AlternativeDataEngine(self.config, logger=self.logger)
 
