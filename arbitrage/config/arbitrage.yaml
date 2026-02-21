@@ -35,7 +35,7 @@ cross_exchange:
   min_net_spread_bps: 1.0
   signal_ttl_seconds: 5
   min_trade_usd: 100
-  max_trade_usd: 750              # Must be ≤ risk.max_single_arb_usd
+  max_trade_usd: 1000              # Must be ≤ risk.max_single_arb_usd
   scan_interval_ms: 100
   fill_timeout_seconds: 3
   emergency_close_seconds: 5
@@ -55,7 +55,7 @@ triangular:
   start_currencies:
     - USDT
   scan_interval_ms: 5000            # Reduced from 500ms — save API rate limits
-  max_trade_usd: 750
+  max_trade_usd: 1000
   observation_mode: false           # 3-leg executor now handles triangular trades directly
   max_signals_per_cycle: 2          # Max signals per 60s window — conservative
 
@@ -72,7 +72,7 @@ inventory:
     SOL: SOL
 
 risk:
-  max_single_arb_usd: 750
+  max_single_arb_usd: 1000
   max_total_exposure_usd: 10000
   max_one_sided_usd: 200
   max_daily_loss_usd: 100
