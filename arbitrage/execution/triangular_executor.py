@@ -46,6 +46,7 @@ class TriExecutionResult:
     total_fees_usd: Decimal = Decimal('0')
     execution_time_ms: float = 0.0
     timestamp: datetime = field(default_factory=datetime.utcnow)
+    book_depth: Optional[Dict] = None  # Per-leg book depth at time of execution
 
 
 class TriangularExecutor:
@@ -94,8 +95,12 @@ class TriangularExecutor:
         # Pre-fetch all order books and precision info concurrently
         symbols = [s[0] for s in path]
         pre_fetch_start = time.monotonic()
-        books, precisions = await self._pre_fetch_all(symbols, path)
+        books, precisions, raw_books = await self._pre_fetch_all(symbols, path)
         pre_fetch_ms = (time.monotonic() - pre_fetch_start) * 1000
+
+        # === BOOK DEPTH LOGGING ===
+        # Record depth at top 5 levels for each leg (for scaling analysis)
+        book_depth = self._compute_book_depth(path, raw_books)
 
         # === PRE-EXECUTION ROUNDING CHECK ===
         # Simulate rounding at each leg's precision to estimate worst-case
@@ -126,12 +131,18 @@ class TriangularExecutor:
                 )
                 self._trade_count -= 1  # Don't count skips in stats
                 return self._build_result(trade_id, "skipped", [], initial_amount,
-                                          Decimal('0'), start_time)
+                                          Decimal('0'), start_time, book_depth)
+
+        # Build compact depth string for log: "LEG1:$4200 LEG2:$12000 LEG3:$85000"
+        depth_str = " ".join(
+            f"L{i+1}:${book_depth['legs'][i]['depth_usd_top5']:.0f}"
+            for i in range(len(book_depth.get('legs', [])))
+        ) if book_depth.get('legs') else "no-depth"
 
         logger.info(
             f"TRI EXECUTE {trade_id}: {' -> '.join(s[0] for s in path)} -> {start_currency} "
             f"| Starting: {float(current_amount):.8f} {start_currency} (${float(trade_usd):.2f}) "
-            f"| Pre-fetch: {pre_fetch_ms:.0f}ms"
+            f"| Pre-fetch: {pre_fetch_ms:.0f}ms | Depth: {depth_str}"
         )
 
         for i, (symbol, side, next_currency) in enumerate(path):
@@ -150,7 +161,7 @@ class TriangularExecutor:
                 logger.error(f"TRI LEG {leg_num} FAILED: no price for {symbol}")
                 await self._unwind(legs, trade_id)
                 return self._build_result(trade_id, "failed", legs, trade_usd,
-                                          Decimal('0'), start_time)
+                                          Decimal('0'), start_time, book_depth)
 
             # Calculate quantity
             if side == 'buy':
@@ -170,7 +181,7 @@ class TriangularExecutor:
                 logger.error(f"TRI LEG {leg_num} FAILED: quantity too small for {symbol}")
                 await self._unwind(legs, trade_id)
                 return self._build_result(trade_id, "failed", legs, trade_usd,
-                                          Decimal('0'), start_time)
+                                          Decimal('0'), start_time, book_depth)
 
             order = OrderRequest(
                 exchange="mexc",
@@ -196,7 +207,7 @@ class TriangularExecutor:
                 ))
                 await self._unwind(legs, trade_id)
                 return self._build_result(trade_id, "failed", legs, trade_usd,
-                                          Decimal('0'), start_time)
+                                          Decimal('0'), start_time, book_depth)
 
             if result.status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
                 logger.error(
@@ -209,7 +220,7 @@ class TriangularExecutor:
                 ))
                 await self._unwind(legs, trade_id)
                 return self._build_result(trade_id, "failed", legs, trade_usd,
-                                          Decimal('0'), start_time)
+                                          Decimal('0'), start_time, book_depth)
 
             # Calculate output amount
             fill_price = result.average_fill_price or price
@@ -254,28 +265,35 @@ class TriangularExecutor:
         )
 
         result = self._build_result(
-            trade_id, "filled", legs, initial_amount, current_amount, start_time
+            trade_id, "filled", legs, initial_amount, current_amount, start_time, book_depth
         )
         self._completed.append(result)
         return result
 
     async def _pre_fetch_all(
         self, symbols: List[str], path: List[Tuple[str, str, str]]
-    ) -> Tuple[Dict[Tuple[str, str], Decimal], Dict[str, Tuple[int, int]]]:
-        """Pre-fetch all order books and precision info concurrently."""
+    ) -> Tuple[Dict[Tuple[str, str], Decimal], Dict[str, Tuple[int, int]], Dict[str, 'OrderBook']]:
+        """Pre-fetch all order books and precision info concurrently.
+
+        Returns:
+            books: {(symbol, side): best_price}
+            precisions: {symbol: (price_prec, qty_prec)}
+            raw_books: {symbol: OrderBook} for depth analysis
+        """
         books: Dict[Tuple[str, str], Decimal] = {}
         precisions: Dict[str, Tuple[int, int]] = {}
+        raw_books: Dict[str, object] = {}
 
         # Build list of concurrent tasks
         async def fetch_book(symbol: str, side: str):
             try:
                 book = await self.client.get_order_book(symbol, depth=5)
                 if side == 'ask':
-                    return (symbol, side), book.best_ask
-                return (symbol, side), book.best_bid
+                    return (symbol, side), book.best_ask, book
+                return (symbol, side), book.best_bid, book
             except Exception as e:
                 logger.debug(f"Pre-fetch failed for {symbol} {side}: {e}")
-                return (symbol, side), None
+                return (symbol, side), None, None
 
         async def fetch_precision(symbol: str):
             if symbol in self._precision_cache:
@@ -303,13 +321,16 @@ class TriangularExecutor:
         for r in results:
             if isinstance(r, Exception):
                 continue
-            if isinstance(r, tuple) and len(r) == 2:
+            if isinstance(r, tuple) and len(r) == 3:
+                # Book result: ((symbol, side), price, book_obj)
+                key, value, book_obj = r
+                books[key] = value
+                if book_obj is not None:
+                    raw_books[key[0]] = book_obj
+            elif isinstance(r, tuple) and len(r) == 2:
+                # Precision result: (symbol, (price_prec, qty_prec))
                 key, value = r
-                if isinstance(key, tuple):
-                    # Book result: ((symbol, side), price)
-                    books[key] = value
-                elif isinstance(key, str):
-                    # Precision result: (symbol, (price_prec, qty_prec))
+                if isinstance(key, str):
                     precisions[key] = value
 
         # Fill precisions from cache for any we already had
@@ -317,7 +338,7 @@ class TriangularExecutor:
             if symbol not in precisions and symbol in self._precision_cache:
                 precisions[symbol] = self._precision_cache[symbol]
 
-        return books, precisions
+        return books, precisions, raw_books
 
     @staticmethod
     def _round_decimal(value: Decimal, precision: int) -> Decimal:
@@ -387,7 +408,8 @@ class TriangularExecutor:
 
     def _build_result(self, trade_id: str, status: str,
                       legs: List[TriLegResult], start_amount: Decimal,
-                      end_amount: Decimal, start_time: float) -> TriExecutionResult:
+                      end_amount: Decimal, start_time: float,
+                      book_depth: Optional[Dict] = None) -> TriExecutionResult:
         total_fees = sum(
             (l.order_result.fee_amount if l.order_result else Decimal('0'))
             for l in legs
@@ -401,7 +423,38 @@ class TriangularExecutor:
             profit_usd=end_amount - start_amount,
             total_fees_usd=total_fees,
             execution_time_ms=(time.monotonic() - start_time) * 1000,
+            book_depth=book_depth,
         )
+
+    @staticmethod
+    def _compute_book_depth(
+        path: List[Tuple[str, str, str]],
+        raw_books: Dict[str, object],
+    ) -> Dict:
+        """Compute USD depth at top 5 levels for each leg's relevant side."""
+        legs_depth = []
+        for symbol, side, _ in path:
+            book = raw_books.get(symbol)
+            if not book:
+                legs_depth.append({
+                    "symbol": symbol, "side": side,
+                    "depth_usd_top5": 0.0, "levels": 0,
+                })
+                continue
+
+            # For LIMIT_MAKER: BUY rests at bid, SELL rests at ask
+            # Depth we care about = the side we're joining
+            levels = book.bids[:5] if side == 'buy' else book.asks[:5]
+            depth_usd = sum(
+                float(lvl.price * lvl.quantity) for lvl in levels
+            )
+            legs_depth.append({
+                "symbol": symbol, "side": side,
+                "depth_usd_top5": round(depth_usd, 2),
+                "levels": len(levels),
+            })
+
+        return {"legs": legs_depth}
 
     def get_stats(self) -> dict:
         return {

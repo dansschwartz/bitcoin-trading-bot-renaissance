@@ -61,9 +61,15 @@ class PerformanceTracker:
                 estimated_cost_bps REAL,
                 realized_cost_bps REAL,
                 confidence REAL,
-                timestamp TEXT
+                timestamp TEXT,
+                book_depth_json TEXT
             )
         """)
+        # Add book_depth_json column if missing (existing DBs)
+        try:
+            conn.execute("ALTER TABLE arb_trades ADD COLUMN book_depth_json TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS arb_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,6 +123,7 @@ class PerformanceTracker:
             'realized_cost_bps': float(execution_result.realized_cost_bps),
             'confidence': float(signal.confidence),
             'timestamp': datetime.utcnow().isoformat(),
+            'book_depth_json': None,
         }
 
         self._trades.append(trade)
@@ -191,6 +198,14 @@ class PerformanceTracker:
                 if leg3.order_result and leg3.order_result.average_fill_price:
                     sell_price = float(leg3.order_result.average_fill_price)
 
+        # Serialize book depth as JSON if available
+        depth_json = None
+        if hasattr(result, 'book_depth') and result.book_depth:
+            try:
+                depth_json = json.dumps(result.book_depth)
+            except Exception:
+                pass
+
         trade = {
             'trade_id': result.trade_id,
             'strategy': 'triangular',
@@ -211,6 +226,7 @@ class PerformanceTracker:
             'realized_cost_bps': cost_bps,
             'confidence': 1.0,
             'timestamp': result.timestamp.isoformat(),
+            'book_depth_json': depth_json,
         }
 
         self._trades.append(trade)
@@ -275,8 +291,9 @@ class PerformanceTracker:
                 "(trade_id, strategy, symbol, buy_exchange, sell_exchange, status, "
                 "buy_price, sell_price, quantity, gross_spread_bps, net_spread_bps, "
                 "expected_profit_usd, actual_profit_usd, buy_fee, sell_fee, "
-                "estimated_cost_bps, realized_cost_bps, confidence, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "estimated_cost_bps, realized_cost_bps, confidence, timestamp, "
+                "book_depth_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(trade.values()),
             )
             conn.commit()
