@@ -1523,10 +1523,11 @@ class RenaissanceTradingBot:
                         derivatives_data=_deriv,
                     )
                     market_data['real_time_predictions'] = rt_result
+                    _ml_scale = self.config.get("ml_signal_scale", 10.0)
                     if 'Ensemble' in rt_result:
-                        signals['ml_ensemble'] = rt_result['Ensemble']
+                        signals['ml_ensemble'] = float(np.clip(rt_result['Ensemble'] * _ml_scale, -1.0, 1.0))
                     if 'CNN' in rt_result:
-                        signals['ml_cnn'] = rt_result['CNN']
+                        signals['ml_cnn'] = float(np.clip(rt_result['CNN'] * _ml_scale, -1.0, 1.0))
             except Exception as e:
                 self.logger.warning(f"ML RT pipeline failed: {e}")
 
