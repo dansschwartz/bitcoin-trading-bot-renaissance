@@ -713,7 +713,7 @@ class MEXCClient(ExchangeClient):
         if symbol in self._symbol_info_cache:
             return self._symbol_info_cache[symbol]
 
-        if self._exchange and symbol in self._exchange.markets:
+        if self._exchange and self._exchange.markets and symbol in self._exchange.markets:
             market = self._exchange.markets[symbol]
             info = {
                 'symbol': symbol,
