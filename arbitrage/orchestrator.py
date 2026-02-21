@@ -37,6 +37,7 @@ from arbitrage.risk.arb_risk import ArbitrageRiskEngine
 from arbitrage.inventory.manager import InventoryManager
 from arbitrage.tracking.performance import PerformanceTracker
 from arbitrage.exchanges.base import Trade
+from arbitrage.safety.contract_verifier import ContractVerifier
 
 logger = logging.getLogger("arb.orchestrator")
 
@@ -90,10 +91,15 @@ class ArbitrageOrchestrator:
         # Signal queue: detector → executor
         self.signal_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
+        # Contract verification safety layer
+        self.contract_verifier = ContractVerifier(
+            self.mexc, self.binance, config=self.config,
+        )
+
         # Strategies
         self.cross_exchange_detector = CrossExchangeDetector(
             self.book_manager, self.cost_model, self.risk_engine, self.signal_queue,
-            config=self.config,
+            config=self.config, contract_verifier=self.contract_verifier,
         )
         self.executor = ArbitrageExecutor(
             self.mexc, self.binance, self.cost_model, self.risk_engine,
@@ -184,6 +190,12 @@ class ArbitrageOrchestrator:
         if self.bybit:
             connect_tasks.append(self.bybit.connect())
         await asyncio.gather(*connect_tasks)
+
+        # Contract verification cache (try to populate, degrade gracefully)
+        try:
+            await self.contract_verifier.refresh_cache()
+        except Exception as e:
+            logger.warning(f"Contract verifier cache refresh failed (degrading to permissive): {e}")
 
         # Initial inventory check
         try:
@@ -522,6 +534,10 @@ class ArbitrageOrchestrator:
             tracker_summary = self.tracker.get_summary()
         except Exception:
             tracker_summary = {}
+        try:
+            contract_stats = self.contract_verifier.get_stats()
+        except Exception:
+            contract_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -533,6 +549,7 @@ class ArbitrageOrchestrator:
             "triangular_bybit": tri_bybit_stats,
             "risk": risk_status,
             "tracker_summary": tracker_summary,
+            "contract_verification": contract_stats,
         }
 
     def _log_final_summary(self):

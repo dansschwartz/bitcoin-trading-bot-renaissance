@@ -129,6 +129,11 @@ risk:
   max_book_staleness_sec: 10        # Matches unified_book.py is_fresh window
   min_exchange_balance_usd: 100
 
+safety:
+  max_price_divergence_pct: 5.0     # Block if prices differ >5% between exchanges
+  blocked_tokens: []                # Manual blocklist: ["LUNC", "WBTC"] etc.
+  cache_ttl_hours: 24               # How often to refresh contract data
+
 paper_trading:
   enabled: true
   simulated_latency_ms: 50

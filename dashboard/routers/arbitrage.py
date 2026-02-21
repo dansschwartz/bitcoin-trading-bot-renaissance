@@ -455,6 +455,29 @@ async def arb_sizing_distribution(request: Request):
         return {"error": str(e)}
 
 
+@router.get("/contract-verification")
+async def arb_contract_verification(request: Request):
+    """Contract verification status for cross-exchange safety."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch and hasattr(orch, "contract_verifier"):
+        try:
+            cv = orch.contract_verifier
+            stats = cv.get_stats()
+            stats["blocked_details"] = cv.get_mismatches()
+            return _sanitize_for_json(stats)
+        except Exception as e:
+            logger.debug(f"Contract verification status error: {e}")
+
+    return {
+        "total_checked": 0,
+        "verified": 0,
+        "blocked": 0,
+        "blocklist": [],
+        "mismatches": [],
+        "note": "Contract verifier not initialized (orchestrator not running)",
+    }
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

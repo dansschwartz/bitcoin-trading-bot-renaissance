@@ -61,11 +61,12 @@ class CrossExchangeDetector:
     MAX_TRADE_USD = Decimal('1000')
 
     def __init__(self, book_manager, cost_model, risk_engine, signal_queue: asyncio.Queue,
-                 config: Optional[dict] = None):
+                 config: Optional[dict] = None, contract_verifier=None):
         self.books = book_manager
         self.costs = cost_model
         self.risk = risk_engine
         self.signal_queue = signal_queue
+        self.contract_verifier = contract_verifier
 
         # Override from config
         if config:
@@ -82,6 +83,8 @@ class CrossExchangeDetector:
         self._scan_count = 0
         self._signals_generated = 0
         self._signals_approved = 0
+        self._contract_skips = 0
+        self._price_sanity_skips = 0
         self._last_spreads: dict = {}  # pair -> last gross spread for stability check
 
     async def run(self):
@@ -103,9 +106,22 @@ class CrossExchangeDetector:
                 if not view.is_tradeable:
                     continue
 
+                # Layer 1: Contract/blocklist verification (cached, runs once per token)
+                if self.contract_verifier and not self.contract_verifier.is_verified(pair):
+                    self._contract_skips += 1
+                    continue
+
                 spread_info = view.get_cross_exchange_spread()
                 if spread_info is None or spread_info['gross_spread_bps'] <= 0:
                     continue
+
+                # Layer 2: Price sanity check (instant, no API needed)
+                if self.contract_verifier:
+                    buy_p = float(spread_info['buy_price'])
+                    sell_p = float(spread_info['sell_price'])
+                    if not self.contract_verifier.price_sanity_check(pair, buy_p, sell_p):
+                        self._price_sanity_skips += 1
+                        continue
 
                 # Calculate costs
                 cost_est = self.costs.estimate_arbitrage_cost(
@@ -196,7 +212,8 @@ class CrossExchangeDetector:
                 logger.info(
                     f"CROSS-X DIAG [{self._scan_count} scans]: "
                     f"signals={self._signals_generated} approved={self._signals_approved} "
-                    f"below_threshold={_diag_below_threshold} below_notional={_diag_below_notional} | "
+                    f"below_threshold={_diag_below_threshold} below_notional={_diag_below_notional} "
+                    f"contract_skip={self._contract_skips} price_sanity_skip={self._price_sanity_skips} | "
                     f"best_spread: {_diag_best_pair} gross={_diag_best_gross:.1f}bps "
                     f"net={_diag_best_net:.1f}bps (min={self.MIN_NET_SPREAD_BPS}bps) "
                     f"cost={_diag_best_gross - _diag_best_net:.1f}bps"
@@ -242,7 +259,7 @@ class CrossExchangeDetector:
         return min(confidence, Decimal('0.95'))
 
     def get_stats(self) -> dict:
-        return {
+        stats = {
             "scan_count": self._scan_count,
             "signals_generated": self._signals_generated,
             "signals_approved": self._signals_approved,
@@ -250,4 +267,9 @@ class CrossExchangeDetector:
                 self._signals_approved / self._signals_generated
                 if self._signals_generated > 0 else 0
             ),
+            "contract_skips": self._contract_skips,
+            "price_sanity_skips": self._price_sanity_skips,
         }
+        if self.contract_verifier:
+            stats["contract_verification"] = self.contract_verifier.get_stats()
+        return stats
