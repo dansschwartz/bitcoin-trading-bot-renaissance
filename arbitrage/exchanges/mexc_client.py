@@ -696,7 +696,7 @@ class MEXCClient(ExchangeClient):
     def _paper_balances(self) -> Dict[str, Balance]:
         """Paper trading balances — pre-funded."""
         return {
-            "USDT": Balance("mexc", "USDT", Decimal('5000'), Decimal('0'), Decimal('5000')),
+            "USDT": Balance("mexc", "USDT", Decimal('10000'), Decimal('0'), Decimal('10000')),
             "BTC": Balance("mexc", "BTC", Decimal('0.15'), Decimal('0'), Decimal('0.15')),
             "ETH": Balance("mexc", "ETH", Decimal('2.5'), Decimal('0'), Decimal('2.5')),
             "SOL": Balance("mexc", "SOL", Decimal('50'), Decimal('0'), Decimal('50')),

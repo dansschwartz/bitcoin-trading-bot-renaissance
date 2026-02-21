@@ -73,7 +73,7 @@ inventory:
 
 risk:
   max_single_arb_usd: 750
-  max_total_exposure_usd: 5000
+  max_total_exposure_usd: 10000
   max_one_sided_usd: 200
   max_daily_loss_usd: 100
   max_funding_position_usd: 2000

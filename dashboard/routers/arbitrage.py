@@ -214,7 +214,7 @@ async def arb_summary(request: Request):
 async def arb_wallet(request: Request):
     """Arbitrage wallet balance and allocation."""
     orch = getattr(request.app.state, "arb_orchestrator", None)
-    initial_balance = 5000.0  # Arbitrage wallet starting balance
+    initial_balance = 10000.0  # Arbitrage wallet starting balance
 
     # Calculate realized P&L from arb trades
     total_profit = 0.0

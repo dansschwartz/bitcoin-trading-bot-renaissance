@@ -494,7 +494,7 @@ class BinanceClient(ExchangeClient):
 
     def _paper_balances(self) -> Dict[str, Balance]:
         return {
-            "USDT": Balance("binance", "USDT", Decimal('5000'), Decimal('0'), Decimal('5000')),
+            "USDT": Balance("binance", "USDT", Decimal('10000'), Decimal('0'), Decimal('10000')),
             "BTC": Balance("binance", "BTC", Decimal('0.15'), Decimal('0'), Decimal('0.15')),
             "ETH": Balance("binance", "ETH", Decimal('2.5'), Decimal('0'), Decimal('2.5')),
             "SOL": Balance("binance", "SOL", Decimal('50'), Decimal('0'), Decimal('50')),
