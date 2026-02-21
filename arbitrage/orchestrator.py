@@ -281,7 +281,8 @@ class ArbitrageOrchestrator:
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
-                logger.error(f"Execution loop error: {e}")
+                import traceback
+                logger.error(f"Execution loop error: {e}\n{traceback.format_exc()}")
                 await asyncio.sleep(1)
 
     async def _run_funding_arb(self):
