@@ -104,7 +104,12 @@ class ContractVerifier:
                 return {}
 
             # fetch_currencies requires API keys on most exchanges
-            currencies = ccxt_exchange.fetch_currencies()
+            # ccxt sync exchange — run in executor to avoid blocking
+            if asyncio.iscoroutinefunction(getattr(ccxt_exchange, 'fetch_currencies', None)):
+                currencies = await ccxt_exchange.fetch_currencies()
+            else:
+                loop = asyncio.get_event_loop()
+                currencies = await loop.run_in_executor(None, ccxt_exchange.fetch_currencies)
             if not currencies:
                 logger.info(f"CONTRACT VERIFIER: {exchange} returned 0 currencies (no API keys?)")
                 return {}
