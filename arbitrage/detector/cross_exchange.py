@@ -92,6 +92,7 @@ class CrossExchangeDetector:
         _diag_best_net = -999.0
         _diag_best_pair = ""
         _diag_below_threshold = 0
+        _diag_below_notional = 0
 
         while self._running:
             scan_start = datetime.utcnow()
@@ -141,6 +142,7 @@ class CrossExchangeDetector:
 
                 notional = recommended_qty * mid_price
                 if notional < self.MIN_TRADE_USD:
+                    _diag_below_notional += 1
                     continue
 
                 expected_profit = notional * (net_spread / 10000)
@@ -194,7 +196,7 @@ class CrossExchangeDetector:
                 logger.info(
                     f"CROSS-X DIAG [{self._scan_count} scans]: "
                     f"signals={self._signals_generated} approved={self._signals_approved} "
-                    f"below_threshold={_diag_below_threshold} | "
+                    f"below_threshold={_diag_below_threshold} below_notional={_diag_below_notional} | "
                     f"best_spread: {_diag_best_pair} gross={_diag_best_gross:.1f}bps "
                     f"net={_diag_best_net:.1f}bps (min={self.MIN_NET_SPREAD_BPS}bps) "
                     f"cost={_diag_best_gross - _diag_best_net:.1f}bps"
@@ -204,6 +206,7 @@ class CrossExchangeDetector:
                 _diag_best_net = -999.0
                 _diag_best_pair = ""
                 _diag_below_threshold = 0
+                _diag_below_notional = 0
 
             elapsed = (datetime.utcnow() - scan_start).total_seconds()
             sleep_time = max(0.05, 0.1 - elapsed)

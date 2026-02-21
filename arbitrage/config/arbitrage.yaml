@@ -55,7 +55,7 @@ pairs:
 cross_exchange:
   min_net_spread_bps: 1.0
   signal_ttl_seconds: 5
-  min_trade_usd: 100
+  min_trade_usd: 10                    # Low for paper trading — raise to $100+ for live
   max_trade_usd: 2000              # Must be ≤ risk.max_single_arb_usd
   scan_interval_ms: 100
   fill_timeout_seconds: 3
