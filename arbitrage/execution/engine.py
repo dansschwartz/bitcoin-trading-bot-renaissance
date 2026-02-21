@@ -102,6 +102,21 @@ class ArbitrageExecutor:
             )
             return ExecutionResult(trade_id=trade_id, status="quantity_too_small", signal=signal)
 
+        # Sanity check: reject if rounding moved price >1% from signal
+        for label, rounded, original in [
+            ("buy", buy_price, signal.buy_price),
+            ("sell", sell_price, signal.sell_price),
+        ]:
+            if original > 0:
+                drift_pct = abs(float(rounded - original) / float(original)) * 100
+                if drift_pct > 1.0:
+                    logger.error(
+                        f"PRICE ROUNDING ABORT {trade_id}: {label} price drifted "
+                        f"{drift_pct:.1f}% ({float(original):.6f} → {float(rounded):.6f}). "
+                        f"Precision mode bug? raw_precision={buy_info.get('price_precision') if label == 'buy' else sell_info.get('price_precision')}"
+                    )
+                    return ExecutionResult(trade_id=trade_id, status="price_rounding_abort", signal=signal)
+
         logger.info(
             f"EXECUTING: {signal.symbol} | "
             f"BUY {float(buy_qty):.6f} @ {float(buy_price):.2f} on {signal.buy_exchange} | "
@@ -296,17 +311,39 @@ class ArbitrageExecutor:
         return buy_fee_bps + sell_fee_bps + buy_slip + sell_slip
 
     def _round_qty(self, qty: Decimal, precision) -> Decimal:
-        precision = int(precision)
-        if precision <= 0:
+        """Round quantity to exchange precision.
+
+        precision can be:
+        - int >= 1: decimal place count (DECIMAL_PLACES mode, e.g. MEXC returns 4)
+        - float < 1: step size (TICK_SIZE mode, e.g. Binance returns 0.001)
+        """
+        p = float(precision)
+        if 0 < p < 1:
+            # TICK_SIZE mode: precision IS the step size (e.g. 0.001)
+            step = Decimal(str(precision))
+            return (qty / step).to_integral_value(rounding=ROUND_DOWN) * step
+        places = int(p)
+        if places <= 0:
             return qty.quantize(Decimal('1'), rounding=ROUND_DOWN)
-        quant = Decimal(10) ** -precision
+        quant = Decimal(10) ** -places
         return qty.quantize(quant, rounding=ROUND_DOWN)
 
     def _round_price(self, price: Decimal, precision) -> Decimal:
-        precision = int(precision)
-        if precision <= 0:
+        """Round price to exchange precision.
+
+        precision can be:
+        - int >= 1: decimal place count (DECIMAL_PLACES mode, e.g. MEXC returns 4)
+        - float < 1: tick size (TICK_SIZE mode, e.g. Binance returns 0.01)
+        """
+        p = float(precision)
+        if 0 < p < 1:
+            # TICK_SIZE mode: precision IS the tick size
+            tick = Decimal(str(precision))
+            return (price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+        places = int(p)
+        if places <= 0:
             return price.quantize(Decimal('1'), rounding=ROUND_DOWN)
-        quant = Decimal(10) ** -precision
+        quant = Decimal(10) ** -places
         return price.quantize(quant, rounding=ROUND_DOWN)
 
     def get_stats(self) -> dict:
