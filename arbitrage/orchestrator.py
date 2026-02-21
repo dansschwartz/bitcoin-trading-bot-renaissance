@@ -77,8 +77,9 @@ class ArbitrageOrchestrator:
         # BarAggregator for trade/book data
         self.bar_aggregator = self._init_bar_aggregator()
 
-        # Core modules
-        pairs = self.config.get('pairs', {}).get('phase_1', [])
+        # Core modules — combine phase_1 (large-cap) + phase_2 (mid-cap) pairs
+        pairs_cfg = self.config.get('pairs', {})
+        pairs = pairs_cfg.get('phase_1', []) + pairs_cfg.get('phase_2', [])
         self.book_manager = UnifiedBookManager(
             self.mexc, self.binance, pairs=pairs,
             bar_aggregator=self.bar_aggregator,
@@ -399,7 +400,8 @@ class ArbitrageOrchestrator:
     async def _subscribe_trade_feeds(self):
         """Subscribe to trade streams on both exchanges for all pairs."""
         await asyncio.sleep(3)  # Wait for WS connections to establish
-        pairs = self.config.get('pairs', {}).get('phase_1', [])
+        pairs_cfg = self.config.get('pairs', {})
+        pairs = pairs_cfg.get('phase_1', []) + pairs_cfg.get('phase_2', [])
 
         for pair in pairs:
             try:

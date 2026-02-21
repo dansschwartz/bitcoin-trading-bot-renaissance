@@ -19,7 +19,7 @@ websocket:
   rest_fallback_duration_seconds: 60
 
 pairs:
-  phase_1:
+  phase_1:                              # Large-cap — tight spreads, high liquidity
     - BTC/USDT
     - ETH/USDT
     - SOL/USDT
@@ -30,6 +30,27 @@ pairs:
     - AVAX/USDT
     - LINK/USDT
     - DOT/USDT
+  phase_2:                              # Mid-cap — wider spreads, cross-exchange edge
+    - VANRY/USDT
+    - NTRN/USDT
+    - G/USDT
+    - DUSK/USDT
+    - ZKP/USDT
+    - COTI/USDT
+    - MATIC/USDT
+    - FTM/USDT
+    - NEAR/USDT
+    - ALGO/USDT
+    - ATOM/USDT
+    - FIL/USDT
+    - IMX/USDT
+    - ARB/USDT
+    - OP/USDT
+    - APE/USDT
+    - SAND/USDT
+    - MANA/USDT
+    - GALA/USDT
+    - ENJ/USDT
 
 cross_exchange:
   min_net_spread_bps: 1.0

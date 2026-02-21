@@ -690,10 +690,19 @@ class MEXCClient(ExchangeClient):
 
     async def get_balance(self, currency: str) -> Balance:
         balances = await self.get_balances()
-        return balances.get(currency, Balance(
+        bal = balances.get(currency)
+        if bal:
+            return bal
+        # Paper trading: return generous default for any unlisted token
+        if self.paper_trading:
+            return Balance(
+                exchange="mexc", currency=currency,
+                free=Decimal('100000'), locked=Decimal('0'), total=Decimal('100000'),
+            )
+        return Balance(
             exchange="mexc", currency=currency,
             free=Decimal('0'), locked=Decimal('0'), total=Decimal('0'),
-        ))
+        )
 
     # --- Exchange Info ---
 
