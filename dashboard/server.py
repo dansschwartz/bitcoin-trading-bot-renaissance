@@ -34,12 +34,9 @@ def create_app(
     class NoCacheMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             response: Response = await call_next(request)
-            if request.url.path.startswith("/api/"):
-                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                response.headers["Pragma"] = "no-cache"
-            elif request.url.path.endswith(".html") or request.url.path == "/":
-                response.headers["Cache-Control"] = "no-cache, must-revalidate, max-age=0"
-            # Let .js/.css with hashed filenames cache normally
+            # No-cache on everything — this is a dev/paper-trading dashboard
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
             return response
 
     app.add_middleware(NoCacheMiddleware)

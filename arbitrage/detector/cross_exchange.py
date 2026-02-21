@@ -87,6 +87,11 @@ class CrossExchangeDetector:
     async def run(self):
         self._running = True
         logger.info("CrossExchangeDetector started")
+        # Diagnostic counters
+        _diag_best_gross = 0.0
+        _diag_best_net = -999.0
+        _diag_best_pair = ""
+        _diag_below_threshold = 0
 
         while self._running:
             scan_start = datetime.utcnow()
@@ -112,7 +117,16 @@ class CrossExchangeDetector:
 
                 net_spread = spread_info['gross_spread_bps'] - cost_est.total_cost_bps
 
+                # Track best spread seen for diagnostics
+                gross = float(spread_info['gross_spread_bps'])
+                net = float(net_spread)
+                if gross > _diag_best_gross:
+                    _diag_best_gross = gross
+                    _diag_best_net = net
+                    _diag_best_pair = pair
+
                 if net_spread < self.MIN_NET_SPREAD_BPS:
+                    _diag_below_threshold += 1
                     continue
 
                 # Size the trade
@@ -174,6 +188,22 @@ class CrossExchangeDetector:
                 self._last_spreads[pair] = spread_info['gross_spread_bps']
 
             self._scan_count += 1
+
+            # Periodic diagnostics every 1000 scans (~100 seconds)
+            if self._scan_count % 1000 == 0:
+                logger.info(
+                    f"CROSS-X DIAG [{self._scan_count} scans]: "
+                    f"signals={self._signals_generated} approved={self._signals_approved} "
+                    f"below_threshold={_diag_below_threshold} | "
+                    f"best_spread: {_diag_best_pair} gross={_diag_best_gross:.1f}bps "
+                    f"net={_diag_best_net:.1f}bps (min={self.MIN_NET_SPREAD_BPS}bps) "
+                    f"cost={_diag_best_gross - _diag_best_net:.1f}bps"
+                )
+                # Reset diagnostics for next window
+                _diag_best_gross = 0.0
+                _diag_best_net = -999.0
+                _diag_best_pair = ""
+                _diag_below_threshold = 0
 
             elapsed = (datetime.utcnow() - scan_start).total_seconds()
             sleep_time = max(0.05, 0.1 - elapsed)
