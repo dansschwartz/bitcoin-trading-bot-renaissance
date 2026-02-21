@@ -113,6 +113,27 @@ class PerformanceTracker:
                 max_drawdown_usd REAL
             )
         """)
+        # Path performance tracking for fill rate optimization
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS path_performance (
+                path TEXT PRIMARY KEY,
+                total_attempts INTEGER DEFAULT 0,
+                total_fills INTEGER DEFAULT 0,
+                total_profit REAL DEFAULT 0,
+                avg_profit_per_fill REAL DEFAULT 0,
+                fill_rate REAL DEFAULT 0,
+                last_attempt_ts REAL DEFAULT 0,
+                last_fill_ts REAL DEFAULT 0,
+                priority_score REAL DEFAULT 1.0,
+                is_deprioritized INTEGER DEFAULT 0,
+                updated_at REAL DEFAULT 0
+            )
+        """)
+        # Add path column to arb_trades if missing (currency path, e.g. "USDT→BTC→ETH→USDT")
+        try:
+            conn.execute("ALTER TABLE arb_trades ADD COLUMN path TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.commit()
         conn.close()
 
@@ -191,6 +212,14 @@ class PerformanceTracker:
         leg_symbols = [leg.symbol for leg in result.legs] if result.legs else []
         symbol = "→".join(leg_symbols) if leg_symbols else "triangular"
 
+        # Build currency path (e.g. "USDT→BTC→ETH→USDT") for path performance tracking
+        currency_path = ""
+        if opportunity and hasattr(opportunity, 'path'):
+            currencies = [opportunity.start_currency]
+            for _, _, next_curr in opportunity.path:
+                currencies.append(next_curr)
+            currency_path = "→".join(currencies)
+
         # For failed/unwound trades, profit_usd = end(0) - start(500) = -500
         # which is wrong — the unwind recovers capital. Use 0 for non-filled.
         if result.status != "filled":
@@ -204,6 +233,13 @@ class PerformanceTracker:
         fees = float(result.total_fees_usd)
         spread_bps = (profit / start) * 10000 if start > 0 else 0.0
         cost_bps = (fees / start) * 10000 if start > 0 else 0.0
+
+        # Expected profit at detection time (from opportunity's profit_bps)
+        expected_profit = 0.0
+        if opportunity and hasattr(opportunity, 'profit_bps'):
+            expected_profit = float(opportunity.profit_bps) / 10000.0 * start
+        else:
+            expected_profit = profit  # Fallback to actual
 
         # Extract leg-1 and leg-3 fill prices for buy_price / sell_price
         buy_price = 0.0
@@ -247,7 +283,7 @@ class PerformanceTracker:
             'quantity': float(result.start_amount),
             'gross_spread_bps': spread_bps + cost_bps,  # before fees
             'net_spread_bps': spread_bps,                # after fees
-            'expected_profit_usd': profit,
+            'expected_profit_usd': expected_profit,
             'actual_profit_usd': profit,
             'buy_fee': fees / 2,
             'sell_fee': fees / 2,
@@ -261,6 +297,7 @@ class PerformanceTracker:
             'leg3_depth_usd': leg3_depth,
             'trade_size_usd': float(result.start_amount),
             'leg_count': len(result.legs) if result.legs else 3,
+            'path': currency_path,
         }
 
         self._trades.append(trade)
@@ -294,9 +331,19 @@ class PerformanceTracker:
             self._hourly_pnl[hour_key] = self._hourly_pnl.get(hour_key, Decimal('0')) + profit_dec
 
         self._persist_trade(trade)
+
+        # Update path performance stats for fill rate optimization
+        if currency_path:
+            self.update_path_performance(
+                currency_path,
+                filled=(result.status == "filled"),
+                profit=profit,
+            )
+
         logger.info(
             f"Recorded triangular trade {result.trade_id}: "
-            f"status={result.status} profit=${profit:.4f}"
+            f"status={result.status} profit=${profit:.4f} "
+            f"expected=${expected_profit:.4f} path={currency_path}"
         )
 
     def record_signal(self, signal, approved: bool, executed: bool):
@@ -351,6 +398,81 @@ class PerformanceTracker:
             )[:5]),
             "recent_hourly_pnl": dict(sorted(self._hourly_pnl.items())[-24:]),
         }
+
+    def update_path_performance(self, path: str, filled: bool, profit: float = 0.0) -> None:
+        """Update rolling path performance stats after every attempt."""
+        import time as _time
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+
+            # Query last 200 attempts for this path to compute rolling stats
+            recent = conn.execute(
+                "SELECT status, actual_profit_usd FROM arb_trades "
+                "WHERE path = ? ORDER BY id DESC LIMIT 200",
+                (path,),
+            ).fetchall()
+
+            attempts = len(recent)
+            fills = sum(1 for r in recent if r['status'] == 'filled')
+            total_profit = sum(
+                r['actual_profit_usd'] for r in recent
+                if r['status'] == 'filled' and r['actual_profit_usd']
+            )
+            fill_rate = fills / attempts if attempts > 0 else 0.0
+            avg_profit = total_profit / fills if fills > 0 else 0.0
+
+            # Priority score: fill_rate × avg_profit
+            # Need 20+ samples for meaningful score
+            priority_score = fill_rate * avg_profit if attempts >= 20 else 1.0
+            is_deprioritized = 1 if (fill_rate < 0.30 and attempts >= 50) else 0
+
+            now = _time.time()
+            conn.execute(
+                "INSERT OR REPLACE INTO path_performance "
+                "(path, total_attempts, total_fills, total_profit, avg_profit_per_fill, "
+                "fill_rate, last_attempt_ts, last_fill_ts, priority_score, "
+                "is_deprioritized, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    path, attempts, fills, total_profit, avg_profit,
+                    fill_rate, now,
+                    now if filled else (conn.execute(
+                        "SELECT last_fill_ts FROM path_performance WHERE path = ?", (path,)
+                    ).fetchone() or (0.0,))[0],
+                    priority_score, is_deprioritized, now,
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Path performance update error: {e}")
+
+    def get_path_performance(self, path: str) -> Optional[dict]:
+        """Get performance stats for a specific path."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM path_performance WHERE path = ?", (path,)
+            ).fetchone()
+            conn.close()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def get_all_path_performance(self) -> List[dict]:
+        """Get performance stats for all tracked paths."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM path_performance ORDER BY priority_score DESC"
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     def _empty_stats(self) -> dict:
         return {'trades': 0, 'wins': 0, 'losses': 0, 'profit_usd': 0.0}

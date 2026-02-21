@@ -14,6 +14,7 @@ Challenges: tiny edges, must execute all 3 legs near-simultaneously.
 """
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -21,6 +22,43 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("arb.triangular")
+
+
+class StalenessFilter:
+    """If a path failed to fill, impose a short cooldown before retrying.
+
+    Prevents the bot from hammering the same dead opportunity every cycle.
+    """
+
+    def __init__(self, cooldown_seconds: int = 15):
+        self.cooldown = cooldown_seconds
+        self._recent_failures: Dict[str, float] = {}  # path -> last_failure_timestamp
+
+    def record_failure(self, path: str) -> None:
+        self._recent_failures[path] = time.time()
+
+    def is_on_cooldown(self, path: str) -> bool:
+        last_fail = self._recent_failures.get(path)
+        if last_fail is None:
+            return False
+        if time.time() - last_fail < self.cooldown:
+            return True
+        # Cooldown expired, clean up
+        del self._recent_failures[path]
+        return False
+
+    def cleanup(self) -> None:
+        """Remove expired cooldowns. Call periodically."""
+        now = time.time()
+        self._recent_failures = {
+            p: t for p, t in self._recent_failures.items()
+            if now - t < self.cooldown
+        }
+
+    @property
+    def active_cooldowns(self) -> int:
+        return sum(1 for t in self._recent_failures.values()
+                   if time.time() - t < self.cooldown)
 
 
 @dataclass
@@ -116,6 +154,33 @@ class TriangularArbitrage:
         self._edge_alert_threshold_bps = 4.0  # Warn if median drops below this
         self._edge_alert_logged = False
 
+        # Pre-flight freshness check stats
+        self._preflight_stats = {
+            'passed': 0, 'price_moved': 0, 'profit_gone': 0, 'fetch_failed': 0,
+        }
+        self._preflight_log_counter = 0
+
+        # Adaptive threshold configuration
+        self._adaptive_enabled = False
+        self._adaptive_config = {
+            'check_interval_attempts': 500,
+            'raise_if_fill_rate_below': 0.25,
+            'lower_if_fill_rate_above': 0.60,
+            'step_size_bps': 0.5,
+            'floor_bps': 3.0,
+            'ceiling_bps': 15.0,
+        }
+        self._attempts_since_threshold_check = 0
+        if config:
+            tri_cfg = config.get('triangular', {})
+            self._adaptive_enabled = tri_cfg.get('adaptive_threshold_enabled', False)
+            if 'adaptive_threshold' in tri_cfg:
+                self._adaptive_config.update(tri_cfg['adaptive_threshold'])
+
+        # Staleness filter — prevents hammering failed paths
+        self._staleness_filter = StalenessFilter(cooldown_seconds=15)
+        self._staleness_skips = 0
+
         # 4-leg diagnostic counters
         self._quad_signals_this_cycle = 0
         self._quad_rejection_reasons = {
@@ -175,6 +240,10 @@ class TriangularArbitrage:
                 three_leg_opps = [o for o in opportunities if len(o.path) == 3]
                 four_leg_opps = [o for o in opportunities if len(o.path) == 4]
 
+                # Rank by expected value (profit × fill_rate)
+                three_leg_opps = self._rank_opportunities(three_leg_opps)
+                four_leg_opps = self._rank_opportunities(four_leg_opps)
+
                 # --- Execute 3-leg (up to MAX_SIGNALS_PER_CYCLE) ---
                 for opp in three_leg_opps[:3]:
                     self._opportunities_found += 1
@@ -194,6 +263,17 @@ class TriangularArbitrage:
                     if self._signals_this_cycle >= self.MAX_SIGNALS_PER_CYCLE:
                         continue
 
+                    # Staleness filter: skip if this path recently failed
+                    path_key = self._opp_path_key(opp)
+                    if self._staleness_filter.is_on_cooldown(path_key):
+                        self._staleness_skips += 1
+                        continue
+
+                    # Pre-flight freshness check: verify edge still exists
+                    if not await self._preflight_freshness_check(opp):
+                        self._staleness_filter.record_failure(path_key)
+                        continue
+
                     try:
                         result = await self.tri_executor.execute(
                             path=opp.path,
@@ -205,6 +285,8 @@ class TriangularArbitrage:
 
                         if result.status == "filled":
                             self.risk.record_trade_result(result.profit_usd)
+                        elif result.status not in ("skipped",):
+                            self._staleness_filter.record_failure(path_key)
 
                         if self.tracker:
                             try:
@@ -212,6 +294,7 @@ class TriangularArbitrage:
                             except Exception as track_err:
                                 logger.debug(f"Triangular trade tracking error: {track_err}")
                     except Exception as e:
+                        self._staleness_filter.record_failure(path_key)
                         logger.error(f"Triangular execution error: {e}")
 
                 # --- Execute 4-leg (dedicated slot, up to _quad_max_signals) ---
@@ -242,6 +325,17 @@ class TriangularArbitrage:
                         self._quad_rejection_reasons['rate_limited'] += 1
                         continue
 
+                    # Staleness filter for 4-leg
+                    path_key = self._opp_path_key(opp)
+                    if self._staleness_filter.is_on_cooldown(path_key):
+                        self._staleness_skips += 1
+                        continue
+
+                    # Pre-flight freshness check for 4-leg
+                    if not await self._preflight_freshness_check(opp):
+                        self._staleness_filter.record_failure(path_key)
+                        continue
+
                     try:
                         result = await self.tri_executor.execute(
                             path=opp.path,
@@ -254,6 +348,8 @@ class TriangularArbitrage:
 
                         if result.status == "filled":
                             self.risk.record_trade_result(result.profit_usd)
+                        elif result.status not in ("skipped",):
+                            self._staleness_filter.record_failure(path_key)
 
                         if self.tracker:
                             try:
@@ -261,8 +357,29 @@ class TriangularArbitrage:
                             except Exception as track_err:
                                 logger.debug(f"Triangular trade tracking error: {track_err}")
                     except Exception as e:
+                        self._staleness_filter.record_failure(path_key)
                         self._quad_rejection_reasons['execution_error'] += 1
                         logger.error(f"Quad execution error: {e}")
+
+                # Periodic staleness filter cleanup + preflight summary
+                if self._scan_count % 50 == 0:
+                    self._staleness_filter.cleanup()
+
+                # Preflight summary every 100 scans
+                self._preflight_log_counter += 1
+                if self._preflight_log_counter >= 100:
+                    pf = self._preflight_stats
+                    total_checked = pf['passed'] + pf['price_moved'] + pf['profit_gone'] + pf['fetch_failed']
+                    if total_checked > 0:
+                        logger.info(
+                            f"PREFLIGHT SUMMARY: {total_checked} checked | "
+                            f"{pf['passed']} passed ({pf['passed']/total_checked:.0%}) | "
+                            f"{pf['price_moved']} price_moved | {pf['profit_gone']} profit_gone | "
+                            f"{pf['fetch_failed']} fetch_failed | "
+                            f"staleness_skips={self._staleness_skips} "
+                            f"cooldowns_active={self._staleness_filter.active_cooldowns}"
+                        )
+                    self._preflight_log_counter = 0
 
                 # Periodic quad diagnostics (every 100 scans)
                 self._quad_diag_cycle_count += 1
@@ -279,6 +396,9 @@ class TriangularArbitrage:
                     self._quad_rejection_reasons = {k: 0 for k in qr}
 
                 self._scan_count += 1
+
+                # Adaptive threshold: adjust min_profit_bps based on fill data
+                self._adapt_min_profit_threshold()
 
                 # Log data source periodically
                 if self._scan_count % 100 == 1:
@@ -506,6 +626,220 @@ class TriangularArbitrage:
 
         return results
 
+    def _adapt_min_profit_threshold(self) -> None:
+        """Adaptive threshold: if marginal trades aren't filling, raise the bar.
+
+        If they're filling easily, lower it to capture more volume.
+        Only adjusts by step_size_bps at a time. Checked every N attempts.
+        """
+        if not self._adaptive_enabled or not self.tracker:
+            return
+
+        self._attempts_since_threshold_check += 1
+        cfg = self._adaptive_config
+        if self._attempts_since_threshold_check < cfg['check_interval_attempts']:
+            return
+
+        self._attempts_since_threshold_check = 0
+        current = float(self.MIN_NET_PROFIT_BPS)
+
+        # Query fill rate for trades near the current threshold
+        # "Marginal" = trades with expected profit in [current, current + 2.0 bps]
+        import sqlite3
+        try:
+            conn = sqlite3.connect(self.tracker.db_path)
+            conn.row_factory = sqlite3.Row
+            marginal_range_bps = 2.0
+            # expected_profit_usd is in USD; we need bps. Use net_spread_bps instead.
+            rows = conn.execute(
+                "SELECT status FROM arb_trades "
+                "WHERE strategy = 'triangular' "
+                "AND net_spread_bps >= ? AND net_spread_bps < ? "
+                "ORDER BY id DESC LIMIT 500",
+                (current, current + marginal_range_bps),
+            ).fetchall()
+            conn.close()
+        except Exception:
+            return
+
+        if len(rows) < 50:
+            return  # Not enough data
+
+        fill_rate = sum(1 for r in rows if r['status'] == 'filled') / len(rows)
+        step = cfg['step_size_bps']
+
+        if fill_rate < cfg['raise_if_fill_rate_below']:
+            new_threshold = min(current + step, cfg['ceiling_bps'])
+            if new_threshold != current:
+                logger.info(
+                    f"ADAPTIVE THRESHOLD: Raising min_profit from {current:.1f}bps to "
+                    f"{new_threshold:.1f}bps (marginal fill rate {fill_rate:.1%} < "
+                    f"{cfg['raise_if_fill_rate_below']:.0%})"
+                )
+                self.MIN_NET_PROFIT_BPS = Decimal(str(new_threshold))
+
+        elif fill_rate > cfg['lower_if_fill_rate_above']:
+            new_threshold = max(current - step, cfg['floor_bps'])
+            if new_threshold != current:
+                logger.info(
+                    f"ADAPTIVE THRESHOLD: Lowering min_profit from {current:.1f}bps to "
+                    f"{new_threshold:.1f}bps (marginal fill rate {fill_rate:.1%} > "
+                    f"{cfg['lower_if_fill_rate_above']:.0%})"
+                )
+                self.MIN_NET_PROFIT_BPS = Decimal(str(new_threshold))
+        else:
+            logger.debug(
+                f"ADAPTIVE THRESHOLD: Holding at {current:.1f}bps "
+                f"(marginal fill rate {fill_rate:.1%})"
+            )
+
+    def _rank_opportunities(self, opportunities: List[TrianglePath]) -> List[TrianglePath]:
+        """Sort opportunities by expected value, using path performance data.
+
+        Ranking formula:
+            score = profit_bps × path_fill_rate
+
+        - profit_bps: detected profit for this specific opportunity
+        - path_fill_rate: historical fill rate (default 0.5 for unknown paths)
+
+        Deprioritized paths (fill_rate < 30% after 50+ attempts) are moved to the back.
+        """
+        if not self.tracker:
+            return opportunities  # No tracker = can't rank
+
+        scored = []
+        for opp in opportunities:
+            path_key = self._opp_path_key(opp)
+            perf = self.tracker.get_path_performance(path_key)
+
+            fill_rate = 0.5  # Default for unknown paths
+            is_deprioritized = False
+            if perf and perf.get('total_attempts', 0) >= 20:
+                fill_rate = perf.get('fill_rate', 0.5)
+                is_deprioritized = bool(perf.get('is_deprioritized', 0))
+
+            score = float(opp.profit_bps) * fill_rate
+            scored.append((opp, score, is_deprioritized))
+
+        # Sort: non-deprioritized first (by score desc), then deprioritized (by score desc)
+        scored.sort(key=lambda x: (not x[2], x[1]), reverse=True)
+        return [s[0] for s in scored]
+
+    async def _preflight_freshness_check(self, opp: TrianglePath) -> bool:
+        """Re-fetch the bottleneck leg's price and verify the edge still exists.
+
+        The bottleneck leg is the one with the smallest book depth (if depth
+        data is available from the current tickers), otherwise defaults to
+        leg index 1 (the middle altcoin cross — typically least liquid).
+
+        Returns True if opportunity is still valid, False if stale.
+        """
+        legs = opp.path  # [(symbol, side, next_currency), ...]
+        if not legs:
+            return False
+
+        # Pick the bottleneck leg — default to middle leg (index 1)
+        bottleneck_idx = min(1, len(legs) - 1)
+        bottleneck = legs[bottleneck_idx]
+        bn_symbol, bn_side, _ = bottleneck
+
+        # Re-fetch current price for bottleneck leg
+        try:
+            book = await self.client.get_order_book(bn_symbol, depth=5)
+            if not book:
+                self._preflight_stats['fetch_failed'] += 1
+                return False
+            fresh_price = book.best_ask if bn_side == 'buy' else book.best_bid
+            if not fresh_price or fresh_price <= 0:
+                self._preflight_stats['fetch_failed'] += 1
+                return False
+        except Exception:
+            self._preflight_stats['fetch_failed'] += 1
+            return False
+
+        # Get the original price used in graph calculation
+        # For 'buy': rate = 1/ask, so original ask = 1/rate
+        # For 'sell': rate = bid
+        edge_data = self._pair_graph.get(
+            opp.path[bottleneck_idx - 1][2] if bottleneck_idx > 0 else opp.start_currency,
+            {},
+        )
+        # Alternatively, use the graph edge rates to get original price
+        original_rate = Decimal('0')
+        for curr, edges in self._pair_graph.items():
+            for dest, edge in edges.items():
+                if edge['symbol'] == bn_symbol and edge['side'] == bn_side:
+                    original_rate = edge['rate']
+                    break
+            if original_rate:
+                break
+
+        if not original_rate:
+            # Can't find original — allow (permissive)
+            self._preflight_stats['passed'] += 1
+            return True
+
+        # Compute the original price from rate
+        if bn_side == 'buy':
+            original_price = Decimal('1') / original_rate if original_rate > 0 else Decimal('0')
+        else:
+            original_price = original_rate
+
+        if original_price <= 0:
+            self._preflight_stats['passed'] += 1
+            return True
+
+        # Quick sanity: if price moved more than 0.5%, opportunity is stale
+        price_change_pct = abs(float(fresh_price) - float(original_price)) / float(original_price)
+        if price_change_pct > 0.005:
+            self._preflight_stats['price_moved'] += 1
+            logger.debug(
+                f"PREFLIGHT STALE: {self._opp_path_key(opp)} — bottleneck {bn_symbol} "
+                f"price moved {price_change_pct:.3%} ({float(original_price):.6f} → {float(fresh_price):.6f})"
+            )
+            return False
+
+        # Recalculate cycle rate with fresh price substituted in
+        fresh_rate = (Decimal('1') / fresh_price) if bn_side == 'buy' else fresh_price
+        # Rebuild cycle rate: multiply all leg rates, replacing bottleneck
+        new_cycle_rate = Decimal('1')
+        for i, (sym, side, _) in enumerate(opp.path):
+            if i == bottleneck_idx:
+                new_cycle_rate *= fresh_rate
+            else:
+                # Use current graph rate for other legs
+                for curr, edges in self._pair_graph.items():
+                    for dest, edge in edges.items():
+                        if edge['symbol'] == sym and edge['side'] == side:
+                            new_cycle_rate *= edge['rate']
+                            break
+                    else:
+                        continue
+                    break
+
+        fee = self.costs.FEES.get("mexc", {}).get("spot", {}).get("maker", Decimal('0'))
+        total_fee_bps = fee * len(opp.path) * 10000
+        new_profit_bps = (new_cycle_rate - 1) * 10000 - total_fee_bps
+
+        if new_profit_bps < self.MIN_NET_PROFIT_BPS:
+            self._preflight_stats['profit_gone'] += 1
+            logger.debug(
+                f"PREFLIGHT KILLED: {self._opp_path_key(opp)} — profit dropped from "
+                f"{float(opp.profit_bps):.1f}bps to {float(new_profit_bps):.1f}bps"
+            )
+            return False
+
+        self._preflight_stats['passed'] += 1
+        return True
+
+    @staticmethod
+    def _opp_path_key(opp: TrianglePath) -> str:
+        """Build a currency path key for tracking (e.g., 'USDT→BTC→ETH→USDT')."""
+        currencies = [opp.start_currency]
+        for _, _, next_curr in opp.path:
+            currencies.append(next_curr)
+        return "→".join(currencies)
+
     # --- Competition Detector ---
 
     def _record_edges(self, opportunities: List[TrianglePath]) -> None:
@@ -578,6 +912,9 @@ class TriangularArbitrage:
             "signals_skipped_observation": self._signals_skipped_observation,
             "signals_skipped_balance": self._signals_skipped_balance,
             "signals_skipped_size": self._signals_skipped_size,
+            "preflight": self._preflight_stats.copy(),
+            "staleness_skips": self._staleness_skips,
+            "staleness_active_cooldowns": self._staleness_filter.active_cooldowns,
             "observation_mode": self.OBSERVATION_MODE,
             "min_profit_bps": float(self.MIN_NET_PROFIT_BPS),
             "graph_currencies": len(self._pair_graph),
@@ -588,4 +925,9 @@ class TriangularArbitrage:
             "ws_tickers": ws_tickers_count,
             "ws_age_ms": round(ws_age_ms, 0) if ws_age_ms < 1e9 else None,
             "exchange": self._exchange_name,
+            "adaptive_threshold": {
+                "enabled": self._adaptive_enabled,
+                "current_min_profit_bps": float(self.MIN_NET_PROFIT_BPS),
+                "attempts_until_check": max(0, self._adaptive_config['check_interval_attempts'] - self._attempts_since_threshold_check),
+            },
         }

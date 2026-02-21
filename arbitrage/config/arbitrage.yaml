@@ -88,6 +88,14 @@ triangular:
   dynamic_sizing_enabled: true      # Master switch for dynamic sizing
   observation_mode: false           # 3-leg executor now handles triangular trades directly
   max_signals_per_cycle: 2          # Max 3-leg signals per 60s window
+  adaptive_threshold_enabled: true  # Enable adaptive min_profit_bps auto-tuning
+  adaptive_threshold:
+    check_interval_attempts: 500    # Re-evaluate every N attempts
+    raise_if_fill_rate_below: 0.25  # Raise threshold if marginal trades fill <25%
+    lower_if_fill_rate_above: 0.60  # Lower threshold if marginal trades fill >60%
+    step_size_bps: 0.5              # Adjust by 0.5 bps at a time
+    floor_bps: 3.0                  # Never go below 3.0 bps
+    ceiling_bps: 15.0               # Never go above 15.0 bps
 
 quadrangular:
   enabled: true

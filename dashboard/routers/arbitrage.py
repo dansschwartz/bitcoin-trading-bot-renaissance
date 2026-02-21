@@ -455,6 +455,151 @@ async def arb_sizing_distribution(request: Request):
         return {"error": str(e)}
 
 
+@router.get("/path-performance")
+async def arb_path_performance(request: Request):
+    """Per-path fill rate and performance tracking for triangular arb."""
+    try:
+        with _arb_conn() as c:
+            # Check if path_performance table exists
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            if "path_performance" not in tables:
+                return {"error": "path_performance table not yet created — deploy latest code"}
+
+            rows = c.execute(
+                "SELECT * FROM path_performance ORDER BY priority_score DESC"
+            ).fetchall()
+            all_paths = _rows_to_dicts(rows)
+
+            deprioritized = [p for p in all_paths if p.get('is_deprioritized')]
+            top_paths = [p for p in all_paths if not p.get('is_deprioritized')][:10]
+            worst_paths = sorted(
+                [p for p in all_paths if p.get('total_attempts', 0) >= 20],
+                key=lambda x: x.get('fill_rate', 0),
+            )[:5]
+
+            return {
+                "total_paths_tracked": len(all_paths),
+                "deprioritized_paths": len(deprioritized),
+                "top_paths": [
+                    {
+                        "path": p["path"],
+                        "fill_rate": round(p.get("fill_rate", 0), 3),
+                        "avg_profit": round(p.get("avg_profit_per_fill", 0), 4),
+                        "score": round(p.get("priority_score", 0), 4),
+                        "attempts": p.get("total_attempts", 0),
+                        "fills": p.get("total_fills", 0),
+                    }
+                    for p in top_paths
+                ],
+                "worst_paths": [
+                    {
+                        "path": p["path"],
+                        "fill_rate": round(p.get("fill_rate", 0), 3),
+                        "avg_profit": round(p.get("avg_profit_per_fill", 0), 4),
+                        "attempts": p.get("total_attempts", 0),
+                        "fills": p.get("total_fills", 0),
+                    }
+                    for p in worst_paths
+                ],
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/fill-rate-optimization")
+async def arb_fill_rate_optimization(request: Request):
+    """Fill rate optimization dashboard — preflight, staleness, path ranking, adaptive threshold."""
+    result = {
+        "current_fill_rate": 0.0,
+        "target_fill_rate": 0.75,
+        "preflight_stats": {},
+        "staleness_filter": {},
+        "path_ranking": {},
+        "adaptive_threshold": {},
+    }
+
+    # Try live data from orchestrator's triangular arb
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch and hasattr(orch, "triangular_arb"):
+        try:
+            tri_stats = orch.triangular_arb.get_stats()
+            result["preflight_stats"] = tri_stats.get("preflight", {})
+            result["staleness_filter"] = {
+                "staleness_skips": tri_stats.get("staleness_skips", 0),
+                "active_cooldowns": tri_stats.get("staleness_active_cooldowns", 0),
+            }
+            result["adaptive_threshold"] = tri_stats.get("adaptive_threshold", {})
+
+            # Fill rate from executor
+            exec_stats = tri_stats.get("executor", {})
+            total = exec_stats.get("total_trades", 0)
+            fills = exec_stats.get("total_fills", 0)
+            result["current_fill_rate"] = fills / max(1, total)
+        except Exception as e:
+            logger.debug(f"Live fill rate stats error: {e}")
+
+    # DB-based fill rate (always available)
+    try:
+        with _arb_conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) as total, "
+                "SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills "
+                "FROM arb_trades WHERE strategy='triangular'"
+            ).fetchone()
+            total_db = row["total"] or 0
+            fills_db = row["fills"] or 0
+            result["db_fill_rate"] = fills_db / max(1, total_db)
+            result["db_total_attempts"] = total_db
+            result["db_total_fills"] = fills_db
+
+            # Edge bucket analysis
+            edge_buckets = c.execute("""
+                SELECT
+                    CASE
+                        WHEN expected_profit_usd < 0.10 THEN '<$0.10'
+                        WHEN expected_profit_usd < 0.20 THEN '$0.10-0.20'
+                        WHEN expected_profit_usd < 0.50 THEN '$0.20-0.50'
+                        WHEN expected_profit_usd < 1.00 THEN '$0.50-1.00'
+                        WHEN expected_profit_usd < 2.00 THEN '$1.00-2.00'
+                        ELSE '>$2.00'
+                    END as edge_bucket,
+                    COUNT(*) as attempts,
+                    SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills,
+                    ROUND(100.0 * SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) / COUNT(*), 1) as fill_rate_pct,
+                    ROUND(AVG(CASE WHEN status='filled' THEN actual_profit_usd ELSE NULL END), 4) as avg_actual_profit
+                FROM arb_trades
+                WHERE strategy = 'triangular'
+                  AND expected_profit_usd IS NOT NULL
+                  AND expected_profit_usd > 0
+                GROUP BY edge_bucket
+                ORDER BY MIN(expected_profit_usd)
+            """).fetchall()
+            result["edge_buckets"] = _rows_to_dicts(edge_buckets)
+
+            # Path ranking from path_performance table
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            if "path_performance" in tables:
+                paths = c.execute(
+                    "SELECT path, fill_rate, avg_profit_per_fill, total_attempts, is_deprioritized "
+                    "FROM path_performance ORDER BY priority_score DESC LIMIT 5"
+                ).fetchall()
+                result["path_ranking"] = {
+                    "total_paths": c.execute("SELECT COUNT(*) FROM path_performance").fetchone()[0],
+                    "deprioritized": c.execute(
+                        "SELECT COUNT(*) FROM path_performance WHERE is_deprioritized=1"
+                    ).fetchone()[0],
+                    "top_paths": [dict(r) for r in paths],
+                }
+    except Exception as e:
+        logger.debug(f"DB fill rate stats error: {e}")
+
+    return _sanitize_for_json(result)
+
+
 @router.get("/contract-verification")
 async def arb_contract_verification(request: Request):
     """Contract verification status for cross-exchange safety."""
