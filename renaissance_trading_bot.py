@@ -2414,12 +2414,23 @@ class RenaissanceTradingBot:
             self.logger.error(f"Performance attribution failed: {e}")
 
     def _fetch_account_balance(self) -> float:
-        """Fetch current USD account balance from Coinbase (or paper trader)."""
+        """Fetch current USD account balance from Coinbase (or paper trader).
+
+        Includes sanity cap: paper trading balance cannot exceed 2x initial
+        to prevent phantom inflation from short-sell accounting.
+        """
         try:
             portfolio = self.coinbase_client.get_portfolio_breakdown()
             if "error" not in portfolio:
                 balance = portfolio.get("total_balance_usd", 0.0)
                 if balance > 0:
+                    # Safety cap for paper trading
+                    if getattr(self.coinbase_client, 'paper_trading', False):
+                        initial = getattr(
+                            getattr(self.coinbase_client, 'paper_trader', None),
+                            'INITIAL_BALANCE_USD', 10000.0
+                        )
+                        balance = min(balance, initial * 2.0)
                     self._cached_balance_usd = balance
                     return balance
         except Exception as e:

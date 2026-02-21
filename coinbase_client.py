@@ -244,6 +244,8 @@ class RateLimiter:
 class PaperTradingSimulator:
     """Simulate trading operations for paper trading mode with real P&L tracking"""
 
+    INITIAL_BALANCE_USD = 10000.0
+
     def __init__(self):
         self.orders = {}
         self.balances = {
@@ -304,7 +306,11 @@ class PaperTradingSimulator:
                 fill_price = last_price * slippage_mult
                 fill_value = base_size * fill_price
             else:
-                fill_value = base_size * 50000  # ultimate fallback
+                # Fallback: reject trade if no price data — prevents phantom balance inflation
+                self.logger.warning(f"PAPER: No price data for {product_id}, rejecting order")
+                return {"order": {"order_id": f"paper_rejected_{self.order_counter - 1}",
+                                  "status": "FAILED", "failure_reason": "no_price_data"},
+                        "success": False}
             fee = fill_value * fee_rate
 
             # Update balances
@@ -1007,7 +1013,12 @@ class EnhancedCoinbaseClient:
             return {"error": str(fills_error), "fills": []}
 
     def get_portfolio_breakdown(self) -> Dict[str, Any]:
-        """Get portfolio breakdown with balances"""
+        """Get portfolio breakdown with balances.
+
+        For paper trading: computes true portfolio value = USD cash + market
+        value of all crypto holdings (including negative/short positions).
+        This prevents phantom balance inflation from short sells.
+        """
         try:
             accounts_response = self.get_accounts()
 
@@ -1020,6 +1031,9 @@ class EnhancedCoinbaseClient:
                 "allocation": {}
             }
 
+            usd_cash = 0.0
+            crypto_value = 0.0
+
             for account in accounts_response.get("accounts", []):
                 currency = account.get("currency", "")
                 available_balance = float(account.get("available_balance", {}).get("value", 0))
@@ -1030,11 +1044,22 @@ class EnhancedCoinbaseClient:
                     "account_id": account.get("uuid", "")
                 }
 
-                # For USD, add directly to total
                 if currency == "USD":
-                    portfolio["total_balance_usd"] += available_balance
-                # For crypto, would need current prices to calculate USD value
-                # This is simplified, for example
+                    usd_cash += available_balance
+                else:
+                    # Value crypto at market price (handles negative/short positions)
+                    if self.paper_trading and self.paper_trader:
+                        price = self.paper_trader._last_prices.get(f"{currency}-USD", 0)
+                        crypto_value += available_balance * price
+
+            # True portfolio value = USD cash + market value of crypto
+            portfolio["total_balance_usd"] = usd_cash + crypto_value
+
+            # Safety cap for paper trading: never exceed 2x initial balance
+            if self.paper_trading and self.paper_trader:
+                cap = self.paper_trader.INITIAL_BALANCE_USD * 2.0
+                if portfolio["total_balance_usd"] > cap:
+                    portfolio["total_balance_usd"] = cap
 
             return portfolio
 

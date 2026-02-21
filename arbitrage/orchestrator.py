@@ -274,7 +274,7 @@ class ArbitrageOrchestrator:
                 # Update risk engine
                 if result.status == "filled":
                     self.risk_engine.record_trade_result(result.actual_profit_usd)
-                elif "one_sided" in result.status:
+                elif result.status and "one_sided" in result.status:
                     self.risk_engine.record_trade_result(Decimal('0'), one_sided=True)
 
             except asyncio.TimeoutError:
