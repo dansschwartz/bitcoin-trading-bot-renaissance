@@ -7,9 +7,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from dashboard.config import DashboardConfig
 from dashboard.event_emitter import DashboardEventEmitter
@@ -27,6 +29,20 @@ def create_app(
     emitter: DashboardEventEmitter | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Renaissance Dashboard", version="1.0.0")
+
+    # No-cache middleware — prevents stale dashboard data in browser
+    class NoCacheMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            response: Response = await call_next(request)
+            if request.url.path.startswith("/api/"):
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                response.headers["Pragma"] = "no-cache"
+            elif request.url.path.endswith(".html") or request.url.path == "/":
+                response.headers["Cache-Control"] = "no-cache, must-revalidate, max-age=0"
+            # Let .js/.css with hashed filenames cache normally
+            return response
+
+    app.add_middleware(NoCacheMiddleware)
 
     # CORS (allow Vite dev server during development)
     app.add_middleware(
