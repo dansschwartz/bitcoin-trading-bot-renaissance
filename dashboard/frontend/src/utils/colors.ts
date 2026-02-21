@@ -3,14 +3,20 @@
 export const REGIME_COLORS: Record<string, string> = {
   bullish: '#00d395',
   bull: '#00d395',
+  bull_trending: '#00d395',
+  bull_mean_reverting: '#06b6d4',
   neutral: '#3b82f6',
+  neutral_sideways: '#3b82f6',
   bearish: '#ff4757',
   bear: '#ff4757',
+  bear_trending: '#ff4757',
+  bear_mean_reverting: '#f97316',
   high_volatility: '#fbbf24',
   low_volatility: '#a855f7',
   trending: '#00d395',
-  mean_reverting: '#3b82f6',
+  mean_reverting: '#06b6d4',
   crisis: '#ff4757',
+  unknown: '#6b7280',
 };
 
 export const ACTION_COLORS: Record<string, string> = {
@@ -33,5 +39,11 @@ export function pnlBgColor(value: number): string {
 export function regimeColor(regime: string | undefined | null): string {
   if (!regime) return '#6b7280';
   const lower = regime.toLowerCase();
-  return REGIME_COLORS[lower] || '#6b7280';
+  // Direct match first
+  if (REGIME_COLORS[lower]) return REGIME_COLORS[lower];
+  // Fuzzy match: check if any key is contained in the regime name
+  for (const [key, color] of Object.entries(REGIME_COLORS)) {
+    if (lower.includes(key)) return color;
+  }
+  return '#6b7280';
 }

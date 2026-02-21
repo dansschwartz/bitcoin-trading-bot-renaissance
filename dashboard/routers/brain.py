@@ -1,9 +1,14 @@
 """Brain endpoints — ML ensemble, regime, VAE, confluence."""
 
+import json
+import logging
+import sqlite3
+
 from fastapi import APIRouter, Request
 
 from dashboard import db_queries
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/brain", tags=["brain"])
 
 
@@ -50,6 +55,22 @@ async def regime_status(request: Request):
             "bar_count": live.get("bar_count", 0),
             "details": live.get("details", ""),
         }
+    elif current:
+        # DB fallback: derive classifier + bar_count when emitter is unavailable
+        # (bot and dashboard run as separate processes)
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            bar_count = conn.execute(
+                "SELECT COUNT(*) FROM five_minute_bars"
+            ).fetchone()[0]
+            conn.close()
+            classifier = "hmm" if bar_count >= 200 else "bootstrap"
+            current["classifier"] = classifier
+            current["bar_count"] = bar_count
+        except Exception as e:
+            logger.debug(f"Bar count query failed: {e}")
+            current.setdefault("classifier", "hmm")
+            current.setdefault("bar_count", 0)
 
     return {
         "current": current,
@@ -59,7 +80,7 @@ async def regime_status(request: Request):
 
 @router.get("/confluence")
 async def confluence_status(request: Request):
-    """Confluence data — populated via emitter cache from live bot."""
+    """Confluence data — from emitter cache or reconstructed from DB."""
     # Primary: read from emitter's channel cache (works even with 0 WS clients)
     emitter = getattr(request.app.state, "emitter", None)
     if emitter:
@@ -68,7 +89,32 @@ async def confluence_status(request: Request):
             return cached
     # Fallback: legacy WS relay cache
     legacy = getattr(request.app.state, "last_confluence", None)
-    return legacy or {"status": "no_live_data", "message": "Waiting for bot cycle"}
+    if legacy:
+        return legacy
+
+    # DB fallback: reconstruct confluence from latest decision's signals
+    db = request.app.state.dashboard_config.db_path
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        row = conn.execute(
+            "SELECT reasoning, timestamp FROM decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row and row[0]:
+            reasoning = json.loads(row[0])
+            signals = reasoning.get("signal_contributions", {})
+            if signals:
+                # Run confluence engine against latest signals
+                from confluence_engine import ConfluenceEngine
+                ce = ConfluenceEngine()
+                result = ce.calculate_confluence_boost(signals)
+                result["source"] = "db_fallback"
+                result["decision_timestamp"] = row[1]
+                return result
+    except Exception as e:
+        logger.debug(f"Confluence DB fallback failed: {e}")
+
+    return {"status": "no_live_data", "message": "Waiting for bot cycle"}
 
 
 @router.get("/vae")
