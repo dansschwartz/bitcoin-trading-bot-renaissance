@@ -237,6 +237,132 @@ async def arb_wallet(request: Request):
     }
 
 
+@router.get("/funding")
+async def arb_funding(request: Request):
+    """Current funding rates and positions from the funding arb module."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+
+    # Try live data from orchestrator
+    if orch and hasattr(orch, 'funding_arb'):
+        try:
+            stats = orch.funding_arb.get_stats()
+            return _sanitize_for_json(stats)
+        except Exception as e:
+            logger.debug(f"Live funding stats error: {e}")
+
+    # Fallback: read from DB
+    try:
+        with _arb_conn() as c:
+            # Check if tables exist
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+
+            result = {
+                "observation_mode": True,
+                "current_rates": {},
+                "open_positions": [],
+                "total_funding_collected": 0.0,
+            }
+
+            if "funding_positions" in tables:
+                open_pos = c.execute(
+                    "SELECT * FROM funding_positions WHERE status='open'"
+                ).fetchall()
+                result["open_positions"] = _rows_to_dicts(open_pos)
+
+                collected = c.execute(
+                    "SELECT COALESCE(SUM(total_funding_collected), 0) FROM funding_positions"
+                ).fetchone()[0]
+                result["total_funding_collected"] = round(float(collected), 4)
+
+            if "funding_rate_history" in tables:
+                # Latest rate for each symbol
+                latest = c.execute("""
+                    SELECT symbol, funding_rate, annualized_pct, signal, timestamp
+                    FROM funding_rate_history
+                    WHERE id IN (
+                        SELECT MAX(id) FROM funding_rate_history GROUP BY symbol
+                    )
+                """).fetchall()
+                for r in latest:
+                    name = r["symbol"].split("/")[0] if "/" in r["symbol"] else r["symbol"]
+                    result["current_rates"][name] = {
+                        "rate": r["funding_rate"],
+                        "annualized": f"{r['annualized_pct']:.1f}%",
+                        "signal": r["signal"],
+                        "last_update": r["timestamp"],
+                    }
+
+            return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/depth-analysis")
+async def arb_depth_analysis(request: Request):
+    """Analyze book depth data from triangular trades for sizing decisions."""
+    try:
+        with _arb_conn() as c:
+            # Check if leg depth columns exist
+            cols = [r[1] for r in c.execute("PRAGMA table_info(arb_trades)").fetchall()]
+            if "leg1_depth_usd" not in cols:
+                return {"error": "leg depth columns not yet available — deploy latest code"}
+
+            total_with_depth = c.execute(
+                "SELECT COUNT(*) FROM arb_trades WHERE strategy='triangular' "
+                "AND leg1_depth_usd > 0"
+            ).fetchone()[0]
+
+            if total_with_depth == 0:
+                return {
+                    "avg_leg1_depth": 0.0, "avg_leg2_depth": 0.0, "avg_leg3_depth": 0.0,
+                    "min_observed_depth": 0.0,
+                    "trades_where_size_exceeded_25pct_depth": 0,
+                    "total_trades_with_depth_data": 0,
+                    "recommended_max_trade_usd": 2000,
+                }
+
+            row = c.execute("""
+                SELECT AVG(leg1_depth_usd) as avg1,
+                       AVG(leg2_depth_usd) as avg2,
+                       AVG(leg3_depth_usd) as avg3,
+                       MIN(CASE WHEN leg2_depth_usd > 0 THEN leg2_depth_usd END) as min2,
+                       MIN(CASE WHEN leg3_depth_usd > 0 THEN leg3_depth_usd END) as min3
+                FROM arb_trades
+                WHERE strategy='triangular' AND leg1_depth_usd > 0
+            """).fetchone()
+
+            # Leg1 (USDC/USDT) is always huge, so min depth = min(leg2, leg3)
+            min2 = row["min2"] or 0
+            min3 = row["min3"] or 0
+            min_depth = min(min2, min3) if min2 > 0 and min3 > 0 else max(min2, min3)
+
+            # Count trades where size > 25% of thinnest leg
+            oversized = c.execute("""
+                SELECT COUNT(*) FROM arb_trades
+                WHERE strategy='triangular' AND leg1_depth_usd > 0
+                AND quantity > 0.25 * MIN(
+                    CASE WHEN leg2_depth_usd > 0 THEN leg2_depth_usd ELSE 999999 END,
+                    CASE WHEN leg3_depth_usd > 0 THEN leg3_depth_usd ELSE 999999 END
+                )
+            """).fetchone()[0]
+
+            recommended = min(2000, 0.25 * min_depth) if min_depth > 0 else 2000
+
+            return {
+                "avg_leg1_depth": round(float(row["avg1"] or 0), 2),
+                "avg_leg2_depth": round(float(row["avg2"] or 0), 2),
+                "avg_leg3_depth": round(float(row["avg3"] or 0), 2),
+                "min_observed_depth": round(float(min_depth), 2),
+                "trades_where_size_exceeded_25pct_depth": oversized,
+                "total_trades_with_depth_data": total_with_depth,
+                "recommended_max_trade_usd": round(recommended, 2),
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

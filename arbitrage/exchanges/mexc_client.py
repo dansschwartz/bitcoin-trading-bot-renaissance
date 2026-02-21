@@ -55,6 +55,12 @@ class MEXCClient(ExchangeClient):
         self._ws_running = False
         self._last_books: Dict[str, OrderBook] = {}
         self._ws_task: Optional[asyncio.Task] = None
+        # All-ticker WebSocket feed for triangular scanner
+        self._ws_tickers: Dict[str, dict] = {}
+        self._ws_ticker_last_update: float = 0.0
+        self._ws_ticker_running = False
+        self._ws_ticker_task: Optional[asyncio.Task] = None
+        self._ws_ticker_callback: Optional[Callable] = None
 
     async def connect(self) -> None:
         config = {
@@ -344,6 +350,168 @@ class MEXCClient(ExchangeClient):
                 if poll_count % 20 == 1:  # Log every ~60s
                     logger.info(f"MEXC REST poll #{poll_count}: {len(tasks)} symbols, {error_count} total errors")
             await asyncio.sleep(3)  # 10 pairs × 1 req each = 10 req/3s ≈ 3.3 req/s (within MEXC limits)
+
+    # ========== All-Ticker WebSocket Feed ==========
+
+    async def subscribe_all_tickers(self, callback: Optional[Callable] = None):
+        """Subscribe to MEXC mini-ticker WebSocket stream for ALL symbols.
+
+        Updates self._ws_tickers in real-time. The callback (if set) is
+        called on each batch with the full ticker dict.
+
+        Message format from MEXC:
+          {"s": "BTCUSDT", "p": "67758.64", "bid": "67758.00", "ask": "67759.00", ...}
+        """
+        self._ws_ticker_callback = callback
+        if self._ws_ticker_running:
+            return
+        self._ws_ticker_running = True
+        self._ws_ticker_task = asyncio.create_task(self._ws_ticker_loop())
+        logger.info("All-ticker WebSocket subscription started")
+
+    async def _ws_ticker_loop(self):
+        """Outer loop: reconnection for all-ticker stream."""
+        reconnect_attempts = 0
+        while self._ws_ticker_running:
+            try:
+                await self._ws_ticker_connect()
+                reconnect_attempts = 0
+            except asyncio.CancelledError:
+                return
+            except _WSBlockedError:
+                logger.warning("MEXC all-ticker WS geo-blocked — ticker feed unavailable")
+                self._ws_ticker_running = False
+                return
+            except Exception as e:
+                reconnect_attempts += 1
+                backoff = min(2 ** reconnect_attempts, 30)
+                logger.warning(f"Ticker WS disconnected: {e} — reconnecting in {backoff}s")
+                await asyncio.sleep(backoff)
+
+    async def _ws_ticker_connect(self):
+        """Single WebSocket session for all-ticker stream."""
+        connect_time = time.monotonic()
+        max_age_sec = WS_MAX_AGE_HOURS * 3600
+        got_data = False
+
+        async with websockets.connect(
+            WS_ENDPOINT,
+            ping_interval=None,
+            close_timeout=5,
+        ) as ws:
+            logger.info("MEXC all-ticker WebSocket connected")
+
+            # Subscribe to mini-tickers for all symbols
+            sub_msg = {
+                "method": "SUBSCRIPTION",
+                "params": ["spot@public.miniTickers.v3.api@UTC+0"]
+            }
+            await ws.send(json.dumps(sub_msg))
+
+            # Ping loop
+            ping_task = asyncio.create_task(self._ws_ping_loop(ws))
+
+            # Watchdog: if no data in 10s, probably geo-blocked
+            async def watchdog():
+                await asyncio.sleep(10)
+                if not got_data:
+                    raise _WSBlockedError("No ticker data received")
+
+            watchdog_task = asyncio.create_task(watchdog())
+
+            try:
+                async for raw in ws:
+                    if not self._ws_ticker_running:
+                        break
+                    if time.monotonic() - connect_time > max_age_sec:
+                        logger.info("Ticker WS max age reached, reconnecting")
+                        break
+                    try:
+                        msg = json.loads(raw)
+                        if isinstance(msg, dict):
+                            msg_text = msg.get("msg", "")
+                            if "Blocked" in msg_text:
+                                raise _WSBlockedError(msg_text)
+                            if msg_text == "PONG" or msg.get("id") is not None:
+                                continue
+
+                        channel = msg.get("c", "")
+                        if "miniTickers" in channel:
+                            got_data = True
+                            watchdog_task.cancel()
+                            self._handle_mini_tickers(msg)
+                    except _WSBlockedError:
+                        raise
+                    except Exception as e:
+                        logger.debug(f"Ticker WS parse error: {e}")
+            finally:
+                ping_task.cancel()
+                watchdog_task.cancel()
+
+    def _handle_mini_tickers(self, msg: dict):
+        """Parse mini-ticker batch and update internal cache."""
+        data = msg.get("d", {})
+        tickers = data if isinstance(data, list) else data.get("data", [])
+        if not isinstance(tickers, list):
+            # Single ticker update
+            tickers = [data] if isinstance(data, dict) and "s" in data else []
+
+        update_count = 0
+        for t in tickers:
+            raw_sym = t.get("s", "")
+            if not raw_sym:
+                continue
+            symbol = self._mexc_sym_to_normalized(raw_sym)
+            if '/' not in symbol:
+                continue
+
+            bid = t.get("bid") or t.get("b")
+            ask = t.get("ask") or t.get("a")
+            last = t.get("p") or t.get("c")  # last price
+
+            bid_d = Decimal(str(bid)) if bid else Decimal('0')
+            ask_d = Decimal(str(ask)) if ask else Decimal('0')
+            last_d = Decimal(str(last)) if last else Decimal('0')
+
+            # Use last price as fallback for bid/ask
+            if bid_d <= 0 and last_d > 0:
+                bid_d = last_d
+            if ask_d <= 0 and last_d > 0:
+                ask_d = last_d
+
+            if bid_d > 0 or ask_d > 0:
+                self._ws_tickers[symbol] = {
+                    'symbol': symbol,
+                    'last_price': last_d if last_d > 0 else (bid_d + ask_d) / 2,
+                    'bid': bid_d,
+                    'ask': ask_d,
+                    'volume_24h': Decimal('0'),
+                }
+                update_count += 1
+
+        if update_count > 0:
+            self._ws_ticker_last_update = time.time()
+
+        # Invoke callback if set
+        if self._ws_ticker_callback and update_count > 0:
+            try:
+                self._ws_ticker_callback(self._ws_tickers)
+            except Exception as e:
+                logger.debug(f"Ticker callback error: {e}")
+
+    def get_ws_tickers(self) -> Optional[Dict[str, dict]]:
+        """Return WebSocket tickers if fresh (< 10s old), else None."""
+        if self._ws_tickers and self._ws_ticker_last_update > 0:
+            age = time.time() - self._ws_ticker_last_update
+            if age < 10:
+                return self._ws_tickers
+        return None
+
+    def get_ws_ticker_age_ms(self) -> float:
+        """Age of the most recent WS ticker update in milliseconds."""
+        if self._ws_ticker_last_update <= 0:
+            return float('inf')
+        return (time.time() - self._ws_ticker_last_update) * 1000
 
     # ========== Symbol Conversion ==========
 

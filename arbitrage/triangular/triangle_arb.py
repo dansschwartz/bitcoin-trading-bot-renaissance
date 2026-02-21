@@ -37,7 +37,8 @@ class TrianglePath:
 class TriangularArbitrage:
 
     MIN_NET_PROFIT_BPS = Decimal('3.0')   # Raised from 0.5 — must clear round-trip costs
-    SCAN_INTERVAL_SECONDS = 5.0           # Reduced from 0.5s — save API rate limits
+    SCAN_INTERVAL_SECONDS = 5.0           # REST polling interval
+    SCAN_INTERVAL_WS = 0.5               # WebSocket mode: scan every 500ms
     MAX_TRADE_USD = Decimal('500')        # Configurable via YAML
     START_CURRENCIES = ["USDT", "BTC", "ETH"]
     MAX_SIGNALS_PER_CYCLE = 3             # Max signals pushed per 60s cycle
@@ -55,10 +56,11 @@ class TriangularArbitrage:
         self.risk = risk_engine
         self.signal_queue = signal_queue
 
-        # Dedicated 3-leg executor (replaces routing through 2-leg signal queue)
+        # Dedicated N-leg executor (handles both 3-leg and 4-leg cycles)
         from ..execution.triangular_executor import TriangularExecutor
         self.tri_executor = TriangularExecutor(mexc_client)
         self.tracker = tracker
+        self._exchange_name = "mexc"  # Default; overridable for multi-exchange
 
         # Override class defaults from config if provided
         if config:
@@ -73,6 +75,10 @@ class TriangularArbitrage:
                 self.MAX_SIGNALS_PER_CYCLE = tri_cfg['max_signals_per_cycle']
             if 'start_currencies' in tri_cfg:
                 self.START_CURRENCIES = tri_cfg['start_currencies']
+            if 'scan_interval_ms_ws' in tri_cfg:
+                self.SCAN_INTERVAL_WS = tri_cfg['scan_interval_ms_ws'] / 1000.0
+            if 'scan_interval_ms_rest' in tri_cfg:
+                self.SCAN_INTERVAL_SECONDS = tri_cfg['scan_interval_ms_rest'] / 1000.0
         self._running = False
         self._scan_count = 0
         self._opportunities_found = 0
@@ -107,13 +113,21 @@ class TriangularArbitrage:
                 await asyncio.sleep(300)
             return
 
+        # Start WebSocket all-ticker feed (non-blocking)
+        try:
+            if hasattr(self.client, 'subscribe_all_tickers'):
+                await self.client.subscribe_all_tickers()
+                logger.info("TriangularArbitrage: WebSocket ticker feed requested")
+        except Exception as e:
+            logger.warning(f"WebSocket ticker feed unavailable: {e}")
+
         while self._running:
             try:
-                # Refresh tickers
-                tickers = await self.client.get_all_tickers()
+                # Hybrid data source: prefer WebSocket, fallback to REST
+                tickers, data_source, ticker_age_ms = await self._get_tickers()
                 self._update_graph(tickers)
 
-                # Scan for profitable triangles
+                # Scan for profitable cycles (3-leg + 4-leg)
                 opportunities = self._find_profitable_cycles(tickers)
 
                 # Competition detector: record edge sizes
@@ -127,13 +141,15 @@ class TriangularArbitrage:
 
                 for opp in opportunities[:3]:  # Top 3 per scan
                     self._opportunities_found += 1
+                    n_legs = len(opp.path)
+                    prefix = "QUAD OPP" if n_legs == 4 else "TRIANGLE OPP"
 
                     # Log opportunity (always, but throttled)
-                    if self._scan_count % 20 == 0:
+                    if self._scan_count % 20 == 0 or n_legs == 4:
                         logger.info(
-                            f"TRIANGLE OPP: {' -> '.join(s[0] for s in opp.path)} -> {opp.start_currency} | "
+                            f"{prefix}: {' -> '.join(s[0] for s in opp.path)} -> {opp.start_currency} | "
                             f"Profit: {float(opp.profit_bps):.2f}bps | "
-                            f"Rate: {float(opp.cycle_rate):.8f}"
+                            f"Rate: {float(opp.cycle_rate):.8f} | {n_legs} legs"
                             f"{' [OBSERVATION]' if self.OBSERVATION_MODE else ''}"
                         )
 
@@ -171,13 +187,39 @@ class TriangularArbitrage:
 
                 self._scan_count += 1
 
+                # Log data source periodically
+                if self._scan_count % 100 == 1:
+                    logger.info(
+                        f"TRI SCAN: source={data_source}, tickers={len(tickers)}, "
+                        f"age={ticker_age_ms:.0f}ms, opportunities={len(opportunities)}"
+                    )
+
             except Exception as e:
                 logger.error(f"Triangle scan error: {e}")
 
-            await asyncio.sleep(self.SCAN_INTERVAL_SECONDS)
+            # Dynamic interval: faster with WebSocket, slower with REST
+            interval = self.SCAN_INTERVAL_WS if data_source == "websocket" else self.SCAN_INTERVAL_SECONDS
+            await asyncio.sleep(interval)
 
     def stop(self):
         self._running = False
+
+    async def _get_tickers(self) -> Tuple[Dict[str, dict], str, float]:
+        """Hybrid data source: prefer WebSocket tickers, fallback to REST.
+
+        Returns:
+            (tickers_dict, data_source, age_ms)
+        """
+        # Try WebSocket tickers first
+        if hasattr(self.client, 'get_ws_tickers'):
+            ws_tickers = self.client.get_ws_tickers()
+            if ws_tickers and len(ws_tickers) > 100:
+                age_ms = self.client.get_ws_ticker_age_ms()
+                return ws_tickers, "websocket", age_ms
+
+        # Fallback to REST
+        tickers = await self.client.get_all_tickers()
+        return tickers, "rest", 0.0
 
     async def _build_pair_graph(self) -> bool:
         """Build adjacency graph of all trading pairs. Returns True on success."""
@@ -227,19 +269,19 @@ class TriangularArbitrage:
                 }
 
     def _find_profitable_cycles(self, tickers: Dict) -> List[TrianglePath]:
-        """Find all profitable 3-step cycles starting from each start currency."""
+        """Find all profitable 3-step and 4-step cycles starting from each start currency."""
         opportunities = []
+        fee = self.costs.FEES.get("mexc", {}).get("spot", {}).get("maker", Decimal('0'))
 
         for start in self.START_CURRENCIES:
             if start not in self._pair_graph:
                 continue
 
-            # Step 1: start -> A
+            # --- 3-leg triangles ---
             for a_currency, edge_1 in self._pair_graph[start].items():
                 if a_currency == start:
                     continue
 
-                # Step 2: A -> B
                 if a_currency not in self._pair_graph:
                     continue
 
@@ -247,7 +289,6 @@ class TriangularArbitrage:
                     if b_currency == start or b_currency == a_currency:
                         continue
 
-                    # Step 3: B -> start (must close the cycle)
                     if b_currency not in self._pair_graph:
                         continue
                     if start not in self._pair_graph[b_currency]:
@@ -255,21 +296,16 @@ class TriangularArbitrage:
 
                     edge_3 = self._pair_graph[b_currency][start]
 
-                    # Calculate cycle rate
                     cycle_rate = edge_1['rate'] * edge_2['rate'] * edge_3['rate']
 
                     if cycle_rate <= 1:
                         continue
 
                     profit_bps = (cycle_rate - 1) * 10000
-
-                    # Subtract fees (3 legs × maker fee = 0 on MEXC)
-                    fee = self.costs.FEES.get("mexc", {}).get("spot", {}).get("maker", Decimal('0'))
                     total_fee_bps = fee * 3 * 10000
                     net_profit_bps = profit_bps - total_fee_bps
 
                     if net_profit_bps > self.MIN_NET_PROFIT_BPS:
-                        # Skip cycles with blocked quote currencies (low precision → rounding losses)
                         leg_symbols = [edge_1['symbol'], edge_2['symbol'], edge_3['symbol']]
                         has_blocked = any(
                             sym.split('/')[1] in self.BLOCKED_QUOTE_CURRENCIES
@@ -287,11 +323,95 @@ class TriangularArbitrage:
                             ],
                             cycle_rate=cycle_rate,
                             profit_bps=net_profit_bps,
-                            exchange="mexc",
+                            exchange=self._exchange_name,
                         ))
+
+            # --- 4-leg quadrangles ---
+            quad_opps = self._find_quadrangles(start, fee)
+            opportunities.extend(quad_opps)
 
         opportunities.sort(key=lambda x: x.profit_bps, reverse=True)
         return opportunities
+
+    def _find_quadrangles(self, start: str, fee: Decimal) -> List[TrianglePath]:
+        """Find 4-leg cycles: start -> A -> B -> C -> start.
+
+        Performance: prune paths where cumulative rate < 0.998 after 2 legs,
+        which eliminates ~95% of search space.
+        """
+        results = []
+        total_fee_bps = fee * 4 * 10000  # 4 legs
+
+        if start not in self._pair_graph:
+            return results
+
+        for a_currency, edge_1 in self._pair_graph[start].items():
+            if a_currency == start:
+                continue
+            if a_currency not in self._pair_graph:
+                continue
+
+            rate_2 = edge_1['rate']
+
+            for b_currency, edge_2 in self._pair_graph[a_currency].items():
+                if b_currency in (start, a_currency):
+                    continue
+                if b_currency not in self._pair_graph:
+                    continue
+
+                cum_rate_2 = rate_2 * edge_2['rate']
+                # Prune: if cumulative rate after 2 legs is too low, skip
+                if cum_rate_2 < Decimal('0.998'):
+                    continue
+
+                for c_currency, edge_3 in self._pair_graph[b_currency].items():
+                    if c_currency in (start, a_currency, b_currency):
+                        continue
+                    if c_currency not in self._pair_graph:
+                        continue
+                    if start not in self._pair_graph[c_currency]:
+                        continue
+
+                    cum_rate_3 = cum_rate_2 * edge_3['rate']
+                    # Prune after 3 legs
+                    if cum_rate_3 < Decimal('0.998'):
+                        continue
+
+                    edge_4 = self._pair_graph[c_currency][start]
+                    cycle_rate = cum_rate_3 * edge_4['rate']
+
+                    if cycle_rate <= 1:
+                        continue
+
+                    profit_bps = (cycle_rate - 1) * 10000
+                    net_profit_bps = profit_bps - total_fee_bps
+
+                    if net_profit_bps > self.MIN_NET_PROFIT_BPS:
+                        leg_symbols = [
+                            edge_1['symbol'], edge_2['symbol'],
+                            edge_3['symbol'], edge_4['symbol'],
+                        ]
+                        has_blocked = any(
+                            sym.split('/')[1] in self.BLOCKED_QUOTE_CURRENCIES
+                            for sym in leg_symbols if '/' in sym
+                        )
+                        if has_blocked:
+                            continue
+
+                        results.append(TrianglePath(
+                            start_currency=start,
+                            path=[
+                                (edge_1['symbol'], edge_1['side'], a_currency),
+                                (edge_2['symbol'], edge_2['side'], b_currency),
+                                (edge_3['symbol'], edge_3['side'], c_currency),
+                                (edge_4['symbol'], edge_4['side'], start),
+                            ],
+                            cycle_rate=cycle_rate,
+                            profit_bps=net_profit_bps,
+                            exchange=self._exchange_name,
+                        ))
+
+        return results
 
     # --- Competition Detector ---
 
@@ -348,6 +468,16 @@ class TriangularArbitrage:
 
     def get_stats(self) -> dict:
         exec_stats = self.tri_executor.get_stats() if self.tri_executor else {}
+        # Data source info
+        ws_available = False
+        ws_tickers_count = 0
+        ws_age_ms = float('inf')
+        if hasattr(self.client, 'get_ws_tickers'):
+            ws_data = self.client.get_ws_tickers()
+            if ws_data:
+                ws_available = True
+                ws_tickers_count = len(ws_data)
+                ws_age_ms = self.client.get_ws_ticker_age_ms()
         return {
             "scan_count": self._scan_count,
             "opportunities_found": self._opportunities_found,
@@ -361,4 +491,8 @@ class TriangularArbitrage:
             "graph_edges": sum(len(v) for v in self._pair_graph.values()),
             "executor": exec_stats,
             "competition": self._get_competition_stats(),
+            "data_source": "websocket" if ws_available else "rest",
+            "ws_tickers": ws_tickers_count,
+            "ws_age_ms": round(ws_age_ms, 0) if ws_age_ms < 1e9 else None,
+            "exchange": self._exchange_name,
         }

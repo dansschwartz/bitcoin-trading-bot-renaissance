@@ -102,6 +102,16 @@ class TriangularExecutor:
         # Record depth at top 5 levels for each leg (for scaling analysis)
         book_depth = self._compute_book_depth(path, raw_books)
 
+        # === DYNAMIC SIZING (observation mode) ===
+        leg_depths = [l['depth_usd_top5'] for l in book_depth.get('legs', [])]
+        optimal_size = self._optimal_trade_size(leg_depths, float(trade_usd))
+        if leg_depths and all(d > 0 for d in leg_depths):
+            min_depth = min(leg_depths)
+            logger.info(
+                f"TRI SIZING: config=${float(trade_usd):.0f}, optimal=${optimal_size:.0f} "
+                f"(min_depth=${min_depth:.0f}), using=${float(trade_usd):.0f} (observation)"
+            )
+
         # === PRE-EXECUTION ROUNDING CHECK ===
         # Simulate rounding at each leg's precision to estimate worst-case
         # rounding loss. Skip cycle if rounding eats >50% of expected profit.
@@ -425,6 +435,18 @@ class TriangularExecutor:
             execution_time_ms=(time.monotonic() - start_time) * 1000,
             book_depth=book_depth,
         )
+
+    @staticmethod
+    def _optimal_trade_size(depths: List[float], max_trade_usd: float) -> float:
+        """Optimal trade size = min(max_trade_usd, 0.25 * min_leg_depth).
+
+        We never want to consume more than 25% of the thinnest leg's
+        visible depth at the top 5 price levels.
+        """
+        min_depth = min(depths) if depths and all(d > 0 for d in depths) else 0
+        if min_depth <= 0:
+            return max_trade_usd  # fallback to config
+        return min(max_trade_usd, 0.25 * min_depth)
 
     @staticmethod
     def _compute_book_depth(

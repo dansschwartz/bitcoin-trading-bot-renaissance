@@ -70,6 +70,16 @@ class PerformanceTracker:
             conn.execute("ALTER TABLE arb_trades ADD COLUMN book_depth_json TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        # Add individual leg depth columns (for efficient queries)
+        for col in ("leg1_depth_usd", "leg2_depth_usd", "leg3_depth_usd"):
+            try:
+                conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} REAL")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE arb_trades ADD COLUMN exchange TEXT DEFAULT 'mexc'")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS arb_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,6 +134,9 @@ class PerformanceTracker:
             'confidence': float(signal.confidence),
             'timestamp': datetime.utcnow().isoformat(),
             'book_depth_json': None,
+            'leg1_depth_usd': 0.0,
+            'leg2_depth_usd': 0.0,
+            'leg3_depth_usd': 0.0,
         }
 
         self._trades.append(trade)
@@ -198,20 +211,30 @@ class PerformanceTracker:
                 if leg3.order_result and leg3.order_result.average_fill_price:
                     sell_price = float(leg3.order_result.average_fill_price)
 
-        # Serialize book depth as JSON if available
+        # Serialize book depth as JSON if available + extract per-leg depths
         depth_json = None
+        leg1_depth = 0.0
+        leg2_depth = 0.0
+        leg3_depth = 0.0
         if hasattr(result, 'book_depth') and result.book_depth:
             try:
                 depth_json = json.dumps(result.book_depth)
             except Exception:
                 pass
+            legs = result.book_depth.get('legs', [])
+            if len(legs) >= 1:
+                leg1_depth = legs[0].get('depth_usd_top5', 0.0)
+            if len(legs) >= 2:
+                leg2_depth = legs[1].get('depth_usd_top5', 0.0)
+            if len(legs) >= 3:
+                leg3_depth = legs[2].get('depth_usd_top5', 0.0)
 
         trade = {
             'trade_id': result.trade_id,
             'strategy': 'triangular',
             'symbol': symbol,
-            'buy_exchange': 'mexc',
-            'sell_exchange': 'mexc',
+            'buy_exchange': result.legs[0].order_result.exchange if result.legs and result.legs[0].order_result else 'mexc',
+            'sell_exchange': result.legs[0].order_result.exchange if result.legs and result.legs[0].order_result else 'mexc',
             'status': result.status,
             'buy_price': buy_price,
             'sell_price': sell_price,
@@ -227,6 +250,9 @@ class PerformanceTracker:
             'confidence': 1.0,
             'timestamp': result.timestamp.isoformat(),
             'book_depth_json': depth_json,
+            'leg1_depth_usd': leg1_depth,
+            'leg2_depth_usd': leg2_depth,
+            'leg3_depth_usd': leg3_depth,
         }
 
         self._trades.append(trade)
@@ -292,8 +318,8 @@ class PerformanceTracker:
                 "buy_price, sell_price, quantity, gross_spread_bps, net_spread_bps, "
                 "expected_profit_usd, actual_profit_usd, buy_fee, sell_fee, "
                 "estimated_cost_bps, realized_cost_bps, confidence, timestamp, "
-                "book_depth_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "book_depth_json, leg1_depth_usd, leg2_depth_usd, leg3_depth_usd) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(trade.values()),
             )
             conn.commit()

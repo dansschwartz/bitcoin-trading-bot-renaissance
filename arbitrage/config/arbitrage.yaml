@@ -42,22 +42,39 @@ cross_exchange:
   order_type: LIMIT_MAKER
 
 funding_rate:
-  min_differential_apr: 5.0
+  enabled: true
+  observation_mode: true             # Log only, don't trade — collect data first
+  entry_threshold: 0.0001            # 0.01% — minimum rate to enter
+  exit_threshold: 0.00005            # 0.005% — rate considered normalized
+  max_position_usd: 1000             # Max per-symbol position
+  max_total_positions: 3             # Max simultaneous funding positions
+  check_interval_seconds: 60         # How often to check rates
+  min_differential_apr: 5.0          # Legacy — kept for backward compat
   close_differential_apr: 2.0
   max_leverage: 3.0
-  check_interval_seconds: 300
-  max_position_usd: 2000
-  max_simultaneous_positions: 5
 
 triangular:
   min_net_profit_bps: 5.0           # Must clear taker fees (3×0.05%=1.5bps) + slippage
   exchange: mexc
   start_currencies:
     - USDT
-  scan_interval_ms: 5000            # Reduced from 500ms — save API rate limits
+  scan_interval_ms: 5000            # REST polling interval
+  scan_interval_ms_ws: 500          # WebSocket mode: 500ms (data already in memory)
+  scan_interval_ms_rest: 5000       # REST fallback interval
   max_trade_usd: 2000
   observation_mode: false           # 3-leg executor now handles triangular trades directly
   max_signals_per_cycle: 2          # Max signals per 60s window — conservative
+
+triangular_bybit:
+  enabled: false                     # Enable after observation period
+  min_net_profit_bps: 35.0           # Bybit maker fee 0.10% × 3 legs = 30bps + 5bps buffer
+  exchange: bybit
+  start_currencies:
+    - USDT
+  scan_interval_ms: 5000
+  max_trade_usd: 500                 # Start conservative
+  observation_mode: true             # MUST start in observation mode
+  max_signals_per_cycle: 2
 
 inventory:
   target_allocation: 0.50

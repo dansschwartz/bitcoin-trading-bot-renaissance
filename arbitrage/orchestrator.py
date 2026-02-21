@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from arbitrage.exchanges.mexc_client import MEXCClient
 from arbitrage.exchanges.binance_client import BinanceClient
+from arbitrage.exchanges.bybit_client import BybitClient
 from arbitrage.orderbook.unified_book import UnifiedBookManager
 from arbitrage.costs.model import ArbitrageCostModel
 from arbitrage.detector.cross_exchange import CrossExchangeDetector
@@ -65,6 +66,14 @@ class ArbitrageOrchestrator:
             paper_trading=paper,
         )
 
+        # Bybit exchange client (secondary, for triangular arb)
+        bybit_cfg = self.config.get('triangular_bybit', {})
+        self.bybit = BybitClient(
+            api_key=os.getenv('BYBIT_API_KEY', ''),
+            api_secret=os.getenv('BYBIT_API_SECRET', ''),
+            paper_trading=paper,
+        ) if bybit_cfg.get('enabled', False) else None
+
         # BarAggregator for trade/book data
         self.bar_aggregator = self._init_bar_aggregator()
 
@@ -90,6 +99,7 @@ class ArbitrageOrchestrator:
         )
         self.funding_arb = FundingRateArbitrage(
             self.mexc, self.binance, self.risk_engine,
+            config=self.config, tracker=self.tracker,
         )
         # Support modules (tracker must be created before triangular_arb)
         self.inventory = InventoryManager(self.mexc, self.binance)
@@ -99,6 +109,17 @@ class ArbitrageOrchestrator:
             self.mexc, self.cost_model, self.risk_engine, self.signal_queue,
             config=self.config, tracker=self.tracker,
         )
+
+        # Bybit triangular arb (separate instance, separate config)
+        self.triangular_arb_bybit = None
+        if self.bybit and bybit_cfg.get('enabled', False):
+            bybit_config = dict(self.config)
+            bybit_config['triangular'] = bybit_cfg
+            self.triangular_arb_bybit = TriangularArbitrage(
+                self.bybit, self.cost_model, self.risk_engine, self.signal_queue,
+                config=bybit_config, tracker=self.tracker,
+            )
+            self.triangular_arb_bybit._exchange_name = "bybit"
 
         self._running = False
         self._start_time: Optional[datetime] = None
@@ -157,10 +178,10 @@ class ArbitrageOrchestrator:
 
         # Connect exchanges
         logger.info("Connecting to exchanges...")
-        await asyncio.gather(
-            self.mexc.connect(),
-            self.binance.connect(),
-        )
+        connect_tasks = [self.mexc.connect(), self.binance.connect()]
+        if self.bybit:
+            connect_tasks.append(self.bybit.connect())
+        await asyncio.gather(*connect_tasks)
 
         # Initial inventory check
         try:
@@ -176,6 +197,10 @@ class ArbitrageOrchestrator:
             asyncio.create_task(self._run_execution_loop(), name="executor"),
             asyncio.create_task(self._run_funding_arb(), name="funding_arb"),
             asyncio.create_task(self._run_triangular_arb(), name="triangular_arb"),
+            *(
+                [asyncio.create_task(self._run_triangular_arb_bybit(), name="triangular_arb_bybit")]
+                if self.triangular_arb_bybit else []
+            ),
             asyncio.create_task(self._run_monitoring(), name="monitoring"),
             asyncio.create_task(self._run_inventory_checks(), name="inventory"),
             asyncio.create_task(self._subscribe_trade_feeds(), name="trade_feeds"),
@@ -196,12 +221,13 @@ class ArbitrageOrchestrator:
         self.cross_exchange_detector.stop()
         self.funding_arb.stop()
         self.triangular_arb.stop()
+        if self.triangular_arb_bybit:
+            self.triangular_arb_bybit.stop()
         await self.book_manager.stop()
-        await asyncio.gather(
-            self.mexc.disconnect(),
-            self.binance.disconnect(),
-            return_exceptions=True,
-        )
+        disconnect_tasks = [self.mexc.disconnect(), self.binance.disconnect()]
+        if self.bybit:
+            disconnect_tasks.append(self.bybit.disconnect())
+        await asyncio.gather(*disconnect_tasks, return_exceptions=True)
         logger.info("Arbitrage engine stopped")
         self._log_final_summary()
 
@@ -265,12 +291,22 @@ class ArbitrageOrchestrator:
             logger.error(f"Funding arb error: {e}")
 
     async def _run_triangular_arb(self):
-        """Run triangular arbitrage scanner."""
+        """Run triangular arbitrage scanner (MEXC)."""
         await asyncio.sleep(8)
         try:
             await self.triangular_arb.run()
         except Exception as e:
             logger.error(f"Triangular arb error: {e}")
+
+    async def _run_triangular_arb_bybit(self):
+        """Run triangular arbitrage scanner (Bybit)."""
+        await asyncio.sleep(12)  # Start after MEXC scanner
+        if not self.triangular_arb_bybit:
+            return
+        try:
+            await self.triangular_arb_bybit.run()
+        except Exception as e:
+            logger.error(f"Bybit triangular arb error: {e}")
 
     async def _run_monitoring(self):
         """Periodic status logging."""
@@ -471,6 +507,10 @@ class ArbitrageOrchestrator:
         except Exception:
             tri_stats = {}
         try:
+            tri_bybit_stats = self.triangular_arb_bybit.get_stats() if self.triangular_arb_bybit else {}
+        except Exception:
+            tri_bybit_stats = {}
+        try:
             risk_status = self.risk_engine.get_status()
         except Exception:
             risk_status = {}
@@ -486,6 +526,7 @@ class ArbitrageOrchestrator:
             "executor": executor_stats,
             "funding": funding_stats,
             "triangular": tri_stats,
+            "triangular_bybit": tri_bybit_stats,
             "risk": risk_status,
             "tracker_summary": tracker_summary,
         }
