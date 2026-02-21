@@ -79,6 +79,25 @@ class TriangularArbitrage:
                 self.SCAN_INTERVAL_WS = tri_cfg['scan_interval_ms_ws'] / 1000.0
             if 'scan_interval_ms_rest' in tri_cfg:
                 self.SCAN_INTERVAL_SECONDS = tri_cfg['scan_interval_ms_rest'] / 1000.0
+
+            # Dynamic sizing params
+            self._min_trade_usd = tri_cfg.get('min_trade_usd', 50)
+            self._depth_fraction = tri_cfg.get('depth_fraction', 0.25)
+            self._dynamic_sizing = tri_cfg.get('dynamic_sizing_enabled', True)
+
+            # 4-leg (quadrangular) config
+            quad_cfg = config.get('quadrangular', {})
+            self._quad_enabled = quad_cfg.get('enabled', True)
+            self._quad_max_signals = quad_cfg.get('max_signals_per_cycle', 1)
+            self._quad_min_profit_bps = Decimal(str(quad_cfg.get('min_net_profit_bps', 6.0)))
+        else:
+            self._min_trade_usd = 50
+            self._depth_fraction = 0.25
+            self._dynamic_sizing = True
+            self._quad_enabled = True
+            self._quad_max_signals = 1
+            self._quad_min_profit_bps = Decimal('6.0')
+
         self._running = False
         self._scan_count = 0
         self._opportunities_found = 0
@@ -96,6 +115,18 @@ class TriangularArbitrage:
         self._edge_window_minutes = 60  # Track last 60 min
         self._edge_alert_threshold_bps = 4.0  # Warn if median drops below this
         self._edge_alert_logged = False
+
+        # 4-leg diagnostic counters
+        self._quad_signals_this_cycle = 0
+        self._quad_rejection_reasons = {
+            'executed': 0,
+            'rate_limited': 0,
+            'lost_to_3leg_priority': 0,
+            'edge_below_threshold': 0,
+            'skipped_observation': 0,
+            'execution_error': 0,
+        }
+        self._quad_diag_cycle_count = 0
 
     async def run(self):
         self._running = True
@@ -138,32 +169,31 @@ class TriangularArbitrage:
                 if self._cycle_start is None or (now - self._cycle_start).total_seconds() > 60:
                     self._cycle_start = now
                     self._signals_this_cycle = 0
+                    self._quad_signals_this_cycle = 0
 
-                for opp in opportunities[:3]:  # Top 3 per scan
+                # Separate 3-leg and 4-leg opportunities
+                three_leg_opps = [o for o in opportunities if len(o.path) == 3]
+                four_leg_opps = [o for o in opportunities if len(o.path) == 4]
+
+                # --- Execute 3-leg (up to MAX_SIGNALS_PER_CYCLE) ---
+                for opp in three_leg_opps[:3]:
                     self._opportunities_found += 1
-                    n_legs = len(opp.path)
-                    prefix = "QUAD OPP" if n_legs == 4 else "TRIANGLE OPP"
 
-                    # Log opportunity (always, but throttled)
-                    if self._scan_count % 20 == 0 or n_legs == 4:
+                    if self._scan_count % 20 == 0:
                         logger.info(
-                            f"{prefix}: {' -> '.join(s[0] for s in opp.path)} -> {opp.start_currency} | "
+                            f"TRIANGLE OPP: {' -> '.join(s[0] for s in opp.path)} -> {opp.start_currency} | "
                             f"Profit: {float(opp.profit_bps):.2f}bps | "
-                            f"Rate: {float(opp.cycle_rate):.8f} | {n_legs} legs"
+                            f"Rate: {float(opp.cycle_rate):.8f} | 3 legs"
                             f"{' [OBSERVATION]' if self.OBSERVATION_MODE else ''}"
                         )
 
-                    # Observation mode: log but don't execute
                     if self.OBSERVATION_MODE:
                         self._signals_skipped_observation += 1
                         continue
 
-                    # Rate limit: max signals per cycle
                     if self._signals_this_cycle >= self.MAX_SIGNALS_PER_CYCLE:
-                        logger.debug("Triangular arb rate limited, skipping")
                         continue
 
-                    # Execute directly via 3-leg executor
                     try:
                         result = await self.tri_executor.execute(
                             path=opp.path,
@@ -176,7 +206,6 @@ class TriangularArbitrage:
                         if result.status == "filled":
                             self.risk.record_trade_result(result.profit_usd)
 
-                        # Persist to DB for dashboard visibility
                         if self.tracker:
                             try:
                                 self.tracker.record_triangular_trade(result, opportunity=opp)
@@ -184,6 +213,70 @@ class TriangularArbitrage:
                                 logger.debug(f"Triangular trade tracking error: {track_err}")
                     except Exception as e:
                         logger.error(f"Triangular execution error: {e}")
+
+                # --- Execute 4-leg (dedicated slot, up to _quad_max_signals) ---
+                for opp in four_leg_opps[:3]:
+                    self._opportunities_found += 1
+
+                    # Always log 4-leg opportunities
+                    logger.info(
+                        f"QUAD OPP: {' -> '.join(s[0] for s in opp.path)} -> {opp.start_currency} | "
+                        f"Profit: {float(opp.profit_bps):.2f}bps | "
+                        f"Rate: {float(opp.cycle_rate):.8f} | 4 legs"
+                        f"{' [OBSERVATION]' if self.OBSERVATION_MODE else ''}"
+                    )
+
+                    if self.OBSERVATION_MODE:
+                        self._quad_rejection_reasons['skipped_observation'] += 1
+                        continue
+
+                    if not self._quad_enabled:
+                        continue
+
+                    # 4-leg has its own min_profit_bps threshold
+                    if opp.profit_bps < self._quad_min_profit_bps:
+                        self._quad_rejection_reasons['edge_below_threshold'] += 1
+                        continue
+
+                    if self._quad_signals_this_cycle >= self._quad_max_signals:
+                        self._quad_rejection_reasons['rate_limited'] += 1
+                        continue
+
+                    try:
+                        result = await self.tri_executor.execute(
+                            path=opp.path,
+                            start_currency=opp.start_currency,
+                            trade_usd=self.MAX_TRADE_USD,
+                        )
+                        self._signals_submitted += 1
+                        self._quad_signals_this_cycle += 1
+                        self._quad_rejection_reasons['executed'] += 1
+
+                        if result.status == "filled":
+                            self.risk.record_trade_result(result.profit_usd)
+
+                        if self.tracker:
+                            try:
+                                self.tracker.record_triangular_trade(result, opportunity=opp)
+                            except Exception as track_err:
+                                logger.debug(f"Triangular trade tracking error: {track_err}")
+                    except Exception as e:
+                        self._quad_rejection_reasons['execution_error'] += 1
+                        logger.error(f"Quad execution error: {e}")
+
+                # Periodic quad diagnostics (every 100 scans)
+                self._quad_diag_cycle_count += 1
+                if self._quad_diag_cycle_count >= 100:
+                    qr = self._quad_rejection_reasons
+                    logger.info(
+                        f"QUAD DIAGNOSTICS (last 100 cycles): "
+                        f"executed={qr['executed']}, rate_limited={qr['rate_limited']}, "
+                        f"edge_below={qr['edge_below_threshold']}, "
+                        f"observation={qr['skipped_observation']}, "
+                        f"errors={qr['execution_error']}"
+                    )
+                    self._quad_diag_cycle_count = 0
+                    self._quad_rejection_reasons = {k: 0 for k in qr}
 
                 self._scan_count += 1
 

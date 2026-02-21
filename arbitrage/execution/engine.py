@@ -75,13 +75,13 @@ class ArbitrageExecutor:
         required_base = signal.recommended_quantity
 
         if buy_balance.free < required_quote:
-            logger.debug(f"Insufficient {quote} on {signal.buy_exchange}: "
-                        f"need {float(required_quote):.2f}, have {float(buy_balance.free):.2f}")
+            logger.info(f"Insufficient {quote} on {signal.buy_exchange}: "
+                       f"need {float(required_quote):.2f}, have {float(buy_balance.free):.2f}")
             return ExecutionResult(trade_id=trade_id, status="insufficient_balance", signal=signal)
 
         if sell_balance.free < required_base:
-            logger.debug(f"Insufficient {base} on {signal.sell_exchange}: "
-                        f"need {float(required_base):.6f}, have {float(sell_balance.free):.6f}")
+            logger.info(f"Insufficient {base} on {signal.sell_exchange}: "
+                       f"need {float(required_base):.6f}, have {float(sell_balance.free):.6f}")
             return ExecutionResult(trade_id=trade_id, status="insufficient_balance", signal=signal)
 
         # Round to exchange precision

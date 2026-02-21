@@ -80,6 +80,12 @@ class PerformanceTracker:
             conn.execute("ALTER TABLE arb_trades ADD COLUMN exchange TEXT DEFAULT 'mexc'")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        # Dynamic sizing and leg count columns
+        for col, default in [("trade_size_usd", "REAL"), ("leg_count", "INTEGER DEFAULT 3")]:
+            try:
+                conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {default}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS arb_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,6 +259,8 @@ class PerformanceTracker:
             'leg1_depth_usd': leg1_depth,
             'leg2_depth_usd': leg2_depth,
             'leg3_depth_usd': leg3_depth,
+            'trade_size_usd': float(result.start_amount),
+            'leg_count': len(result.legs) if result.legs else 3,
         }
 
         self._trades.append(trade)
@@ -312,14 +320,10 @@ class PerformanceTracker:
     def _persist_trade(self, trade: dict):
         try:
             conn = sqlite3.connect(self.db_path)
+            cols = ", ".join(trade.keys())
+            placeholders = ", ".join("?" * len(trade))
             conn.execute(
-                "INSERT OR REPLACE INTO arb_trades "
-                "(trade_id, strategy, symbol, buy_exchange, sell_exchange, status, "
-                "buy_price, sell_price, quantity, gross_spread_bps, net_spread_bps, "
-                "expected_profit_usd, actual_profit_usd, buy_fee, sell_fee, "
-                "estimated_cost_bps, realized_cost_bps, confidence, timestamp, "
-                "book_depth_json, leg1_depth_usd, leg2_depth_usd, leg3_depth_usd) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT OR REPLACE INTO arb_trades ({cols}) VALUES ({placeholders})",
                 tuple(trade.values()),
             )
             conn.commit()

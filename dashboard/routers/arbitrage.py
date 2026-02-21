@@ -363,6 +363,98 @@ async def arb_depth_analysis(request: Request):
         return {"error": str(e)}
 
 
+@router.get("/sizing-distribution")
+async def arb_sizing_distribution(request: Request):
+    """Analyze dynamic sizing tier distribution and depth utilization."""
+    try:
+        with _arb_conn() as c:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(arb_trades)").fetchall()]
+            if "trade_size_usd" not in cols or "leg_count" not in cols:
+                return {"error": "trade_size_usd/leg_count columns not yet available — deploy latest code"}
+
+            # Tier breakdown (based on trade_size_usd)
+            tiers = {}
+            for tier_name, lo, hi in [("FULL", 1500, 999999), ("MEDIUM", 500, 1500),
+                                       ("SMALL", 50, 500)]:
+                row = c.execute(
+                    "SELECT COUNT(*), AVG(actual_profit_usd), AVG(trade_size_usd) "
+                    "FROM arb_trades WHERE strategy='triangular' AND status='filled' "
+                    "AND trade_size_usd >= ? AND trade_size_usd < ?",
+                    (lo, hi)
+                ).fetchone()
+                tiers[tier_name] = {
+                    "count": row[0] or 0,
+                    "avg_profit": round(row[1] or 0, 4),
+                    "avg_size": round(row[2] or 0, 0),
+                }
+
+            # Skip count (trade_size_usd is NULL or 0 for skipped)
+            skip_count = c.execute(
+                "SELECT COUNT(*) FROM arb_trades WHERE strategy='triangular' "
+                "AND status='skipped'"
+            ).fetchone()[0]
+            tiers["SKIP"] = {"count": skip_count, "reason": "depth_too_thin"}
+
+            total = c.execute(
+                "SELECT COUNT(*) FROM arb_trades WHERE strategy='triangular' "
+                "AND trade_size_usd > 0"
+            ).fetchone()[0]
+
+            # Depth utilization: how many trades exceed 25% of min leg depth
+            exceeding = c.execute("""
+                SELECT COUNT(*) FROM arb_trades
+                WHERE strategy='triangular' AND trade_size_usd > 0
+                AND leg2_depth_usd > 0
+                AND trade_size_usd > 0.25 * MIN(
+                    CASE WHEN leg2_depth_usd > 0 THEN leg2_depth_usd ELSE 999999 END,
+                    CASE WHEN leg3_depth_usd > 0 THEN leg3_depth_usd ELSE 999999 END
+                )
+            """).fetchone()[0]
+
+            avg_util = c.execute("""
+                SELECT AVG(
+                    CASE WHEN leg2_depth_usd > 0
+                    THEN trade_size_usd / MIN(
+                        CASE WHEN leg2_depth_usd > 0 THEN leg2_depth_usd ELSE 999999 END,
+                        CASE WHEN leg3_depth_usd > 0 THEN leg3_depth_usd ELSE 999999 END
+                    ) * 100
+                    ELSE NULL END
+                ) FROM arb_trades
+                WHERE strategy='triangular' AND trade_size_usd > 0 AND leg2_depth_usd > 0
+            """).fetchone()[0]
+
+            # 3-leg vs 4-leg breakdown
+            leg_breakdown = {}
+            for lc in (3, 4):
+                row = c.execute(
+                    "SELECT COUNT(*), SUM(actual_profit_usd), AVG(actual_profit_usd) "
+                    "FROM arb_trades WHERE strategy='triangular' AND status='filled' "
+                    "AND leg_count=?", (lc,)
+                ).fetchone()
+                detected = c.execute(
+                    "SELECT COUNT(*) FROM arb_trades WHERE strategy='triangular' AND leg_count=?",
+                    (lc,)
+                ).fetchone()[0]
+                leg_breakdown[f"{lc}_leg"] = {
+                    "detected": detected,
+                    "filled": row[0] or 0,
+                    "fill_rate": f"{(row[0] or 0) / max(1, detected) * 100:.1f}%",
+                    "total_profit": round(row[1] or 0, 2),
+                    "avg_per_fill": round(row[2] or 0, 2),
+                }
+
+            return {
+                "total_trades": total,
+                "by_tier": tiers,
+                "avg_depth_utilization_pct": round(avg_util or 0, 1),
+                "trades_exceeding_25pct_depth": exceeding,
+                "pct_exceeding_25pct_depth": round(exceeding / max(1, total) * 100, 1),
+                "by_leg_count": leg_breakdown,
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

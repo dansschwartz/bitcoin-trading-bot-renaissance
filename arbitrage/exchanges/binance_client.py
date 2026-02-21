@@ -493,16 +493,17 @@ class BinanceClient(ExchangeClient):
         )
 
     def _paper_balances(self) -> Dict[str, Balance]:
+        """Paper trading balances — pre-funded at $50K USDT equivalent per asset."""
         return {
-            "USDT": Balance("binance", "USDT", Decimal('10000'), Decimal('0'), Decimal('10000')),
-            "BTC": Balance("binance", "BTC", Decimal('0.15'), Decimal('0'), Decimal('0.15')),
-            "ETH": Balance("binance", "ETH", Decimal('2.5'), Decimal('0'), Decimal('2.5')),
-            "SOL": Balance("binance", "SOL", Decimal('50'), Decimal('0'), Decimal('50')),
-            "BNB": Balance("binance", "BNB", Decimal('5'), Decimal('0'), Decimal('5')),
-            "XRP": Balance("binance", "XRP", Decimal('2000'), Decimal('0'), Decimal('2000')),
-            "DOGE": Balance("binance", "DOGE", Decimal('10000'), Decimal('0'), Decimal('10000')),
-            "ADA": Balance("binance", "ADA", Decimal('5000'), Decimal('0'), Decimal('5000')),
-            "AVAX": Balance("binance", "AVAX", Decimal('50'), Decimal('0'), Decimal('50')),
-            "LINK": Balance("binance", "LINK", Decimal('200'), Decimal('0'), Decimal('200')),
-            "DOT": Balance("binance", "DOT", Decimal('300'), Decimal('0'), Decimal('300')),
+            "USDT": Balance("binance", "USDT", Decimal('50000'), Decimal('0'), Decimal('50000')),
+            "BTC": Balance("binance", "BTC", Decimal('0.75'), Decimal('0'), Decimal('0.75')),
+            "ETH": Balance("binance", "ETH", Decimal('12.5'), Decimal('0'), Decimal('12.5')),
+            "SOL": Balance("binance", "SOL", Decimal('250'), Decimal('0'), Decimal('250')),
+            "BNB": Balance("binance", "BNB", Decimal('25'), Decimal('0'), Decimal('25')),
+            "XRP": Balance("binance", "XRP", Decimal('10000'), Decimal('0'), Decimal('10000')),
+            "DOGE": Balance("binance", "DOGE", Decimal('50000'), Decimal('0'), Decimal('50000')),
+            "ADA": Balance("binance", "ADA", Decimal('25000'), Decimal('0'), Decimal('25000')),
+            "AVAX": Balance("binance", "AVAX", Decimal('250'), Decimal('0'), Decimal('250')),
+            "LINK": Balance("binance", "LINK", Decimal('1000'), Decimal('0'), Decimal('1000')),
+            "DOT": Balance("binance", "DOT", Decimal('1500'), Decimal('0'), Decimal('1500')),
         }
