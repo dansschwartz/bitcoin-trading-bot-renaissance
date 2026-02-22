@@ -5,22 +5,22 @@ import { formatTimestamp } from '../../utils/formatters';
 interface DevilEntry {
   pair: string;
   side: string;
-  signal_price: number;
-  fill_price: number;
-  slippage_bps: number;
-  fill_fee: number;
-  devil: number;
-  latency_signal_to_fill_ms: number;
+  signal_price: number | null;
+  fill_price: number | null;
+  slippage_bps: number | null;
+  fill_fee: number | null;
+  devil: number | null;
+  latency_signal_to_fill_ms: number | null;
   signal_timestamp: string;
 }
 
 interface DevilSummary {
   total_signals: number;
   total_fills: number;
-  avg_slippage_bps: number;
-  avg_latency_ms: number;
-  total_devil_cost_usd: number;
-  total_fees_usd: number;
+  avg_slippage_bps: number | null;
+  avg_latency_ms: number | null;
+  total_devil_cost_usd: number | null;
+  total_fees_usd: number | null;
   recent: DevilEntry[];
 }
 
@@ -44,7 +44,7 @@ export default function DevilTrackerPanel() {
     );
   }
 
-  const costRatio = data.total_devil_cost_usd;
+  const costRatio = data.total_devil_cost_usd ?? 0;
   const ratioColor =
     costRatio > 50 ? 'text-accent-red' : costRatio > 10 ? 'text-yellow-400' : 'text-accent-green';
 
@@ -59,25 +59,25 @@ export default function DevilTrackerPanel() {
       <div className="grid grid-cols-4 gap-2 mb-3">
         <div className="text-center">
           <p className={`text-lg font-mono font-semibold ${ratioColor}`}>
-            ${data.total_devil_cost_usd.toFixed(2)}
+            ${(data.total_devil_cost_usd ?? 0).toFixed(2)}
           </p>
           <p className="text-[10px] text-gray-600">Total Leakage</p>
         </div>
         <div className="text-center">
           <p className="text-lg font-mono font-semibold text-gray-200">
-            {data.avg_slippage_bps.toFixed(1)}
+            {(data.avg_slippage_bps ?? 0).toFixed(1)}
           </p>
           <p className="text-[10px] text-gray-600">Avg Slip (bps)</p>
         </div>
         <div className="text-center">
           <p className="text-lg font-mono font-semibold text-gray-200">
-            {data.avg_latency_ms.toFixed(1)}
+            {(data.avg_latency_ms ?? 0).toFixed(1)}
           </p>
           <p className="text-[10px] text-gray-600">Avg Latency (ms)</p>
         </div>
         <div className="text-center">
           <p className="text-lg font-mono font-semibold text-gray-200">
-            ${data.total_fees_usd.toFixed(2)}
+            ${(data.total_fees_usd ?? 0).toFixed(2)}
           </p>
           <p className="text-[10px] text-gray-600">Total Fees</p>
         </div>
@@ -103,10 +103,10 @@ export default function DevilTrackerPanel() {
                   {entry.side}
                 </td>
                 <td className="py-1 text-right text-gray-400 font-mono">
-                  {entry.slippage_bps.toFixed(1)}
+                  {(entry.slippage_bps ?? 0).toFixed(1)}
                 </td>
                 <td className="py-1 text-right text-gray-400 font-mono">
-                  {entry.latency_signal_to_fill_ms.toFixed(1)}ms
+                  {(entry.latency_signal_to_fill_ms ?? 0).toFixed(1)}ms
                 </td>
                 <td className="py-1 text-right text-gray-600">{formatTimestamp(entry.signal_timestamp)}</td>
               </tr>

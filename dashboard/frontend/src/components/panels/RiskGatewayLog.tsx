@@ -34,7 +34,7 @@ export default function RiskGatewayLog() {
                 <tr key={e.id} className="border-b border-surface-3/30">
                   <td className="py-1.5 px-2 text-gray-500">{formatTimestamp(e.timestamp)}</td>
                   <td className="py-1.5 px-2 text-gray-300">{e.action}</td>
-                  <td className="py-1.5 px-2 text-right text-gray-400">{(e.confidence * 100).toFixed(0)}%</td>
+                  <td className="py-1.5 px-2 text-right text-gray-400">{e.confidence != null ? (e.confidence * 100).toFixed(0) + '%' : '--'}</td>
                   <td className="py-1.5 px-2 text-right text-gray-400">{e.vae_loss != null ? e.vae_loss.toFixed(4) : '--'}</td>
                   <td className="py-1.5 px-2">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
