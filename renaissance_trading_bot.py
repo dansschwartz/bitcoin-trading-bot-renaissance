@@ -1533,13 +1533,15 @@ class RenaissanceTradingBot:
                     )
                     market_data['real_time_predictions'] = rt_result
                     _ml_scale = self.config.get("ml_signal_scale", 10.0)
-                    if 'Ensemble' in rt_result:
-                        signals['ml_ensemble'] = float(np.clip(rt_result['Ensemble'] * _ml_scale, -1.0, 1.0))
+                    # MetaEnsemble is the key from real_time_pipeline name_map
+                    _ens_val = rt_result.get('MetaEnsemble') or rt_result.get('Ensemble') or 0.0
+                    if _ens_val:
+                        signals['ml_ensemble'] = float(np.clip(_ens_val * _ml_scale, -1.0, 1.0))
                     if 'CNN' in rt_result:
                         signals['ml_cnn'] = float(np.clip(rt_result['CNN'] * _ml_scale, -1.0, 1.0))
                     self.logger.info(
                         f"ML SIGNALS: ensemble={signals.get('ml_ensemble', 0):.4f}, "
-                        f"cnn={signals.get('ml_cnn', 0):.4f} (raw: E={rt_result.get('Ensemble', 0):.4f}, "
+                        f"cnn={signals.get('ml_cnn', 0):.4f} (raw: E={_ens_val:.4f}, "
                         f"C={rt_result.get('CNN', 0):.4f}, scale={_ml_scale})"
                     )
             except Exception as e:
