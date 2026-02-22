@@ -1052,6 +1052,13 @@ class RenaissanceTradingBot:
         })
         self.signal_weights = {str(k): float(self._force_float(v)) for k, v in raw_weights.items()}
 
+        # Ensure ML weights always present (genetic optimizer may drop them)
+        _ml_required = {'ml_ensemble': 0.05, 'ml_cnn': 0.03}
+        for k, v in _ml_required.items():
+            if k not in self.signal_weights:
+                self.signal_weights[k] = v
+                self.logger.info(f"Injected missing ML weight: {k}={v}")
+
         # Trading state
         self.current_position = 0.0
         self.daily_pnl = 0.0
@@ -2358,6 +2365,12 @@ class RenaissanceTradingBot:
             if config_data.get('weight_lock', False):
                 self.logger.info("Weight lock enabled — skipping weight persistence")
                 return
+
+            # Ensure ML weights survive genetic optimization
+            _ml_required = {'ml_ensemble': 0.05, 'ml_cnn': 0.03}
+            for k, v in _ml_required.items():
+                if k not in weights:
+                    weights[k] = v
 
             config_data['signal_weights'] = weights
 
