@@ -284,9 +284,9 @@
         "enabled": true,
         "short_window": 72,
         "long_window": 288,
-        "kill_accuracy": 0.45,
-        "min_samples_to_kill": 30,
-        "reentry_accuracy": 0.52
+        "kill_accuracy": 0.35,
+        "min_samples_to_kill": 72,
+        "reentry_accuracy": 0.45
     },
     "recovery": {
         "enabled": true,
