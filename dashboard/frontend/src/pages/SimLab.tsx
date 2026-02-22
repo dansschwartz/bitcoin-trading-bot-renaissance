@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import PageShell from '../components/layout/PageShell';
 import MetricCard from '../components/cards/MetricCard';
+import BacktestRunnerPanel from '../components/panels/BacktestRunnerPanel';
 import { api } from '../api';
 import type { PnLSummary, RiskMetrics, BacktestRun, BacktestComparison } from '../types';
 import { formatCurrency, formatPercent, pnlColor } from '../utils/formatters';
@@ -631,6 +632,9 @@ export default function SimLab() {
     >
       {/* Section 1: Live Performance Dashboard */}
       <PerformanceDashboard />
+
+      {/* Section 1.5: Backtest Runner */}
+      <BacktestRunnerPanel onComplete={() => api.backtestRuns().then(setRuns).catch(() => {})} />
 
       {/* Section 2: Backtest Runs Table */}
       <BacktestRunsTable runs={runs} selectedId={selectedId} onSelect={handleSelect} />

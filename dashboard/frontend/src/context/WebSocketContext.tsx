@@ -36,6 +36,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
       case 'price':
         // Could update price in-place
         break;
+      case 'backtest.progress':
+        window.dispatchEvent(new CustomEvent('backtest-progress', { detail: msg.data }));
+        break;
     }
   }, [dispatch, refresh]);
 

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
+from dashboard.backtest_runner import BacktestJobManager
 from dashboard.config import DashboardConfig
 from dashboard.event_emitter import DashboardEventEmitter
 from dashboard.ws_manager import ConnectionManager
@@ -57,6 +58,7 @@ def create_app(
     app.state.start_time = datetime.now(timezone.utc)
     app.state.last_confluence = None
     app.state.active_alerts: list = []
+    app.state.backtest_manager = BacktestJobManager(emitter=app.state.emitter, db_path=cfg.db_path)
 
     # Routers
     app.include_router(system.router)

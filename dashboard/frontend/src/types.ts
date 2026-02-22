@@ -229,6 +229,70 @@ export interface BacktestComparison {
   };
 }
 
+// ─── Backtest Runner ────────────────────────────────────────────────────
+
+export interface BacktestConfig {
+  pairs: string[];
+  cost_bps: number;
+  lookahead: number;
+  new_denom: number;
+  new_buy_thresh: number;
+  new_sell_thresh: number;
+  new_conf_floor: number;
+  new_signal_scale: number;
+  new_exit_bars: number;
+  new_pos_min: number;
+  new_pos_max: number;
+  new_pos_base: number;
+  old_denom: number;
+  old_buy_thresh: number;
+  old_sell_thresh: number;
+  old_conf_floor: number;
+  old_signal_scale: number;
+  old_exit_bars: number;
+  old_pos_usd: number;
+}
+
+export interface BacktestProgress {
+  state: 'idle' | 'running' | 'complete' | 'error';
+  type?: string;
+  pair?: string;
+  pair_idx?: number;
+  total_pairs?: number;
+  bars_done?: number;
+  bars_total?: number;
+  pct?: number;
+  new_pnl?: number;
+  old_pnl?: number;
+  summary?: BacktestSummary;
+  csv_path?: string;
+  error?: string;
+  config?: BacktestConfig;
+  progress?: BacktestProgress;
+}
+
+export interface BacktestSummary {
+  new: BacktestPipelineResult;
+  old: BacktestPipelineResult;
+  per_pair: Record<string, { new: BacktestPipelineResult; old: BacktestPipelineResult }>;
+  accuracy: Record<string, { accuracy: number; n_predictions: number; n_nonzero: number }>;
+  total_candles: number;
+  total_inferences: number;
+  elapsed: number;
+}
+
+export interface BacktestPipelineResult {
+  name: string;
+  n_trades: number;
+  signals: { BUY: number; SELL: number; HOLD: number };
+  win_rate: number;
+  total_pnl: number;
+  avg_pnl: number;
+  sharpe: number;
+  max_drawdown: number;
+  avg_position_usd: number;
+}
+
 // ─── Time Range ──────────────────────────────────────────────────────────
 
 export type TimeRange = '1H' | '4H' | '1D' | '1W' | '1M' | 'ALL';

@@ -1,5 +1,5 @@
 /**
- * REST API fetch helpers — all reads, no writes.
+ * REST API fetch helpers.
  */
 
 const BASE = '';  // Same origin in production, proxied in dev
@@ -10,6 +10,19 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail?.detail || `API ${res.status}: ${path}`);
+  }
+  return res.json();
+}
+
 // ─── System ──────────────────────────────────────────────────────────────
 import type {
   SystemStatus, SystemConfig, Decision, Trade, Position, EquityPoint,
@@ -17,7 +30,7 @@ import type {
   EnsembleStatus, RegimeStatus, VAEPoint, RiskMetrics, Exposure,
   RiskGatewayEntry, TimeRange, BacktestRun, BacktestComparison,
   ClosedPosition, PositionSummary, ArbStatus, ArbTrade, ArbSignal, ArbSummary,
-  ArbWallet,
+  ArbWallet, BacktestConfig, BacktestProgress,
 } from './types';
 
 export const api = {
@@ -75,6 +88,9 @@ export const api = {
   backtestRuns: () => get<BacktestRun[]>('/api/backtest/runs'),
   backtestResult: (id: number) => get<BacktestRun>(`/api/backtest/runs/${id}`),
   backtestCompare: (id: number) => get<BacktestComparison>(`/api/backtest/compare/${id}`),
+  startBacktest: (config: BacktestConfig) => post<{ status: string }>('/api/backtest/start', config),
+  backtestStatus: () => get<BacktestProgress>('/api/backtest/status'),
+  backtestDownloadUrl: () => `${BASE}/api/backtest/download`,
 
   // Positions (round-trip P&L)
   closedPositions: (limit = 50, offset = 0) =>
