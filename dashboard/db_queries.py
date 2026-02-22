@@ -86,6 +86,40 @@ def get_trade_count(db_path: str) -> int:
         return row["cnt"] if row else 0
 
 
+def get_active_product_ids(db_path: str, hours: int = 2) -> List[str]:
+    """Return distinct product_ids seen in recent decisions (dynamic universe)."""
+    with _conn(db_path) as c:
+        rows = c.execute(
+            """SELECT DISTINCT product_id FROM decisions
+               WHERE datetime(timestamp) > datetime('now', ? || ' hours')
+               ORDER BY product_id""",
+            (f"-{hours}",),
+        ).fetchall()
+        return [r["product_id"] for r in rows]
+
+
+def get_latest_prices_batch(db_path: str, product_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Fetch latest price for each product_id in a single pass."""
+    if not product_ids:
+        return {}
+    with _conn(db_path) as c:
+        # Use a single query with GROUP BY to get the max id per product,
+        # then join back to get the full row
+        placeholders = ",".join("?" for _ in product_ids)
+        rows = c.execute(
+            f"""SELECT m.product_id, m.price, m.bid, m.ask, m.timestamp
+                FROM market_data m
+                INNER JOIN (
+                    SELECT product_id, MAX(id) as max_id
+                    FROM market_data
+                    WHERE product_id IN ({placeholders})
+                    GROUP BY product_id
+                ) latest ON m.id = latest.max_id""",
+            product_ids,
+        ).fetchall()
+        return {r["product_id"]: dict(r) for r in rows}
+
+
 # ─── Decisions / Signals ──────────────────────────────────────────────────
 
 def get_recent_decisions(db_path: str, limit: int = 100) -> List[Dict[str, Any]]:

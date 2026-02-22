@@ -19,31 +19,20 @@ async def system_status(request: Request):
     trade_count = db_queries.get_trade_count(db)
     open_positions = db_queries.get_open_positions(db)
 
-    # Latest price per product with change %
+    # Dynamic universe: pairs the bot is actually scanning (from recent decisions)
+    active_ids = db_queries.get_active_product_ids(db, hours=2)
+    product_ids = active_ids if active_ids else cfg.product_ids
+
+    # Batch-fetch latest prices for all active pairs
+    batch_prices = db_queries.get_latest_prices_batch(db, product_ids)
     latest_prices = {}
-    for pid in cfg.product_ids:
-        lp = db_queries.get_latest_price(db, pid)
-        if lp:
-            price = lp.get("price", 0)
-            # Compute 1h price change
-            change_pct = 0.0
-            try:
-                old_prices = db_queries.get_recent_market_data(db, product_id=pid, limit=500)
-                # old_prices is newest-first from DB
-                if len(old_prices) > 1:
-                    oldest = old_prices[-1]
-                    oldest_price = oldest.get("price", price)
-                    if oldest_price > 0:
-                        change_pct = round((price - oldest_price) / oldest_price * 100, 2)
-            except Exception:
-                pass
-            latest_prices[pid] = {
-                "price": price,
-                "bid": lp.get("bid"),
-                "ask": lp.get("ask"),
-                "timestamp": lp.get("timestamp"),
-                "change_pct": change_pct,
-            }
+    for pid, lp in batch_prices.items():
+        latest_prices[pid] = {
+            "price": lp.get("price", 0),
+            "bid": lp.get("bid"),
+            "ask": lp.get("ask"),
+            "timestamp": lp.get("timestamp"),
+        }
 
     ws_clients = request.app.state.ws_manager.active_count
 
@@ -54,7 +43,7 @@ async def system_status(request: Request):
         "trade_count": trade_count,
         "open_position_count": len(open_positions),
         "paper_trading": cfg.paper_trading,
-        "product_ids": cfg.product_ids,
+        "product_ids": product_ids,
         "latest_prices": latest_prices,
         "ws_clients": ws_clients,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -64,11 +53,13 @@ async def system_status(request: Request):
 @router.get("/config")
 async def system_config(request: Request):
     cfg = request.app.state.dashboard_config
+    db = cfg.db_path
+    active_ids = db_queries.get_active_product_ids(db, hours=2)
     return {
         "flags": cfg.flags,
         "signal_weights": cfg.signal_weights,
         "dashboard": cfg.dashboard,
-        "product_ids": cfg.product_ids,
+        "product_ids": active_ids if active_ids else cfg.product_ids,
         "paper_trading": cfg.paper_trading,
     }
 
