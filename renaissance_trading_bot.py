@@ -1762,7 +1762,17 @@ class RenaissanceTradingBot:
         # Backtest: >85% agreement → 54.1% accuracy (profitable).
         #           <70% agreement → 50.7% accuracy (coin flip).
         if action != 'HOLD' and ml_package and ml_package.ml_predictions:
-            pred_values = [v for _, v in ml_package.ml_predictions if isinstance(v, (int, float))]
+            # Extract prediction values — ml_predictions can be list of dicts or tuples
+            pred_values = []
+            for mp in ml_package.ml_predictions:
+                if isinstance(mp, dict):
+                    v = mp.get('prediction', 0.0)
+                    if isinstance(v, (int, float)):
+                        pred_values.append(float(v))
+                elif isinstance(mp, (tuple, list)) and len(mp) >= 2:
+                    v = mp[1]
+                    if isinstance(v, (int, float)):
+                        pred_values.append(float(v))
             if len(pred_values) >= 3:
                 signs = [1 if p > 0 else (-1 if p < 0 else 0) for p in pred_values]
                 nonzero_signs = [s for s in signs if s != 0]
