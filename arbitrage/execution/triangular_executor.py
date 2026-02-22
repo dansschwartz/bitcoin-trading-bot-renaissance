@@ -476,9 +476,11 @@ class TriangularExecutor:
 
         Returns 0.0 if optimal is below min_trade_usd (signal to skip).
         """
-        min_depth = min(depths) if depths and all(d > 0 for d in depths) else 0
+        if not depths:
+            return max_trade_usd  # no depth data at all — fallback to config
+        min_depth = min(depths)
         if min_depth <= 0:
-            return max_trade_usd  # fallback to config if depth data unavailable
+            return 0.0  # at least one leg has zero depth — skip (unsafe to trade)
         optimal = min(max_trade_usd, depth_fraction * min_depth)
         if optimal < min_trade_usd:
             return 0.0  # Signal to skip — depth too thin
