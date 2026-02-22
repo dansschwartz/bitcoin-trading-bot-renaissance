@@ -623,6 +623,174 @@ async def arb_contract_verification(request: Request):
     }
 
 
+@router.get("/sizing")
+async def arb_sizing(request: Request):
+    """Dynamic depth-based position sizing analytics.
+
+    Returns config, last-hour stats, by-depth-tier breakdown, and top paths.
+    """
+    result = {
+        "config": {},
+        "last_hour": {},
+        "by_depth_tier": {},
+        "top_paths_by_capital": [],
+        "top_paths_by_roi": [],
+    }
+
+    # Live config from orchestrator
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch and hasattr(orch, "triangular_arb"):
+        try:
+            tri_stats = orch.triangular_arb.get_stats()
+            sizing = tri_stats.get("sizing", {})
+            result["config"] = {
+                "max_single_trade_usd": sizing.get("max_single_trade_usd"),
+                "depth_fraction": sizing.get("depth_fraction"),
+                "max_capital_per_cycle": sizing.get("max_capital_per_cycle"),
+                "hourly_capital_limit": sizing.get("hourly_capital_limit"),
+                "edge_thresholds": sizing.get("edge_thresholds"),
+            }
+            result["live_budget"] = {
+                "cycle_capital_deployed": sizing.get("cycle_capital_deployed", 0),
+                "hourly_capital_deployed": sizing.get("hourly_capital_deployed", 0),
+                "trades_skipped_capital": sizing.get("trades_skipped_capital", 0),
+            }
+        except Exception as e:
+            logger.debug(f"Live sizing stats error: {e}")
+
+    # DB-based analytics
+    try:
+        with _arb_conn() as c:
+            # Check columns exist
+            cols = [r[1] for r in c.execute("PRAGMA table_info(arb_trades)").fetchall()]
+            has_sizing = "bottleneck_depth_usd" in cols and "sizing_reason" in cols
+
+            # Last hour stats
+            hour_row = c.execute("""
+                SELECT COUNT(*) as trades,
+                       AVG(trade_size_usd) as avg_size,
+                       MAX(trade_size_usd) as max_size,
+                       SUM(trade_size_usd) as capital_deployed,
+                       SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END) as skipped,
+                       SUM(CASE WHEN status='filled' THEN actual_profit_usd ELSE 0 END) as profit
+                FROM arb_trades
+                WHERE strategy='triangular'
+                  AND timestamp >= datetime('now', '-1 hour')
+            """).fetchone()
+            result["last_hour"] = {
+                "trades": hour_row["trades"] or 0,
+                "avg_trade_size": round(float(hour_row["avg_size"] or 0), 2),
+                "max_trade_size": round(float(hour_row["max_size"] or 0), 2),
+                "capital_deployed": round(float(hour_row["capital_deployed"] or 0), 2),
+                "trades_skipped": hour_row["skipped"] or 0,
+                "profit": round(float(hour_row["profit"] or 0), 4),
+            }
+
+            # Median trade size (approximate via subquery)
+            median_row = c.execute("""
+                SELECT trade_size_usd FROM arb_trades
+                WHERE strategy='triangular' AND status='filled'
+                  AND timestamp >= datetime('now', '-1 hour')
+                  AND trade_size_usd > 0
+                ORDER BY trade_size_usd
+                LIMIT 1 OFFSET (
+                    SELECT COUNT(*) / 2 FROM arb_trades
+                    WHERE strategy='triangular' AND status='filled'
+                      AND timestamp >= datetime('now', '-1 hour')
+                      AND trade_size_usd > 0
+                )
+            """).fetchone()
+            result["last_hour"]["median_trade_size"] = round(
+                float(median_row[0]) if median_row else 0, 2
+            )
+
+            # By depth tier (bottleneck_depth_usd ranges)
+            if has_sizing:
+                depth_tiers = [
+                    ("$50-1K", 50, 1000),
+                    ("$1K-5K", 1000, 5000),
+                    ("$5K-20K", 5000, 20000),
+                    ("$20K-100K", 20000, 100000),
+                    (">$100K", 100000, 999999999),
+                ]
+                for tier_name, lo, hi in depth_tiers:
+                    row = c.execute(
+                        "SELECT COUNT(*) as cnt, "
+                        "AVG(trade_size_usd) as avg_size, "
+                        "AVG(actual_profit_usd) as avg_profit, "
+                        "SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills "
+                        "FROM arb_trades "
+                        "WHERE strategy='triangular' "
+                        "AND bottleneck_depth_usd >= ? AND bottleneck_depth_usd < ?",
+                        (lo, hi),
+                    ).fetchone()
+                    cnt = row["cnt"] or 0
+                    result["by_depth_tier"][tier_name] = {
+                        "count": cnt,
+                        "avg_trade_size": round(float(row["avg_size"] or 0), 2),
+                        "avg_profit": round(float(row["avg_profit"] or 0), 4),
+                        "fill_rate": round(
+                            (row["fills"] or 0) / max(1, cnt), 3
+                        ),
+                    }
+
+            # Top paths by capital deployed (last 24h)
+            capital_paths = c.execute("""
+                SELECT path,
+                       SUM(trade_size_usd) as total_capital,
+                       COUNT(*) as trades,
+                       SUM(CASE WHEN status='filled' THEN actual_profit_usd ELSE 0 END) as profit
+                FROM arb_trades
+                WHERE strategy='triangular' AND path != '' AND path IS NOT NULL
+                  AND timestamp >= datetime('now', '-24 hours')
+                GROUP BY path
+                ORDER BY total_capital DESC
+                LIMIT 10
+            """).fetchall()
+            result["top_paths_by_capital"] = [
+                {
+                    "path": r["path"],
+                    "capital_deployed": round(float(r["total_capital"] or 0), 2),
+                    "trades": r["trades"],
+                    "profit": round(float(r["profit"] or 0), 4),
+                }
+                for r in capital_paths
+            ]
+
+            # Top paths by ROI (profit/capital, min 5 fills)
+            roi_paths = c.execute("""
+                SELECT path,
+                       SUM(trade_size_usd) as total_capital,
+                       SUM(CASE WHEN status='filled' THEN actual_profit_usd ELSE 0 END) as profit,
+                       COUNT(*) as trades
+                FROM arb_trades
+                WHERE strategy='triangular' AND path != '' AND path IS NOT NULL
+                  AND timestamp >= datetime('now', '-24 hours')
+                GROUP BY path
+                HAVING SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) >= 5
+                   AND total_capital > 0
+                ORDER BY (profit * 1.0 / total_capital) DESC
+                LIMIT 10
+            """).fetchall()
+            result["top_paths_by_roi"] = [
+                {
+                    "path": r["path"],
+                    "roi_pct": round(
+                        float(r["profit"] or 0) / max(1, float(r["total_capital"] or 1)) * 100, 4
+                    ),
+                    "capital_deployed": round(float(r["total_capital"] or 0), 2),
+                    "profit": round(float(r["profit"] or 0), 4),
+                    "trades": r["trades"],
+                }
+                for r in roi_paths
+            ]
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return _sanitize_for_json(result)
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

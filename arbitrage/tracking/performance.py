@@ -81,7 +81,9 @@ class PerformanceTracker:
         except sqlite3.OperationalError:
             pass  # Column already exists
         # Dynamic sizing and leg count columns
-        for col, default in [("trade_size_usd", "REAL"), ("leg_count", "INTEGER DEFAULT 3")]:
+        for col, default in [("trade_size_usd", "REAL"), ("leg_count", "INTEGER DEFAULT 3"),
+                              ("bottleneck_depth_usd", "REAL DEFAULT 0"),
+                              ("sizing_reason", "TEXT DEFAULT ''")]:
             try:
                 conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {default}")
             except sqlite3.OperationalError:
@@ -271,6 +273,10 @@ class PerformanceTracker:
             if len(legs) >= 3:
                 leg3_depth = legs[2].get('depth_usd_top5', 0.0)
 
+        # Extract bottleneck depth and sizing reason from result
+        bottleneck_depth = getattr(result, 'bottleneck_depth_usd', 0.0)
+        sizing_reason_str = getattr(result, 'sizing_reason', '')
+
         trade = {
             'trade_id': result.trade_id,
             'strategy': 'triangular',
@@ -298,6 +304,8 @@ class PerformanceTracker:
             'trade_size_usd': float(result.start_amount),
             'leg_count': len(result.legs) if result.legs else 3,
             'path': currency_path,
+            'bottleneck_depth_usd': bottleneck_depth,
+            'sizing_reason': sizing_reason_str,
         }
 
         self._trades.append(trade)

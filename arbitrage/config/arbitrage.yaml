@@ -82,9 +82,12 @@ triangular:
   scan_interval_ms: 5000            # REST polling interval
   scan_interval_ms_ws: 500          # WebSocket mode: 500ms (data already in memory)
   scan_interval_ms_rest: 5000       # REST fallback interval
-  max_trade_usd: 3000               # Upper ceiling — dynamic sizing brings most trades below
+  max_single_trade_usd: 15000      # Hard cap per trade (raised ceiling — depth sizing scales down)
+  max_trade_usd: 3000               # Legacy — kept for backward compat, overridden by max_single_trade_usd
   min_trade_usd: 50                 # Floor — skip if optimal is below this
-  depth_fraction: 0.25              # Use at most 25% of thinnest leg's depth
+  max_depth_fraction: 0.15          # Use at most 15% of thinnest leg's depth (was 0.25)
+  max_capital_per_cycle: 25000      # Total USD deployed per 60s cycle
+  hourly_capital_limit: 500000      # Hourly capital breaker
   dynamic_sizing_enabled: true      # Master switch for dynamic sizing
   observation_mode: false           # 3-leg executor now handles triangular trades directly
   max_signals_per_cycle: 2          # Max 3-leg signals per 60s window
@@ -96,6 +99,10 @@ triangular:
     step_size_bps: 0.5              # Adjust by 0.5 bps at a time
     floor_bps: 3.0                  # Never go below 3.0 bps
     ceiling_bps: 15.0               # Never go above 15.0 bps
+  edge_scaling:                     # Edge-quality scaling: small edges → smaller positions
+    thin_bps: 5                     # <5 bps → 0.5x size
+    moderate_bps: 10                # 5-10 bps → 0.75x size
+    full_bps: 20                    # ≥10 bps → 1.0x size
 
 quadrangular:
   enabled: true
@@ -126,7 +133,7 @@ inventory:
     SOL: SOL
 
 risk:
-  max_single_arb_usd: 3000
+  max_single_arb_usd: 15000
   max_total_exposure_usd: 10000
   max_one_sided_usd: 200
   max_daily_loss_usd: 100

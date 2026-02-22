@@ -120,8 +120,22 @@ class TriangularArbitrage:
 
             # Dynamic sizing params
             self._min_trade_usd = tri_cfg.get('min_trade_usd', 50)
-            self._depth_fraction = tri_cfg.get('depth_fraction', 0.25)
+            self._depth_fraction = tri_cfg.get('max_depth_fraction',
+                                               tri_cfg.get('depth_fraction', 0.15))
             self._dynamic_sizing = tri_cfg.get('dynamic_sizing_enabled', True)
+            # New: raised ceiling (overrides MAX_TRADE_USD for executor calls)
+            self._max_single_trade_usd = tri_cfg.get('max_single_trade_usd',
+                                                      float(self.MAX_TRADE_USD))
+            # Per-cycle and hourly capital budgets
+            self._max_capital_per_cycle = tri_cfg.get('max_capital_per_cycle', 25000)
+            self._hourly_capital_limit = tri_cfg.get('hourly_capital_limit', 500000)
+            # Edge scaling thresholds
+            edge_cfg = tri_cfg.get('edge_scaling', {})
+            self._edge_thresholds = {
+                'thin_bps': edge_cfg.get('thin_bps', 5.0),
+                'moderate_bps': edge_cfg.get('moderate_bps', 10.0),
+                'full_bps': edge_cfg.get('full_bps', 20.0),
+            }
 
             # 4-leg (quadrangular) config
             quad_cfg = config.get('quadrangular', {})
@@ -130,8 +144,12 @@ class TriangularArbitrage:
             self._quad_min_profit_bps = Decimal(str(quad_cfg.get('min_net_profit_bps', 6.0)))
         else:
             self._min_trade_usd = 50
-            self._depth_fraction = 0.25
+            self._depth_fraction = 0.15
             self._dynamic_sizing = True
+            self._max_single_trade_usd = 15000
+            self._max_capital_per_cycle = 25000
+            self._hourly_capital_limit = 500000
+            self._edge_thresholds = {'thin_bps': 5.0, 'moderate_bps': 10.0, 'full_bps': 20.0}
             self._quad_enabled = True
             self._quad_max_signals = 1
             self._quad_min_profit_bps = Decimal('6.0')
@@ -143,10 +161,16 @@ class TriangularArbitrage:
         self._signals_skipped_balance = 0
         self._signals_skipped_size = 0
         self._signals_skipped_observation = 0
+        self._signals_skipped_capital = 0
         self._last_signal_time: Optional[datetime] = None
         self._signals_this_cycle = 0
         self._cycle_start: Optional[datetime] = None
         self._pair_graph: Dict[str, Dict[str, dict]] = defaultdict(dict)
+
+        # Per-cycle and hourly capital tracking
+        self._cycle_capital_deployed: float = 0.0
+        self._hourly_capital: float = 0.0
+        self._hourly_capital_reset_time: float = time.time()
 
         # Competition detector — rolling window of edge sizes
         self._edge_history: List[Tuple[datetime, float]] = []  # (timestamp, profit_bps)
@@ -235,6 +259,12 @@ class TriangularArbitrage:
                     self._cycle_start = now
                     self._signals_this_cycle = 0
                     self._quad_signals_this_cycle = 0
+                    self._cycle_capital_deployed = 0.0
+
+                # Hourly capital breaker reset
+                if time.time() - self._hourly_capital_reset_time >= 3600:
+                    self._hourly_capital = 0.0
+                    self._hourly_capital_reset_time = time.time()
 
                 # Separate 3-leg and 4-leg opportunities
                 three_leg_opps = [o for o in opportunities if len(o.path) == 3]
@@ -274,17 +304,28 @@ class TriangularArbitrage:
                         self._staleness_filter.record_failure(path_key)
                         continue
 
+                    # Capital budget checks
+                    if not self._check_capital_budget():
+                        continue
+
                     try:
                         result = await self.tri_executor.execute(
                             path=opp.path,
                             start_currency=opp.start_currency,
-                            trade_usd=self.MAX_TRADE_USD,
+                            trade_usd=Decimal(str(self._max_single_trade_usd)),
+                            min_trade_usd=self._min_trade_usd,
+                            depth_fraction=self._depth_fraction,
+                            edge_bps=float(opp.profit_bps),
+                            edge_thresholds=self._edge_thresholds,
                         )
                         self._signals_submitted += 1
                         self._signals_this_cycle += 1
 
                         if result.status == "filled":
                             self.risk.record_trade_result(result.profit_usd)
+                            deployed = float(result.start_amount)
+                            self._cycle_capital_deployed += deployed
+                            self._hourly_capital += deployed
                         elif result.status not in ("skipped",):
                             self._staleness_filter.record_failure(path_key)
 
@@ -336,11 +377,20 @@ class TriangularArbitrage:
                         self._staleness_filter.record_failure(path_key)
                         continue
 
+                    # Capital budget checks
+                    if not self._check_capital_budget():
+                        self._quad_rejection_reasons['rate_limited'] += 1
+                        continue
+
                     try:
                         result = await self.tri_executor.execute(
                             path=opp.path,
                             start_currency=opp.start_currency,
-                            trade_usd=self.MAX_TRADE_USD,
+                            trade_usd=Decimal(str(self._max_single_trade_usd)),
+                            min_trade_usd=self._min_trade_usd,
+                            depth_fraction=self._depth_fraction,
+                            edge_bps=float(opp.profit_bps),
+                            edge_thresholds=self._edge_thresholds,
                         )
                         self._signals_submitted += 1
                         self._quad_signals_this_cycle += 1
@@ -348,6 +398,9 @@ class TriangularArbitrage:
 
                         if result.status == "filled":
                             self.risk.record_trade_result(result.profit_usd)
+                            deployed = float(result.start_amount)
+                            self._cycle_capital_deployed += deployed
+                            self._hourly_capital += deployed
                         elif result.status not in ("skipped",):
                             self._staleness_filter.record_failure(path_key)
 
@@ -840,6 +893,27 @@ class TriangularArbitrage:
             currencies.append(next_curr)
         return "→".join(currencies)
 
+    # --- Capital Budget ---
+
+    def _check_capital_budget(self) -> bool:
+        """Check per-cycle and hourly capital budgets. Returns False if over limit."""
+        if self._cycle_capital_deployed + self._min_trade_usd > self._max_capital_per_cycle:
+            self._signals_skipped_capital += 1
+            if self._signals_skipped_capital % 50 == 1:
+                logger.warning(
+                    f"CAPITAL BUDGET: cycle limit reached "
+                    f"(${self._cycle_capital_deployed:.0f}/${self._max_capital_per_cycle:.0f})"
+                )
+            return False
+        if self._hourly_capital + self._min_trade_usd > self._hourly_capital_limit:
+            self._signals_skipped_capital += 1
+            logger.warning(
+                f"CAPITAL BREAKER: hourly limit reached "
+                f"(${self._hourly_capital:.0f}/${self._hourly_capital_limit:.0f})"
+            )
+            return False
+        return True
+
     # --- Competition Detector ---
 
     def _record_edges(self, opportunities: List[TrianglePath]) -> None:
@@ -912,6 +986,7 @@ class TriangularArbitrage:
             "signals_skipped_observation": self._signals_skipped_observation,
             "signals_skipped_balance": self._signals_skipped_balance,
             "signals_skipped_size": self._signals_skipped_size,
+            "signals_skipped_capital": self._signals_skipped_capital,
             "preflight": self._preflight_stats.copy(),
             "staleness_skips": self._staleness_skips,
             "staleness_active_cooldowns": self._staleness_filter.active_cooldowns,
@@ -929,5 +1004,15 @@ class TriangularArbitrage:
                 "enabled": self._adaptive_enabled,
                 "current_min_profit_bps": float(self.MIN_NET_PROFIT_BPS),
                 "attempts_until_check": max(0, self._adaptive_config['check_interval_attempts'] - self._attempts_since_threshold_check),
+            },
+            "sizing": {
+                "max_single_trade_usd": self._max_single_trade_usd,
+                "depth_fraction": self._depth_fraction,
+                "max_capital_per_cycle": self._max_capital_per_cycle,
+                "hourly_capital_limit": self._hourly_capital_limit,
+                "edge_thresholds": self._edge_thresholds,
+                "cycle_capital_deployed": round(self._cycle_capital_deployed, 2),
+                "hourly_capital_deployed": round(self._hourly_capital, 2),
+                "trades_skipped_capital": self._signals_skipped_capital,
             },
         }

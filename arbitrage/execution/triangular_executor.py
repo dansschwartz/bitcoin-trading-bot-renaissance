@@ -47,6 +47,8 @@ class TriExecutionResult:
     execution_time_ms: float = 0.0
     timestamp: datetime = field(default_factory=datetime.utcnow)
     book_depth: Optional[Dict] = None  # Per-leg book depth at time of execution
+    bottleneck_depth_usd: float = 0.0  # USD depth of thinnest leg
+    sizing_reason: str = ""            # Human-readable sizing explanation
 
 
 class TriangularExecutor:
@@ -61,14 +63,23 @@ class TriangularExecutor:
         self._precision_cache: Dict[str, Tuple[int, int]] = {}  # symbol -> (price_prec, qty_prec)
 
     async def execute(self, path, start_currency: str,
-                      trade_usd: Decimal) -> TriExecutionResult:
+                      trade_usd: Decimal,
+                      min_trade_usd: float = 50.0,
+                      depth_fraction: float = 0.15,
+                      edge_bps: Optional[float] = None,
+                      edge_thresholds: Optional[Dict[str, float]] = None,
+                      ) -> TriExecutionResult:
         """
         Execute a triangular arbitrage cycle.
 
         Args:
             path: List of (symbol, side, intermediate_currency) tuples
             start_currency: Currency we start and end with (e.g., "USDT")
-            trade_usd: USD amount to trade
+            trade_usd: USD ceiling for this trade
+            min_trade_usd: Floor — skip if optimal is below this
+            depth_fraction: Fraction of thinnest leg's depth to use (default 15%)
+            edge_bps: Detected edge in bps (for edge-quality scaling)
+            edge_thresholds: Custom edge scaling thresholds
         """
         trade_id = f"tri_{start_currency}_{int(time.time() * 1000)}"
         self._trade_count += 1
@@ -104,11 +115,19 @@ class TriangularExecutor:
 
         # === DYNAMIC SIZING (active) ===
         leg_depths = [l['depth_usd_top5'] for l in book_depth.get('legs', [])]
-        optimal_size = self._optimal_trade_size(leg_depths, float(trade_usd))
+        optimal_size, sizing_reason = self._optimal_trade_size(
+            leg_depths, float(trade_usd),
+            min_trade_usd=min_trade_usd,
+            depth_fraction=depth_fraction,
+            edge_bps=edge_bps,
+            edge_thresholds=edge_thresholds,
+        )
         min_depth = min(leg_depths) if leg_depths and all(d > 0 for d in leg_depths) else 0.0
 
         # Determine tier for logging
-        if optimal_size >= 1500:
+        if optimal_size >= 5000:
+            tier = "LARGE"
+        elif optimal_size >= 1500:
             tier = "FULL"
         elif optimal_size >= 500:
             tier = "MEDIUM"
@@ -119,18 +138,19 @@ class TriangularExecutor:
 
         if tier == "SKIP":
             logger.info(
-                f"TRI SKIP {trade_id}: min_depth=${min_depth:.0f} too thin, "
-                f"optimal=$0 (floor=$50) | {' -> '.join(s[0] for s in path)}"
+                f"TRI SKIP {trade_id}: {sizing_reason} | {' -> '.join(s[0] for s in path)}"
             )
             self._trade_count -= 1
             return self._build_result(trade_id, "skipped", [], trade_usd,
-                                      Decimal('0'), start_time, book_depth)
+                                      Decimal('0'), start_time, book_depth,
+                                      bottleneck_depth_usd=min_depth,
+                                      sizing_reason=sizing_reason)
 
         # Apply dynamic size — override trade_usd with optimal
         actual_trade_usd = Decimal(str(optimal_size))
         logger.info(
-            f"TRI SIZING: config=${float(trade_usd):.0f} | optimal=${optimal_size:.0f} | "
-            f"min_depth=${min_depth:.0f} | tier={tier} | using=${optimal_size:.0f}"
+            f"TRI SIZING: {sizing_reason} | tier={tier} | "
+            f"path={' -> '.join(s[0] for s in path)}"
         )
 
         # Re-compute current_amount with the dynamically sized trade
@@ -200,7 +220,9 @@ class TriangularExecutor:
                 logger.error(f"TRI LEG {leg_num} FAILED: no price for {symbol}")
                 await self._unwind(legs, trade_id)
                 return self._build_result(trade_id, "failed", legs, trade_usd,
-                                          Decimal('0'), start_time, book_depth)
+                                          Decimal('0'), start_time, book_depth,
+                                          bottleneck_depth_usd=min_depth,
+                                          sizing_reason=sizing_reason)
 
             # Calculate quantity
             if side == 'buy':
@@ -220,7 +242,9 @@ class TriangularExecutor:
                 logger.error(f"TRI LEG {leg_num} FAILED: quantity too small for {symbol}")
                 await self._unwind(legs, trade_id)
                 return self._build_result(trade_id, "failed", legs, trade_usd,
-                                          Decimal('0'), start_time, book_depth)
+                                          Decimal('0'), start_time, book_depth,
+                                          bottleneck_depth_usd=min_depth,
+                                          sizing_reason=sizing_reason)
 
             order = OrderRequest(
                 exchange="mexc",
@@ -246,7 +270,9 @@ class TriangularExecutor:
                 ))
                 await self._unwind(legs, trade_id)
                 return self._build_result(trade_id, "failed", legs, trade_usd,
-                                          Decimal('0'), start_time, book_depth)
+                                          Decimal('0'), start_time, book_depth,
+                                          bottleneck_depth_usd=min_depth,
+                                          sizing_reason=sizing_reason)
 
             if result.status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
                 logger.error(
@@ -259,7 +285,9 @@ class TriangularExecutor:
                 ))
                 await self._unwind(legs, trade_id)
                 return self._build_result(trade_id, "failed", legs, trade_usd,
-                                          Decimal('0'), start_time, book_depth)
+                                          Decimal('0'), start_time, book_depth,
+                                          bottleneck_depth_usd=min_depth,
+                                          sizing_reason=sizing_reason)
 
             # Calculate output amount
             fill_price = result.average_fill_price or price
@@ -304,7 +332,8 @@ class TriangularExecutor:
         )
 
         result = self._build_result(
-            trade_id, "filled", legs, initial_amount, current_amount, start_time, book_depth
+            trade_id, "filled", legs, initial_amount, current_amount, start_time, book_depth,
+            bottleneck_depth_usd=min_depth, sizing_reason=sizing_reason,
         )
         self._completed.append(result)
         return result
@@ -448,7 +477,9 @@ class TriangularExecutor:
     def _build_result(self, trade_id: str, status: str,
                       legs: List[TriLegResult], start_amount: Decimal,
                       end_amount: Decimal, start_time: float,
-                      book_depth: Optional[Dict] = None) -> TriExecutionResult:
+                      book_depth: Optional[Dict] = None,
+                      bottleneck_depth_usd: float = 0.0,
+                      sizing_reason: str = "") -> TriExecutionResult:
         total_fees = sum(
             (l.order_result.fee_amount if l.order_result else Decimal('0'))
             for l in legs
@@ -463,28 +494,71 @@ class TriangularExecutor:
             total_fees_usd=total_fees,
             execution_time_ms=(time.monotonic() - start_time) * 1000,
             book_depth=book_depth,
+            bottleneck_depth_usd=bottleneck_depth_usd,
+            sizing_reason=sizing_reason,
         )
 
     @staticmethod
     def _optimal_trade_size(depths: List[float], max_trade_usd: float,
                             min_trade_usd: float = 50.0,
-                            depth_fraction: float = 0.25) -> float:
-        """Optimal trade size = min(max_trade_usd, depth_fraction * min_leg_depth).
+                            depth_fraction: float = 0.15,
+                            edge_bps: Optional[float] = None,
+                            edge_thresholds: Optional[Dict[str, float]] = None,
+                            ) -> Tuple[float, str]:
+        """Optimal trade size = min(max_trade_usd, depth_fraction * min_leg_depth) × edge_factor.
 
         We never want to consume more than depth_fraction of the thinnest
         leg's visible depth at the top 5 price levels.
 
-        Returns 0.0 if optimal is below min_trade_usd (signal to skip).
+        Edge-quality scaling (edge_bps → multiplier):
+          <thin_bps  → 0.5x   (small edge = conservative)
+          thin-moderate → 0.75x
+          >=full_bps → 1.0x   (big edge = full size)
+
+        Returns (trade_size, sizing_reason). size=0.0 means skip.
         """
+        thresholds = edge_thresholds or {
+            'thin_bps': 5.0, 'moderate_bps': 10.0, 'full_bps': 20.0,
+        }
+
         if not depths:
-            return max_trade_usd  # no depth data at all — fallback to config
+            reason = f"no_depth_data|cap=${max_trade_usd:.0f}"
+            return max_trade_usd, reason
+
         min_depth = min(depths)
         if min_depth <= 0:
-            return 0.0  # at least one leg has zero depth — skip (unsafe to trade)
-        optimal = min(max_trade_usd, depth_fraction * min_depth)
+            return 0.0, "zero_depth|skip"
+
+        # Depth-based size
+        depth_size = depth_fraction * min_depth
+        base_size = min(max_trade_usd, depth_size)
+
+        # Edge-quality scaling
+        edge_factor = 1.0
+        edge_label = "full"
+        if edge_bps is not None:
+            if edge_bps < thresholds['thin_bps']:
+                edge_factor = 0.5
+                edge_label = "thin"
+            elif edge_bps < thresholds['moderate_bps']:
+                edge_factor = 0.75
+                edge_label = "moderate"
+            # else edge_factor stays 1.0
+
+        optimal = round(base_size * edge_factor, 2)
+
         if optimal < min_trade_usd:
-            return 0.0  # Signal to skip — depth too thin
-        return round(optimal, 2)
+            reason = (
+                f"too_thin|depth=${min_depth:.0f}|{depth_fraction:.0%}=${depth_size:.0f}"
+                f"|edge={edge_label}({edge_factor}x)|final=${optimal:.0f}<floor${min_trade_usd:.0f}"
+            )
+            return 0.0, reason
+
+        reason = (
+            f"depth=${min_depth:.0f}|{depth_fraction:.0%}=${depth_size:.0f}"
+            f"|cap=${max_trade_usd:.0f}|edge={edge_label}({edge_factor}x)|final=${optimal:.0f}"
+        )
+        return optimal, reason
 
     @staticmethod
     def _compute_book_depth(
