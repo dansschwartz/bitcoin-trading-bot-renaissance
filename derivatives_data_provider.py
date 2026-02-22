@@ -42,15 +42,30 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ── Symbol mapping: Coinbase product IDs → Binance futures symbols ────────────
-PAIR_TO_BINANCE = {
-    'BTC-USD': 'BTCUSDT',
-    'ETH-USD': 'ETHUSDT',
-    'SOL-USD': 'SOLUSDT',
-    'DOGE-USD': 'DOGEUSDT',
-    'AVAX-USD': 'AVAXUSDT',
-    'LINK-USD': 'LINKUSDT',
+# ── Symbol mapping: product IDs → Binance futures symbols ─────────────────────
+# Auto-converts any 'XXX-USD' → 'XXXUSDT'. Static map for overrides only.
+_PAIR_OVERRIDES = {
+    'MATIC-USD': 'MATICUSDT',  # POL on some exchanges but MATIC on Binance futures
 }
+
+
+def _pair_to_binance_symbol(pair: str) -> str:
+    """Convert any pair format to Binance futures symbol (e.g. 'SOL-USD' → 'SOLUSDT')."""
+    if pair in _PAIR_OVERRIDES:
+        return _PAIR_OVERRIDES[pair]
+    # 'BTC-USD' → 'BTC' → 'BTCUSDT'
+    base = pair.split('-')[0].split('/')[0].upper()
+    # Strip trailing USDT/USD if already present
+    for suffix in ('USDT', 'USD', 'BUSD'):
+        if base.endswith(suffix) and len(base) > len(suffix):
+            base = base[:-len(suffix)]
+    return f"{base}USDT"
+
+
+# Backward-compatible alias (kept for any external references)
+PAIR_TO_BINANCE = {p: _pair_to_binance_symbol(p) for p in [
+    'BTC-USD', 'ETH-USD', 'SOL-USD', 'DOGE-USD', 'AVAX-USD', 'LINK-USD',
+]}
 
 BINANCE_FAPI_BASE = "https://fapi.binance.com"
 BINANCE_FUTURES_DATA = "https://fapi.binance.com/futures/data"
@@ -87,7 +102,7 @@ class DerivativesDataProvider:
         if cache_key in self._cache and (now - self._cache_ts.get(cache_key, 0)) < self._cache_ttl:
             return self._cache[cache_key]
 
-        symbol = PAIR_TO_BINANCE.get(pair, pair.replace('-', ''))
+        symbol = _pair_to_binance_symbol(pair)
 
         # Fetch all in parallel
         results = await asyncio.gather(
@@ -137,7 +152,7 @@ class DerivativesDataProvider:
             days_back: How many days of history to fetch
             period: Granularity for OI/LS/taker data ('5m', '15m', '1h', etc.)
         """
-        symbol = PAIR_TO_BINANCE.get(pair, pair.replace('-', ''))
+        symbol = _pair_to_binance_symbol(pair)
         end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         start_ms = end_ms - (days_back * 86400 * 1000)
 

@@ -22,9 +22,16 @@ import logging
 import os
 import pickle
 import sqlite3
+import warnings
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+
+# Suppress hmmlearn convergence and covariance warnings (expected for new pairs with <50 bars)
+warnings.filterwarnings("ignore", message=".*covars.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*Fitting.*converge.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*KMeans.*converge.*", category=UserWarning)
+logging.getLogger('hmmlearn').setLevel(logging.ERROR)
 
 import numpy as np
 

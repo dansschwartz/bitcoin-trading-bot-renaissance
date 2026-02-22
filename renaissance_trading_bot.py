@@ -607,11 +607,13 @@ class RenaissanceTradingBot:
                 "kelly_fraction": 0.50,            # Half-Kelly for drawdown control
                 "min_edge": 0.001,                 # 0.1% minimum edge
                 "min_win_prob": 0.52,              # Need > 52% to trade
-                "taker_fee_bps": 40.0,             # Coinbase Advanced taker
-                "maker_fee_bps": 25.0,             # Coinbase Advanced maker
+                "taker_fee_bps": 5.0,              # MEXC taker 0.05% (backup, rarely used)
+                "maker_fee_bps": 0.0,              # MEXC maker = FREE (our default execution)
+                "spread_cost_bps": 2.0,            # Tight for MEXC top pairs
+                "slippage_bps": 1.0,               # Limit orders = minimal slippage
                 "cost_gate_ratio": 0.50,           # Block if cost > 50% of expected profit
                 "target_vol": 0.02,                # Target 2% daily vol
-                "min_order_usd": 1.0,              # Coinbase min order
+                "min_order_usd": 1.0,              # MEXC min order ~$1
             },
             logger=self.logger,
         )

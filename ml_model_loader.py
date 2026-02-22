@@ -34,9 +34,12 @@ N_DERIVATIVES_FEATURES = 7  # funding_rate_z, oi_change_pct, long_short_ratio,
                             # fear_greed_norm, fear_greed_roc
 # Total real features: 46 single-pair + 15 cross-asset + 7 derivatives = 68, padded to 98
 
+# Feature audit tracking — logs once per pair per process lifetime
+_feature_audit_logged: set = set()
+
 # ── Cross-asset lead signal configuration ─────────────────────────────────────
 
-LEAD_SIGNALS = {
+_LEAD_SIGNALS_STATIC = {
     'BTC-USD':  {'primary': 'ETH-USD',  'secondary': 'SOL-USD'},
     'ETH-USD':  {'primary': 'BTC-USD',  'secondary': 'LINK-USD'},
     'SOL-USD':  {'primary': 'BTC-USD',  'secondary': 'ETH-USD'},
@@ -44,6 +47,62 @@ LEAD_SIGNALS = {
     'AVAX-USD': {'primary': 'ETH-USD',  'secondary': 'BTC-USD'},
     'DOGE-USD': {'primary': 'BTC-USD',  'secondary': 'ETH-USD'},
 }
+
+# Sector-based lead signals: BTC leads all; ETH leads L1/DeFi/infra
+_SECTOR_LEADS = {
+    # L1 / alt-L1 chains → led by ETH + BTC
+    'SOL': ('ETH', 'BTC'), 'AVAX': ('ETH', 'BTC'), 'NEAR': ('ETH', 'BTC'),
+    'ATOM': ('ETH', 'BTC'), 'DOT': ('ETH', 'BTC'), 'ADA': ('ETH', 'BTC'),
+    'ALGO': ('ETH', 'BTC'), 'SEI': ('ETH', 'BTC'), 'SUI': ('ETH', 'BTC'),
+    'APT': ('ETH', 'BTC'), 'INJ': ('ETH', 'BTC'), 'TIA': ('ETH', 'BTC'),
+    'FTM': ('ETH', 'BTC'), 'MATIC': ('ETH', 'BTC'), 'HBAR': ('ETH', 'BTC'),
+    'ICP': ('ETH', 'BTC'), 'FIL': ('ETH', 'BTC'), 'AR': ('ETH', 'BTC'),
+    'STX': ('BTC', 'ETH'), 'KAS': ('BTC', 'ETH'),
+    # DeFi → led by ETH
+    'LINK': ('ETH', 'BTC'), 'UNI': ('ETH', 'BTC'), 'AAVE': ('ETH', 'BTC'),
+    'MKR': ('ETH', 'BTC'), 'SNX': ('ETH', 'BTC'), 'CRV': ('ETH', 'BTC'),
+    'DYDX': ('ETH', 'BTC'), 'PENDLE': ('ETH', 'BTC'), 'JUP': ('SOL', 'ETH'),
+    # L2 → led by ETH
+    'ARB': ('ETH', 'BTC'), 'OP': ('ETH', 'BTC'), 'IMX': ('ETH', 'BTC'),
+    # Memes → led by BTC + DOGE
+    'DOGE': ('BTC', 'ETH'), 'SHIB': ('DOGE', 'BTC'), 'PEPE': ('DOGE', 'BTC'),
+    'WIF': ('SOL', 'BTC'), 'BONK': ('SOL', 'BTC'), 'FLOKI': ('DOGE', 'BTC'),
+    # Gaming/NFT → led by ETH
+    'SAND': ('ETH', 'BTC'), 'MANA': ('ETH', 'BTC'), 'GALA': ('ETH', 'BTC'),
+    'AXS': ('ETH', 'BTC'), 'ENJ': ('ETH', 'BTC'), 'APE': ('ETH', 'BTC'),
+    'IMX': ('ETH', 'BTC'), 'RNDR': ('ETH', 'BTC'),
+    # AI → led by ETH
+    'FET': ('ETH', 'BTC'), 'RNDR': ('ETH', 'BTC'), 'TAO': ('ETH', 'BTC'),
+    'ARKM': ('ETH', 'BTC'),
+    # Exchange tokens → led by BTC
+    'BNB': ('BTC', 'ETH'),
+    # Privacy/utility → led by BTC
+    'XRP': ('BTC', 'ETH'), 'XLM': ('XRP', 'BTC'), 'LTC': ('BTC', 'ETH'),
+    'BCH': ('BTC', 'ETH'), 'ETC': ('ETH', 'BTC'), 'TRX': ('BTC', 'ETH'),
+    'RUNE': ('BTC', 'ETH'), 'GRT': ('ETH', 'BTC'), 'THETA': ('ETH', 'BTC'),
+    'JASMY': ('BTC', 'ETH'), 'CHZ': ('ETH', 'BTC'), 'ENS': ('ETH', 'BTC'),
+    'LDO': ('ETH', 'BTC'), 'WLD': ('ETH', 'BTC'), 'JTO': ('SOL', 'ETH'),
+    'PYTH': ('SOL', 'ETH'), 'W': ('ETH', 'BTC'), 'STRK': ('ETH', 'BTC'),
+    'ZRO': ('ETH', 'BTC'), 'EIGEN': ('ETH', 'BTC'), 'NTRN': ('ATOM', 'ETH'),
+}
+
+
+def _resolve_lead_signals(pair_name: str) -> Dict[str, str]:
+    """Resolve lead signals for any pair, static map first then sector-based."""
+    if pair_name in _LEAD_SIGNALS_STATIC:
+        return _LEAD_SIGNALS_STATIC[pair_name]
+    # Extract base symbol: 'SOL-USD' → 'SOL', 'BTCUSDT' → 'BTC'
+    base = pair_name.split('-')[0].split('/')[0].replace('USDT', '').replace('USD', '')
+    if base in _SECTOR_LEADS:
+        pri, sec = _SECTOR_LEADS[base]
+        # Convert to pair format matching cross_data keys (e.g. 'BTC-USD')
+        return {'primary': f'{pri}-USD', 'secondary': f'{sec}-USD'}
+    # Default: BTC primary, ETH secondary
+    return {'primary': 'BTC-USD', 'secondary': 'ETH-USD'}
+
+
+# Backward-compatible alias
+LEAD_SIGNALS = _LEAD_SIGNALS_STATIC
 
 # ── Attention (matching trained weights) ──────────────────────────────────────
 
@@ -715,7 +774,7 @@ def _build_cross_features(
     log_ret = np.log(close / close.shift(1))
 
     # ── Lead signals (5 features) ─────────────────────────────────────────
-    lead_cfg = LEAD_SIGNALS.get(pair_name, {})
+    lead_cfg = _resolve_lead_signals(pair_name)
     primary_pair = lead_cfg.get('primary')
     secondary_pair = lead_cfg.get('secondary')
 
@@ -963,6 +1022,19 @@ def build_feature_sequence(
 
     feat_df = pd.DataFrame(features, index=df.index)
     feat_df = feat_df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0)
+
+    # ── Feature audit (once per pair) ────────────────────────────────────────
+    _pair_key = pair_name or "unknown"
+    if _pair_key not in _feature_audit_logged:
+        _feature_audit_logged.add(_pair_key)
+        n_total = len(feat_df.columns)
+        active_cols = [c for c in feat_df.columns if feat_df[c].abs().sum() > 0]
+        zero_cols = [c for c in feat_df.columns if c not in active_cols]
+        logger.info(
+            f"[FEATURE AUDIT] {_pair_key}: {len(active_cols)}/{n_total} active, "
+            f"{INPUT_DIM - n_total} zero-padded | "
+            f"zeros: {zero_cols[:10]}{'...' if len(zero_cols) > 10 else ''}"
+        )
 
     # Take last seq_len rows
     feat_arr = feat_df.tail(seq_len).values.astype(np.float32)

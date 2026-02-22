@@ -4,12 +4,19 @@ Advanced Regime Detector — Medallion-Style HMM Suite
 with periodic refitting, regime-specific alpha weights, and duration estimation.
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 import logging
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+
+# Suppress hmmlearn convergence and covariance warnings (expected for new pairs with <50 bars)
+warnings.filterwarnings("ignore", message=".*covars.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*Fitting.*converge.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*KMeans.*converge.*", category=UserWarning)
+logging.getLogger('hmmlearn').setLevel(logging.ERROR)
 
 # Graceful import with fallback
 try:
@@ -203,7 +210,7 @@ class AdvancedRegimeDetector:
                 fitted = True
                 self.logger.info(f"HMM fitted with hmmlearn: {self.n_regimes} states, {len(features)} samples")
             except Exception as e:
-                self.logger.warning(f"hmmlearn fit failed: {e}")
+                self.logger.debug(f"hmmlearn fit failed (expected for new pairs): {e}")
 
         # Fallback to GMM
         if not fitted and self.fallback_to_gmm:
