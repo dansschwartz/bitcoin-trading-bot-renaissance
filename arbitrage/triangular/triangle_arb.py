@@ -462,6 +462,7 @@ class TriangularArbitrage:
 
             except Exception as e:
                 logger.error(f"Triangle scan error: {e}")
+                data_source = "rest"  # default for interval calc on error
 
             # Dynamic interval: faster with WebSocket, slower with REST
             interval = self.SCAN_INTERVAL_WS if data_source == "websocket" else self.SCAN_INTERVAL_SECONDS
