@@ -1,16 +1,20 @@
 {
     "trading": {
         "product_ids": [
-            "BTC-USD",
-            "ETH-USD",
-            "SOL-USD",
-            "DOGE-USD",
-            "AVAX-USD",
-            "LINK-USD"
+            "BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "XRP-USD", "ADA-USD",
+            "AVAX-USD", "LINK-USD", "DOT-USD", "MATIC-USD", "UNI-USD", "ATOM-USD",
+            "LTC-USD", "BCH-USD", "NEAR-USD", "APT-USD", "ARB-USD", "OP-USD",
+            "FIL-USD", "ICP-USD", "HBAR-USD", "VET-USD", "ALGO-USD",
+            "AAVE-USD", "GRT-USD", "MKR-USD", "SNX-USD", "CRV-USD", "LDO-USD",
+            "IMX-USD", "INJ-USD", "STX-USD", "SEI-USD", "SUI-USD",
+            "TIA-USD", "JUP-USD", "RENDER-USD", "FET-USD", "JASMY-USD", "PEPE-USD",
+            "SHIB-USD", "BONK-USD", "WIF-USD"
         ],
         "cycle_interval_seconds": 300,
         "paper_trading": true,
-        "sandbox": false
+        "sandbox": false,
+        "buy_threshold": 0.06,
+        "sell_threshold": -0.06
     },
     "risk_management": {
         "daily_loss_limit": 500,
