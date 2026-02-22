@@ -46,6 +46,7 @@ from position_manager import EnhancedPositionManager, RiskLimits, PositionStatus
 from alert_manager import AlertManager
 from coinbase_advanced_client import CoinbaseAdvancedClient
 from logger import SecretMaskingFilter
+from binance_spot_provider import BinanceSpotProvider, to_binance_symbol, from_binance_symbol
 
 # Step 14 & 16 & Deep Alternative
 from genetic_optimizer import GeneticWeightOptimizer
@@ -1020,6 +1021,16 @@ class RenaissanceTradingBot:
             except Exception as e:
                 self.logger.warning(f"Multi-exchange bridge init failed: {e}")
 
+        # ── Binance Spot Provider (primary data source for expanded universe) ──
+        self.binance_spot = BinanceSpotProvider(logger=self.logger)
+
+        # Dynamic universe state (populated async in run_continuous_trading)
+        self.trading_universe: list = []
+        self._pair_tiers: Dict[str, int] = {}
+        self._pair_binance_symbols: Dict[str, str] = {}
+        self._universe_built = False
+        self._universe_last_refresh: float = 0.0
+
         # Step 8: Dynamic Thresholds (calibrated to actual signal distribution)
         # Backtest proof: |prediction| < 0.06 is noise (51% accuracy).
         # Only trade strong ML signals — configurable via config.json.
@@ -1089,30 +1100,140 @@ class RenaissanceTradingBot:
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
 
-    # ── Tiered Scanning: scan large-caps every cycle, mid-caps less often ──
-    # Tier 1: Major pairs (highest volume) — every cycle
-    TIER_1_PAIRS = {
-        "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "AVAX-USD",
-        "LINK-USD", "ADA-USD", "DOT-USD", "MATIC-USD", "UNI-USD", "ATOM-USD",
-    }
-    # Tier 3: Memecoins / low-cap — every 4th cycle
-    TIER_3_PAIRS = {"JASMY-USD", "PEPE-USD", "SHIB-USD", "BONK-USD", "WIF-USD"}
-    # Tier 2: Everything else — every 2nd cycle
-
     def get_pairs_for_cycle(self, cycle_number: int) -> list:
-        """Return pairs to scan this cycle based on tiered schedule.
+        """Return pairs to scan this cycle based on 4-tier volume schedule.
 
-        Tier 1 (12 large-cap): every cycle
-        Tier 2 (mid-cap): every 2nd cycle
-        Tier 3 (memecoins): every 4th cycle
+        Tier 1 (top 15 by volume):   every cycle
+        Tier 2 (16-50):              every 2nd cycle
+        Tier 3 (51-100):             every 3rd cycle
+        Tier 4 (101-150):            every 4th cycle
         """
-        pairs = [p for p in self.product_ids if p in self.TIER_1_PAIRS]
-        if cycle_number % 2 == 0:
-            pairs.extend(p for p in self.product_ids
-                         if p not in self.TIER_1_PAIRS and p not in self.TIER_3_PAIRS)
-        if cycle_number % 4 == 0:
-            pairs.extend(p for p in self.product_ids if p in self.TIER_3_PAIRS)
+        if not self._pair_tiers:
+            # Fallback: scan all product_ids if universe not built yet
+            return list(self.product_ids)
+
+        pairs = []
+        for pid in self.product_ids:
+            tier = self._pair_tiers.get(pid, 1)
+            if tier == 1:
+                pairs.append(pid)
+            elif tier == 2 and cycle_number % 2 == 0:
+                pairs.append(pid)
+            elif tier == 3 and cycle_number % 3 == 0:
+                pairs.append(pid)
+            elif tier == 4 and cycle_number % 4 == 0:
+                pairs.append(pid)
         return pairs
+
+    async def _build_and_apply_universe(self) -> None:
+        """Build dynamic trading universe from Binance and apply it."""
+        try:
+            universe_cfg = self.config.get('universe', {})
+            min_vol = float(universe_cfg.get('min_volume_usd', 2_000_000))
+            max_pairs = int(universe_cfg.get('max_pairs', 150))
+
+            universe = await self.binance_spot.build_trading_universe(
+                min_volume_usd=min_vol, max_pairs=max_pairs,
+            )
+            if not universe:
+                self.logger.warning("UNIVERSE: Binance returned empty — keeping existing product_ids")
+                return
+
+            self.trading_universe = universe
+            self.product_ids = [c['product_id'] for c in universe]
+            self._pair_tiers = {c['product_id']: c['tier'] for c in universe}
+            self._pair_binance_symbols = {
+                c['product_id']: c['binance_symbol'] for c in universe
+            }
+            self._universe_built = True
+            self._universe_last_refresh = time.time()
+            self.logger.info(f"UNIVERSE BUILT: {len(self.product_ids)} pairs")
+        except Exception as e:
+            self.logger.error(f"UNIVERSE BUILD FAILED: {e} — keeping existing product_ids")
+
+    async def _collect_from_binance(self, product_id: str) -> Dict[str, Any]:
+        """Collect market data from Binance for a single pair.
+
+        Returns a market_data dict compatible with the existing pipeline.
+        """
+        binance_sym = self._pair_binance_symbols.get(product_id)
+        if not binance_sym:
+            binance_sym = to_binance_symbol(product_id)
+
+        try:
+            ticker = await self.binance_spot.fetch_ticker(binance_sym)
+            if not ticker or ticker.get('price', 0) <= 0:
+                return {}
+
+            # Build market_data dict compatible with existing pipeline
+            tech = self._get_tech(product_id)
+
+            # Fetch latest candle for tech indicator feed
+            candles = await self.binance_spot.fetch_candles(binance_sym, '5m', 2)
+            if candles:
+                from enhanced_technical_indicators import PriceData
+                latest = candles[-1]
+                price_data = PriceData(
+                    timestamp=datetime.utcfromtimestamp(latest['timestamp']),
+                    open=latest['open'],
+                    high=latest['high'],
+                    low=latest['low'],
+                    close=latest['close'],
+                    volume=latest['volume'],
+                )
+                tech.update_price_data(price_data)
+            else:
+                price_data = None
+
+            technical_signals = tech.get_latest_signals()
+
+            # Build orderbook snapshot for microstructure signals
+            order_book_snapshot = None
+            try:
+                ob = await self.binance_spot.fetch_orderbook(binance_sym, 20)
+                if ob and ob.get('bids') and ob.get('asks'):
+                    from microstructure_engine import OrderBookSnapshot, OrderBookLevel
+                    bids = [OrderBookLevel(price=p, size=s) for p, s in ob['bids']]
+                    asks = [OrderBookLevel(price=p, size=s) for p, s in ob['asks']]
+                    order_book_snapshot = OrderBookSnapshot(
+                        timestamp=datetime.utcnow(),
+                        bids=bids,
+                        asks=asks,
+                        last_price=ticker['price'],
+                        last_size=0.0,
+                    )
+            except Exception:
+                pass
+
+            # Compute bid_ask_spread
+            bid = ticker.get('bid', 0)
+            ask = ticker.get('ask', 0)
+            spread = ask - bid if bid > 0 and ask > 0 else 0.0
+
+            return {
+                'order_book_snapshot': order_book_snapshot,
+                'price_data': price_data,
+                'technical_signals': technical_signals,
+                'alternative_signals': {},  # Filled later in sequential phase
+                'ticker': {
+                    'price': ticker['price'],
+                    'bid': bid,
+                    'ask': ask,
+                    'best_bid': bid,
+                    'best_ask': ask,
+                    'volume': ticker.get('volume_24h', 0),
+                    'volume_24h': ticker.get('volume_24h', 0),
+                    'quote_volume_24h': ticker.get('quote_volume_24h', 0),
+                    'bid_ask_spread': spread,
+                },
+                'product_id': product_id,
+                'timestamp': datetime.now(),
+                'recent_trades': [],
+                '_data_source': 'binance',
+            }
+        except Exception as e:
+            self.logger.debug(f"Binance collect failed for {product_id}: {e}")
+            return {}
 
     def _get_tech(self, product_id: str) -> 'EnhancedTechnicalIndicators':
         """Get per-asset technical indicators instance (creates on-demand for new assets)."""
@@ -1329,7 +1450,17 @@ class RenaissanceTradingBot:
             pass
 
     async def collect_all_data(self, product_id: str = "BTC-USD") -> Dict[str, Any]:
-        """Collect data from all sources for a specific product"""
+        """Collect data from all sources for a specific product.
+
+        Routes to Binance for expanded-universe pairs, Coinbase for legacy pairs.
+        """
+        # Use Binance as primary data source when universe is built
+        if self._universe_built and product_id in self._pair_binance_symbols:
+            data = await self._collect_from_binance(product_id)
+            if data:
+                return data
+            # Fall through to Coinbase if Binance fails
+
         try:
             # Try WebSocket data first (sub-100ms latency)
             # Drain the queue but only use data matching this product_id
@@ -2252,17 +2383,44 @@ class RenaissanceTradingBot:
         return decision
 
     async def _execute_smart_order(self, decision: TradingDecision, market_data: Dict[str, Any]):
-        """Execute order through position manager (real or paper) with slippage analysis"""
+        """Execute order through position manager (real or paper) with slippage analysis.
+
+        Routes through MEXC (0% maker) for Binance-sourced pairs, Coinbase for legacy.
+        """
         try:
             product_id = market_data.get('product_id', 'BTC-USD')
             current_price = decision.reasoning.get('current_price', 0.0)
+
+            # Determine execution venue
+            is_mexc_execution = (
+                self._universe_built
+                and product_id in self._pair_binance_symbols
+            )
+
+            # For MEXC execution: use limit order at best bid/ask for 0% maker fee
+            if is_mexc_execution:
+                ticker = market_data.get('ticker', {})
+                if decision.action == 'BUY':
+                    limit_price = float(ticker.get('bid', current_price))
+                    limit_price *= 1.0001  # Tiny premium for fill probability
+                else:
+                    limit_price = float(ticker.get('ask', current_price))
+                    limit_price *= 0.9999  # Tiny discount
+                # In paper mode, limit_price ≈ current_price (negligible difference)
+                current_price = limit_price if limit_price > 0 else current_price
+                order_type = 'LIMIT_MAKER'
+                execution_exchange = 'mexc'
+            else:
+                order_type = 'MARKET'
+                execution_exchange = 'coinbase'
 
             order_details = {
                 'product_id': product_id,
                 'side': decision.action,
                 'size': decision.position_size,
                 'price': current_price,
-                'type': 'MARKET'
+                'type': order_type,
+                'exchange': execution_exchange,
             }
 
             # 1. Analyze Slippage Risk
@@ -2286,11 +2444,19 @@ class RenaissanceTradingBot:
                 'position_id': position.position_id if position else None,
                 'execution_price': current_price,
                 'slippage': slippage_risk.get('predicted_slippage', 0.0),
+                'exchange': execution_exchange,
+                'order_type': order_type,
             }
 
             # Record trade cycle for anti-churn cooldown
             if success:
                 self._last_trade_cycle[product_id] = getattr(self, 'scan_cycle_count', 0)
+                # Log MEXC maker order
+                if is_mexc_execution:
+                    self.logger.info(
+                        f"MEXC LIMIT ORDER: {decision.action} {decision.position_size:.8f} "
+                        f"{product_id} @ ${current_price:.2f} (maker, 0% fee)"
+                    )
 
             # Devil Tracker — record fill (actual execution price vs signal price)
             if success and self.devil_tracker:
@@ -2316,8 +2482,8 @@ class RenaissanceTradingBot:
                     'size': decision.position_size,
                     'price': current_price,
                     'status': 'EXECUTED',
-                    'algo_used': 'POSITION_MANAGER',
-                    'slippage': slippage_risk.get('predicted_slippage', 0.0),
+                    'algo_used': f'POSITION_MANAGER_{execution_exchange.upper()}',
+                    'slippage': slippage_risk.get('predicted_slippage', 0.0) if not is_mexc_execution else 0.0,
                     'execution_time': 0.0,
                 }
                 self._track_task(self.db_manager.store_trade(trade_data))
@@ -2341,7 +2507,7 @@ class RenaissanceTradingBot:
                     import time as _time
                     self.bar_aggregator.on_trade(
                         pair=product_id,
-                        exchange="coinbase",
+                        exchange=execution_exchange,
                         price=current_price,
                         quantity=decision.position_size,
                         side=decision.action.lower(),
@@ -2684,6 +2850,10 @@ class RenaissanceTradingBot:
             except Exception as exp_err:
                 self.logger.debug(f"Exposure monitor error: {exp_err}")
 
+            # ── Build/refresh dynamic universe (weekly refresh) ──
+            if not self._universe_built or (time.time() - self._universe_last_refresh > 86400):
+                await self._build_and_apply_universe()
+
             # ── Determine which pairs to scan this cycle (tiered schedule) ──
             cycle_pairs = self.get_pairs_for_cycle(self.scan_cycle_count)
             self.logger.info(
@@ -2691,53 +2861,103 @@ class RenaissanceTradingBot:
             )
 
             # ── Preload candle history on first cycle (eliminates cold-start) ──
-            # Only preload Tier 1 on first cycle; others warm up naturally
             if not getattr(self, '_history_preloaded', False):
                 self._history_preloaded = True
-                preload_pairs = [p for p in self.product_ids if p in self.TIER_1_PAIRS]
+                # Preload Tier 1 pairs from Binance (or Coinbase fallback)
+                preload_pairs = [p for p in self.product_ids
+                                 if self._pair_tiers.get(p, 1) == 1][:15]
                 for pid in preload_pairs:
                     try:
-                        candles = await asyncio.to_thread(
-                            self.market_data_provider.fetch_candle_history, pid
-                        )
-                        # Fallback: if Coinbase API returns nothing, load from DB
-                        if not candles:
-                            candles = self._load_candles_from_db(pid, limit=200)
-                        if candles:
-                            pid_tech = self._get_tech(pid)
-                            for candle in candles:
-                                pid_tech.update_price_data(candle)
-                                # Feed GARCH engine with historical returns
-                                if candle.close > 0:
-                                    self.garch_engine.update_returns(pid, candle.close)
-                                    # Feed stat arb + correlation engines
-                                    self.stat_arb_engine.update_price(pid, candle.close)
-                                    self.correlation_network.update_price(pid, candle.close)
-                                    self.mean_reversion_engine.update_price(pid, candle.close)
-                                    # Feed cross-asset correlation engine (lead_lag signal)
-                                    self.correlation_engine.update_price(pid, candle.close)
-                            self.logger.info(
-                                f"Preloaded {len(candles)} candles for {pid} — "
-                                f"price_history={len(pid_tech.price_history)}, "
-                                f"GARCH returns={len(self.garch_engine._returns.get(pid, []))}, "
-                                f"lead_lag history={len(self.correlation_engine.history.get(pid, []))}"
+                        bsym = self._pair_binance_symbols.get(pid, to_binance_symbol(pid))
+                        raw_candles = await self.binance_spot.fetch_candles(bsym, '5m', 200)
+                        if not raw_candles:
+                            # Fallback to Coinbase
+                            raw_candles_cb = await asyncio.to_thread(
+                                self.market_data_provider.fetch_candle_history, pid
                             )
-                            # Try initial GARCH fit with preloaded data
-                            if self.garch_engine.should_refit(pid):
-                                self.garch_engine.fit_model(pid)
-                        else:
-                            self.logger.warning(f"No candle history available for {pid} (API + DB both empty)")
+                            if raw_candles_cb:
+                                pid_tech = self._get_tech(pid)
+                                for candle in raw_candles_cb:
+                                    pid_tech.update_price_data(candle)
+                                    if candle.close > 0:
+                                        self.garch_engine.update_returns(pid, candle.close)
+                                        self.stat_arb_engine.update_price(pid, candle.close)
+                                        self.correlation_network.update_price(pid, candle.close)
+                                        self.mean_reversion_engine.update_price(pid, candle.close)
+                                        self.correlation_engine.update_price(pid, candle.close)
+                                self.logger.info(f"Preloaded {len(raw_candles_cb)} candles for {pid} (Coinbase)")
+                            continue
+
+                        from enhanced_technical_indicators import PriceData
+                        pid_tech = self._get_tech(pid)
+                        for c in raw_candles:
+                            pd_obj = PriceData(
+                                timestamp=datetime.utcfromtimestamp(c['timestamp']),
+                                open=c['open'], high=c['high'],
+                                low=c['low'], close=c['close'],
+                                volume=c['volume'],
+                            )
+                            pid_tech.update_price_data(pd_obj)
+                            if c['close'] > 0:
+                                self.garch_engine.update_returns(pid, c['close'])
+                                self.stat_arb_engine.update_price(pid, c['close'])
+                                self.correlation_network.update_price(pid, c['close'])
+                                self.mean_reversion_engine.update_price(pid, c['close'])
+                                self.correlation_engine.update_price(pid, c['close'])
+                        self.logger.info(
+                            f"Preloaded {len(raw_candles)} candles for {pid} (Binance) — "
+                            f"price_history={len(pid_tech.price_history)}"
+                        )
+                        if self.garch_engine.should_refit(pid):
+                            self.garch_engine.fit_model(pid)
                     except Exception as e:
                         self.logger.warning(f"History preload failed for {pid}: {e}")
 
+            # ══════════════════════════════════════════════════════
+            # PHASE 1: PARALLEL DATA FETCH (all pairs concurrently)
+            # ══════════════════════════════════════════════════════
+            fetch_start = time.time()
+
+            sem = asyncio.Semaphore(15)  # Max 15 concurrent Binance requests
+
+            async def _fetch_one(pid: str):
+                async with sem:
+                    try:
+                        return (pid, await self.collect_all_data(pid))
+                    except Exception as e:
+                        self.logger.debug(f"Parallel fetch failed for {pid}: {e}")
+                        return (pid, {})
+
+            fetch_results = await asyncio.gather(
+                *[_fetch_one(pid) for pid in cycle_pairs],
+                return_exceptions=True,
+            )
+
+            # Build dict of successful fetches
+            market_data_all: Dict[str, Dict[str, Any]] = {}
+            for result in fetch_results:
+                if isinstance(result, Exception):
+                    continue
+                pid, data = result
+                if data:
+                    market_data_all[pid] = data
+
+            fetch_elapsed = time.time() - fetch_start
+            self.logger.info(
+                f"PARALLEL FETCH: {len(market_data_all)}/{len(cycle_pairs)} pairs "
+                f"in {fetch_elapsed:.1f}s"
+            )
+
+            # ══════════════════════════════════════════════════════
+            # PHASE 2: SEQUENTIAL PROCESSING (signals + decisions)
+            # ══════════════════════════════════════════════════════
+
             # ── Build cross-asset data dict for ML cross-pair features ──
-            # Only build cross_data for pairs we're scanning this cycle
             cross_data = {}
             for _pid in cycle_pairs:
                 try:
                     _tech = self._get_tech(_pid)
                     _cdf = _tech._to_dataframe()
-                    # Fallback to DB bars when tech indicators are sparse
                     if _cdf is None or len(_cdf) < 30:
                         _cdf = self._load_price_df_from_db(_pid, limit=100)
                     if _cdf is not None and len(_cdf) > 0:
@@ -2747,10 +2967,11 @@ class RenaissanceTradingBot:
 
             for product_id in cycle_pairs:
                 pair_start_time = time.time()
-                self.logger.info(f"Starting cycle for {product_id}...")
 
-                # 1. Collect all market data
-                market_data = await self.collect_all_data(product_id)
+                # 1. Use pre-fetched market data from Phase 1
+                market_data = market_data_all.get(product_id)
+                if not market_data:
+                    continue
 
                 if not market_data:
                     self.logger.warning(f"No market data for {product_id}, skipping")
@@ -2860,7 +3081,7 @@ class RenaissanceTradingBot:
                         ask=ticker.get('ask', 0.0),
                         spread=ticker.get('bid_ask_spread', 0.0),
                         timestamp=datetime.now(timezone.utc),
-                        source="Coinbase",
+                        source=market_data.get('_data_source', 'Coinbase'),
                         product_id=product_id
                     )
                     self._track_task(self.db_manager.store_market_data(md_persist))
@@ -2871,7 +3092,7 @@ class RenaissanceTradingBot:
                         import time as _time
                         self.bar_aggregator.on_orderbook_snapshot(
                             pair=product_id,
-                            exchange="coinbase",
+                            exchange=market_data.get('_data_source', 'coinbase'),
                             best_bid=float(ticker.get('bid', 0)),
                             best_ask=float(ticker.get('ask', 0)),
                             timestamp=_time.time(),
@@ -3397,10 +3618,11 @@ class RenaissanceTradingBot:
                 # 5.05 Devil Tracker — record signal detection price for cost tracking
                 if self.devil_tracker and decision.action != 'HOLD':
                     try:
+                        _exec_exchange = "mexc" if product_id in self._pair_binance_symbols else "coinbase"
                         _devil_trade_id = self.devil_tracker.record_signal_detection(
                             signal_type="combined",
                             pair=product_id,
-                            exchange="coinbase",
+                            exchange=_exec_exchange,
                             price=current_price,
                             side=decision.action,
                         )
@@ -3581,7 +3803,7 @@ class RenaissanceTradingBot:
                                 _ctx = PositionContext(
                                     position_id=_pos.position_id,
                                     pair=product_id,
-                                    exchange="coinbase",
+                                    exchange="mexc" if product_id in self._pair_binance_symbols else "coinbase",
                                     side=_side,
                                     strategy="combined",
                                     entry_price=_D(str(_pos.entry_price)),
@@ -3752,10 +3974,9 @@ class RenaissanceTradingBot:
                         pass
 
                 # Run Breakout Scan (Step 16+)
-                self.scan_cycle_count += 1
                 if self.scan_cycle_count % 10 == 0:
                     self._track_task(self._run_breakout_scan())
-                
+
                 decisions.append(decision)
 
                 pair_elapsed = time.time() - pair_start_time
@@ -3809,10 +4030,14 @@ class RenaissanceTradingBot:
                 except Exception as _de:
                     self.logger.debug(f"Dashboard emit error: {_de}")
 
+            # Increment cycle counter ONCE per cycle (not per pair)
+            self.scan_cycle_count += 1
+
             cycle_time = time.time() - cycle_start
             self.logger.info(
                 f"Cycle {self.scan_cycle_count} complete: "
-                f"{len(cycle_pairs)} pairs in {cycle_time:.1f}s"
+                f"{len(cycle_pairs)} pairs, "
+                f"fetch={fetch_elapsed:.1f}s, total={cycle_time:.1f}s"
             )
             if cycle_time > 240:
                 self.logger.warning(
@@ -4491,6 +4716,20 @@ class RenaissanceTradingBot:
                 )
             except Exception:
                 pass
+
+        # ── Build dynamic trading universe from Binance ──
+        self.logger.info("Building dynamic trading universe from Binance...")
+        await self._build_and_apply_universe()
+        if self._universe_built:
+            # Re-send startup alert with actual pair count
+            if self.monitoring_alert_manager:
+                try:
+                    await self.monitoring_alert_manager.send_system_event(
+                        "Universe Built",
+                        f"Dynamic universe: {len(self.product_ids)} pairs from Binance"
+                    )
+                except Exception:
+                    pass
 
         # Start real-time pipeline if enabled
         if self.real_time_pipeline.enabled:

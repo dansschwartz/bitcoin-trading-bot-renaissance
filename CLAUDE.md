@@ -35,8 +35,26 @@ bitcoin-trading-bot-renaissance/
 ```
 
 **Tech stack:** Python 3.11, SQLite, WebSockets, REST APIs, hmmlearn, scikit-learn, asyncio
-**Exchanges:** MEXC (primary), Binance (arbitrage/reference)
+**Exchanges:** MEXC (execution, 0% maker), Binance (data, derivatives, arbitrage)
 **Dashboard:** HTML/JS frontend served by Python backend at port 8080
+
+## TRADING UNIVERSE & DATA ARCHITECTURE (Updated 2026-02-22)
+
+```
+Binance (data + pairs) → ML Models → MEXC (execution, 0% maker)
+~70-90 pairs, parallel fetch, ~0bps cost on limit orders
+```
+
+- **Dynamic universe** built from Binance USDT pairs, filtered by $2M+ daily volume
+- **~70-90 pairs** (all Binance USDT pairs above volume threshold), auto-refreshed daily
+- **4-tier scanning**: Tier 1 (top 15) every cycle, Tier 2 (16-50) every 2nd, Tier 3 (51-100) every 3rd, Tier 4 (101-150) every 4th
+- **Data source**: Binance spot API (`binance_spot_provider.py`) — free, no auth
+- **Execution**: MEXC via LIMIT_MAKER orders (0% maker fee)
+- **Parallel fetch**: asyncio.gather with Semaphore(15), typically <15s for all pairs
+- **Warmup gate**: 30 bars of data collection before trading new pairs
+- **Max 10 simultaneous positions** regardless of universe size
+
+**Key files**: `binance_spot_provider.py` (Binance data), `renaissance_trading_bot.py` (orchestration), `position_sizer.py` (fee model: 0bps maker)
 
 ---
 

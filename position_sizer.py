@@ -94,11 +94,11 @@ class RenaissancePositionSizer:
         self.min_edge = float(config.get("min_edge", 0.001))
         self.min_win_prob = float(config.get("min_win_prob", 0.52))
 
-        # ── Transaction cost model ──
-        self.taker_fee_bps = float(config.get("taker_fee_bps", 40.0))
-        self.maker_fee_bps = float(config.get("maker_fee_bps", 25.0))
-        self.spread_cost_bps = float(config.get("spread_cost_bps", 5.0))
-        self.slippage_bps = float(config.get("slippage_bps", 5.0))
+        # ── Transaction cost model (MEXC maker: 0%, taker: 5bps) ──
+        self.taker_fee_bps = float(config.get("taker_fee_bps", 5.0))    # MEXC taker 0.05%
+        self.maker_fee_bps = float(config.get("maker_fee_bps", 0.0))    # MEXC maker 0.00%
+        self.spread_cost_bps = float(config.get("spread_cost_bps", 2.0))
+        self.slippage_bps = float(config.get("slippage_bps", 1.0))      # Limit orders = minimal
         self.cost_gate_ratio = float(config.get("cost_gate_ratio", 0.50))
 
         # ── Market impact model (Almgren-Chriss square-root law) ──
