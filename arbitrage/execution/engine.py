@@ -290,8 +290,14 @@ class ArbitrageExecutor:
     def _calculate_actual_profit(self, buy: OrderResult, sell: OrderResult) -> Decimal:
         if not buy.average_fill_price or not sell.average_fill_price:
             return Decimal('0')
-        buy_cost = buy.filled_quantity * buy.average_fill_price + buy.fee_amount
-        sell_revenue = sell.filled_quantity * sell.average_fill_price - sell.fee_amount
+
+        # BUY fee is in base currency — convert to quote (USDT) for correct accounting.
+        # SELL fee is already in quote currency.
+        buy_fee_usd = buy.fee_amount * buy.average_fill_price
+        sell_fee_usd = sell.fee_amount
+
+        buy_cost = buy.filled_quantity * buy.average_fill_price + buy_fee_usd
+        sell_revenue = sell.filled_quantity * sell.average_fill_price - sell_fee_usd
         return sell_revenue - buy_cost
 
     def _calculate_realized_cost(
@@ -304,7 +310,10 @@ class ArbitrageExecutor:
             return Decimal('0')
         buy_slip = abs(buy.average_fill_price - signal.buy_price) / mid * 10000
         sell_slip = abs(sell.average_fill_price - signal.sell_price) / mid * 10000
-        buy_fee_bps = (buy.fee_amount / (buy.filled_quantity * buy.average_fill_price) * 10000
+
+        # BUY fee is in base — convert to quote for bps calculation
+        buy_fee_usd = buy.fee_amount * buy.average_fill_price if buy.average_fill_price else Decimal('0')
+        buy_fee_bps = (buy_fee_usd / (buy.filled_quantity * buy.average_fill_price) * 10000
                        if buy.filled_quantity > 0 and buy.average_fill_price > 0 else Decimal('0'))
         sell_fee_bps = (sell.fee_amount / (sell.filled_quantity * sell.average_fill_price) * 10000
                         if sell.filled_quantity > 0 and sell.average_fill_price > 0 else Decimal('0'))

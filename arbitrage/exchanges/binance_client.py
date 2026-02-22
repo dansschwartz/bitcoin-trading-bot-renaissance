@@ -463,10 +463,10 @@ class BinanceClient(ExchangeClient):
         book = self._last_books.get(order.symbol)
         if order.order_type == OrderType.MARKET:
             fill_price = (book.best_ask if order.side == OrderSide.BUY else book.best_bid) if book else order.price
-            fee_rate = Decimal('0.00075') if self.bnb_fee_discount else Decimal('0.001')
+            fee_rate = Decimal('0.00075') if self.bnb_fee_discount else Decimal('0.001')   # taker
         else:
             fill_price = order.price
-            fee_rate = Decimal('0.00075') if self.bnb_fee_discount else Decimal('0.001')
+            fee_rate = Decimal('0.0001') if self.bnb_fee_discount else Decimal('0.0002')   # maker
 
         if order.side == OrderSide.BUY:
             fee = order.quantity * fee_rate                                    # base units
@@ -497,7 +497,8 @@ class BinanceClient(ExchangeClient):
             requested_quantity=order.quantity,
             filled_quantity=order.quantity,
             average_fill_price=fill_price,
-            fee_amount=fee, fee_currency="USDT",
+            fee_amount=fee,
+            fee_currency=order.symbol.split('/')[0] if order.side == OrderSide.BUY else "USDT",
             timestamp=datetime.utcnow(),
         )
 
