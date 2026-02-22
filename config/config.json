@@ -466,7 +466,7 @@
         "signal_ttl_seconds": 3600,
         "evaluation_interval_seconds": 30.0,
         "min_edge_bps": 0.1,
-        "confidence_floor": 0.505,
+        "confidence_floor": 0.48,
         "trim_threshold": 0.6,
         "close_threshold": 0.15,
         "add_threshold": 1.5,

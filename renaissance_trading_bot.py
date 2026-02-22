@@ -1021,8 +1021,8 @@ class RenaissanceTradingBot:
                 self.logger.warning(f"Multi-exchange bridge init failed: {e}")
 
         # Step 8: Dynamic Thresholds (calibrated to actual signal distribution)
-        self.buy_threshold = 0.01
-        self.sell_threshold = -0.01
+        self.buy_threshold = 0.015
+        self.sell_threshold = -0.015
         self.adaptive_thresholds = self.config.get("adaptive_thresholds", True)
         self.breakout_candidates = []
         self.scan_cycle_count = 0
@@ -1030,23 +1030,25 @@ class RenaissanceTradingBot:
         if self.db_enabled:
             self._track_task(self.db_manager.init_database())
 
-        # Renaissance Research-Optimized Signal Weights (15 signals)
+        # Renaissance Research-Optimized Signal Weights (17 signals — ML included)
         raw_weights = self.config.get("signal_weights", {
-            'order_flow': 0.18,               # Institutional Flow
+            'order_flow': 0.14,               # Institutional Flow (reduced from 0.18)
             'order_book': 0.12,               # Microstructure
             'volume': 0.08,                   # Volume
             'macd': 0.05,                     # Momentum
             'rsi': 0.05,                      # Mean Reversion (technical)
             'bollinger': 0.05,                # Volatility Bands
-            'alternative': 0.03,              # Sentiment/Whales
+            'alternative': 0.01,              # Sentiment/Whales (reduced — often zero)
             'stat_arb': 0.12,                 # Multi-pair Mean Reversion
             'volume_profile': 0.04,           # Volume Profile
             'fractal': 0.05,                  # Fractal Intelligence
             'entropy': 0.04,                  # Market Entropy
-            'quantum': 0.04,                  # Quantum Oscillator
+            'quantum': 0.02,                  # Quantum Oscillator (reduced — heuristic)
             'lead_lag': 0.03,                 # Cross-Asset Lead-Lag
             'correlation_divergence': 0.06,   # Correlation Network Divergence
             'garch_vol': 0.06,                # GARCH Volatility Signal
+            'ml_ensemble': 0.05,              # ML 7-model ensemble prediction
+            'ml_cnn': 0.03,                   # ML CNN model prediction
         })
         self.signal_weights = {str(k): float(self._force_float(v)) for k, v in raw_weights.items()}
 
@@ -1528,6 +1530,11 @@ class RenaissanceTradingBot:
                         signals['ml_ensemble'] = float(np.clip(rt_result['Ensemble'] * _ml_scale, -1.0, 1.0))
                     if 'CNN' in rt_result:
                         signals['ml_cnn'] = float(np.clip(rt_result['CNN'] * _ml_scale, -1.0, 1.0))
+                    self.logger.info(
+                        f"ML SIGNALS: ensemble={signals.get('ml_ensemble', 0):.4f}, "
+                        f"cnn={signals.get('ml_cnn', 0):.4f} (raw: E={rt_result.get('Ensemble', 0):.4f}, "
+                        f"C={rt_result.get('CNN', 0):.4f}, scale={_ml_scale})"
+                    )
             except Exception as e:
                 self.logger.warning(f"ML RT pipeline failed: {e}")
 
@@ -1668,8 +1675,10 @@ class RenaissanceTradingBot:
             pass  # Don't let cost pre-screen crash the decision pipeline
 
         # Calculate confidence based on signal strength and directional consensus
-        # signal_strength: rescale so that typical max (0.05) maps to 1.0
-        signal_strength = min(abs(weighted_signal) / 0.05, 1.0)
+        # signal_strength: rescale so that a strong signal (0.02) maps to 1.0
+        # Typical weighted signals are 0.001-0.03; old denominator 0.05 wasted
+        # the top 60% of the confidence range.
+        signal_strength = min(abs(weighted_signal) / 0.02, 1.0)
 
         # Directional consensus: fraction of non-trivial signals agreeing on direction
         raw_contribs = [v for v in signal_contributions.values() if abs(v) > 0.0001]
@@ -2089,6 +2098,26 @@ class RenaissanceTradingBot:
                     )
                 except Exception:
                     pass
+
+            # ── FINAL SIZE NORMALIZATION — predictable sizing from signal quality ──
+            if action != 'HOLD' and position_size > 0 and current_price > 0:
+                balance = self._cached_balance_usd or 10000.0
+                base_usd = balance * 0.01                                 # 1% of equity
+                sig_scalar = min(abs(weighted_signal) / 0.02, 2.0)        # signal quality
+                sig_scalar = max(sig_scalar, 0.5)
+                conf_scalar = max(0.5, min((confidence - 0.3) * 3.0, 2.0))  # confidence quality
+                dd_scalar = getattr(self, '_drawdown_size_scalar', 1.0)
+                normalized_usd = base_usd * sig_scalar * conf_scalar * dd_scalar
+                normalized_usd = max(50.0, min(normalized_usd, balance * 0.03))  # $50 floor, 3% ceiling
+                normalized_size = normalized_usd / current_price
+                original_usd = position_size * current_price
+                if abs(normalized_usd - original_usd) > 10:
+                    self.logger.info(
+                        f"SIZE NORMALIZATION: {product_id} "
+                        f"chain=${original_usd:.0f} → normalized=${normalized_usd:.0f} "
+                        f"(sig={sig_scalar:.2f}x, conf={conf_scalar:.2f}x, dd={dd_scalar:.2f}x)"
+                    )
+                position_size = normalized_size
 
         reasoning = {
             'weighted_signal': weighted_signal,
@@ -3015,12 +3044,17 @@ class RenaissanceTradingBot:
                     self.logger.debug(f"Adaptive weights skipped: {_aw_err}")
 
                 # 2.8 Apply GARCH position-size multiplier to dynamic thresholds
+                # FIX: Reset to base thresholds per-product to prevent unbounded
+                # accumulation across cycles. Use local vars so products don't
+                # interfere with each other.
+                buy_threshold = self.buy_threshold   # Base from _update_dynamic_thresholds()
+                sell_threshold = self.sell_threshold
                 garch_pos_mult = 1.0
                 if self.garch_engine.is_available:
                     garch_pos_mult = self.garch_engine.get_position_size_multiplier(product_id)
                     buy_delta, sell_delta = self.garch_engine.get_dynamic_threshold_adjustment(product_id)
-                    self.buy_threshold += buy_delta
-                    self.sell_threshold += sell_delta
+                    buy_threshold += buy_delta
+                    sell_threshold += sell_delta
 
                 # 2.9 Signal Validation Gate — clip anomalies, check regime consistency
                 if self.signal_validation_gate:
@@ -4542,20 +4576,20 @@ class RenaissanceTradingBot:
             latest_tech = self._get_tech(product_id).get_latest_signals()
             vol_regime = latest_tech.volatility_regime if latest_tech else None
             
-            # Base thresholds — calibrated to actual signal distribution
+            # Base thresholds — raised to filter noise from tiny signals
             # Typical weighted signals: 0.003-0.03, occasional spikes: 0.03-0.06
-            self.buy_threshold = 0.01
-            self.sell_threshold = -0.01
+            self.buy_threshold = 0.015
+            self.sell_threshold = -0.015
 
             # Adjust based on volatility
             if vol_regime == "high_volatility" or vol_regime == "extreme_volatility":
                 # Increase thresholds in high volatility to avoid fakeouts
-                self.buy_threshold = 0.02
-                self.sell_threshold = -0.02
+                self.buy_threshold = 0.025
+                self.sell_threshold = -0.025
             elif vol_regime == "low_volatility":
                 # Decrease thresholds in low volatility to catch smaller moves
-                self.buy_threshold = 0.005
-                self.sell_threshold = -0.005
+                self.buy_threshold = 0.008
+                self.sell_threshold = -0.008
                 
             self.logger.info(f"Dynamic Thresholds updated: Buy {self.buy_threshold:.2f}, Sell {self.sell_threshold:.2f} (Regime: {vol_regime})")
         except Exception as e:

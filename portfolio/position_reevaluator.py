@@ -36,7 +36,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": True,
     "evaluation_interval_seconds": 1.0,
     "min_edge_bps": 0.5,
-    "confidence_floor": 0.505,
+    "confidence_floor": 0.48,
     "trim_threshold": 0.8,
     "close_threshold": 0.3,
     "add_threshold": 1.5,
