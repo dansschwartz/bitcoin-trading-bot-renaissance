@@ -221,16 +221,16 @@ class TriangularArbitrage:
         self._running = True
         logger.info("TriangularArbitrage scanner started")
 
-        # Build initial pair graph — retry up to 3 times
-        for attempt in range(3):
+        # Build initial pair graph — retry with backoff until success
+        attempt = 0
+        while self._running:
+            attempt += 1
             if await self._build_pair_graph():
                 break
-            logger.warning(f"TriangularArbitrage: pair graph build failed (attempt {attempt + 1}/3), retrying in 30s")
-            await asyncio.sleep(30)
-        else:
-            logger.warning("TriangularArbitrage: pair graph unavailable after 3 attempts, scanner disabled")
-            while self._running:
-                await asyncio.sleep(300)
+            backoff = min(30 * attempt, 300)  # 30s, 60s, 90s, ... capped at 5min
+            logger.warning(f"TriangularArbitrage: pair graph build failed (attempt {attempt}), retrying in {backoff}s")
+            await asyncio.sleep(backoff)
+        if not self._running:
             return
 
         # Start WebSocket all-ticker feed (non-blocking)
