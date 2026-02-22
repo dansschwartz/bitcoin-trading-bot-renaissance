@@ -138,7 +138,7 @@ risk:
   max_one_sided_usd: 200
   max_daily_loss_usd: 100
   max_funding_position_usd: 2000
-  max_trades_per_hour: 1000
+  max_trades_per_hour: 2000
   max_consecutive_losses: 10
   max_api_latency_ms: 500
   max_book_staleness_sec: 10        # Matches unified_book.py is_fresh window
