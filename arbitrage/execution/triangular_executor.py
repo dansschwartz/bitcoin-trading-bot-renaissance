@@ -522,8 +522,7 @@ class TriangularExecutor:
         }
 
         if not depths:
-            reason = f"no_depth_data|cap=${max_trade_usd:.0f}"
-            return max_trade_usd, reason
+            return 0.0, "no_depth_data|skip"
 
         min_depth = min(depths)
         if min_depth <= 0:
