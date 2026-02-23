@@ -163,14 +163,15 @@ class PolymarketExecutor:
 
     def repair_premature_resolutions(self) -> None:
         """
-        One-time fix: reopen positions that were resolved prematurely.
-        A position was prematurely resolved if it was closed within 30 minutes
-        of opening and the market's deadline is months away.
-        Idempotent — does nothing if no suspicious positions found.
+        One-time fix: deduplicate positions caused by premature resolution bug.
+        The bug opened duplicate bets on the same slug every cycle. For each slug,
+        keep only the most recent open position and delete the rest.
+        Idempotent — does nothing if no duplicates found.
         """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
+        # Step 1: Reopen any prematurely resolved HIT_PRICE positions
         suspicious = conn.execute("""
             SELECT * FROM polymarket_positions
             WHERE status IN ('won', 'lost')
@@ -178,29 +179,47 @@ class PolymarketExecutor:
               AND (julianday(closed_at) - julianday(opened_at)) < 0.021
         """).fetchall()
 
-        if not suspicious:
+        if suspicious:
+            self.logger.info(f"REPAIR: Found {len(suspicious)} prematurely resolved positions")
+            for pos in suspicious:
+                conn.execute("""
+                    UPDATE polymarket_positions
+                    SET status = 'open', exit_price = NULL, pnl = NULL,
+                        closed_at = NULL, notes = 'REPAIRED: was prematurely resolved'
+                    WHERE position_id = ?
+                """, (pos['position_id'],))
+
+        # Step 2: Deduplicate — for each slug, keep only the most recent open position
+        dupes = conn.execute("""
+            SELECT slug, COUNT(*) as cnt
+            FROM polymarket_positions
+            WHERE status = 'open' AND slug IS NOT NULL
+            GROUP BY slug HAVING cnt > 1
+        """).fetchall()
+
+        total_deleted = 0
+        for row in dupes:
+            slug = row['slug']
+            # Keep the most recent (highest id), delete the rest
+            keep = conn.execute("""
+                SELECT id FROM polymarket_positions
+                WHERE slug = ? AND status = 'open'
+                ORDER BY id DESC LIMIT 1
+            """, (slug,)).fetchone()
+            if keep:
+                deleted = conn.execute("""
+                    DELETE FROM polymarket_positions
+                    WHERE slug = ? AND status = 'open' AND id != ?
+                """, (slug, keep['id']))
+                n = deleted.rowcount
+                total_deleted += n
+                self.logger.info(f"REPAIR: Deduped '{slug}' — kept 1, deleted {n} duplicates")
+
+        if not suspicious and total_deleted == 0:
             conn.close()
             return
 
-        self.logger.info(f"REPAIR: Found {len(suspicious)} prematurely resolved positions")
-
-        for pos in suspicious:
-            old_status = pos['status']
-            old_pnl = pos['pnl'] or 0
-
-            conn.execute("""
-                UPDATE polymarket_positions
-                SET status = 'open', exit_price = NULL, pnl = NULL,
-                    closed_at = NULL, notes = 'REPAIRED: was prematurely resolved'
-                WHERE position_id = ?
-            """, (pos['position_id'],))
-
-            self.logger.info(
-                f"REPAIR: Reopened '{pos['question'][:50]}' "
-                f"(was {old_status}, pnl was ${old_pnl})"
-            )
-
-        # Recalculate bankroll from scratch: initial - open_bets + resolved_pnl
+        # Step 3: Recalculate bankroll from scratch
         open_bets = conn.execute(
             "SELECT COALESCE(SUM(bet_amount), 0) as total FROM polymarket_positions WHERE status = 'open'"
         ).fetchone()
@@ -216,7 +235,10 @@ class PolymarketExecutor:
 
         # Log bankroll AFTER releasing the DB lock
         self._log_bankroll("repair_premature_resolution", None, 0)
-        self.logger.info(f"REPAIR: Bankroll recalculated to ${self.bankroll:.2f}")
+        self.logger.info(
+            f"REPAIR: Deleted {total_deleted} duplicate positions, "
+            f"bankroll recalculated to ${self.bankroll:.2f}"
+        )
 
     # ------------------------------------------------------------------
     # Main cycle
