@@ -127,6 +127,13 @@ export const api = {
   polymarketHistory: (hours = 24, asset?: string) =>
     get<Record<string, unknown>>(`/api/polymarket/history?hours=${hours}${asset ? `&asset=${asset}` : ''}`),
   polymarketStats: () => get<Record<string, unknown>>('/api/polymarket/stats'),
+  polymarketPositions: (status?: string, limit = 100) => {
+    let path = `/api/polymarket/positions?limit=${limit}`;
+    if (status) path += `&status=${status}`;
+    return get<Record<string, unknown>>(path);
+  },
+  polymarketPnl: () => get<Record<string, unknown>>('/api/polymarket/pnl'),
+  polymarketExecutor: () => get<Record<string, unknown>>('/api/polymarket/executor'),
 
   // Devil Tracker
   devilSummary: (hours = 24) => get<Record<string, unknown>>(`/api/devil/summary?hours=${hours}`),

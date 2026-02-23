@@ -62,6 +62,47 @@ interface BridgeSignal {
   };
 }
 
+interface PmPosition {
+  position_id: string;
+  condition_id: string;
+  slug: string;
+  question: string;
+  market_type: string;
+  asset: string;
+  direction: string;
+  entry_price: number;
+  shares: number;
+  bet_amount: number;
+  edge_at_entry: number;
+  our_prob_at_entry: number;
+  crowd_prob_at_entry: number;
+  target_price: number | null;
+  deadline: string | null;
+  status: string;
+  exit_price: number | null;
+  pnl: number | null;
+  opened_at: string;
+  closed_at: string | null;
+  notes: string | null;
+}
+
+interface PmPnl {
+  bankroll: number;
+  open_count: number;
+  open_exposure: number;
+  total_bets: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl: number;
+  total_wagered: number;
+  roi: number;
+  pnl_24h: number;
+  bets_24h: number;
+  per_asset: { asset: string; bets: number; wins: number; pnl: number }[];
+  per_type: { market_type: string; bets: number; wins: number; pnl: number }[];
+}
+
 const TYPE_COLORS: Record<string, string> = {
   DIRECTION: 'bg-accent-blue/20 text-accent-blue',
   THRESHOLD: 'bg-purple-400/20 text-purple-400',
@@ -71,13 +112,21 @@ const TYPE_COLORS: Record<string, string> = {
   OTHER: 'bg-surface-3 text-gray-400',
 };
 
+function parseUnrealizedPnl(notes: string | null): number | null {
+  if (!notes) return null;
+  const match = notes.match(/unrealized_pnl=(-?[\d.]+)/);
+  return match ? parseFloat(match[1]) : null;
+}
+
 export default function Polymarket() {
   const [summary, setSummary] = useState<PolymarketSummary | null>(null);
   const [edges, setEdges] = useState<EdgeOpportunity[]>([]);
   const [signal, setSignal] = useState<BridgeSignal | null>(null);
-  const [tab, setTab] = useState<'edges' | 'markets' | 'signal'>('edges');
+  const [tab, setTab] = useState<'positions' | 'edges' | 'markets' | 'signal'>('positions');
   const [markets, setMarkets] = useState<EdgeOpportunity[]>([]);
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
+  const [positions, setPositions] = useState<PmPosition[]>([]);
+  const [pnlData, setPnlData] = useState<PmPnl | null>(null);
 
   useEffect(() => {
     const load = () => {
@@ -88,6 +137,10 @@ export default function Polymarket() {
       api.polymarketSignal().then((d) =>
         setSignal(((d as Record<string, unknown>).signal ?? null) as BridgeSignal | null)
       ).catch(() => {});
+      api.polymarketPositions().then((d) =>
+        setPositions(((d as Record<string, unknown>).positions ?? []) as PmPosition[])
+      ).catch(() => {});
+      api.polymarketPnl().then((d) => setPnlData(d as unknown as PmPnl)).catch(() => {});
     };
     load();
     const id = setInterval(load, 30_000);
@@ -105,19 +158,18 @@ export default function Polymarket() {
     }
   }, [tab, typeFilter]);
 
-  const topEdge = summary?.top_opportunity;
+  const openPositions = positions.filter((p) => p.status === 'open');
+  const closedPositions = positions.filter((p) => p.status !== 'open');
 
   return (
     <PageShell
       title="Polymarket"
-      subtitle="Prediction market scanner + ML edge detection"
+      subtitle="Prediction market scanner + executor"
       actions={
         <div className="flex items-center gap-2">
-          {signal?.observationMode && (
-            <span className="px-2 py-1 rounded text-xs font-medium bg-accent-yellow/20 text-accent-yellow">
-              OBSERVATION
-            </span>
-          )}
+          <span className="px-2 py-1 rounded text-xs font-medium bg-accent-yellow/20 text-accent-yellow">
+            PAPER
+          </span>
           <span className="text-xs text-gray-500">
             {summary?.last_scan
               ? `Scan: ${formatTimestamp(summary.last_scan)}`
@@ -127,44 +179,47 @@ export default function Polymarket() {
       }
     >
       {/* Summary Metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <MetricCard
-          title="Markets Scanned"
-          value={summary?.total_markets ?? 0}
+          title="Bankroll"
+          value={pnlData ? formatCurrency(pnlData.bankroll) : '$500'}
+        />
+        <MetricCard
+          title="Open Positions"
+          value={`${pnlData?.open_count ?? 0} ($${(pnlData?.open_exposure ?? 0).toFixed(0)})`}
+        />
+        <MetricCard
+          title="Total P&L"
+          value={pnlData ? `$${pnlData.total_pnl.toFixed(2)}` : '$0'}
+          valueColor={pnlColor(pnlData?.total_pnl ?? 0)}
+        />
+        <MetricCard
+          title="24h P&L"
+          value={pnlData ? `$${pnlData.pnl_24h.toFixed(2)}` : '$0'}
+          valueColor={pnlColor(pnlData?.pnl_24h ?? 0)}
+        />
+        <MetricCard
+          title="Win Rate"
+          value={pnlData && pnlData.total_bets > 0
+            ? `${pnlData.win_rate}% (${pnlData.wins}W/${pnlData.losses}L)`
+            : '--'}
+          valueColor={
+            (pnlData?.win_rate ?? 0) >= 60 ? 'text-accent-green' :
+            (pnlData?.win_rate ?? 0) >= 40 ? 'text-gray-300' :
+            'text-accent-red'
+          }
         />
         <MetricCard
           title="Opportunities"
           value={summary?.opportunities ?? 0}
-          valueColor={
-            (summary?.opportunities ?? 0) > 0 ? 'text-accent-green' : 'text-gray-400'
-          }
-        />
-        <MetricCard
-          title="Max Edge"
-          value={
-            summary?.max_edge != null
-              ? `${(summary.max_edge * 100).toFixed(1)}%`
-              : '--'
-          }
-          valueColor="text-accent-green"
-        />
-        <MetricCard
-          title="ML Signal"
-          value={signal ? `${signal.direction}` : '--'}
           subtitle={
-            signal
-              ? `conf ${signal.confidence}% | ${signal.regime}`
+            summary?.max_edge != null
+              ? `max ${(summary.max_edge * 100).toFixed(1)}% edge`
               : undefined
           }
           valueColor={
-            signal?.direction === 'UP' ? 'text-accent-green' :
-            signal?.direction === 'DOWN' ? 'text-accent-red' :
-            'text-gray-400'
+            (summary?.opportunities ?? 0) > 0 ? 'text-accent-green' : 'text-gray-400'
           }
-        />
-        <MetricCard
-          title="BTC Price"
-          value={signal?.btcPrice ? formatCurrency(signal.btcPrice) : '--'}
         />
       </div>
 
@@ -195,7 +250,7 @@ export default function Polymarket() {
 
       {/* Tab Switcher */}
       <div className="flex gap-1 bg-surface-1 border border-surface-3 rounded-lg p-1 w-fit">
-        {(['edges', 'markets', 'signal'] as const).map((t) => (
+        {(['positions', 'edges', 'markets', 'signal'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -205,7 +260,8 @@ export default function Polymarket() {
                 : 'text-gray-400 hover:text-gray-200'
             }`}
           >
-            {t === 'edges' ? `Edge Opportunities (${edges.length})` :
+            {t === 'positions' ? `Positions (${openPositions.length} open)` :
+             t === 'edges' ? `Edge Opportunities (${edges.length})` :
              t === 'markets' ? 'All Markets' :
              'Bridge Signal'}
           </button>
@@ -213,12 +269,188 @@ export default function Polymarket() {
       </div>
 
       {/* Tab Content */}
+      {tab === 'positions' && (
+        <PositionsPanel
+          open={openPositions}
+          closed={closedPositions}
+          pnl={pnlData}
+        />
+      )}
       {tab === 'edges' && <EdgesTable edges={edges} />}
       {tab === 'markets' && <MarketsTable markets={markets} />}
       {tab === 'signal' && <SignalDetail signal={signal} />}
     </PageShell>
   );
 }
+
+/* ── Positions Panel ─────────────────────────────────────────── */
+
+function PositionsPanel({
+  open,
+  closed,
+  pnl,
+}: {
+  open: PmPosition[];
+  closed: PmPosition[];
+  pnl: PmPnl | null;
+}) {
+  return (
+    <div className="space-y-4">
+      {/* Open Positions */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-gray-300 mb-3">
+          Open Positions ({open.length})
+        </h3>
+        {open.length === 0 ? (
+          <div className="text-center text-gray-500 text-xs py-4">
+            No open positions. Executor will place bets when edges are found.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-surface-3">
+                  <th className="text-left py-2 px-2">Market</th>
+                  <th className="text-left py-2 px-2">Type</th>
+                  <th className="text-left py-2 px-2">Dir</th>
+                  <th className="text-right py-2 px-2">Entry</th>
+                  <th className="text-right py-2 px-2">Shares</th>
+                  <th className="text-right py-2 px-2">Bet</th>
+                  <th className="text-right py-2 px-2">Edge</th>
+                  <th className="text-right py-2 px-2">Unreal.</th>
+                  <th className="text-left py-2 px-2">Opened</th>
+                </tr>
+              </thead>
+              <tbody>
+                {open.map((p) => {
+                  const unrealized = parseUnrealizedPnl(p.notes);
+                  return (
+                    <tr key={p.position_id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
+                      <td className="py-2 px-2 text-gray-300 max-w-[200px] truncate" title={p.question}>
+                        {p.asset && <span className="text-gray-200 font-medium mr-1">{p.asset}</span>}
+                        {truncateQuestion(p.question)}
+                      </td>
+                      <td className="py-2 px-2">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${TYPE_COLORS[p.market_type] || 'bg-surface-3 text-gray-400'}`}>
+                          {p.market_type}
+                        </span>
+                      </td>
+                      <td className="py-2 px-2">
+                        <span className={p.direction === 'YES' || p.direction === 'UP' ? 'text-accent-green' : 'text-accent-red'}>
+                          {p.direction}
+                        </span>
+                      </td>
+                      <td className="py-2 px-2 text-right text-gray-300">${p.entry_price.toFixed(3)}</td>
+                      <td className="py-2 px-2 text-right text-gray-400">{p.shares.toFixed(1)}</td>
+                      <td className="py-2 px-2 text-right text-gray-300">${p.bet_amount.toFixed(2)}</td>
+                      <td className="py-2 px-2 text-right text-gray-400">{(p.edge_at_entry * 100).toFixed(1)}%</td>
+                      <td className={`py-2 px-2 text-right ${unrealized != null ? pnlColor(unrealized) : 'text-gray-500'}`}>
+                        {unrealized != null ? `$${unrealized.toFixed(2)}` : '--'}
+                      </td>
+                      <td className="py-2 px-2 text-gray-500">{formatTimestamp(p.opened_at)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Per-Asset P&L */}
+      {pnl && pnl.per_asset.length > 0 && (
+        <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+          <h3 className="text-sm font-medium text-gray-300 mb-3">P&L by Asset</h3>
+          <div className="flex flex-wrap gap-3">
+            {pnl.per_asset.map((a) => (
+              <div key={a.asset} className="bg-surface-2 rounded-lg p-3 min-w-[120px]">
+                <div className="text-xs text-gray-500">{a.asset}</div>
+                <div className={`text-lg font-mono ${pnlColor(a.pnl)}`}>
+                  ${a.pnl.toFixed(2)}
+                </div>
+                <div className="text-[10px] text-gray-500">
+                  {a.wins}W / {a.bets - a.wins}L
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Closed Positions */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-gray-300 mb-3">
+          Closed Positions ({closed.length})
+        </h3>
+        {closed.length === 0 ? (
+          <div className="text-center text-gray-500 text-xs py-4">
+            No resolved positions yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-surface-3">
+                  <th className="text-left py-2 px-2">Market</th>
+                  <th className="text-left py-2 px-2">Type</th>
+                  <th className="text-left py-2 px-2">Dir</th>
+                  <th className="text-right py-2 px-2">Entry</th>
+                  <th className="text-right py-2 px-2">Exit</th>
+                  <th className="text-right py-2 px-2">Bet</th>
+                  <th className="text-right py-2 px-2">P&L</th>
+                  <th className="text-left py-2 px-2">Result</th>
+                  <th className="text-left py-2 px-2">Closed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {closed.map((p) => (
+                  <tr key={p.position_id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
+                    <td className="py-2 px-2 text-gray-300 max-w-[200px] truncate" title={p.question}>
+                      {p.asset && <span className="text-gray-200 font-medium mr-1">{p.asset}</span>}
+                      {truncateQuestion(p.question)}
+                    </td>
+                    <td className="py-2 px-2">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${TYPE_COLORS[p.market_type] || 'bg-surface-3 text-gray-400'}`}>
+                        {p.market_type}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2">
+                      <span className={p.direction === 'YES' || p.direction === 'UP' ? 'text-accent-green' : 'text-accent-red'}>
+                        {p.direction}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2 text-right text-gray-300">${p.entry_price.toFixed(3)}</td>
+                    <td className="py-2 px-2 text-right text-gray-300">
+                      {p.exit_price != null ? `$${p.exit_price.toFixed(3)}` : '--'}
+                    </td>
+                    <td className="py-2 px-2 text-right text-gray-300">${p.bet_amount.toFixed(2)}</td>
+                    <td className={`py-2 px-2 text-right font-medium ${pnlColor(p.pnl ?? 0)}`}>
+                      {p.pnl != null ? `$${p.pnl.toFixed(2)}` : '--'}
+                    </td>
+                    <td className="py-2 px-2">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        p.status === 'won' ? 'bg-accent-green/20 text-accent-green' :
+                        p.status === 'lost' ? 'bg-accent-red/20 text-accent-red' :
+                        'bg-surface-3 text-gray-400'
+                      }`}>
+                        {p.status.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2 text-gray-500">
+                      {p.closed_at ? formatTimestamp(p.closed_at) : '--'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Edges Table ─────────────────────────────────────────────── */
 
 function EdgesTable({ edges }: { edges: EdgeOpportunity[] }) {
   if (edges.length === 0) {
@@ -360,7 +592,6 @@ function SignalDetail({ signal }: { signal: BridgeSignal | null }) {
 
   return (
     <div className="space-y-4">
-      {/* Signal Overview */}
       <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
         <h3 className="text-sm font-medium text-gray-300 mb-3">Latest Bridge Signal</h3>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -411,7 +642,6 @@ function SignalDetail({ signal }: { signal: BridgeSignal | null }) {
         </div>
       </div>
 
-      {/* Model Confidences */}
       {Object.keys(mc).length > 0 && (
         <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
           <h3 className="text-sm font-medium text-gray-300 mb-3">Per-Model Predictions</h3>

@@ -55,6 +55,7 @@ from whale_activity_monitor import WhaleActivityMonitor
 from breakout_scanner import BreakoutScanner, BreakoutSignal
 from polymarket_bridge import PolymarketBridge
 from polymarket_scanner import PolymarketScanner
+from polymarket_executor import PolymarketExecutor
 from volume_profile_engine import VolumeProfileEngine
 from fractal_intelligence import FractalIntelligenceEngine
 from market_entropy_engine import MarketEntropyEngine
@@ -832,6 +833,21 @@ class RenaissanceTradingBot:
         )
         self._last_poly_scan: Optional[datetime] = None
         self._latest_scanner_opportunities: List[dict] = []
+
+        # Initialize Polymarket Executor — paper-trade prediction markets
+        try:
+            self.polymarket_executor = PolymarketExecutor(
+                config=self.config,
+                db_path=scanner_db,
+                logger=self.logger,
+            )
+            self.logger.info(
+                f"Polymarket Executor: {'PAPER' if self.polymarket_executor.paper_mode else 'LIVE'} mode | "
+                f"Bankroll: ${self.polymarket_executor.bankroll:.2f}"
+            )
+        except Exception as _pe_err:
+            self.logger.warning(f"Polymarket executor init failed: {_pe_err}")
+            self.polymarket_executor = None
 
         self.volume_profile_engine = VolumeProfileEngine()
         self.fractal_intelligence = FractalIntelligenceEngine(logger=self.logger)
@@ -3787,6 +3803,13 @@ class RenaissanceTradingBot:
                                 self._latest_scanner_opportunities = []
                     except Exception as _ps_err:
                         self.logger.debug(f"Polymarket scanner error: {_ps_err}")
+
+                    # 3.17 Polymarket Executor — place/resolve paper bets (runs with scanner)
+                    if self.polymarket_executor and _scan_due:
+                        try:
+                            await self.polymarket_executor.execute_cycle()
+                        except Exception as _pex_err:
+                            self.logger.debug(f"Polymarket executor error: {_pex_err}")
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
                 self._update_dynamic_thresholds(product_id, market_data)

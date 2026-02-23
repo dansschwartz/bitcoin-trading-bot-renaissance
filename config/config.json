@@ -540,6 +540,12 @@
         "max_proposals_per_week": 5,
         "model": "sonnet"
     },
+    "polymarket": {
+        "executor_enabled": true,
+        "paper_mode": true,
+        "initial_bankroll": 500.0,
+        "max_positions": 10
+    },
     "ml_signal_scale": 10.0,
     "model_retraining": {
         "enabled": true,

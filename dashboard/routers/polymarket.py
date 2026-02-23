@@ -263,3 +263,170 @@ async def polymarket_stats(request: Request):
             pass
 
     return result
+
+
+def _table_exists(conn, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+@router.get("/positions")
+async def polymarket_positions(request: Request, status: str | None = None, limit: int = 100):
+    """All Polymarket positions — open and resolved."""
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            if not _table_exists(c, "polymarket_positions"):
+                return {"positions": []}
+
+            query = """
+                SELECT position_id, condition_id, slug, question, market_type, asset,
+                       direction, entry_price, shares, bet_amount, edge_at_entry,
+                       our_prob_at_entry, crowd_prob_at_entry, target_price, deadline,
+                       status, exit_price, pnl, opened_at, closed_at, notes
+                FROM polymarket_positions
+            """
+            params: list = []
+            if status:
+                query += " WHERE status = ?"
+                params.append(status)
+            query += " ORDER BY opened_at DESC LIMIT ?"
+            params.append(limit)
+
+            rows = c.execute(query, params).fetchall()
+            return {"positions": [dict(r) for r in rows]}
+    except Exception as e:
+        return {"error": str(e), "positions": []}
+
+
+@router.get("/pnl")
+async def polymarket_pnl(request: Request):
+    """P&L summary: total, 24h, per-asset, per-market-type."""
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            if not _table_exists(c, "polymarket_positions"):
+                return _empty_pnl()
+
+            # Overall resolved
+            overall = c.execute("""
+                SELECT
+                    COUNT(*) as total_bets,
+                    SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as losses,
+                    COALESCE(SUM(pnl), 0) as total_pnl,
+                    COALESCE(SUM(bet_amount), 0) as total_wagered
+                FROM polymarket_positions
+                WHERE status IN ('won', 'lost')
+            """).fetchone()
+
+            # 24h
+            pnl_24h = c.execute("""
+                SELECT COALESCE(SUM(pnl), 0) as pnl,
+                       COUNT(*) as bets,
+                       SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins
+                FROM polymarket_positions
+                WHERE status IN ('won', 'lost')
+                  AND closed_at >= datetime('now', '-24 hours')
+            """).fetchone()
+
+            # Per asset
+            per_asset = c.execute("""
+                SELECT asset,
+                       COUNT(*) as bets,
+                       SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins,
+                       COALESCE(SUM(pnl), 0) as pnl
+                FROM polymarket_positions
+                WHERE status IN ('won', 'lost')
+                GROUP BY asset ORDER BY pnl DESC
+            """).fetchall()
+
+            # Per market type
+            per_type = c.execute("""
+                SELECT market_type,
+                       COUNT(*) as bets,
+                       SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins,
+                       COALESCE(SUM(pnl), 0) as pnl
+                FROM polymarket_positions
+                WHERE status IN ('won', 'lost')
+                GROUP BY market_type ORDER BY pnl DESC
+            """).fetchall()
+
+            # Open positions summary
+            open_summary = c.execute("""
+                SELECT COUNT(*) as count,
+                       COALESCE(SUM(bet_amount), 0) as exposure
+                FROM polymarket_positions
+                WHERE status = 'open'
+            """).fetchone()
+
+            # Bankroll
+            bankroll_row = None
+            if _table_exists(c, "polymarket_bankroll_log"):
+                bankroll_row = c.execute(
+                    "SELECT bankroll FROM polymarket_bankroll_log ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+
+            total_bets = overall['total_bets'] or 0
+            wins = overall['wins'] or 0
+            total_wagered = overall['total_wagered'] or 0
+
+            return {
+                "bankroll": bankroll_row['bankroll'] if bankroll_row else 500.0,
+                "open_count": open_summary['count'],
+                "open_exposure": round(open_summary['exposure'], 2),
+                "total_bets": total_bets,
+                "wins": wins,
+                "losses": overall['losses'] or 0,
+                "win_rate": round(wins / total_bets * 100, 1) if total_bets > 0 else 0,
+                "total_pnl": round(overall['total_pnl'] or 0, 2),
+                "total_wagered": round(total_wagered, 2),
+                "roi": round((overall['total_pnl'] or 0) / total_wagered * 100, 1) if total_wagered > 0 else 0,
+                "pnl_24h": round(pnl_24h['pnl'] or 0, 2),
+                "bets_24h": pnl_24h['bets'] or 0,
+                "per_asset": [dict(r) for r in per_asset],
+                "per_type": [dict(r) for r in per_type],
+            }
+    except Exception as e:
+        return {"error": str(e), **_empty_pnl()}
+
+
+def _empty_pnl() -> dict:
+    return {
+        "bankroll": 500.0, "open_count": 0, "open_exposure": 0,
+        "total_bets": 0, "wins": 0, "losses": 0, "win_rate": 0,
+        "total_pnl": 0, "total_wagered": 0, "roi": 0,
+        "pnl_24h": 0, "bets_24h": 0, "per_asset": [], "per_type": [],
+    }
+
+
+@router.get("/executor")
+async def polymarket_executor_status(request: Request):
+    """Executor status: bankroll, recent bets."""
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            if not _table_exists(c, "polymarket_positions"):
+                return {"bankroll": 500.0, "recent_bets": []}
+
+            bankroll_row = None
+            if _table_exists(c, "polymarket_bankroll_log"):
+                bankroll_row = c.execute(
+                    "SELECT bankroll FROM polymarket_bankroll_log ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+
+            recent = c.execute("""
+                SELECT position_id, question, direction, bet_amount, edge_at_entry,
+                       status, pnl, opened_at, closed_at
+                FROM polymarket_positions
+                ORDER BY opened_at DESC LIMIT 10
+            """).fetchall()
+
+            return {
+                "bankroll": bankroll_row['bankroll'] if bankroll_row else 500.0,
+                "recent_bets": [dict(r) for r in recent],
+            }
+    except Exception as e:
+        return {"error": str(e), "bankroll": 500.0, "recent_bets": []}
