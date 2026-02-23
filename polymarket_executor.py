@@ -211,10 +211,11 @@ class PolymarketExecutor:
         initial = self.config.get("polymarket", {}).get("initial_bankroll", 500.0)
         self.bankroll = initial - open_bets['total'] + resolved_pnl['total']
 
-        self._log_bankroll("repair_premature_resolution", None, 0)
-
         conn.commit()
         conn.close()
+
+        # Log bankroll AFTER releasing the DB lock
+        self._log_bankroll("repair_premature_resolution", None, 0)
         self.logger.info(f"REPAIR: Bankroll recalculated to ${self.bankroll:.2f}")
 
     # ------------------------------------------------------------------
