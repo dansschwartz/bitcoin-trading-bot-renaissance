@@ -11,6 +11,8 @@ import SimLab from './pages/SimLab';
 import Risk from './pages/Risk';
 import Agents from './pages/Agents';
 import Arbitrage from './pages/Arbitrage';
+import BreakoutScanner from './pages/BreakoutScanner';
+import Polymarket from './pages/Polymarket';
 
 export default function App() {
   return (
@@ -29,6 +31,8 @@ export default function App() {
                 <Route path="/simlab" element={<SimLab />} />
                 <Route path="/risk" element={<Risk />} />
                 <Route path="/arbitrage" element={<Arbitrage />} />
+                <Route path="/breakout" element={<BreakoutScanner />} />
+                <Route path="/polymarket" element={<Polymarket />} />
                 <Route path="/agents" element={<Agents />} />
               </Routes>
             </main>

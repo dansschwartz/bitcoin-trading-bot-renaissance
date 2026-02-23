@@ -106,6 +106,28 @@ export const api = {
   arbSummary: () => get<ArbSummary>('/api/arbitrage/summary'),
   arbWallet: () => get<ArbWallet>('/api/arbitrage/wallet'),
 
+  // Breakout Scanner
+  breakoutSummary: () => get<Record<string, unknown>>('/api/breakout/summary'),
+  breakoutSignals: (limit = 30) => get<Record<string, unknown>>(`/api/breakout/signals?limit=${limit}`),
+  breakoutHistory: (hours = 24, limit = 100) =>
+    get<Record<string, unknown>>(`/api/breakout/history?hours=${hours}&limit=${limit}`),
+  breakoutHeatmap: () => get<Record<string, unknown>>('/api/breakout/heatmap'),
+
+  // Polymarket
+  polymarketSummary: () => get<Record<string, unknown>>('/api/polymarket/summary'),
+  polymarketEdges: (minEdge = 0, limit = 50) =>
+    get<Record<string, unknown>>(`/api/polymarket/edges?min_edge=${minEdge}&limit=${limit}`),
+  polymarketMarkets: (marketType?: string, asset?: string, limit = 100) => {
+    let path = `/api/polymarket/markets?limit=${limit}`;
+    if (marketType) path += `&market_type=${marketType}`;
+    if (asset) path += `&asset=${asset}`;
+    return get<Record<string, unknown>>(path);
+  },
+  polymarketSignal: () => get<Record<string, unknown>>('/api/polymarket/signal'),
+  polymarketHistory: (hours = 24, asset?: string) =>
+    get<Record<string, unknown>>(`/api/polymarket/history?hours=${hours}${asset ? `&asset=${asset}` : ''}`),
+  polymarketStats: () => get<Record<string, unknown>>('/api/polymarket/stats'),
+
   // Devil Tracker
   devilSummary: (hours = 24) => get<Record<string, unknown>>(`/api/devil/summary?hours=${hours}`),
 
