@@ -52,7 +52,7 @@ from binance_spot_provider import BinanceSpotProvider, to_binance_symbol, from_b
 from genetic_optimizer import GeneticWeightOptimizer
 from cross_asset_engine import CrossAssetCorrelationEngine
 from whale_activity_monitor import WhaleActivityMonitor
-from breakout_scanner import BreakoutScanner
+from breakout_scanner import BreakoutScanner, BreakoutSignal
 from volume_profile_engine import VolumeProfileEngine
 from fractal_intelligence import FractalIntelligenceEngine
 from market_entropy_engine import MarketEntropyEngine
@@ -800,14 +800,16 @@ class RenaissanceTradingBot:
         if hist_cfg.get("enabled", False):
             self.historical_cache.init_tables()
 
-        # Initialize Breakout Scanner (Step 16+)
-        scanner_cfg = self.config.get("breakout_scanner", {"enabled": True, "top_n": 30})
+        # Initialize Breakout Scanner — scans ALL 600+ Binance pairs in 1 API call
+        scanner_cfg = self.config.get("breakout_scanner", {"enabled": True, "max_flagged": 30})
         self.breakout_scanner = BreakoutScanner(
-            exchanges=scanner_cfg.get("exchanges", ["coinbase", "kraken"]),
-            top_n=scanner_cfg.get("top_n", 30),
-            logger=self.logger
+            max_flagged=scanner_cfg.get("max_flagged", 30),
+            min_volume_usd=scanner_cfg.get("min_volume_usd", 500_000),
+            min_breakout_score=scanner_cfg.get("min_breakout_score", 25.0),
+            logger=self.logger,
         )
         self.scanner_enabled = scanner_cfg.get("enabled", True)
+        self._breakout_scores: Dict[str, BreakoutSignal] = {}  # Current cycle's breakout signals
         self.volume_profile_engine = VolumeProfileEngine()
         self.fractal_intelligence = FractalIntelligenceEngine(logger=self.logger)
         self.market_entropy = MarketEntropyEngine(logger=self.logger)
@@ -1069,6 +1071,7 @@ class RenaissanceTradingBot:
             'garch_vol': 0.06,                # GARCH Volatility Signal
             'ml_ensemble': 0.05,              # ML 7-model ensemble prediction
             'ml_cnn': 0.03,                   # ML CNN model prediction
+            'breakout': 0.08,                 # Breakout scanner signal (Binance-wide)
         })
         self.signal_weights = {str(k): float(self._force_float(v)) for k, v in raw_weights.items()}
 
@@ -1457,7 +1460,9 @@ class RenaissanceTradingBot:
         Routes to Binance for expanded-universe pairs, Coinbase for legacy pairs.
         """
         # Use Binance as primary data source when universe is built
-        if self._universe_built and product_id in self._pair_binance_symbols:
+        # Also use Binance for breakout-flagged pairs not in the original universe
+        _is_breakout_pair = product_id in getattr(self, '_breakout_scores', {})
+        if (self._universe_built and product_id in self._pair_binance_symbols) or _is_breakout_pair:
             data = await self._collect_from_binance(product_id)
             if data:
                 return data
@@ -2867,18 +2872,42 @@ class RenaissanceTradingBot:
             if not self._universe_built or (time.time() - self._universe_last_refresh > 86400):
                 await self._build_and_apply_universe()
 
-            # ── Determine which pairs to scan this cycle (tiered schedule) ──
-            cycle_pairs = self.get_pairs_for_cycle(self.scan_cycle_count)
-            self.logger.info(
-                f"Cycle {self.scan_cycle_count}: scanning {len(cycle_pairs)}/{len(self.product_ids)} pairs"
-            )
+            # ══════════════════════════════════════════════════
+            # PHASE 0: BREAKOUT SCAN (1 API call, ~1-2 seconds)
+            # ══════════════════════════════════════════════════
+            if self.scanner_enabled:
+                try:
+                    breakout_signals = await self.breakout_scanner.scan()
+                    self._breakout_scores = {s.product_id: s for s in breakout_signals}
+                except Exception as _bs_err:
+                    self.logger.warning(f"Breakout scan failed: {_bs_err}")
+                    breakout_signals = []
+                    self._breakout_scores = {}
+
+                # Build deep-scan list: always-scan majors + breakout flagged pairs
+                always_pairs = self.breakout_scanner.get_always_scan_pairs()
+                breakout_pairs = [s.product_id for s in breakout_signals]
+
+                # Combine and deduplicate, preserving order (majors first)
+                cycle_pairs = list(dict.fromkeys(always_pairs + breakout_pairs))
+
+                self.logger.info(
+                    f"SCAN PLAN: {len(cycle_pairs)} pairs for deep scan "
+                    f"({len(always_pairs)} majors + {len(breakout_signals)} breakouts)"
+                )
+            else:
+                # Fallback to tiered scanning if breakout scanner disabled
+                cycle_pairs = self.get_pairs_for_cycle(self.scan_cycle_count)
+                self.logger.info(
+                    f"Cycle {self.scan_cycle_count}: scanning {len(cycle_pairs)}/{len(self.product_ids)} pairs"
+                )
 
             # ── Preload candle history on first cycle (eliminates cold-start) ──
             if not getattr(self, '_history_preloaded', False):
                 self._history_preloaded = True
-                # Preload Tier 1 pairs from Binance (or Coinbase fallback)
-                preload_pairs = [p for p in self.product_ids
-                                 if self._pair_tiers.get(p, 1) == 1][:15]
+                # Preload always-scan majors from Binance (or Coinbase fallback)
+                preload_pairs = self.breakout_scanner.get_always_scan_pairs()[:15] if self.scanner_enabled else \
+                    [p for p in self.product_ids if self._pair_tiers.get(p, 1) == 1][:15]
                 for pid in preload_pairs:
                     try:
                         bsym = self._pair_binance_symbols.get(pid, to_binance_symbol(pid))
@@ -3020,18 +3049,50 @@ class RenaissanceTradingBot:
                 # ── Warmup Gate: new pairs need 30 bars before trading ──
                 _tech_warmup = self._get_tech(product_id)
                 if len(_tech_warmup.price_history) < 30:
-                    self.logger.debug(
-                        f"WARMUP: {product_id} has {len(_tech_warmup.price_history)} bars, need 30 — collecting data only"
-                    )
-                    # Still feed price engines so warmup progresses
-                    if current_price > 0:
-                        self.stat_arb_engine.update_price(product_id, current_price)
-                        self.correlation_network.update_price(product_id, current_price)
-                        self.garch_engine.update_returns(product_id, current_price)
-                    pair_elapsed = time.time() - pair_start_time
-                    if pair_elapsed > 10:
-                        self.logger.warning(f"SLOW PAIR: {product_id} took {pair_elapsed:.1f}s (warmup)")
-                    continue
+                    # High-score breakout pairs get instant warmup via candle fetch
+                    _bo_info = self._breakout_scores.get(product_id)
+                    if _bo_info and _bo_info.breakout_score >= 50:
+                        try:
+                            _bo_sym = product_id.split('-')[0] + 'USDT'
+                            _bo_candles = await self.binance_spot.fetch_candles(_bo_sym, '5m', 200)
+                            if _bo_candles:
+                                from enhanced_technical_indicators import PriceData
+                                for c in _bo_candles:
+                                    pd_obj = PriceData(
+                                        timestamp=datetime.utcfromtimestamp(c['timestamp']),
+                                        open=c['open'], high=c['high'],
+                                        low=c['low'], close=c['close'],
+                                        volume=c['volume'],
+                                    )
+                                    _tech_warmup.update_price_data(pd_obj)
+                                    if c['close'] > 0:
+                                        self.garch_engine.update_returns(product_id, c['close'])
+                                        self.stat_arb_engine.update_price(product_id, c['close'])
+                                self.logger.info(
+                                    f"BREAKOUT WARMUP: {product_id} loaded {len(_bo_candles)} candles "
+                                    f"(score={_bo_info.breakout_score:.0f})"
+                                )
+                                # Re-check after warmup
+                                if len(_tech_warmup.price_history) < 30:
+                                    continue
+                            else:
+                                continue
+                        except Exception as _bw_err:
+                            self.logger.debug(f"Breakout warmup failed for {product_id}: {_bw_err}")
+                            continue
+                    else:
+                        self.logger.debug(
+                            f"WARMUP: {product_id} has {len(_tech_warmup.price_history)} bars, need 30 — collecting data only"
+                        )
+                        # Still feed price engines so warmup progresses
+                        if current_price > 0:
+                            self.stat_arb_engine.update_price(product_id, current_price)
+                            self.correlation_network.update_price(product_id, current_price)
+                            self.garch_engine.update_returns(product_id, current_price)
+                        pair_elapsed = time.time() - pair_start_time
+                        if pair_elapsed > 10:
+                            self.logger.warning(f"SLOW PAIR: {product_id} took {pair_elapsed:.1f}s (warmup)")
+                        continue
 
                 # ── Signal Scorecard: evaluate last cycle's predictions ──
                 if product_id in self._pending_predictions and current_price > 0:
@@ -3180,6 +3241,20 @@ class RenaissanceTradingBot:
                 
                 # HARDENING: Ensure all signals are floats
                 signals = {k: self._force_float(v) for k, v in signals.items()}
+
+                # 2.0b Breakout Scanner signal injection
+                _bo_sig = self._breakout_scores.get(product_id)
+                if _bo_sig and _bo_sig.breakout_score >= 40:
+                    # Normalize to -1 to +1 range
+                    _bo_norm = _bo_sig.breakout_score / 100.0
+                    if _bo_sig.direction == 'bearish':
+                        _bo_norm = -_bo_norm
+                    signals['breakout'] = _bo_norm
+                    self.logger.info(
+                        f"BREAKOUT SIGNAL: {product_id} score={_bo_sig.breakout_score:.0f} "
+                        f"dir={_bo_sig.direction} vol_24h=${_bo_sig.volume_24h_usd:,.0f} "
+                        f"change={_bo_sig.price_change_pct:+.1f}%"
+                    )
 
                 # 2.0a Advanced Microstructure Signals (Module F)
                 if self.signal_aggregator:
@@ -3997,9 +4072,9 @@ class RenaissanceTradingBot:
                     except Exception:
                         pass
 
-                # Run Breakout Scan (Step 16+)
-                if self.scan_cycle_count % 10 == 0:
-                    self._track_task(self._run_breakout_scan())
+                # DEPRECATED: Old breakout scan (replaced by Phase 0 breakout_scanner)
+                # if self.scan_cycle_count % 10 == 0:
+                #     self._track_task(self._run_breakout_scan())
 
                 decisions.append(decision)
 
@@ -4210,27 +4285,10 @@ class RenaissanceTradingBot:
 
         self.logger.info("="*60 + "\n")
 
-    async def _run_breakout_scan(self):
-        """Step 16+: Renaissance Global Scanner for breakout opportunities"""
-        if not self.scanner_enabled:
-            return
-            
-        try:
-            self.logger.info("🚀 Initiating Renaissance Global Breakout Scan...")
-            results = await self.breakout_scanner.scan_all_exchanges()
-            self.breakout_candidates = results
-            
-            if results:
-                self.logger.info(f"🔥 Found {len(results)} breakout candidates!")
-                for r in results[:5]:
-                    symbol = r['symbol'].replace('/', '-')
-                    if r['breakout_score'] >= 80:
-                        self.logger.info(f"🎯 Breakout detected: {symbol} (score={r['breakout_score']}) — logged only, not auto-added")
-                        
-            else:
-                self.logger.info("No major breakouts detected in this cycle.")
-        except Exception as e:
-            self.logger.error(f"Breakout scan failed: {e}")
+    # DEPRECATED: Old breakout scan replaced by Phase 0 breakout_scanner in execute_trading_cycle
+    # async def _run_breakout_scan(self):
+    #     """Step 16+: Renaissance Global Scanner for breakout opportunities"""
+    #     pass
 
     # ──────────────────────────────────────────────
     #  Kill Switch
