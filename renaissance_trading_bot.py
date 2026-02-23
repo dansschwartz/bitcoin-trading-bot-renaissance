@@ -1881,6 +1881,23 @@ class RenaissanceTradingBot:
             confidence = float(np.clip(confidence + (overlay * consciousness_factor), 0.0, 1.0))
             self.logger.info(f"ML confidence adjustment: {(overlay * consciousness_factor):+.4f} (Consciousness: {consciousness_factor:.2f})")
 
+        # ── Regime-biased entry thresholds ──
+        # In bearish regimes, require higher conviction for longs (and vice versa).
+        # Trading WITH the regime: lower bar. AGAINST: higher bar.
+        _regime_label = None
+        try:
+            if self.regime_overlay.enabled:
+                _regime_label = self.regime_overlay.get_hmm_regime_label()
+        except Exception:
+            pass
+
+        _BEARISH = {'bear_trending', 'bear_mean_reverting', 'high_volatility'}
+        _BULLISH = {'bull_trending', 'bull_mean_reverting'}
+
+        # Start with base thresholds
+        _pred_thresh = abs(self.buy_threshold)  # Usually 0.06
+        _agree_thresh = 0.71
+
         # Determine action direction
         if confidence < self.min_confidence:
             action = 'HOLD'
@@ -1891,16 +1908,46 @@ class RenaissanceTradingBot:
         else:
             action = 'HOLD'
 
+        # Apply regime bias to thresholds based on trade direction
+        if action != 'HOLD' and _regime_label and _regime_label not in ('neutral_sideways', 'unknown', 'low_volatility'):
+            _is_bearish = _regime_label in _BEARISH
+            _is_bullish = _regime_label in _BULLISH
+            _counter_trend = (_is_bearish and action == 'BUY') or (_is_bullish and action == 'SELL')
+            _with_trend = (_is_bearish and action == 'SELL') or (_is_bullish and action == 'BUY')
+
+            if _counter_trend:
+                # Swimming upstream — require much higher conviction
+                _pred_thresh = 0.10
+                _agree_thresh = 0.80
+                # Re-check prediction threshold with raised bar
+                if abs(weighted_signal) < _pred_thresh:
+                    self.logger.info(
+                        f"REGIME FILTER: {product_id} {action} in {_regime_label} — "
+                        f"|signal|={abs(weighted_signal):.4f} < {_pred_thresh} (counter-trend blocked)"
+                    )
+                    action = 'HOLD'
+                else:
+                    self.logger.info(
+                        f"REGIME FILTER: {product_id} {action} in {_regime_label} — "
+                        f"raised thresholds to pred>{_pred_thresh} agree>{_agree_thresh}"
+                    )
+            elif _with_trend:
+                # Trading with regime — lower the bar
+                _pred_thresh = 0.05
+                _agree_thresh = 0.65
+                self.logger.info(
+                    f"REGIME BOOST: {product_id} {action} in {_regime_label} — "
+                    f"lowered thresholds to pred>{_pred_thresh} agree>{_agree_thresh}"
+                )
+
         # ── Signal filter stats tracking ──
         self._signal_filter_stats['total'] += 1
         if action == 'HOLD' and abs(weighted_signal) > 0.001:
             self._signal_filter_stats['filtered_threshold'] += 1
 
         # ── ML Agreement Gate: only trade when models agree strongly ──
-        # Backtest: >85% agreement → 54.1% accuracy (profitable).
-        #           <70% agreement → 50.7% accuracy (coin flip).
+        # Threshold is regime-adjusted: 0.65 with-trend, 0.71 neutral, 0.80 counter-trend
         if action != 'HOLD' and ml_package and ml_package.ml_predictions:
-            # Extract prediction values — ml_predictions can be list of dicts or tuples
             pred_values = []
             for mp in ml_package.ml_predictions:
                 if isinstance(mp, dict):
@@ -1916,10 +1963,10 @@ class RenaissanceTradingBot:
                 nonzero_signs = [s for s in signs if s != 0]
                 if nonzero_signs:
                     agreement = max(nonzero_signs.count(1), nonzero_signs.count(-1)) / len(nonzero_signs)
-                    if agreement < 0.71:  # Less than ~5/7 models agree
+                    if agreement < _agree_thresh:
                         self.logger.info(
                             f"ML AGREEMENT GATE: {product_id} blocked — "
-                            f"only {agreement:.0%} model agreement (need >71%)"
+                            f"only {agreement:.0%} model agreement (need >{_agree_thresh:.0%})"
                         )
                         self._signal_filter_stats['filtered_agreement'] += 1
                         action = 'HOLD'

@@ -561,15 +561,16 @@ class RenaissancePositionSizer:
             reasons.append(f"Stop loss: {pnl_pct:.2%} < -2%")
             return {"exit_fraction": 1.0, "reason": "stop_loss", "details": reasons, "urgency": "expedited"}
 
-        # Maximum age: force close after 3 cycles (~15 min) regardless of P&L
-        # ML predicts 30-min direction; if edge isn't captured by 15 min, it's not coming
-        if holding_periods >= 3:
-            reasons.append(f"Max age reached: {holding_periods} >= 3 cycles")
+        # Maximum age: force close after 2 cycles (~10 min) regardless of P&L
+        # Data shows winners close via EDGE_CONSUMED in ~7 min avg. Trades reaching
+        # max_age have 55% WR and net negative P&L — cut losers faster.
+        if holding_periods >= 2:
+            reasons.append(f"Max age reached: {holding_periods} >= 2 cycles")
             return {"exit_fraction": 1.0, "reason": "max_age", "details": reasons, "urgency": "normal"}
 
-        # Minimum hold: don't evaluate other exits before 2 periods (~10 min)
-        if holding_periods < 2:
-            reasons.append(f"Min hold: {holding_periods}/2 periods")
+        # Minimum hold: don't evaluate other exits before 1 period (~5 min)
+        if holding_periods < 1:
+            reasons.append(f"Min hold: {holding_periods}/1 periods")
             return {"exit_fraction": 0.0, "reason": "hold", "details": reasons, "urgency": "none"}
 
         # Trailing stop: -1.0% from entry, activating after 8 periods (wider trail, later activation)
