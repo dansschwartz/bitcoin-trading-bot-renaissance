@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/polymarket", tags=["polymarket"])
 
 BOT_DB = Path(__file__).resolve().parent.parent.parent / "data" / "renaissance_bot.db"
+# Directory name kept as "revenue-engine" for Node.js Polymarket bot compatibility
 SIGNAL_FILE = Path.home() / "revenue-engine" / "data" / "output" / "renaissance-signal.json"
 
 

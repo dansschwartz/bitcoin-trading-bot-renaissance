@@ -1,11 +1,11 @@
 """
 Polymarket Bridge — Converts Renaissance ML predictions to Polymarket signals.
 
-Writes a signal JSON file that the Node.js Polymarket trader reads.
-Signal file: ~/revenue-engine/data/output/renaissance-signal.json
+Writes a signal JSON file that the Node.js Polymarket bot reads.
+Signal file: ~/revenue-engine/data/output/renaissance-signal.json  (path kept for Node.js compat)
 
 Architecture:
-  Renaissance Bot (Python) --writes JSON--> Revenue Engine (Node.js) --trades--> Polymarket
+  Renaissance Bot (Python) --writes JSON--> Polymarket Bot (Node.js) --trades--> Polymarket
 """
 
 import json
@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Path to the revenue-engine's signal consumption point
+# Path to the Polymarket bot's signal consumption point (directory name kept for Node.js compat)
 SIGNAL_FILE = Path.home() / "revenue-engine" / "data" / "output" / "renaissance-signal.json"
 
 
