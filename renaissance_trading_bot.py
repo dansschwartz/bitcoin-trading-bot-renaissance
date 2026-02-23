@@ -53,6 +53,7 @@ from genetic_optimizer import GeneticWeightOptimizer
 from cross_asset_engine import CrossAssetCorrelationEngine
 from whale_activity_monitor import WhaleActivityMonitor
 from breakout_scanner import BreakoutScanner, BreakoutSignal
+from polymarket_bridge import PolymarketBridge
 from volume_profile_engine import VolumeProfileEngine
 from fractal_intelligence import FractalIntelligenceEngine
 from market_entropy_engine import MarketEntropyEngine
@@ -810,6 +811,16 @@ class RenaissanceTradingBot:
         )
         self.scanner_enabled = scanner_cfg.get("enabled", True)
         self._breakout_scores: Dict[str, BreakoutSignal] = {}  # Current cycle's breakout signals
+
+        # Initialize Polymarket Bridge — converts ML signals to binary bet signals
+        poly_cfg = self.config.get("polymarket_bridge", {})
+        self.polymarket_bridge = PolymarketBridge(
+            min_prediction=poly_cfg.get("min_prediction", 0.03),
+            min_agreement=poly_cfg.get("min_agreement", 0.55),
+            observation_mode=poly_cfg.get("observation_mode", True),
+            logger=self.logger,
+        )
+
         self.volume_profile_engine = VolumeProfileEngine()
         self.fractal_intelligence = FractalIntelligenceEngine(logger=self.logger)
         self.market_entropy = MarketEntropyEngine(logger=self.logger)
@@ -3614,6 +3625,47 @@ class RenaissanceTradingBot:
                 market_data['confluence_data'] = confluence_data
                 market_data['garch_position_multiplier'] = garch_pos_mult
                 market_data['regime_adjusted_weights'] = cycle_weights
+
+                # 3.15 Polymarket Bridge — emit BTC signal for binary bet markets
+                if product_id == 'BTC-USD':
+                    try:
+                        _pm_model_preds = {}
+                        if ml_package and ml_package.ml_predictions:
+                            for mp in ml_package.ml_predictions:
+                                if isinstance(mp, (tuple, list)) and len(mp) >= 2:
+                                    _pm_model_preds[str(mp[0])] = float(mp[1]) if isinstance(mp[1], (int, float)) else 0.0
+                                elif isinstance(mp, dict):
+                                    _pm_model_preds[mp.get('name', 'unknown')] = float(mp.get('prediction', 0.0))
+
+                        # Compute agreement from model predictions
+                        _pm_agreement = 0.5
+                        if _pm_model_preds:
+                            _pm_signs = [1 if v > 0 else (-1 if v < 0 else 0) for v in _pm_model_preds.values()]
+                            _pm_nonzero = [s for s in _pm_signs if s != 0]
+                            if _pm_nonzero:
+                                _pm_agreement = max(_pm_nonzero.count(1), _pm_nonzero.count(-1)) / len(_pm_nonzero)
+
+                        _pm_regime = regime_label if 'regime_label' in dir() else (
+                            self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else "unknown"
+                        )
+
+                        _pm_btc_breakout = 0.0
+                        _pm_bo = self._breakout_scores.get('BTC-USD')
+                        if _pm_bo:
+                            _pm_btc_breakout = _pm_bo.breakout_score
+
+                        _pm_price = float(market_data.get('ticker', {}).get('price', 0.0))
+
+                        self.polymarket_bridge.generate_signal(
+                            prediction=weighted_signal,
+                            agreement=_pm_agreement,
+                            regime=_pm_regime,
+                            breakout_score=_pm_btc_breakout,
+                            btc_price=_pm_price,
+                            model_confidences=_pm_model_preds,
+                        )
+                    except Exception as _pm_err:
+                        self.logger.debug(f"Polymarket bridge error: {_pm_err}")
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
                 self._update_dynamic_thresholds(product_id, market_data)
