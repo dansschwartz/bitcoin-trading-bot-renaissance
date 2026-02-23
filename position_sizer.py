@@ -535,6 +535,7 @@ class RenaissancePositionSizer:
         confidence: float,
         volatility: Optional[float] = None,
         regime: Optional[str] = None,
+        side: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Determine optimal exit sizing.
@@ -548,7 +549,12 @@ class RenaissancePositionSizer:
         - Alpha half-life: 25 cycles (patient signal decay)
         """
         reasons = []
-        pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        # Side-aware PnL: LONG profits when price rises, SHORT profits when price falls
+        raw_pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        if side and side.upper() == "SHORT":
+            pnl_pct = -raw_pnl_pct
+        else:
+            pnl_pct = raw_pnl_pct
         reasons.append(f"PnL={pnl_pct:.2%}, Periods={holding_periods}")
 
         # Stop loss: exit immediately if losing > 2% — checked FIRST, before min hold

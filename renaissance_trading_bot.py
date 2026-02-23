@@ -3750,6 +3750,7 @@ class RenaissanceTradingBot:
                             / max(60, self.config.get("trading", {}).get("cycle_interval_seconds", 300))
                         ))
                         garch_forecast = market_data.get('garch_forecast', {})
+                        _pos_side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
                         exit_decision = self.position_sizer.calculate_exit_size(
                             position_size=pos.size,
                             entry_price=pos.entry_price,
@@ -3758,6 +3759,7 @@ class RenaissanceTradingBot:
                             confidence=decision.confidence,
                             volatility=garch_forecast.get('forecast_vol'),
                             regime=self.regime_overlay.get_current_regime() if hasattr(self.regime_overlay, 'get_current_regime') else None,
+                            side=_pos_side,
                         )
                         if exit_decision['exit_fraction'] > 0:
                             self.logger.info(
