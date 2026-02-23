@@ -404,7 +404,10 @@ class PolymarketScanner:
         self._cached_markets: List[dict] = []
         self._cache_time: float = 0.0
         self._session: Optional[aiohttp.ClientSession] = None
-        self._supported_assets = {'BTC', 'ETH', 'SOL'}  # Phase 1: ML edge for these
+        self._supported_assets = {
+            'BTC', 'ETH', 'SOL', 'DOGE', 'XRP', 'BNB',
+            'ADA', 'AVAX', 'LINK', 'DOT', 'UNI', 'BONK',
+        }
         self._last_scan_stats: Dict[str, Any] = {}
         self._init_db()
 
