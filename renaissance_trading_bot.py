@@ -2755,8 +2755,8 @@ class RenaissanceTradingBot:
 
             # Dynamically update position manager limits — selective: 1 per product, 15 max
             # With 43 pairs we scan widely but trade selectively (max 15 simultaneous)
-            # Each trade is ~$300 (1% of equity normalized), so 50% cap ≈ 16 simultaneous trades
-            self.position_manager.risk_limits.max_position_size_usd = account_balance * 0.05
+            # Each trade is $1K-$5K (3-10% of equity), so 50% cap ≈ 5-25 simultaneous trades
+            self.position_manager.risk_limits.max_position_size_usd = account_balance * 0.10
             self.position_manager.risk_limits.max_total_exposure_usd = account_balance * 0.50
             self.position_manager.risk_limits.max_total_positions = min(len(self.product_ids), 15)
             self.position_manager.risk_limits.max_positions_per_product = 1

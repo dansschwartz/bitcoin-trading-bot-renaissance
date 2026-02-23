@@ -19,7 +19,7 @@
     },
     "risk_management": {
         "daily_loss_limit": 500,
-        "position_limit": 1000,
+        "position_limit": 5000,
         "min_confidence": 0.25
     },
     "regime_overlay": {
