@@ -35,17 +35,17 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": True,
     "evaluation_interval_seconds": 1.0,
-    "min_edge_bps": 0.5,
+    "min_edge_bps": 0.1,              # Loose exit: trust selective signals (was 0.5)
     "confidence_floor": 0.48,
     "trim_threshold": 0.8,
     "close_threshold": 0.3,
     "add_threshold": 1.5,
-    "churn_prevention_seconds": 10,
+    "churn_prevention_seconds": 60,    # Evaluate once/min, not constantly (was 10)
     "max_adjustments_per_position": 5,
     "min_trim_usd": 5.0,
     "cost_spike_multiplier": 2.0,
     "spread_spike_multiplier": 3.0,
-    "max_position_loss_bps": 50,
+    "max_position_loss_bps": 150,      # 1.5% max loss — room for crypto swings (was 50)
 }
 
 # Regime transition confidence impact

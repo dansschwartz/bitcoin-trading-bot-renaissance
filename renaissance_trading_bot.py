@@ -3767,7 +3767,11 @@ class RenaissanceTradingBot:
                                     realized_pnl=float(_rpnl),
                                     exit_reason=f"exit_engine:{exit_decision['reason']}",
                                 ))
-                                self.logger.info(f"EXIT EXECUTED: {pos.position_id} — {close_msg}")
+                                _hold_min = (datetime.now() - pos.entry_time).total_seconds() / 60
+                                self.logger.info(
+                                    f"TRADE CLOSED: {product_id} held {_hold_min:.1f} min | "
+                                    f"reason=exit_engine:{exit_decision['reason']} | P&L=${float(_rpnl):.2f}"
+                                )
                                 # Record trade PnL for health monitor
                                 if self.health_monitor and pos.entry_price > 0:
                                     trade_pnl_pct = (current_price - pos.entry_price) / pos.entry_price
@@ -3857,9 +3861,14 @@ class RenaissanceTradingBot:
                                                 exit_reason=f"reeval:{_rr.reason_code}",
                                             )
                                         )
+                                        _rr_hold_min = (datetime.now() - _rr_pos.entry_time).total_seconds() / 60 if _rr_pos else 0.0
                                         self.logger.warning(
                                             f"REEVAL CLOSE: {_rr.position_id} — {_rr.reason_code} "
                                             f"(edge={_rr.remaining_edge_bps:.1f}bps, urgency={_rr.urgency})"
+                                        )
+                                        self.logger.info(
+                                            f"TRADE CLOSED: {product_id} held {_rr_hold_min:.1f} min | "
+                                            f"reason=reeval:{_rr.reason_code} | P&L=${float(_rr_rpnl):.2f}"
                                         )
                                         if self.devil_tracker:
                                             self.devil_tracker.record_exit(

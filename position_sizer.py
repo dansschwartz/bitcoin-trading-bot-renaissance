@@ -539,39 +539,40 @@ class RenaissancePositionSizer:
         """
         Determine optimal exit sizing.
 
-        Tuned for 60-second cycles on crypto:
-        - Stop-loss at -1% (crypto moves fast — -3% is too late)
-        - Trailing stop at -0.5% from peak after +0.3% profit
-        - Profit targets: 50% exit at +0.5%, full exit at +1.5%
-        - Max age: 30 cycles = forced close
-        - Alpha half-life: 10 cycles (edge decays fast in crypto)
+        Tight entry, loose exit — ML models predict 30-min direction.
+        Give selective signals room to work:
+        - Stop-loss at -2% (max ~$6 on $300 position)
+        - Trailing stop at -1.0% activating after 8 periods
+        - Profit targets: 50% exit at +1.5%, full exit at +3.0%
+        - Max age: 60 cycles = forced close (~5 hours)
+        - Alpha half-life: 25 cycles (patient signal decay)
         """
         reasons = []
         pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
         reasons.append(f"PnL={pnl_pct:.2%}, Periods={holding_periods}")
 
-        # Stop loss: exit immediately if losing > 1% — checked FIRST, before min hold
-        if pnl_pct < -0.01:
-            reasons.append(f"Stop loss: {pnl_pct:.2%} < -1%")
+        # Stop loss: exit immediately if losing > 2% — checked FIRST, before min hold
+        if pnl_pct < -0.02:
+            reasons.append(f"Stop loss: {pnl_pct:.2%} < -2%")
             return {"exit_fraction": 1.0, "reason": "stop_loss", "details": reasons, "urgency": "expedited"}
 
-        # Maximum age: force close after 30 cycles regardless of P&L
-        if holding_periods >= 30:
-            reasons.append(f"Max age reached: {holding_periods} >= 30 cycles")
+        # Maximum age: force close after 60 cycles regardless of P&L
+        if holding_periods >= 60:
+            reasons.append(f"Max age reached: {holding_periods} >= 60 cycles")
             return {"exit_fraction": 1.0, "reason": "max_age", "details": reasons, "urgency": "normal"}
 
-        # Minimum hold: don't evaluate other exits before 2 periods
-        if holding_periods < 2:
-            reasons.append(f"Min hold: {holding_periods}/2 periods")
+        # Minimum hold: don't evaluate other exits before 6 periods (matches 30-min prediction horizon)
+        if holding_periods < 6:
+            reasons.append(f"Min hold: {holding_periods}/6 periods")
             return {"exit_fraction": 0.0, "reason": "hold", "details": reasons, "urgency": "none"}
 
-        # Trailing stop: if position was up +0.3% but now giving back, exit at -0.5% from entry
-        if pnl_pct < -0.005 and holding_periods >= 3:
-            reasons.append(f"Trailing stop: {pnl_pct:.2%} < -0.5%")
+        # Trailing stop: -1.0% from entry, activating after 8 periods (wider trail, later activation)
+        if pnl_pct < -0.01 and holding_periods >= 8:
+            reasons.append(f"Trailing stop: {pnl_pct:.2%} < -1.0%")
             return {"exit_fraction": 1.0, "reason": "trailing_stop", "details": reasons, "urgency": "expedited"}
 
-        # Alpha half-life: 10 periods (edge decays fast in crypto)
-        alpha_half_life = 10
+        # Alpha half-life: 25 periods (patient — signal decays to 50% in ~125 min)
+        alpha_half_life = 25
         alpha_remaining = 0.5 ** (holding_periods / alpha_half_life)
         reasons.append(f"Alpha remaining={alpha_remaining:.2%}")
 
@@ -581,27 +582,27 @@ class RenaissancePositionSizer:
         estimated_edge = confidence * 0.10
         remaining_edge = estimated_edge * alpha_remaining
 
-        if remaining_edge < exit_cost and holding_periods > 5:
+        if remaining_edge < exit_cost and holding_periods > 12:
             reasons.append(f"Edge exhausted: {remaining_edge:.4f} < cost {exit_cost:.4f}")
             return {"exit_fraction": 1.0, "reason": "edge_exhausted", "details": reasons, "urgency": "normal"}
 
         # Regime-driven exit
         regime_label = regime or "normal"
-        if regime_label in ("chaotic", "volatile") and holding_periods > 5:
+        if regime_label in ("chaotic", "volatile") and holding_periods > 12:
             reasons.append(f"Regime={regime_label}, accelerating exit")
             return {"exit_fraction": 0.75, "reason": "regime_exit", "details": reasons, "urgency": "expedited"}
 
-        # Time decay exit — positions held > 2x half-life (20 cycles)
+        # Time decay exit — positions held > 2x half-life (50 cycles)
         if holding_periods > alpha_half_life * 2:
             decay_fraction = min(1.0, (holding_periods - alpha_half_life * 2) / alpha_half_life)
             reasons.append(f"Time decay exit: fraction={decay_fraction:.2f}")
             return {"exit_fraction": max(0.5, decay_fraction), "reason": "time_decay", "details": reasons, "urgency": "normal"}
 
-        # Profit target: scale out 50% at +0.5%, full exit at +1.5%
-        if pnl_pct > 0.015:
+        # Profit target: scale out 50% at +1.5%, full exit at +3.0% (let winners run)
+        if pnl_pct > 0.03:
             reasons.append(f"Profit target: full exit at {pnl_pct:.2%}")
             return {"exit_fraction": 1.0, "reason": "profit_target", "details": reasons, "urgency": "normal"}
-        if pnl_pct > 0.005:
+        if pnl_pct > 0.015:
             reasons.append(f"Profit target: scaling out 50% at {pnl_pct:.2%}")
             return {"exit_fraction": 0.50, "reason": "profit_target", "details": reasons, "urgency": "normal"}
 
