@@ -603,7 +603,7 @@ class RenaissanceTradingBot:
             config={
                 "default_balance_usd": 10000.0,    # Fallback if balance fetch fails
                 "max_position_pct": 3.0,           # Max 3% of balance per position
-                "max_total_exposure_pct": 15.0,    # Max 15% total exposure
+                "max_total_exposure_pct": 50.0,    # Max 50% total exposure
                 "kelly_fraction": 0.50,            # Half-Kelly for drawdown control
                 "min_edge": 0.001,                 # 0.1% minimum edge
                 "min_win_prob": 0.52,              # Need > 52% to trade
@@ -2825,7 +2825,7 @@ class RenaissanceTradingBot:
             # ── Continuous Exposure Monitor ──
             try:
                 total_exposure = self.position_manager._calculate_total_exposure()
-                max_exposure = account_balance * 0.15
+                max_exposure = account_balance * 0.50
                 if total_exposure > max_exposure:
                     self.logger.warning(
                         f"EXPOSURE LIMIT: ${total_exposure:,.2f} > ${max_exposure:,.2f} — force-closing worst position"
