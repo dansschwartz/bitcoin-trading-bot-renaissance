@@ -2973,6 +2973,52 @@ class RenaissanceTradingBot:
                     f"SCAN PLAN: {len(cycle_pairs)} pairs for deep scan "
                     f"({len(always_pairs)} majors + {len(breakout_signals)} breakouts + {n_open} open-pos)"
                 )
+
+                # Emit breakout data to dashboard
+                try:
+                    _bo_signal_dicts = sorted(
+                        [
+                            {
+                                "product_id": s.product_id,
+                                "symbol": s.symbol,
+                                "score": round(s.breakout_score, 1),
+                                "direction": s.direction,
+                                "price": s.price,
+                                "volume_24h_usd": round(s.volume_24h_usd, 2),
+                                "price_change_pct": round(s.price_change_pct, 2),
+                                "volume_score": round(s.volume_score, 1),
+                                "price_score": round(s.price_score, 1),
+                                "momentum_score": round(s.momentum_score, 1),
+                                "volatility_score": round(s.volatility_score, 1),
+                                "divergence_score": round(s.divergence_score, 1),
+                            }
+                            for s in breakout_signals
+                        ],
+                        key=lambda x: x["score"],
+                        reverse=True,
+                    )
+                    _scan_time = datetime.now(timezone.utc).isoformat()
+                    self._track_task(self.dashboard_emitter.emit("breakout.signals", {
+                        "scan_time": _scan_time,
+                        "total_scanned": self.breakout_scanner.last_scan_count if hasattr(self.breakout_scanner, 'last_scan_count') else len(cycle_pairs),
+                        "total_flagged": len(breakout_signals),
+                        "signals": _bo_signal_dicts,
+                    }))
+                    self._track_task(self.dashboard_emitter.emit("breakout.summary", {
+                        "total_scans": self.scan_cycle_count + 1,
+                        "total_flagged": len(breakout_signals),
+                        "avg_flagged_per_scan": len(breakout_signals),
+                        "last_scan_seconds": round(time.time() - cycle_start, 1),
+                        "pairs_tracked": len(cycle_pairs),
+                        "last_scan_time": _scan_time,
+                    }))
+                    # Heatmap: all scored pairs (top 100)
+                    self._track_task(self.dashboard_emitter.emit("breakout.heatmap", {
+                        "pairs": _bo_signal_dicts[:100],
+                    }))
+                except Exception as _be:
+                    self.logger.debug(f"Breakout dashboard emit error: {_be}")
+
             else:
                 # Fallback to tiered scanning if breakout scanner disabled
                 cycle_pairs = self.get_pairs_for_cycle(self.scan_cycle_count)

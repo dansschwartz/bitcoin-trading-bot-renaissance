@@ -197,6 +197,7 @@ class BreakoutScanner:
         self._total_scans += 1
         self._total_flagged += len(flagged)
         self._last_scan_time = scan_elapsed
+        self.last_scan_count = len(usdt_tickers)
 
         if flagged:
             top3 = ', '.join(f"{s.product_id}({s.breakout_score:.0f})" for s in flagged[:3])
