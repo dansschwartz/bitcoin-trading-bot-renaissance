@@ -470,7 +470,7 @@
     },
     "reevaluation": {
         "enabled": true,
-        "signal_ttl_seconds": 3600,
+        "signal_ttl_seconds": 1800,
         "evaluation_interval_seconds": 30.0,
         "min_edge_bps": 0.1,
         "confidence_floor": 0.48,

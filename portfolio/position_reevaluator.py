@@ -332,7 +332,7 @@ class PositionReEvaluator:
     ) -> Optional[ReEvalResult]:
         """Non-negotiable exits — fire regardless of re-evaluation."""
 
-        # Signal expired
+        # Signal expired (full TTL)
         if pos.is_expired:
             urgency = "normal" if pos.is_profitable else "high"
             return self._close_result(
@@ -340,6 +340,17 @@ class PositionReEvaluator:
                 f"TTL={pos.signal_ttl_seconds}s elapsed",
                 pos.current_confidence, pos.remaining_edge_bps,
                 urgency=urgency,
+            )
+
+        # Stale loser: past 50% of TTL and underwater → cut early
+        # ML predicts 30-min returns; if the move hasn't happened by half-TTL,
+        # it's unlikely to. Don't let losers drift to full expiry.
+        if pos.time_elapsed_pct >= 0.5 and not pos.is_profitable:
+            return self._close_result(
+                pos, "STALE_LOSER",
+                f"past 50%% TTL ({pos.age_seconds:.0f}s/{pos.signal_ttl_seconds}s) and underwater ({pos.unrealized_pnl_bps:.1f}bps)",
+                pos.current_confidence, pos.remaining_edge_bps,
+                urgency="high",
             )
 
         # Risk budget exhausted
