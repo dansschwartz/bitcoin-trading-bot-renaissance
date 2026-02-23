@@ -338,15 +338,15 @@ def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def _gbm_hit_probability(
-    current_price: float,
-    target_price: float,
-    T_years: float,
+def _barrier_touch_probability_upside(
+    S: float,
+    K: float,
+    T: float,
     sigma: float,
     mu: float = 0.0,
 ) -> float:
     """
-    Probability that price REACHES target at any point before time T (barrier-hitting).
+    Probability that price REACHES an upside target K > S at any point before time T.
 
     Uses the reflection principle for GBM first-passage time:
       P(max S_t >= K, 0<=t<=T) = N(d1) + exp(2*mu*ln(K/S)/sigma^2) * N(d2)
@@ -355,42 +355,74 @@ def _gbm_hit_probability(
     YES if the price touches the target at ANY point before expiry — not just at expiry.
 
     Args:
-        current_price: Current asset price
-        target_price: Target price to hit
-        T_years: Time to deadline in years
+        S: Current asset price
+        K: Target price to hit (K > S for upside)
+        T: Time to deadline in years
         sigma: Annualized volatility (e.g. 0.60 for 60%)
-        mu: Annualized drift (informed by ML prediction)
+        mu: Annualized drift (default 0.0 = risk-neutral)
 
     Returns:
-        Probability between 0 and 1.
+        Probability between 0.01 and 0.99.
     """
-    if current_price <= 0 or target_price <= 0 or T_years <= 0 or sigma <= 0:
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
         return 0.0
 
     # Already at or past the target
-    if target_price <= current_price:
-        return 0.95  # Near-certain but not 1.0 (market could reverse)
+    if K <= S:
+        return 0.95
 
-    ln_KS = math.log(target_price / current_price)  # positive when K > S
+    ln_KS = math.log(K / S)  # positive when K > S
     vol_sq = sigma * sigma
-    sqrt_T = math.sqrt(T_years)
+    sqrt_T = math.sqrt(T)
     drift = mu - 0.5 * vol_sq  # GBM log-drift
 
     # Term 1: P(S_T >= K) — endpoint probability
-    d1 = (-ln_KS + drift * T_years) / (sigma * sqrt_T)
+    d1 = (-ln_KS + drift * T) / (sigma * sqrt_T)
     term1 = _norm_cdf(d1)
 
     # Term 2: Reflection/barrier correction
     exponent = 2.0 * mu * ln_KS / vol_sq
-    # Clamp exponent to prevent overflow (exp(50) ~ 5e21, plenty)
     exponent = max(-50.0, min(50.0, exponent))
-    d2 = (-ln_KS - drift * T_years) / (sigma * sqrt_T)
+    d2 = (-ln_KS - drift * T) / (sigma * sqrt_T)
     term2 = math.exp(exponent) * _norm_cdf(d2)
 
     prob = term1 + term2
-
-    # Clamp to reasonable range
     return max(0.01, min(0.99, prob))
+
+
+def _barrier_touch_probability_downside(
+    S: float,
+    K: float,
+    T: float,
+    sigma: float,
+    mu: float = 0.0,
+) -> float:
+    """
+    Probability that price DROPS to a downside target K < S at any point before time T.
+
+    Mirrors the upside formula by reflecting: P(min S_t <= K) for K < S.
+    Equivalent to upside barrier with inverted price/target and negated drift.
+
+    Args:
+        S: Current asset price
+        K: Target price (K < S for downside)
+        T: Time to deadline in years
+        sigma: Annualized volatility
+        mu: Annualized drift (default 0.0 = risk-neutral)
+
+    Returns:
+        Probability between 0.01 and 0.99.
+    """
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return 0.0
+
+    # Already at or below the target
+    if K >= S:
+        return 0.95
+
+    # P(min S_t <= K) = P(max (1/S_t) >= 1/K) — invert and use upside formula
+    # Equivalently: swap S and K, negate drift
+    return _barrier_touch_probability_upside(K, S, T, sigma, -mu)
 
 
 # ---------------------------------------------------------------------------
@@ -599,11 +631,13 @@ class PolymarketScanner:
         current_price: float,
     ) -> Optional[PolymarketOpportunity]:
         """
-        Compute edge for a HIT_PRICE market using GBM probability model.
+        Compute edge for a HIT_PRICE market using barrier-touch GBM model.
 
-        Uses log-normal model: P(S_T >= K) = N(d2)
-        Drift mu is informed by ML prediction direction + regime.
-        Sigma is asset-specific annualized volatility.
+        Uses first-passage time formula (reflection principle):
+          P(max S_t >= K) = N(d1) + exp(2*mu*ln(K/S)/sigma^2) * N(d2)
+
+        For long-dated markets, drift=0 (risk-neutral) is more reliable than
+        ML-informed drift since ML predictions are trained on 5-minute horizons.
 
         Edge = our_probability - market_yes_price (for YES bets)
         or   = (1 - our_probability) - market_no_price (for NO bets)
@@ -626,47 +660,37 @@ class PolymarketScanner:
         except (ValueError, TypeError):
             return None
 
-        # Skip very long-dated markets (>2 years) — too uncertain for ML edge
+        # Skip very long-dated markets (>2 years) — too uncertain
         if T_years > 2.0:
             return None
 
         # Get asset volatility
         sigma = DEFAULT_ANNUAL_VOL.get(market.asset, _DEFAULT_VOL_FALLBACK)
 
-        # Compute ML-informed drift
-        # Base drift: 0 (risk-neutral). ML prediction nudges it.
-        # ml_prediction ~0.05 maps to ~15% annualized drift
-        mu = float(ml_prediction) * 3.0  # Scale: 0.05 pred -> 15% annual drift
+        # Use drift=0.0 (risk-neutral) for HIT_PRICE markets.
+        # ML predictions are trained on 5-minute horizons and don't extrapolate
+        # to months/years. The vol parameter drives barrier probability.
+        mu = 0.0
 
-        # Regime adjustment to drift
-        bullish_regimes = ('bull_trending', 'bull_mean_reverting')
-        bearish_regimes = ('bear_trending', 'bear_mean_reverting', 'high_volatility')
-        if regime in bullish_regimes:
-            mu += 0.05  # Add 5% annual drift in bull regimes
-        elif regime in bearish_regimes:
-            mu -= 0.05
-
-        # Agreement scaling: low agreement → pull drift toward zero
-        if agreement < 0.55:
-            mu *= 0.5
-        elif agreement >= 0.80:
-            mu *= 1.2
-
-        # GBM probability
-        our_prob = _gbm_hit_probability(current_price, market.target_price, T_years, sigma, mu)
+        # Determine barrier direction from target vs current price
+        target = market.target_price
+        if target > current_price:
+            # Upside barrier: "Will price REACH $X" where X > current
+            our_prob = _barrier_touch_probability_upside(current_price, target, T_years, sigma, mu)
+        else:
+            # Downside barrier: "Will price DROP to $X" where X < current
+            our_prob = _barrier_touch_probability_downside(current_price, target, T_years, sigma, mu)
 
         market_prob = market.yes_price  # Market's implied probability of hitting target
 
         # Determine which side to bet: YES (will hit) or NO (won't hit)
         yes_edge = our_prob - market_prob
-        no_edge = (1.0 - our_prob) - (1.0 - market_prob)  # Simplifies to market_prob - our_prob
+        no_edge = market_prob - our_prob  # Simplification of (1-our) - (1-mkt)
 
         if yes_edge >= 0.03:
-            # We think it's MORE likely to hit than market does → bet YES
             edge = yes_edge
             direction = "YES"
         elif no_edge >= 0.03:
-            # We think it's LESS likely to hit than market does → bet NO
             edge = no_edge
             direction = "NO"
         else:
@@ -681,7 +705,7 @@ class PolymarketScanner:
             market_probability=round(market_prob, 4),
             edge=round(edge, 4),
             confidence=round(confidence, 1),
-            source="gbm_ml_drift",
+            source="gbm_barrier",
         )
 
     def _persist(

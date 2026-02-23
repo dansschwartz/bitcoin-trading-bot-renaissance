@@ -3690,6 +3690,9 @@ class RenaissanceTradingBot:
                             # Map BTC-USD prediction to BTC asset key
                             if ml_package and ml_package.ensemble_score != 0.0:
                                 _scan_preds['BTC'] = float(weighted_signal)
+                            # Always include current BTC price (we're in the BTC-USD block)
+                            if _pm_price and _pm_price > 0:
+                                _scan_prices['BTC'] = float(_pm_price)
                             # Collect latest prices for all traded assets
                             if hasattr(self, '_last_prices'):
                                 for _pid, _px in self._last_prices.items():
