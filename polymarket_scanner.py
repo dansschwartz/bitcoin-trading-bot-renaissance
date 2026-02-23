@@ -346,12 +346,13 @@ def _gbm_hit_probability(
     mu: float = 0.0,
 ) -> float:
     """
-    Probability that price reaches target by time T under geometric Brownian motion.
+    Probability that price REACHES target at any point before time T (barrier-hitting).
 
-    For target > current (upside): P(S_T >= K) = N(d2)
-    For target < current (downside): P(S_T <= K) = N(-d2)
+    Uses the reflection principle for GBM first-passage time:
+      P(max S_t >= K, 0<=t<=T) = N(d1) + exp(2*mu*ln(K/S)/sigma^2) * N(d2)
 
-    Where d2 = [ln(S/K) + (mu - sigma^2/2)*T] / (sigma * sqrt(T))
+    This is the correct model for Polymarket "Will X reach $Y" markets, which resolve
+    YES if the price touches the target at ANY point before expiry — not just at expiry.
 
     Args:
         current_price: Current asset price
@@ -370,12 +371,23 @@ def _gbm_hit_probability(
     if target_price <= current_price:
         return 0.95  # Near-certain but not 1.0 (market could reverse)
 
-    ln_ratio = math.log(current_price / target_price)
-    drift_term = (mu - 0.5 * sigma * sigma) * T_years
-    vol_term = sigma * math.sqrt(T_years)
+    ln_KS = math.log(target_price / current_price)  # positive when K > S
+    vol_sq = sigma * sigma
+    sqrt_T = math.sqrt(T_years)
+    drift = mu - 0.5 * vol_sq  # GBM log-drift
 
-    d2 = (ln_ratio + drift_term) / vol_term
-    prob = _norm_cdf(d2)
+    # Term 1: P(S_T >= K) — endpoint probability
+    d1 = (-ln_KS + drift * T_years) / (sigma * sqrt_T)
+    term1 = _norm_cdf(d1)
+
+    # Term 2: Reflection/barrier correction
+    exponent = 2.0 * mu * ln_KS / vol_sq
+    # Clamp exponent to prevent overflow (exp(50) ~ 5e21, plenty)
+    exponent = max(-50.0, min(50.0, exponent))
+    d2 = (-ln_KS - drift * T_years) / (sigma * sqrt_T)
+    term2 = math.exp(exponent) * _norm_cdf(d2)
+
+    prob = term1 + term2
 
     # Clamp to reasonable range
     return max(0.01, min(0.99, prob))
