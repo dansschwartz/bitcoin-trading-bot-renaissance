@@ -2935,12 +2935,20 @@ class RenaissanceTradingBot:
                 always_pairs = self.breakout_scanner.get_always_scan_pairs()
                 breakout_pairs = [s.product_id for s in breakout_signals]
 
-                # Combine and deduplicate, preserving order (majors first)
-                cycle_pairs = list(dict.fromkeys(always_pairs + breakout_pairs))
+                # Include pairs with open positions so exit engine always runs
+                try:
+                    with self.position_manager._lock:
+                        open_pos_pairs = [p.product_id for p in self.position_manager.positions.values()]
+                except Exception:
+                    open_pos_pairs = []
 
+                # Combine and deduplicate, preserving order (majors first, then breakouts, then open positions)
+                cycle_pairs = list(dict.fromkeys(always_pairs + breakout_pairs + open_pos_pairs))
+
+                n_open = len(set(open_pos_pairs) - set(always_pairs) - set(breakout_pairs))
                 self.logger.info(
                     f"SCAN PLAN: {len(cycle_pairs)} pairs for deep scan "
-                    f"({len(always_pairs)} majors + {len(breakout_signals)} breakouts)"
+                    f"({len(always_pairs)} majors + {len(breakout_signals)} breakouts + {n_open} open-pos)"
                 )
             else:
                 # Fallback to tiered scanning if breakout scanner disabled
@@ -3867,10 +3875,10 @@ class RenaissanceTradingBot:
                     for pos in open_positions:
                         if pos.product_id != product_id:
                             continue
-                        holding_periods = max(1, int(
+                        holding_periods = int(
                             (datetime.now() - pos.entry_time).total_seconds()
                             / max(60, self.config.get("trading", {}).get("cycle_interval_seconds", 300))
-                        ))
+                        )
                         garch_forecast = market_data.get('garch_forecast', {})
                         _pos_side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
                         exit_decision = self.position_sizer.calculate_exit_size(
