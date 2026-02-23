@@ -12,6 +12,7 @@ Architecture:
 
 import asyncio
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -311,6 +312,76 @@ def _safe_float(v: Any) -> float:
 
 
 # ---------------------------------------------------------------------------
+# GBM probability model for HIT_PRICE edge detection
+# ---------------------------------------------------------------------------
+
+# Annualized volatility defaults (conservative estimates)
+DEFAULT_ANNUAL_VOL: Dict[str, float] = {
+    'BTC': 0.60,
+    'ETH': 0.80,
+    'SOL': 1.00,
+    'DOGE': 1.20,
+    'XRP': 1.00,
+    'BNB': 0.75,
+    'ADA': 1.00,
+    'AVAX': 1.10,
+    'LINK': 1.00,
+    'DOT': 1.00,
+    'UNI': 1.10,
+    'BONK': 1.50,
+}
+_DEFAULT_VOL_FALLBACK = 1.00  # For assets not in the table
+
+
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF using the error function."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _gbm_hit_probability(
+    current_price: float,
+    target_price: float,
+    T_years: float,
+    sigma: float,
+    mu: float = 0.0,
+) -> float:
+    """
+    Probability that price reaches target by time T under geometric Brownian motion.
+
+    For target > current (upside): P(S_T >= K) = N(d2)
+    For target < current (downside): P(S_T <= K) = N(-d2)
+
+    Where d2 = [ln(S/K) + (mu - sigma^2/2)*T] / (sigma * sqrt(T))
+
+    Args:
+        current_price: Current asset price
+        target_price: Target price to hit
+        T_years: Time to deadline in years
+        sigma: Annualized volatility (e.g. 0.60 for 60%)
+        mu: Annualized drift (informed by ML prediction)
+
+    Returns:
+        Probability between 0 and 1.
+    """
+    if current_price <= 0 or target_price <= 0 or T_years <= 0 or sigma <= 0:
+        return 0.0
+
+    # Already at or past the target
+    if target_price <= current_price:
+        return 0.95  # Near-certain but not 1.0 (market could reverse)
+
+    ln_ratio = math.log(current_price / target_price)
+    drift_term = (mu - 0.5 * sigma * sigma) * T_years
+    vol_term = sigma * math.sqrt(T_years)
+
+    d2 = (ln_ratio + drift_term) / vol_term
+    prob = _norm_cdf(d2)
+
+    # Clamp to reasonable range
+    return max(0.01, min(0.99, prob))
+
+
+# ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
 
@@ -435,15 +506,33 @@ class PolymarketScanner:
         ml_prediction: float,
         agreement: float,
         regime: str,
+        current_price: float = 0.0,
     ) -> Optional[PolymarketOpportunity]:
-        """Compute edge for a DIRECTION market using ML predictions."""
-        if market.market_type != 'DIRECTION':
-            return None
+        """Compute edge for a market using ML predictions.
+
+        Dispatches to type-specific edge methods:
+        - DIRECTION: ML prediction → probability comparison
+        - HIT_PRICE: GBM probability model with ML-informed drift
+        """
         if not market.asset or market.asset not in self._supported_assets:
             return None
         if market.yes_price <= 0.01 or market.yes_price >= 0.99:
             return None  # Illiquid / already resolved
 
+        if market.market_type == 'DIRECTION':
+            return self._compute_edge_direction(market, ml_prediction, agreement, regime)
+        elif market.market_type == 'HIT_PRICE':
+            return self._compute_edge_hit_price(market, ml_prediction, agreement, regime, current_price)
+        return None
+
+    def _compute_edge_direction(
+        self,
+        market: PolymarketMarket,
+        ml_prediction: float,
+        agreement: float,
+        regime: str,
+    ) -> Optional[PolymarketOpportunity]:
+        """Compute edge for a DIRECTION market using ML predictions."""
         # Convert ML prediction to probability via calibrated sigmoid
         raw = abs(ml_prediction)
         our_prob = 0.50 + min(0.30, raw * 2.5)
@@ -484,6 +573,100 @@ class PolymarketScanner:
             edge=round(edge, 4),
             confidence=round(confidence, 1),
             source="ml_ensemble",
+        )
+
+    def _compute_edge_hit_price(
+        self,
+        market: PolymarketMarket,
+        ml_prediction: float,
+        agreement: float,
+        regime: str,
+        current_price: float,
+    ) -> Optional[PolymarketOpportunity]:
+        """
+        Compute edge for a HIT_PRICE market using GBM probability model.
+
+        Uses log-normal model: P(S_T >= K) = N(d2)
+        Drift mu is informed by ML prediction direction + regime.
+        Sigma is asset-specific annualized volatility.
+
+        Edge = our_probability - market_yes_price (for YES bets)
+        or   = (1 - our_probability) - market_no_price (for NO bets)
+        """
+        if not market.target_price or market.target_price <= 0:
+            return None
+        if current_price <= 0:
+            return None
+        if not market.deadline:
+            return None
+
+        # Parse deadline and compute time to expiry in years
+        try:
+            deadline_dt = datetime.fromisoformat(market.deadline.replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+            T_seconds = (deadline_dt - now).total_seconds()
+            if T_seconds <= 0:
+                return None  # Already expired
+            T_years = T_seconds / (365.25 * 24 * 3600)
+        except (ValueError, TypeError):
+            return None
+
+        # Skip very long-dated markets (>2 years) — too uncertain for ML edge
+        if T_years > 2.0:
+            return None
+
+        # Get asset volatility
+        sigma = DEFAULT_ANNUAL_VOL.get(market.asset, _DEFAULT_VOL_FALLBACK)
+
+        # Compute ML-informed drift
+        # Base drift: 0 (risk-neutral). ML prediction nudges it.
+        # ml_prediction ~0.05 maps to ~15% annualized drift
+        mu = float(ml_prediction) * 3.0  # Scale: 0.05 pred -> 15% annual drift
+
+        # Regime adjustment to drift
+        bullish_regimes = ('bull_trending', 'bull_mean_reverting')
+        bearish_regimes = ('bear_trending', 'bear_mean_reverting', 'high_volatility')
+        if regime in bullish_regimes:
+            mu += 0.05  # Add 5% annual drift in bull regimes
+        elif regime in bearish_regimes:
+            mu -= 0.05
+
+        # Agreement scaling: low agreement → pull drift toward zero
+        if agreement < 0.55:
+            mu *= 0.5
+        elif agreement >= 0.80:
+            mu *= 1.2
+
+        # GBM probability
+        our_prob = _gbm_hit_probability(current_price, market.target_price, T_years, sigma, mu)
+
+        market_prob = market.yes_price  # Market's implied probability of hitting target
+
+        # Determine which side to bet: YES (will hit) or NO (won't hit)
+        yes_edge = our_prob - market_prob
+        no_edge = (1.0 - our_prob) - (1.0 - market_prob)  # Simplifies to market_prob - our_prob
+
+        if yes_edge >= 0.03:
+            # We think it's MORE likely to hit than market does → bet YES
+            edge = yes_edge
+            direction = "YES"
+        elif no_edge >= 0.03:
+            # We think it's LESS likely to hit than market does → bet NO
+            edge = no_edge
+            direction = "NO"
+        else:
+            return None  # No actionable edge
+
+        confidence = min(95.0, edge * 300 + agreement * 15)
+
+        return PolymarketOpportunity(
+            market=market,
+            direction=direction,
+            our_probability=round(our_prob, 4),
+            market_probability=round(market_prob, 4),
+            edge=round(edge, 4),
+            confidence=round(confidence, 1),
+            source="gbm_ml_drift",
         )
 
     def _persist(
@@ -546,6 +729,7 @@ class PolymarketScanner:
         ml_predictions: Optional[Dict[str, float]] = None,
         agreement: float = 0.5,
         regime: str = "unknown",
+        current_prices: Optional[Dict[str, float]] = None,
     ) -> List[PolymarketOpportunity]:
         """
         Full scan cycle: fetch -> classify -> edge detect -> persist.
@@ -554,11 +738,13 @@ class PolymarketScanner:
             ml_predictions: Asset -> prediction mapping (e.g. {"BTC": 0.05, "ETH": -0.02})
             agreement: Model agreement ratio (0-1)
             regime: Current HMM regime label
+            current_prices: Asset -> current price (e.g. {"BTC": 96000, "ETH": 2800})
 
         Returns:
             List of opportunities sorted by edge (highest first).
         """
         ml_predictions = ml_predictions or {}
+        current_prices = current_prices or {}
 
         try:
             raw_markets = await self.fetch_markets()
@@ -572,13 +758,19 @@ class PolymarketScanner:
             if m is not None:
                 classified.append(m)
 
-        # Compute edges for DIRECTION markets
+        # Compute edges for DIRECTION and HIT_PRICE markets
         opportunities: List[PolymarketOpportunity] = []
         for market in classified:
             pred = ml_predictions.get(market.asset, 0.0) if market.asset else 0.0
-            if pred == 0.0:
+            price = current_prices.get(market.asset, 0.0) if market.asset else 0.0
+
+            # DIRECTION needs a nonzero prediction; HIT_PRICE needs a current price
+            if market.market_type == 'DIRECTION' and pred == 0.0:
                 continue
-            opp = self.compute_edge(market, pred, agreement, regime)
+            if market.market_type == 'HIT_PRICE' and price <= 0:
+                continue
+
+            opp = self.compute_edge(market, pred, agreement, regime, current_price=price)
             if opp:
                 opportunities.append(opp)
 

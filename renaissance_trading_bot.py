@@ -3686,13 +3686,17 @@ class RenaissanceTradingBot:
                             (datetime.now() - self._last_poly_scan).total_seconds() >= 300
                         if _scan_due:
                             _scan_preds: Dict[str, float] = {}
+                            _scan_prices: Dict[str, float] = {}
                             # Map BTC-USD prediction to BTC asset key
                             if ml_package and ml_package.ensemble_score != 0.0:
                                 _scan_preds['BTC'] = float(weighted_signal)
+                            if _pm_price > 0:
+                                _scan_prices['BTC'] = _pm_price
                             _scan_opps = await self.polymarket_scanner.scan(
                                 ml_predictions=_scan_preds,
                                 agreement=_pm_agreement,
                                 regime=_pm_regime,
+                                current_prices=_scan_prices,
                             )
                             self._last_poly_scan = datetime.now()
                             # Include top scanner opportunities in next bridge signal
@@ -3706,8 +3710,11 @@ class RenaissanceTradingBot:
                                         "direction": o.direction,
                                         "edge": o.edge,
                                         "confidence": o.confidence,
+                                        "our_probability": o.our_probability,
                                         "yes_price": o.market.yes_price,
+                                        "target_price": o.market.target_price,
                                         "timeframe_minutes": o.market.timeframe_minutes,
+                                        "source": o.source,
                                     }
                                     for o in _scan_opps[:10]
                                 ]
