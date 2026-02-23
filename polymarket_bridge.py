@@ -56,6 +56,7 @@ class PolymarketBridge:
         breakout_score: float = 0.0,
         btc_price: float = 0.0,
         model_confidences: Optional[Dict[str, float]] = None,
+        scanner_opportunities: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Generate a Polymarket-compatible signal from ML predictions.
@@ -67,6 +68,7 @@ class PolymarketBridge:
             breakout_score: 0-100 from breakout scanner
             btc_price: Current BTC price
             model_confidences: Per-model prediction values
+            scanner_opportunities: Top opportunities from PolymarketScanner
 
         Returns:
             Signal dict (also written to JSON file for Node.js consumption).
@@ -137,6 +139,7 @@ class PolymarketBridge:
                 "modelConfidences": {k: round(v, 6) for k, v in mc.items()},
             },
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "scannerOpportunities": scanner_opportunities or [],
         }
 
         # Write to JSON file

@@ -54,6 +54,7 @@ from cross_asset_engine import CrossAssetCorrelationEngine
 from whale_activity_monitor import WhaleActivityMonitor
 from breakout_scanner import BreakoutScanner, BreakoutSignal
 from polymarket_bridge import PolymarketBridge
+from polymarket_scanner import PolymarketScanner
 from volume_profile_engine import VolumeProfileEngine
 from fractal_intelligence import FractalIntelligenceEngine
 from market_entropy_engine import MarketEntropyEngine
@@ -820,6 +821,17 @@ class RenaissanceTradingBot:
             observation_mode=poly_cfg.get("observation_mode", True),
             logger=self.logger,
         )
+
+        # Initialize Polymarket Scanner — discovers all crypto prediction markets
+        scanner_db = db_cfg.get("path", "data/renaissance_bot.db")
+        poly_scanner_cfg = self.config.get("polymarket_scanner", {})
+        self.polymarket_scanner = PolymarketScanner(
+            db_path=scanner_db,
+            cache_ttl=poly_scanner_cfg.get("cache_ttl", 300),
+            logger=self.logger,
+        )
+        self._last_poly_scan: Optional[datetime] = None
+        self._latest_scanner_opportunities: List[dict] = []
 
         self.volume_profile_engine = VolumeProfileEngine()
         self.fractal_intelligence = FractalIntelligenceEngine(logger=self.logger)
@@ -3663,9 +3675,46 @@ class RenaissanceTradingBot:
                             breakout_score=_pm_btc_breakout,
                             btc_price=_pm_price,
                             model_confidences=_pm_model_preds,
+                            scanner_opportunities=self._latest_scanner_opportunities,
                         )
                     except Exception as _pm_err:
                         self.logger.debug(f"Polymarket bridge error: {_pm_err}")
+
+                    # 3.16 Polymarket Scanner — discover all crypto prediction markets (every 5 min)
+                    try:
+                        _scan_due = self._last_poly_scan is None or \
+                            (datetime.now() - self._last_poly_scan).total_seconds() >= 300
+                        if _scan_due:
+                            _scan_preds: Dict[str, float] = {}
+                            # Map BTC-USD prediction to BTC asset key
+                            if ml_package and ml_package.ensemble_score != 0.0:
+                                _scan_preds['BTC'] = float(weighted_signal)
+                            _scan_opps = await self.polymarket_scanner.scan(
+                                ml_predictions=_scan_preds,
+                                agreement=_pm_agreement,
+                                regime=_pm_regime,
+                            )
+                            self._last_poly_scan = datetime.now()
+                            # Include top scanner opportunities in next bridge signal
+                            if _scan_opps:
+                                self._latest_scanner_opportunities = [
+                                    {
+                                        "condition_id": o.market.condition_id,
+                                        "question": o.market.question[:120],
+                                        "market_type": o.market.market_type,
+                                        "asset": o.market.asset,
+                                        "direction": o.direction,
+                                        "edge": o.edge,
+                                        "confidence": o.confidence,
+                                        "yes_price": o.market.yes_price,
+                                        "timeframe_minutes": o.market.timeframe_minutes,
+                                    }
+                                    for o in _scan_opps[:10]
+                                ]
+                            else:
+                                self._latest_scanner_opportunities = []
+                    except Exception as _ps_err:
+                        self.logger.debug(f"Polymarket scanner error: {_ps_err}")
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
                 self._update_dynamic_thresholds(product_id, market_data)
