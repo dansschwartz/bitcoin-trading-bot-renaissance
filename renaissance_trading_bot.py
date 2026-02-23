@@ -2331,7 +2331,7 @@ class RenaissanceTradingBot:
                 conf_scalar = max(0.5, min((confidence - 0.3) * 3.0, 2.0))  # confidence quality
                 dd_scalar = getattr(self, '_drawdown_size_scalar', 1.0)
                 normalized_usd = base_usd * sig_scalar * conf_scalar * dd_scalar
-                normalized_usd = max(100.0, min(normalized_usd, balance * 0.10))  # $100 floor, 10% ceiling
+                normalized_usd = max(100.0, min(normalized_usd, balance * 0.099))  # $100 floor, 9.9% ceiling (0.1% buffer for rounding)
                 normalized_size = normalized_usd / current_price
                 original_usd = position_size * current_price
                 if abs(normalized_usd - original_usd) > 10:
