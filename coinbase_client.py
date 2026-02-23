@@ -244,12 +244,12 @@ class RateLimiter:
 class PaperTradingSimulator:
     """Simulate trading operations for paper trading mode with real P&L tracking"""
 
-    INITIAL_BALANCE_USD = 10000.0
+    INITIAL_BALANCE_USD = 50000.0
 
     def __init__(self):
         self.orders = {}
         self.balances = {
-            "USD": {"available": "10000.00", "hold": "0.00"},
+            "USD": {"available": "50000.00", "hold": "0.00"},
             "BTC": {"available": "0.00", "hold": "0.00"}
         }
         self.order_counter = 1000

@@ -601,8 +601,8 @@ class RenaissanceTradingBot:
         # "Small bets, many times. We are the casino, not the gambler."
         self.position_sizer = RenaissancePositionSizer(
             config={
-                "default_balance_usd": 10000.0,    # Fallback if balance fetch fails
-                "max_position_pct": 3.0,           # Max 3% of balance per position
+                "default_balance_usd": 50000.0,    # Fallback if balance fetch fails
+                "max_position_pct": 10.0,          # Max 10% of balance per position
                 "max_total_exposure_pct": 50.0,    # Max 50% total exposure
                 "kelly_fraction": 0.50,            # Half-Kelly for drawdown control
                 "min_edge": 0.001,                 # 0.1% minimum edge
@@ -2324,14 +2324,14 @@ class RenaissanceTradingBot:
 
             # ── FINAL SIZE NORMALIZATION — predictable sizing from signal quality ──
             if action != 'HOLD' and position_size > 0 and current_price > 0:
-                balance = self._cached_balance_usd or 10000.0
-                base_usd = balance * 0.01                                 # 1% of equity
+                balance = self._cached_balance_usd or 50000.0
+                base_usd = balance * 0.03                                 # 3% of equity
                 sig_scalar = min(abs(weighted_signal) / 0.02, 2.0)        # signal quality
                 sig_scalar = max(sig_scalar, 0.5)
                 conf_scalar = max(0.5, min((confidence - 0.3) * 3.0, 2.0))  # confidence quality
                 dd_scalar = getattr(self, '_drawdown_size_scalar', 1.0)
                 normalized_usd = base_usd * sig_scalar * conf_scalar * dd_scalar
-                normalized_usd = max(50.0, min(normalized_usd, balance * 0.03))  # $50 floor, 3% ceiling
+                normalized_usd = max(100.0, min(normalized_usd, balance * 0.10))  # $100 floor, 10% ceiling
                 normalized_size = normalized_usd / current_price
                 original_usd = position_size * current_price
                 if abs(normalized_usd - original_usd) > 10:
@@ -2741,7 +2741,7 @@ class RenaissanceTradingBot:
         except Exception as e:
             self.logger.debug(f"Balance fetch failed: {e}")
         # Return cached or default
-        return self._cached_balance_usd if self._cached_balance_usd > 0 else 10000.0
+        return self._cached_balance_usd if self._cached_balance_usd > 0 else 50000.0
 
     async def execute_trading_cycle(self) -> TradingDecision:
         """Execute one complete trading cycle across all products"""

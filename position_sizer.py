@@ -540,13 +540,12 @@ class RenaissancePositionSizer:
         """
         Determine optimal exit sizing.
 
-        Tight entry, loose exit — ML models predict 30-min direction.
-        Give selective signals room to work:
-        - Stop-loss at -2% (max ~$6 on $300 position)
-        - Trailing stop at -1.0% activating after 8 periods
+        Tight entry, fast exit — ML models predict 30-min direction.
+        Kill losers fast, let EDGE_CONSUMED capture winners:
+        - Stop-loss at -2%
+        - Max age: 3 cycles (~15 min) = forced close
+        - Min hold: 2 cycles (~10 min)
         - Profit targets: 50% exit at +1.5%, full exit at +3.0%
-        - Max age: 60 cycles = forced close (~5 hours)
-        - Alpha half-life: 25 cycles (patient signal decay)
         """
         reasons = []
         # Side-aware PnL: LONG profits when price rises, SHORT profits when price falls
@@ -562,14 +561,15 @@ class RenaissancePositionSizer:
             reasons.append(f"Stop loss: {pnl_pct:.2%} < -2%")
             return {"exit_fraction": 1.0, "reason": "stop_loss", "details": reasons, "urgency": "expedited"}
 
-        # Maximum age: force close after 60 cycles regardless of P&L
-        if holding_periods >= 60:
-            reasons.append(f"Max age reached: {holding_periods} >= 60 cycles")
+        # Maximum age: force close after 3 cycles (~15 min) regardless of P&L
+        # ML predicts 30-min direction; if edge isn't captured by 15 min, it's not coming
+        if holding_periods >= 3:
+            reasons.append(f"Max age reached: {holding_periods} >= 3 cycles")
             return {"exit_fraction": 1.0, "reason": "max_age", "details": reasons, "urgency": "normal"}
 
-        # Minimum hold: don't evaluate other exits before 6 periods (matches 30-min prediction horizon)
-        if holding_periods < 6:
-            reasons.append(f"Min hold: {holding_periods}/6 periods")
+        # Minimum hold: don't evaluate other exits before 2 periods (~10 min)
+        if holding_periods < 2:
+            reasons.append(f"Min hold: {holding_periods}/2 periods")
             return {"exit_fraction": 0.0, "reason": "hold", "details": reasons, "urgency": "none"}
 
         # Trailing stop: -1.0% from entry, activating after 8 periods (wider trail, later activation)
