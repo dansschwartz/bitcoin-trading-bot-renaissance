@@ -2974,50 +2974,62 @@ class RenaissanceTradingBot:
                     f"({len(always_pairs)} majors + {len(breakout_signals)} breakouts + {n_open} open-pos)"
                 )
 
-                # Emit breakout data to dashboard
+                # Persist breakout signals to DB for dashboard consumption
                 try:
-                    _bo_signal_dicts = sorted(
-                        [
-                            {
-                                "product_id": s.product_id,
-                                "symbol": s.symbol,
-                                "score": round(s.breakout_score, 1),
-                                "direction": s.direction,
-                                "price": s.price,
-                                "volume_24h_usd": round(s.volume_24h_usd, 2),
-                                "price_change_pct": round(s.price_change_pct, 2),
-                                "volume_score": round(s.volume_score, 1),
-                                "price_score": round(s.price_score, 1),
-                                "momentum_score": round(s.momentum_score, 1),
-                                "volatility_score": round(s.volatility_score, 1),
-                                "divergence_score": round(s.divergence_score, 1),
-                            }
-                            for s in breakout_signals
-                        ],
-                        key=lambda x: x["score"],
-                        reverse=True,
-                    )
                     _scan_time = datetime.now(timezone.utc).isoformat()
-                    self._track_task(self.dashboard_emitter.emit("breakout.signals", {
-                        "scan_time": _scan_time,
-                        "total_scanned": self.breakout_scanner.last_scan_count if hasattr(self.breakout_scanner, 'last_scan_count') else len(cycle_pairs),
-                        "total_flagged": len(breakout_signals),
-                        "signals": _bo_signal_dicts,
-                    }))
-                    self._track_task(self.dashboard_emitter.emit("breakout.summary", {
-                        "total_scans": self.scan_cycle_count + 1,
-                        "total_flagged": len(breakout_signals),
-                        "avg_flagged_per_scan": len(breakout_signals),
-                        "last_scan_seconds": round(time.time() - cycle_start, 1),
-                        "pairs_tracked": len(cycle_pairs),
-                        "last_scan_time": _scan_time,
-                    }))
-                    # Heatmap: all scored pairs (top 100)
-                    self._track_task(self.dashboard_emitter.emit("breakout.heatmap", {
-                        "pairs": _bo_signal_dicts[:100],
-                    }))
+                    _total_scanned = getattr(self.breakout_scanner, 'last_scan_count', len(cycle_pairs))
+                    _db_path = str(self.db_manager.db_path) if hasattr(self.db_manager, 'db_path') else "data/renaissance_bot.db"
+                    import sqlite3 as _bo_sql
+                    _bo_conn = _bo_sql.connect(_db_path)
+                    _bo_conn.execute("""
+                        CREATE TABLE IF NOT EXISTS breakout_scans (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            scan_time TEXT NOT NULL,
+                            product_id TEXT NOT NULL,
+                            symbol TEXT,
+                            score REAL,
+                            direction TEXT,
+                            price REAL,
+                            volume_24h_usd REAL,
+                            price_change_pct REAL,
+                            volume_score REAL,
+                            price_score REAL,
+                            momentum_score REAL,
+                            volatility_score REAL,
+                            divergence_score REAL,
+                            total_scanned INTEGER,
+                            UNIQUE(scan_time, product_id)
+                        )
+                    """)
+                    _bo_conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_breakout_scan_time ON breakout_scans(scan_time)"
+                    )
+                    _bo_rows = [
+                        (
+                            _scan_time, s.product_id, s.symbol,
+                            round(s.breakout_score, 1), s.direction, s.price,
+                            round(s.volume_24h_usd, 2), round(s.price_change_pct, 2),
+                            round(s.volume_score, 1), round(s.price_score, 1),
+                            round(s.momentum_score, 1), round(s.volatility_score, 1),
+                            round(s.divergence_score, 1), _total_scanned,
+                        )
+                        for s in breakout_signals
+                    ]
+                    _bo_conn.executemany("""
+                        INSERT OR REPLACE INTO breakout_scans
+                        (scan_time, product_id, symbol, score, direction, price,
+                         volume_24h_usd, price_change_pct, volume_score, price_score,
+                         momentum_score, volatility_score, divergence_score, total_scanned)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, _bo_rows)
+                    # Prune scans older than 24h to keep DB lean
+                    _bo_conn.execute(
+                        "DELETE FROM breakout_scans WHERE scan_time < datetime('now', '-24 hours')"
+                    )
+                    _bo_conn.commit()
+                    _bo_conn.close()
                 except Exception as _be:
-                    self.logger.debug(f"Breakout dashboard emit error: {_be}")
+                    self.logger.debug(f"Breakout DB persist error: {_be}")
 
             else:
                 # Fallback to tiered scanning if breakout scanner disabled
