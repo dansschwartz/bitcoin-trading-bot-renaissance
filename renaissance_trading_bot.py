@@ -2538,7 +2538,17 @@ class RenaissanceTradingBot:
                     f"Daily loss limit breached: ${abs(self.position_manager.daily_pnl):.2f}"
                 )
 
-            self.logger.info(f"Smart execution complete: {exec_result['status']} | {message}")
+            if exec_result['status'] == 'REJECTED':
+                n_pos = len(self.position_manager.positions)
+                exp = self.position_manager._calculate_total_exposure()
+                lim = self.position_manager.risk_limits.max_total_exposure_usd
+                self.logger.info(
+                    f"Smart execution complete: REJECTED ({product_id}) | {message} "
+                    f"| positions={n_pos}, exposure=${exp:.0f}, limit=${lim:.0f}, "
+                    f"trade_usd=${decision.position_size * current_price:.0f}"
+                )
+            else:
+                self.logger.info(f"Smart execution complete: {exec_result['status']} | {message}")
             return exec_result
 
         except Exception as e:
@@ -2743,11 +2753,12 @@ class RenaissanceTradingBot:
             account_balance = self._fetch_account_balance()
             self.logger.info(f"Account balance: ${account_balance:,.2f}")
 
-            # Dynamically update position manager limits — selective: 1 per product, 10 max
-            # With 43 pairs we scan widely but trade selectively (max 10 simultaneous)
+            # Dynamically update position manager limits — selective: 1 per product, 15 max
+            # With 43 pairs we scan widely but trade selectively (max 15 simultaneous)
+            # Each trade is ~$300 (1% of equity normalized), so 50% cap ≈ 16 simultaneous trades
             self.position_manager.risk_limits.max_position_size_usd = account_balance * 0.05
-            self.position_manager.risk_limits.max_total_exposure_usd = account_balance * 0.15
-            self.position_manager.risk_limits.max_total_positions = min(len(self.product_ids), 10)
+            self.position_manager.risk_limits.max_total_exposure_usd = account_balance * 0.50
+            self.position_manager.risk_limits.max_total_positions = min(len(self.product_ids), 15)
             self.position_manager.risk_limits.max_positions_per_product = 1
 
             # ── Drawdown tracking (Renaissance discipline) ──
