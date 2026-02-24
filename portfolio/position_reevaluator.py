@@ -217,6 +217,9 @@ class PositionReEvaluator:
         """
         timestamp = time.time()
 
+        # ── RECORD P&L SNAPSHOT (unconditional, before any early returns) ──
+        self._record_snapshot(pos)
+
         # ── STEP 0: CHURN PREVENTION ──
         time_since_last = timestamp - self._last_adjustment_time(pos)
         churn_seconds = self._cfg(pos, "churn_prevention_seconds")
@@ -230,9 +233,6 @@ class PositionReEvaluator:
 
         # ── STEP 2: UPDATE CURRENT CONDITIONS ──
         self._update_position_market_data(pos, market_state)
-
-        # ── STEP 2.5: RECORD P&L SNAPSHOT (for early-exit calibration) ──
-        self._record_snapshot(pos)
 
         # ── STEP 3: RE-SCORE SIGNAL CONFIDENCE ──
         rescored_confidence = self._rescore_signal(pos, market_state)
