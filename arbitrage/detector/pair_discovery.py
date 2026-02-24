@@ -65,6 +65,7 @@ class PairDiscoveryEngine:
         self.min_gross_spread_bps = Decimal(str(cfg.get('min_gross_spread_bps', 3.0)))
         self.min_volume_usdt = Decimal(str(cfg.get('min_volume_usdt', 10_000)))
         self.demotion_grace_scans = cfg.get('demotion_grace_scans', 3)
+        self.max_gross_spread_bps = Decimal(str(cfg.get('max_gross_spread_bps', 500.0)))  # 5% cap — beyond this is bogus
 
         # Merge config exclusions with hardcoded set
         extra_excluded = cfg.get('excluded_bases', [])
@@ -165,8 +166,11 @@ class PairDiscoveryEngine:
                 'direction': 'buy_mexc_sell_binance' if spread_1 >= spread_2 else 'buy_binance_sell_mexc',
             })
 
-        # 6. Rank by best spread, filter by threshold
-        above_threshold = [c for c in candidates if c['best_spread_bps'] >= self.min_gross_spread_bps]
+        # 6. Rank by best spread, filter by threshold + sanity cap
+        above_threshold = [
+            c for c in candidates
+            if self.min_gross_spread_bps <= c['best_spread_bps'] <= self.max_gross_spread_bps
+        ]
         above_threshold.sort(key=lambda c: c['best_spread_bps'], reverse=True)
 
         # 7. Determine promotion set (top N)

@@ -68,6 +68,7 @@ pair_discovery:
   scan_interval_sec: 60                # How often to scan all tickers
   max_active_pairs: 40                 # Top N pairs to monitor with full order books
   min_gross_spread_bps: 3.0            # Minimum gross spread to consider a pair
+  max_gross_spread_bps: 500.0          # Maximum — above 5% is bogus (different tokens, stale data)
   min_volume_usdt: 10000               # Minimum 24h USDT volume (from Binance)
   demotion_grace_scans: 3              # Keep pair for N scans after it drops below threshold
   excluded_bases:                      # Additional exclusions beyond hardcoded set
