@@ -3826,22 +3826,6 @@ class RenaissanceTradingBot:
                                     "confidence": float(ml_package.confidence_score * 100),
                                 }
 
-                            # Debug: log cache state every 100 iterations
-                            if not hasattr(self, '_sa_debug_count'):
-                                self._sa_debug_count = 0
-                            self._sa_debug_count += 1
-                            if self._sa_debug_count % 100 == 1:
-                                cache_keys = list(self._sa_ml_cache.keys())[:5]
-                                price_keys = list(_sa_prices.keys())[:5]
-                                self.logger.info(
-                                    f"SA_DEBUG: ml_pkg={ml_package is not None} "
-                                    f"has_ensemble={hasattr(ml_package, 'ensemble_score') if ml_package else False} "
-                                    f"cache_len={len(self._sa_ml_cache)} "
-                                    f"cache_keys={cache_keys} "
-                                    f"price_keys={price_keys} "
-                                    f"pid={product_id}"
-                                )
-
                             # Current prices
                             _sa_prices = {}
                             if hasattr(self, '_last_prices'):
@@ -3858,7 +3842,7 @@ class RenaissanceTradingBot:
                                 current_regime=_sa_regime,
                             )
                         except Exception as _pex_err:
-                            self.logger.info(f"Strategy A cycle error: {_pex_err}")
+                            self.logger.warning(f"Strategy A cycle error: {_pex_err}")
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
                 self._update_dynamic_thresholds(product_id, market_data)
