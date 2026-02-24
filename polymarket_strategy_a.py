@@ -615,11 +615,21 @@ class StrategyAExecutor:
             );
 
             CREATE INDEX IF NOT EXISTS idx_pm_pos_status ON polymarket_positions(status);
-            CREATE INDEX IF NOT EXISTS idx_pm_pos_strategy ON polymarket_positions(strategy);
             CREATE INDEX IF NOT EXISTS idx_lifecycle_asset ON polymarket_lifecycle(asset);
             CREATE INDEX IF NOT EXISTS idx_lifecycle_conviction ON polymarket_lifecycle(conviction_label);
             CREATE INDEX IF NOT EXISTS idx_lifecycle_decision ON polymarket_lifecycle(decision);
         """)
+        conn.commit()
+
+        # Migrate: add 'strategy' column to existing polymarket_positions if missing
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(polymarket_positions)").fetchall()]
+        if "strategy" not in cols:
+            conn.execute("ALTER TABLE polymarket_positions ADD COLUMN strategy TEXT DEFAULT 'legacy'")
+            conn.commit()
+            self.logger.info("Migrated polymarket_positions: added 'strategy' column")
+
+        # Now safe to create index on strategy column
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pm_pos_strategy ON polymarket_positions(strategy)")
         conn.commit()
         conn.close()
 
