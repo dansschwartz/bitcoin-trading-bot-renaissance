@@ -374,6 +374,7 @@ async def polymarket_pnl(request: Request):
             total_wagered = overall['total_wagered'] or 0
 
             return {
+                "active_strategy": "Strategy A: Confirmed Momentum",
                 "bankroll": bankroll_row['bankroll'] if bankroll_row else 500.0,
                 "open_count": open_summary['count'],
                 "open_exposure": round(open_summary['exposure'], 2),
@@ -430,3 +431,144 @@ async def polymarket_executor_status(request: Request):
             }
     except Exception as e:
         return {"error": str(e), "bankroll": 500.0, "recent_bets": []}
+
+
+@router.get("/instruments")
+async def polymarket_instruments():
+    """Show the 5 registered Strategy A instruments and their configs."""
+    try:
+        from polymarket_strategy_a import build_instruments
+        instruments = build_instruments()
+        return {
+            "instruments": [
+                {
+                    "key": key,
+                    "name": inst.name,
+                    "asset": inst.asset,
+                    "ml_pair": inst.ml_pair,
+                    "enabled": inst.enabled,
+                    "min_edge": inst.min_edge,
+                    "min_price_move": inst.min_price_move_pct,
+                    "kelly_fraction": inst.kelly_fraction,
+                    "max_bet_pct": inst.max_bet_pct,
+                    "max_bet_usd": inst.max_bet_usd,
+                    "lead_asset": inst.lead_asset,
+                    "lead_must_agree": inst.lead_must_agree,
+                    "cooldown_seconds": inst.cooldown_after_loss_seconds,
+                    "skip_regimes": inst.skip_regimes,
+                    "max_bets_per_hour": inst.max_bets_per_hour,
+                }
+                for key, inst in instruments.items()
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e), "instruments": []}
+
+
+@router.get("/lifecycle")
+async def polymarket_lifecycle(request: Request, limit: int = 50):
+    """Full lifecycle audit trail for Strategy A markets."""
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            if not _table_exists(c, "polymarket_lifecycle"):
+                return {"lifecycles": []}
+
+            rows = c.execute("""
+                SELECT * FROM polymarket_lifecycle
+                ORDER BY id DESC LIMIT ?
+            """, (limit,)).fetchall()
+            return {"lifecycles": [dict(r) for r in rows]}
+    except Exception as e:
+        return {"error": str(e), "lifecycles": []}
+
+
+@router.get("/lifecycle/stats")
+async def polymarket_lifecycle_stats(request: Request):
+    """Aggregated stats from lifecycle data for calibration."""
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            if not _table_exists(c, "polymarket_lifecycle"):
+                return _empty_lifecycle_stats()
+
+            # Win rate by conviction level
+            by_conviction = c.execute("""
+                SELECT conviction_label,
+                       COUNT(*) as total,
+                       SUM(CASE WHEN t15_won = 1 THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN decision LIKE 'BET%' THEN 1 ELSE 0 END) as bets,
+                       SUM(CASE WHEN decision = 'SKIP' THEN 1 ELSE 0 END) as skips,
+                       COALESCE(SUM(t15_pnl), 0) as pnl
+                FROM polymarket_lifecycle
+                GROUP BY conviction_label
+            """).fetchall()
+
+            # Final 5-min reversal rate
+            reversal_rate = c.execute("""
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN final_5min_reversed = 1 THEN 1 ELSE 0 END) as reversed
+                FROM polymarket_lifecycle
+                WHERE final_5min_reversed IS NOT NULL
+            """).fetchone()
+
+            # ML accuracy at T=10
+            ml_accuracy = c.execute("""
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN ml_accuracy = 1 THEN 1 ELSE 0 END) as correct
+                FROM polymarket_lifecycle
+                WHERE ml_accuracy IS NOT NULL
+            """).fetchone()
+
+            # Crowd lag by asset
+            crowd_lag = c.execute("""
+                SELECT asset,
+                       AVG(crowd_total_lag) as avg_lag,
+                       AVG(t5_crowd_change_from_t0) as avg_crowd_speed_0_5,
+                       AVG(t10_crowd_change_from_t0) as avg_crowd_speed_0_10
+                FROM polymarket_lifecycle
+                WHERE crowd_total_lag IS NOT NULL
+                GROUP BY asset
+            """).fetchall()
+
+            # Win rate by asset
+            by_asset = c.execute("""
+                SELECT asset,
+                       COUNT(*) as total,
+                       SUM(CASE WHEN t15_won = 1 THEN 1 ELSE 0 END) as wins,
+                       COALESCE(SUM(t15_pnl), 0) as pnl
+                FROM polymarket_lifecycle
+                WHERE decision LIKE 'BET%'
+                GROUP BY asset
+            """).fetchall()
+
+            rev_total = reversal_rate["total"] or 0
+            rev_count = reversal_rate["reversed"] or 0
+            ml_total = ml_accuracy["total"] or 0
+            ml_correct = ml_accuracy["correct"] or 0
+
+            return {
+                "by_conviction": [dict(r) for r in by_conviction],
+                "reversal_rate": {
+                    "total": rev_total,
+                    "reversed": rev_count,
+                    "pct": round(rev_count / rev_total * 100, 1) if rev_total > 0 else 0,
+                },
+                "ml_accuracy": {
+                    "total": ml_total,
+                    "correct": ml_correct,
+                    "pct": round(ml_correct / ml_total * 100, 1) if ml_total > 0 else 0,
+                },
+                "crowd_lag_by_asset": [dict(r) for r in crowd_lag],
+                "by_asset": [dict(r) for r in by_asset],
+            }
+    except Exception as e:
+        return {"error": str(e), **_empty_lifecycle_stats()}
+
+
+def _empty_lifecycle_stats() -> dict:
+    return {
+        "by_conviction": [], "reversal_rate": {"total": 0, "reversed": 0, "pct": 0},
+        "ml_accuracy": {"total": 0, "correct": 0, "pct": 0},
+        "crowd_lag_by_asset": [], "by_asset": [],
+    }

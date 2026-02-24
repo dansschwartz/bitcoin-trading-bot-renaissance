@@ -55,7 +55,12 @@ from whale_activity_monitor import WhaleActivityMonitor
 from breakout_scanner import BreakoutScanner, BreakoutSignal
 from polymarket_bridge import PolymarketBridge
 from polymarket_scanner import PolymarketScanner
-from polymarket_executor import PolymarketExecutor
+try:
+    from polymarket_strategy_a import StrategyAExecutor
+    STRATEGY_A_AVAILABLE = True
+except ImportError as _sa_err:
+    STRATEGY_A_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"Strategy A import failed: {_sa_err}")
 from volume_profile_engine import VolumeProfileEngine
 from fractal_intelligence import FractalIntelligenceEngine
 from market_entropy_engine import MarketEntropyEngine
@@ -834,20 +839,23 @@ class RenaissanceTradingBot:
         self._last_poly_scan: Optional[datetime] = None
         self._latest_scanner_opportunities: List[dict] = []
 
-        # Initialize Polymarket Executor — paper-trade prediction markets
-        try:
-            self.polymarket_executor = PolymarketExecutor(
-                config=self.config,
-                db_path=scanner_db,
-                logger=self.logger,
-            )
-            self.logger.info(
-                f"Polymarket Executor: {'PAPER' if self.polymarket_executor.paper_mode else 'LIVE'} mode | "
-                f"Bankroll: ${self.polymarket_executor.bankroll:.2f}"
-            )
-        except Exception as _pe_err:
-            self.logger.warning(f"Polymarket executor init failed: {_pe_err}")
-            self.polymarket_executor = None
+        # Initialize Polymarket Strategy A — Confirmed Momentum executor
+        self.polymarket_executor = None
+        if STRATEGY_A_AVAILABLE:
+            try:
+                self.polymarket_executor = StrategyAExecutor(
+                    config=self.config,
+                    db_path=scanner_db,
+                    logger=self.logger,
+                )
+                self.logger.info(
+                    f"Polymarket Strategy A: "
+                    f"{len([i for i in self.polymarket_executor.instruments.values() if i.enabled])} instruments | "
+                    f"Bankroll: ${self.polymarket_executor.bankroll:.2f}"
+                )
+            except Exception as _pe_err:
+                self.logger.warning(f"Strategy A init failed: {_pe_err}")
+                self.polymarket_executor = None
 
         self.volume_profile_engine = VolumeProfileEngine()
         self.fractal_intelligence = FractalIntelligenceEngine(logger=self.logger)
@@ -3804,12 +3812,43 @@ class RenaissanceTradingBot:
                     except Exception as _ps_err:
                         self.logger.debug(f"Polymarket scanner error: {_ps_err}")
 
-                    # 3.17 Polymarket Executor — place/resolve paper bets (runs with scanner)
-                    if self.polymarket_executor and _scan_due:
+                    # 3.17 Strategy A — Confirmed Momentum executor (runs every cycle)
+                    if self.polymarket_executor:
                         try:
-                            await self.polymarket_executor.execute_cycle()
+                            # Gather ML predictions for all pairs
+                            _sa_ml_preds = {}
+                            for _sa_pair in self.product_ids:
+                                _sa_pred = getattr(self, '_latest_ml_package', {})
+                                if isinstance(_sa_pred, dict):
+                                    _sa_ml_preds[_sa_pair] = _sa_pred.get(_sa_pair, {})
+                                elif ml_package:
+                                    _sa_ml_preds[_sa_pair] = {
+                                        "prediction": float(ml_package.ensemble_score),
+                                        "agreement": float(ml_package.confidence_score),
+                                        "confidence": float(ml_package.confidence_score * 100),
+                                    }
+
+                            # Current prices
+                            _sa_prices = {}
+                            if hasattr(self, '_last_prices'):
+                                _sa_prices = dict(self._last_prices)
+
+                            # Regime
+                            _sa_regime = "unknown"
+                            if self.regime_overlay and self.regime_overlay.enabled:
+                                _sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
+
+                            # Scanner data from DB
+                            _sa_scanner = self._get_polymarket_scanner_data()
+
+                            await self.polymarket_executor.execute_cycle(
+                                scanner_data=_sa_scanner,
+                                ml_predictions=_sa_ml_preds,
+                                current_prices=_sa_prices,
+                                current_regime=_sa_regime,
+                            )
                         except Exception as _pex_err:
-                            self.logger.debug(f"Polymarket executor error: {_pex_err}")
+                            self.logger.debug(f"Strategy A cycle error: {_pex_err}")
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
                 self._update_dynamic_thresholds(product_id, market_data)
@@ -5271,6 +5310,26 @@ class RenaissanceTradingBot:
         # Edge = accuracy - 0.5 (above random), capped at 0.15
         edge = max(0.0, accuracy - 0.5)
         return min(edge, 0.15)
+
+    def _get_polymarket_scanner_data(self) -> list:
+        """Read latest scanner results from database for Strategy A."""
+        try:
+            import sqlite3 as _sa_sql
+            db_path = self.config.get("database", {}).get("path", "data/renaissance_bot.db")
+            conn = _sa_sql.connect(db_path)
+            conn.row_factory = _sa_sql.Row
+            rows = conn.execute("""
+                SELECT condition_id AS market_id, slug, question, market_type, asset,
+                       yes_price AS crowd_prob_yes, our_probability, edge, direction,
+                       volume_24h, deadline
+                FROM polymarket_scanner
+                WHERE scan_time = (SELECT MAX(scan_time) FROM polymarket_scanner)
+                  AND direction IS NOT NULL
+            """).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     def _update_dynamic_thresholds(self, product_id: str, market_data: Dict[str, Any]):
         """Adjusts BUY/SELL thresholds based on volatility and confidence (Step 8)"""
