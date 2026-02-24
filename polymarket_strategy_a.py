@@ -56,7 +56,8 @@ class InstrumentConfig:
     name: str                     # "BTC 15m Confirmed Momentum"
     asset: str                    # "BTC"
     ml_pair: str                  # "BTC-USD" - which ML model to use
-    slug_pattern: str             # Regex to match Polymarket slugs
+    price_pair: str = ""          # "XRP-USD" - which price to use (defaults to ml_pair)
+    slug_pattern: str = ""        # Slug template for Polymarket discovery
     enabled: bool = True
 
     # Timing
@@ -103,16 +104,17 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
     instruments = {}
 
     # 1. BTC 15m Direction
-    # Crowd reprices in ~90s. Need larger edge (4%), higher ML confidence.
+    # Crowd reprices in ~90s. Confirmation mode: ML is safety check, not primary signal.
     instruments["btc_15m"] = InstrumentConfig(
         name="BTC 15m Confirmed Momentum",
         asset="BTC",
         ml_pair="BTC-USD",
+        price_pair="BTC-USD",
         slug_pattern="btc-updown-15m-{ts}",
-        min_price_move_pct=0.15,
+        min_price_move_pct=0.12,
         max_price_chop_ratio=0.40,
-        min_ml_confidence=55.0,
-        min_ml_agreement=0.60,
+        min_ml_confidence=45.0,
+        min_ml_agreement=0.50,
         min_edge=0.04,
         max_crowd_efficiency=0.82,
         kelly_fraction=0.5,
@@ -130,11 +132,12 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
         name="ETH 15m Confirmed Momentum",
         asset="ETH",
         ml_pair="ETH-USD",
+        price_pair="ETH-USD",
         slug_pattern="eth-updown-15m-{ts}",
         min_price_move_pct=0.15,
         max_price_chop_ratio=0.45,
-        min_ml_confidence=50.0,
-        min_ml_agreement=0.55,
+        min_ml_confidence=45.0,
+        min_ml_agreement=0.45,
         min_edge=0.035,
         max_crowd_efficiency=0.83,
         kelly_fraction=0.5,
@@ -152,11 +155,12 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
         name="SOL 15m Confirmed Momentum",
         asset="SOL",
         ml_pair="SOL-USD",
+        price_pair="SOL-USD",
         slug_pattern="sol-updown-15m-{ts}",
         min_price_move_pct=0.25,
         max_price_chop_ratio=0.45,
-        min_ml_confidence=50.0,
-        min_ml_agreement=0.55,
+        min_ml_confidence=40.0,
+        min_ml_agreement=0.45,
         min_edge=0.03,
         max_crowd_efficiency=0.85,
         kelly_fraction=0.55,
@@ -173,6 +177,7 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
         name="DOGE 15m Confirmed Momentum",
         asset="DOGE",
         ml_pair="DOGE-USD",
+        price_pair="DOGE-USD",
         slug_pattern="doge-updown-15m-{ts}",
         enabled=False,
         min_price_move_pct=0.15,
@@ -191,16 +196,17 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
     )
 
     # 5. XRP 15m Direction
-    # News-driven. Strict chop filter (0.35) to skip spikes. No trained model.
+    # News-driven. Uses BTC ML model but XRP's actual price for crowd comparison.
     instruments["xrp_15m"] = InstrumentConfig(
         name="XRP 15m Confirmed Momentum",
         asset="XRP",
-        ml_pair="BTC-USD",  # Fallback: use BTC model
+        ml_pair="BTC-USD",       # Use BTC model for predictions
+        price_pair="XRP-USD",    # Use XRP price for crowd comparison
         slug_pattern="xrp-updown-15m-{ts}",
         min_price_move_pct=0.15,
         max_price_chop_ratio=0.35,
-        min_ml_confidence=50.0,
-        min_ml_agreement=0.55,
+        min_ml_confidence=45.0,
+        min_ml_agreement=0.45,
         min_edge=0.05,
         max_crowd_efficiency=0.80,
         kelly_fraction=0.35,
@@ -754,7 +760,8 @@ class StrategyAExecutor:
                 continue
 
             slug = market.get("slug", "")
-            current_price = current_prices.get(inst.ml_pair, 0)
+            price_pair = inst.price_pair or inst.ml_pair
+            current_price = current_prices.get(price_pair, 0)
 
             # Parse crowd pricing from Gamma API response
             crowd_up = self._parse_crowd_up(market)
@@ -863,7 +870,8 @@ class StrategyAExecutor:
         if should_bet:
             # Run the full evaluation
             ref_price = tracker.checkpoints.get(0, {}).get("asset_price", 0)
-            current_price = current_prices.get(inst.ml_pair, 0)
+            price_pair = inst.price_pair or inst.ml_pair
+            current_price = current_prices.get(price_pair, 0)
 
             if ref_price <= 0:
                 ref_price = current_price  # Fallback if T=0 missing
@@ -900,7 +908,7 @@ class StrategyAExecutor:
 
         if not should_bet:
             skip_reason = skip_reason or f"{conviction_level.value}: {conviction_detail}"
-            self.logger.debug(f"[{tracker.asset}] SKIP: {skip_reason}")
+            self.logger.info(f"[{tracker.asset}] SKIP: {skip_reason}")
             self._save_lifecycle(
                 tracker, market, conviction_level, conviction_score,
                 conviction_detail,
@@ -977,6 +985,13 @@ class StrategyAExecutor:
         our_prob = min(0.88, max(0.55, base_prob + ml_boost))
 
         edge = our_prob - crowd_for_us
+
+        self.logger.info(
+            f"[{inst.asset}] EVAL: price_move={price_move_pct:+.3f}% | "
+            f"ML={ml_direction} conf={ml_conf:.0f} agree={ml_agree:.0%} | "
+            f"Crowd={crowd_for_us:.0%} | Edge={edge:.1%} | "
+            f"Regime={current_regime}"
+        )
 
         if edge < inst.min_edge:
             return {"enter": False, "reason": f"Edge {edge:.1%} < {inst.min_edge:.1%}"}
@@ -1316,7 +1331,8 @@ class StrategyAExecutor:
                     inst_key = pos.get("registry_key", "")
                     inst = self.instruments.get(inst_key)
                     if inst:
-                        current_asset_price = current_prices.get(inst.ml_pair, 0)
+                        price_pair = inst.price_pair or inst.ml_pair
+                        current_asset_price = current_prices.get(price_pair, 0)
                         t0_price = self._get_lifecycle_t0_price(slug)
 
                         if current_asset_price > 0 and t0_price > 0:
@@ -1395,7 +1411,8 @@ class StrategyAExecutor:
         if current_prices:
             inst = self.instruments.get(pos.get("registry_key", ""))
             if inst:
-                t15_price = current_prices.get(inst.ml_pair, 0)
+                price_pair = inst.price_pair or inst.ml_pair
+                t15_price = current_prices.get(price_pair, 0)
 
         t0_price = self._get_lifecycle_t0_price(pos["slug"])
         t10_price = self._get_lifecycle_t10_price(pos["slug"])
