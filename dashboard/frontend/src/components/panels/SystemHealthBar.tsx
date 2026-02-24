@@ -212,7 +212,7 @@ export default function SystemHealthBar() {
         <div className="flex-1" />
 
         <div className="text-[11px] text-gray-500 shrink-0">
-          WS: <span className="text-gray-400">{status?.ws_clients ?? 0}</span>
+          Clients: <span className="text-gray-400">{status?.ws_clients ?? 0}</span>
         </div>
       </div>
 

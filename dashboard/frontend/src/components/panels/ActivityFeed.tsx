@@ -48,7 +48,7 @@ function priorityIcon(p: Priority): string {
 function priorityBg(p: Priority): string {
   switch (p) {
     case 'critical': return 'bg-accent-red/10 border-l-2 border-l-accent-red';
-    case 'high': return 'bg-accent-green/5 border-l-2 border-l-accent-green';
+    case 'high': return 'bg-surface-2/20 border-l-2';
     case 'medium': return 'border-l-2 border-l-purple-500/50';
     default: return '';
   }
@@ -82,7 +82,7 @@ export default function ActivityFeed() {
           type: 'decision',
           message: d.action === 'HOLD'
             ? `${d.product_id} HOLD`
-            : `${d.product_id} ${d.action} | conf: ${(d.confidence * 100).toFixed(0)}% | signal: ${d.weighted_signal.toFixed(4)}`,
+            : `${d.product_id} ${d.action} | conf: ${Math.min(d.confidence * 100, 100).toFixed(0)}% | signal: ${d.weighted_signal.toFixed(4)}`,
           color: ACTION_COLORS[d.action] || '#6b7280',
           priority,
         });
@@ -113,7 +113,7 @@ export default function ActivityFeed() {
         type: 'cycle',
         message: action === 'HOLD'
           ? `${d.product_id || 'multi'} HOLD`
-          : `${d.product_id || 'multi'} ${action} | conf: ${(confidence * 100).toFixed(0)}% | $${Number(d.price || 0).toLocaleString()}`,
+          : `${d.product_id || 'multi'} ${action} | conf: ${Math.min(confidence * 100, 100).toFixed(0)}% | $${Number(d.price || 0).toLocaleString()}`,
         color: ACTION_COLORS[action] || '#3b82f6',
         priority,
       };
@@ -211,7 +211,7 @@ export default function ActivityFeed() {
           </div>
         ) : (
           filtered.map((item) => (
-            <div key={item.id} className={`flex items-start gap-2 py-1.5 px-1 rounded ${priorityBg(item.priority)}`}>
+            <div key={item.id} className={`flex items-start gap-2 py-1.5 px-1 rounded ${priorityBg(item.priority)}`} style={item.priority === 'high' ? { borderLeftColor: item.color } : undefined}>
               <span
                 className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0"
                 style={{ backgroundColor: item.color }}

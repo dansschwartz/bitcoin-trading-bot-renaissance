@@ -26,23 +26,25 @@ export default function Risk() {
         <MetricCard
           title="Current Equity"
           value={metrics ? formatCurrency(metrics.current_equity) : '--'}
-          subtitle={metrics ? `Initial: ${formatCurrency(metrics.initial_capital)}` : ''}
+          subtitle={metrics ? `Initial ${formatCurrency(metrics.initial_capital)} + Realized + Unrealized` : ''}
           valueColor={metrics ? (metrics.current_equity >= metrics.initial_capital ? 'text-accent-green' : 'text-accent-red') : 'text-gray-100'}
         />
         <MetricCard
           title="Max Drawdown"
           value={metrics ? formatPercent(metrics.max_drawdown) : '--'}
+          subtitle="Peak-to-trough (realized)"
           valueColor={metrics && metrics.max_drawdown > 0.05 ? 'text-accent-red' : 'text-gray-100'}
         />
         <MetricCard
           title="Peak Equity"
           value={metrics ? formatCurrency(metrics.peak_equity) : '--'}
+          subtitle="Highest realized equity"
         />
         <MetricCard
           title="Sharpe Ratio"
           value={metrics?.sharpe_ratio != null ? metrics.sharpe_ratio.toFixed(2) : '--'}
           valueColor={metrics ? (metrics.sharpe_ratio >= 1 ? 'text-accent-green' : metrics.sharpe_ratio >= 0 ? 'text-gray-100' : 'text-accent-red') : 'text-gray-100'}
-          subtitle={metrics ? `${metrics.total_trading_days} trading days` : ''}
+          subtitle={metrics ? `Annualized, ${metrics.total_trading_days} trading days` : ''}
         />
       </div>
 
@@ -51,11 +53,13 @@ export default function Risk() {
         <MetricCard
           title="Cumulative P&L"
           value={metrics ? formatCurrency(metrics.cumulative_pnl) : '--'}
+          subtitle="Realized + Unrealized"
           valueColor={metrics ? (metrics.cumulative_pnl >= 0 ? 'text-accent-green' : 'text-accent-red') : 'text-gray-100'}
         />
         <MetricCard
           title="Unrealized P&L"
           value={metrics ? formatCurrency(metrics.unrealized_pnl) : '--'}
+          subtitle="Open positions mark-to-market"
           valueColor={metrics ? (metrics.unrealized_pnl >= 0 ? 'text-accent-green' : 'text-accent-red') : 'text-gray-100'}
         />
         <MetricCard

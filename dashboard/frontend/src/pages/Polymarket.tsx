@@ -122,7 +122,7 @@ export default function Polymarket() {
   const [summary, setSummary] = useState<PolymarketSummary | null>(null);
   const [edges, setEdges] = useState<EdgeOpportunity[]>([]);
   const [signal, setSignal] = useState<BridgeSignal | null>(null);
-  const [tab, setTab] = useState<'positions' | 'edges' | 'markets' | 'signal'>('positions');
+  const [tab, setTab] = useState<'positions' | 'edges' | 'markets' | 'signal' | 'strategy-a'>('positions');
   const [markets, setMarkets] = useState<EdgeOpportunity[]>([]);
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [positions, setPositions] = useState<PmPosition[]>([]);
@@ -250,7 +250,7 @@ export default function Polymarket() {
 
       {/* Tab Switcher */}
       <div className="flex gap-1 bg-surface-1 border border-surface-3 rounded-lg p-1 w-fit">
-        {(['positions', 'edges', 'markets', 'signal'] as const).map((t) => (
+        {(['positions', 'edges', 'markets', 'signal', 'strategy-a'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -263,7 +263,8 @@ export default function Polymarket() {
             {t === 'positions' ? `Positions (${openPositions.length} open)` :
              t === 'edges' ? `Edge Opportunities (${edges.length})` :
              t === 'markets' ? 'All Markets' :
-             'Bridge Signal'}
+             t === 'signal' ? 'Bridge Signal' :
+             'Strategy A'}
           </button>
         ))}
       </div>
@@ -279,6 +280,7 @@ export default function Polymarket() {
       {tab === 'edges' && <EdgesTable edges={edges} />}
       {tab === 'markets' && <MarketsTable markets={markets} />}
       {tab === 'signal' && <SignalDetail signal={signal} />}
+      {tab === 'strategy-a' && <StrategyAPanel />}
     </PageShell>
   );
 }
@@ -659,6 +661,261 @@ function SignalDetail({ signal }: { signal: BridgeSignal | null }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── Strategy A Panel ─────────────────────────────────────────── */
+
+interface Instrument {
+  key: string;
+  enabled: boolean;
+  asset: string;
+  min_edge: number;
+  min_price_move: number;
+  kelly_fraction: number;
+  max_bet_pct: number;
+  max_bet_usd: number;
+  lead_asset: string | null;
+  lead_must_agree: boolean;
+  cooldown_seconds: number;
+  skip_regimes: string[];
+  max_bets_per_hour: number;
+}
+
+interface LifecycleEntry {
+  id: number;
+  asset: string;
+  market_slug: string;
+  conviction_label: string;
+  decision: string;
+  t15_won: number | null;
+  t15_pnl: number | null;
+  ml_accuracy: number | null;
+  final_5min_reversed: number | null;
+  crowd_total_lag: number | null;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+interface LifecycleStats {
+  by_conviction: { conviction_label: string; total: number; wins: number; bets: number; skips: number; pnl: number }[];
+  reversal_rate: { total: number; reversed: number; pct: number };
+  ml_accuracy: { total: number; correct: number; pct: number };
+  crowd_lag_by_asset: { asset: string; avg_lag: number; avg_crowd_speed_0_5: number; avg_crowd_speed_0_10: number }[];
+  by_asset: { asset: string; total: number; wins: number; pnl: number }[];
+}
+
+function StrategyAPanel() {
+  const [instruments, setInstruments] = useState<Instrument[]>([]);
+  const [lifecycles, setLifecycles] = useState<LifecycleEntry[]>([]);
+  const [stats, setStats] = useState<LifecycleStats | null>(null);
+
+  useEffect(() => {
+    api.polymarketInstruments().then((d) =>
+      setInstruments(((d as Record<string, unknown>).instruments ?? []) as Instrument[])
+    ).catch(() => {});
+    api.polymarketLifecycle(50).then((d) =>
+      setLifecycles(((d as Record<string, unknown>).lifecycles ?? []) as LifecycleEntry[])
+    ).catch(() => {});
+    api.polymarketLifecycleStats().then((d) =>
+      setStats(d as unknown as LifecycleStats)
+    ).catch(() => {});
+  }, []);
+
+  return (
+    <div className="space-y-4">
+      {/* Instruments Config */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-gray-300 mb-3">
+          Strategy A: Confirmed Momentum — Instruments
+        </h3>
+        {instruments.length === 0 ? (
+          <p className="text-xs text-gray-500">No instruments configured.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            {instruments.map((inst) => (
+              <div key={inst.key} className={`bg-surface-2 rounded-lg p-3 border ${inst.enabled ? 'border-accent-green/30' : 'border-surface-3 opacity-60'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-gray-200">{inst.asset}</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${inst.enabled ? 'bg-accent-green/20 text-accent-green' : 'bg-gray-600 text-gray-400'}`}>
+                    {inst.enabled ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+                <div className="space-y-1 text-xs font-mono text-gray-400">
+                  <div className="flex justify-between">
+                    <span>Min Edge</span><span>{(inst.min_edge * 100).toFixed(1)}%</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Kelly</span><span>{(inst.kelly_fraction * 100).toFixed(0)}%</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Max Bet</span><span>${inst.max_bet_usd}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Max/hr</span><span>{inst.max_bets_per_hour}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Calibration Stats */}
+      {stats && (
+        <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+          <h3 className="text-sm font-medium text-gray-300 mb-3">Calibration Stats</h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div className="bg-surface-2 rounded-lg p-3">
+              <div className="text-xs text-gray-500">ML Accuracy (T=10)</div>
+              <div className="text-lg font-mono text-gray-200">
+                {stats.ml_accuracy.total > 0 ? `${stats.ml_accuracy.pct}%` : '--'}
+              </div>
+              <div className="text-[10px] text-gray-500">{stats.ml_accuracy.correct}/{stats.ml_accuracy.total}</div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-3">
+              <div className="text-xs text-gray-500">5min Reversal Rate</div>
+              <div className="text-lg font-mono text-gray-200">
+                {stats.reversal_rate.total > 0 ? `${stats.reversal_rate.pct}%` : '--'}
+              </div>
+              <div className="text-[10px] text-gray-500">{stats.reversal_rate.reversed}/{stats.reversal_rate.total}</div>
+            </div>
+          </div>
+
+          {/* By Conviction */}
+          {stats.by_conviction.length > 0 && (
+            <div className="mb-4">
+              <h4 className="text-xs text-gray-500 uppercase tracking-wider mb-2">By Conviction</h4>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs font-mono">
+                  <thead>
+                    <tr className="text-gray-500 border-b border-surface-3">
+                      <th className="text-left py-2 px-2">Label</th>
+                      <th className="text-right py-2 px-2">Total</th>
+                      <th className="text-right py-2 px-2">Bets</th>
+                      <th className="text-right py-2 px-2">Skips</th>
+                      <th className="text-right py-2 px-2">Wins</th>
+                      <th className="text-right py-2 px-2">Win Rate</th>
+                      <th className="text-right py-2 px-2">P&L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stats.by_conviction.map((c) => (
+                      <tr key={c.conviction_label} className="border-b border-surface-3/50">
+                        <td className="py-2 px-2 text-gray-300">{c.conviction_label || 'N/A'}</td>
+                        <td className="py-2 px-2 text-right text-gray-400">{c.total}</td>
+                        <td className="py-2 px-2 text-right text-gray-400">{c.bets}</td>
+                        <td className="py-2 px-2 text-right text-gray-500">{c.skips}</td>
+                        <td className="py-2 px-2 text-right text-gray-400">{c.wins}</td>
+                        <td className="py-2 px-2 text-right text-gray-300">
+                          {c.bets > 0 ? `${(c.wins / c.bets * 100).toFixed(0)}%` : '--'}
+                        </td>
+                        <td className={`py-2 px-2 text-right ${pnlColor(c.pnl)}`}>
+                          ${c.pnl.toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* By Asset */}
+          {stats.by_asset.length > 0 && (
+            <div>
+              <h4 className="text-xs text-gray-500 uppercase tracking-wider mb-2">By Asset (Bets Only)</h4>
+              <div className="flex flex-wrap gap-3">
+                {stats.by_asset.map((a) => (
+                  <div key={a.asset} className="bg-surface-2 rounded-lg p-3 min-w-[120px]">
+                    <div className="text-xs text-gray-500">{a.asset}</div>
+                    <div className={`text-lg font-mono ${pnlColor(a.pnl)}`}>
+                      ${a.pnl.toFixed(2)}
+                    </div>
+                    <div className="text-[10px] text-gray-500">
+                      {a.wins}/{a.total} won
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Lifecycle Audit Trail */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-gray-300 mb-3">
+          Lifecycle Audit Trail ({lifecycles.length})
+        </h3>
+        {lifecycles.length === 0 ? (
+          <p className="text-xs text-gray-500">No lifecycle records yet. Strategy A hasn't run.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-surface-3">
+                  <th className="text-left py-2 px-2">Time</th>
+                  <th className="text-left py-2 px-2">Asset</th>
+                  <th className="text-left py-2 px-2">Conviction</th>
+                  <th className="text-left py-2 px-2">Decision</th>
+                  <th className="text-center py-2 px-2">Won</th>
+                  <th className="text-right py-2 px-2">P&L</th>
+                  <th className="text-center py-2 px-2">ML OK</th>
+                  <th className="text-center py-2 px-2">Reversed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lifecycles.map((lc) => (
+                  <tr key={lc.id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
+                    <td className="py-2 px-2 text-gray-500">{formatTimestamp(lc.created_at)}</td>
+                    <td className="py-2 px-2 text-gray-200 font-medium">{lc.asset}</td>
+                    <td className="py-2 px-2">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        lc.conviction_label === 'CONFIRMED' ? 'bg-accent-green/20 text-accent-green' :
+                        lc.conviction_label === 'GROWING' ? 'bg-accent-yellow/20 text-accent-yellow' :
+                        'bg-surface-3 text-gray-400'
+                      }`}>
+                        {lc.conviction_label || '--'}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2">
+                      <span className={lc.decision?.startsWith('BET') ? 'text-accent-blue' : 'text-gray-500'}>
+                        {lc.decision || '--'}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2 text-center">
+                      {lc.t15_won != null ? (
+                        <span className={lc.t15_won === 1 ? 'text-accent-green' : 'text-accent-red'}>
+                          {lc.t15_won === 1 ? 'Y' : 'N'}
+                        </span>
+                      ) : '--'}
+                    </td>
+                    <td className={`py-2 px-2 text-right ${pnlColor(lc.t15_pnl ?? 0)}`}>
+                      {lc.t15_pnl != null ? `$${lc.t15_pnl.toFixed(2)}` : '--'}
+                    </td>
+                    <td className="py-2 px-2 text-center">
+                      {lc.ml_accuracy != null ? (
+                        <span className={lc.ml_accuracy === 1 ? 'text-accent-green' : 'text-accent-red'}>
+                          {lc.ml_accuracy === 1 ? 'Y' : 'N'}
+                        </span>
+                      ) : '--'}
+                    </td>
+                    <td className="py-2 px-2 text-center">
+                      {lc.final_5min_reversed != null ? (
+                        <span className={lc.final_5min_reversed === 1 ? 'text-accent-red' : 'text-accent-green'}>
+                          {lc.final_5min_reversed === 1 ? 'Y' : 'N'}
+                        </span>
+                      ) : '--'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

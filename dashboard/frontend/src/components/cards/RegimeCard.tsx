@@ -51,7 +51,7 @@ export default function RegimeCard() {
       </div>
       <div className="flex items-center justify-between mt-1">
         <p className="text-xs text-gray-500">
-          Confidence: {(confidence * 100).toFixed(1)}%
+          Confidence: {Math.min(confidence * 100, 100).toFixed(1)}%
         </p>
         <p className="text-[10px] text-gray-600 font-mono">{barsNeeded}</p>
       </div>

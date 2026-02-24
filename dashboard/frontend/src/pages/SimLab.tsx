@@ -137,7 +137,7 @@ function PerformanceDashboard() {
           valueColor={risk && risk.max_drawdown > 0.05 ? 'text-accent-red' : 'text-gray-100'}
         />
         <MetricCard
-          title="Win Rate"
+          title="Win Rate (All-Time)"
           value={pnlAll ? formatPercent(pnlAll.win_rate) : '--'}
           subtitle={pnlAll ? `${pnlAll.winning_round_trips ?? 0}/${pnlAll.total_round_trips ?? 0} round-trips` : ''}
           valueColor={pnlAll && pnlAll.win_rate >= 0.5 ? 'text-accent-green' : 'text-gray-100'}

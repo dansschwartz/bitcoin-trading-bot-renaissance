@@ -33,7 +33,7 @@ export default function DecisionTable() {
                     {d.action}
                   </span>
                 </td>
-                <td className="py-2 px-2 text-right text-gray-300">{(d.confidence * 100).toFixed(1)}%</td>
+                <td className="py-2 px-2 text-right text-gray-300">{Math.min(d.confidence * 100, 100).toFixed(1)}%</td>
                 <td className="py-2 px-2 text-right text-gray-400">{d.weighted_signal.toFixed(4)}</td>
                 <td className="py-2 px-2 text-right text-gray-400">{d.position_size.toFixed(4)}</td>
                 <td className="py-2 px-2">

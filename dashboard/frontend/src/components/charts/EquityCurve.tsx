@@ -71,7 +71,7 @@ export default function EquityCurve() {
                 showBenchmark ? 'bg-blue-500/20 text-blue-400' : 'text-gray-600 hover:text-gray-400'
               }`}
             >
-              BTC B&H
+              BTC Buy & Hold
             </button>
           )}
         </div>

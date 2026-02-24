@@ -48,6 +48,9 @@ export default function Arbitrage() {
       subtitle="Cross-exchange, triangular, and funding rate arbitrage"
       actions={
         <div className="flex items-center gap-2">
+          <span className="px-2 py-1 rounded text-xs font-medium bg-accent-yellow/20 text-accent-yellow">
+            PAPER TRADING
+          </span>
           <span
             className={`px-2 py-1 rounded text-xs font-medium ${
               isRunning ? 'bg-accent-green/20 text-accent-green' : 'bg-gray-600/40 text-gray-400'

@@ -134,6 +134,9 @@ export const api = {
   },
   polymarketPnl: () => get<Record<string, unknown>>('/api/polymarket/pnl'),
   polymarketExecutor: () => get<Record<string, unknown>>('/api/polymarket/executor'),
+  polymarketInstruments: () => get<Record<string, unknown>>('/api/polymarket/instruments'),
+  polymarketLifecycle: (limit = 50) => get<Record<string, unknown>>(`/api/polymarket/lifecycle?limit=${limit}`),
+  polymarketLifecycleStats: () => get<Record<string, unknown>>('/api/polymarket/lifecycle/stats'),
 
   // Devil Tracker
   devilSummary: (hours = 24) => get<Record<string, unknown>>(`/api/devil/summary?hours=${hours}`),

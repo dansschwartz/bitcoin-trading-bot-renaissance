@@ -27,9 +27,9 @@ export default function PositionSummaryCards() {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
       <MetricCard
-        title="Win Rate"
+        title="Win Rate (All-Time)"
         value={`${(summary.win_rate * 100).toFixed(1)}%`}
-        subtitle={`${summary.wins}W / ${summary.losses}L`}
+        subtitle={`${summary.wins}W / ${summary.losses}L of ${summary.total_closed} closed`}
         valueColor={summary.win_rate >= 0.5 ? 'text-accent-green' : 'text-accent-red'}
       />
       <MetricCard

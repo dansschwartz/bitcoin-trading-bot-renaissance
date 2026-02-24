@@ -46,13 +46,13 @@ export default function ExposurePanel() {
             <span className="text-accent-red">{formatCurrency(data.short_exposure)}</span>
           </div>
           <div className="flex justify-between border-t border-surface-3 pt-1">
-            <span className="text-gray-500">Net</span>
+            <span className="text-gray-500" title="Long - Short (directional bias)">Net (L-S)</span>
             <span className={data.net_exposure >= 0 ? 'text-accent-green' : 'text-accent-red'}>
               {formatCurrency(data.net_exposure)}
             </span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-500">Gross</span>
+            <span className="text-gray-500" title="Long + Short (total capital deployed)">Gross (L+S)</span>
             <span className="text-gray-300">{formatCurrency(data.gross_exposure)}</span>
           </div>
           <div className="flex justify-between">
