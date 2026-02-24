@@ -19,7 +19,9 @@ handles the profitable, intelligent management of positions.
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -98,6 +100,7 @@ class PositionReEvaluator:
         regime_detector: Any = None,
         devil_tracker: Any = None,
         mhpe: Any = None,
+        db_path: Optional[str] = None,
     ):
         raw = config or {}
         self.config: Dict[str, Any] = {**_DEFAULT_CONFIG, **raw}
@@ -108,6 +111,7 @@ class PositionReEvaluator:
         self.regime_detector = regime_detector
         self.devil_tracker = devil_tracker
         self.mhpe = mhpe  # MultiHorizonEstimator (Doc 11)
+        self._db_path = db_path
 
         # Strategy-specific overrides
         self._strategy_overrides: Dict[str, Dict[str, Any]] = raw.get(
@@ -226,6 +230,9 @@ class PositionReEvaluator:
 
         # ── STEP 2: UPDATE CURRENT CONDITIONS ──
         self._update_position_market_data(pos, market_state)
+
+        # ── STEP 2.5: RECORD P&L SNAPSHOT (for early-exit calibration) ──
+        self._record_snapshot(pos)
 
         # ── STEP 3: RE-SCORE SIGNAL CONFIDENCE ──
         rescored_confidence = self._rescore_signal(pos, market_state)
@@ -440,6 +447,53 @@ class PositionReEvaluator:
         funding = pair_data.get("funding_rate")
         if funding is not None:
             pos.current_funding_rate = float(funding)
+
+    # ═══════════════════════════════════════════════════════════
+    # STEP 2.5: RECORD P&L SNAPSHOT (per-minute for early-exit calibration)
+    # ═══════════════════════════════════════════════════════════
+
+    def _record_snapshot(self, pos: PositionContext) -> None:
+        """Write one row to position_snapshots for intermediate P&L tracking."""
+        if self._db_path is None:
+            return
+        try:
+            entry = float(pos.entry_price)
+            current = float(pos.current_price)
+            if entry <= 0 or current <= 0:
+                return
+
+            if pos.side == "long":
+                pnl_pct = (current - entry) / entry * 100.0
+            else:
+                pnl_pct = (entry - current) / entry * 100.0
+
+            conn = sqlite3.connect(self._db_path, timeout=5.0)
+            try:
+                conn.execute(
+                    "INSERT INTO position_snapshots "
+                    "(position_id, product_id, snapshot_time, hold_seconds, "
+                    " entry_price, current_price, unrealized_pnl_pct, "
+                    " unrealized_pnl_usd, side, confidence, regime) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        pos.position_id,
+                        pos.pair,
+                        datetime.now(timezone.utc).isoformat(),
+                        pos.age_seconds,
+                        entry,
+                        current,
+                        pnl_pct,
+                        float(pos.unrealized_pnl_usd),
+                        pos.side,
+                        pos.current_confidence,
+                        pos.current_regime,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("Snapshot write failed for %s: %s", pos.position_id, exc)
 
     # ═══════════════════════════════════════════════════════════
     # STEP 3: RE-SCORE SIGNAL CONFIDENCE

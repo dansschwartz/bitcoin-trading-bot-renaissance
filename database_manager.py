@@ -156,6 +156,23 @@ class DatabaseManager:
                 signal_name TEXT NOT NULL, accuracy REAL,
                 sample_count INTEGER, product_id TEXT)''')
 
+            # ── Position Snapshots: per-minute P&L tracking for early-exit calibration ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS position_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                snapshot_time TEXT NOT NULL,
+                hold_seconds REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                current_price REAL NOT NULL,
+                unrealized_pnl_pct REAL NOT NULL,
+                unrealized_pnl_usd REAL,
+                side TEXT NOT NULL,
+                confidence REAL,
+                regime TEXT)''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_pos ON position_snapshots(position_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_time ON position_snapshots(snapshot_time)')
+
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
 

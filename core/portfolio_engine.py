@@ -195,6 +195,7 @@ class PortfolioEngine:
                     regime_detector=regime_detector,
                     devil_tracker=devil_tracker,
                     mhpe=self.mhpe,
+                    db_path=full_config.get('database', {}).get('path', 'data/renaissance_bot.db'),
                 )
                 logger.info("PositionReEvaluator: ACTIVE — continuous position management")
             except Exception as exc:

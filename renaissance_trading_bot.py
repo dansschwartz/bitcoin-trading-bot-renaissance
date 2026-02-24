@@ -742,6 +742,7 @@ class RenaissanceTradingBot:
                     regime_detector=self.medallion_regime,
                     devil_tracker=self.devil_tracker,
                     mhpe=self.mhpe,
+                    db_path=self.config.get('database', {}).get('path', 'data/renaissance_bot.db'),
                 )
                 self.logger.info("PositionReEvaluator: ACTIVE — continuous position re-evaluation")
             except Exception as _re_err:
