@@ -241,13 +241,13 @@ class PairDiscoveryEngine:
         url = "https://api.mexc.com/api/v3/ticker/bookTicker"
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                     if resp.status != 200:
                         logger.warning(f"PAIR_DISCOVERY: MEXC bookTicker HTTP {resp.status}")
                         return {}
                     data = await resp.json()
         except Exception as e:
-            logger.warning(f"PAIR_DISCOVERY: MEXC direct REST failed: {e}")
+            logger.warning(f"PAIR_DISCOVERY: MEXC direct REST failed: {type(e).__name__}: {e}")
             return {}
 
         result: Dict[str, dict] = {}
@@ -283,7 +283,7 @@ class PairDiscoveryEngine:
                         return {}
                     data = await resp.json()
         except Exception as e:
-            logger.warning(f"PAIR_DISCOVERY: Binance direct REST failed: {e}")
+            logger.warning(f"PAIR_DISCOVERY: Binance direct REST failed: {type(e).__name__}: {e}")
             return {}
 
         result: Dict[str, dict] = {}
