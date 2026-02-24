@@ -1036,6 +1036,25 @@ def build_feature_sequence(
             f"zeros: {zero_cols[:10]}{'...' if len(zero_cols) > 10 else ''}"
         )
 
+    # ── Feature health diagnostic (throttled: every 100 calls) ────────────
+    if not hasattr(build_feature_sequence, '_health_counter'):
+        build_feature_sequence._health_counter = 0
+    build_feature_sequence._health_counter += 1
+    if build_feature_sequence._health_counter % 100 == 1:
+        last_row = feat_df.iloc[-1]
+        cross_names = [c for c in feat_df.columns if c.startswith(('lead_', 'corr_', 'spread_', 'mkt_'))]
+        deriv_names = [c for c in feat_df.columns if c.startswith(('funding_', 'oi_', 'taker_', 'fear_', 'ls_ratio', 'net_taker'))]
+        cross_vals = {c: round(float(last_row.get(c, 0)), 4) for c in cross_names}
+        deriv_vals = {c: round(float(last_row.get(c, 0)), 4) for c in deriv_names}
+        cross_active = sum(1 for v in cross_vals.values() if abs(v) > 1e-8)
+        deriv_active = sum(1 for v in deriv_vals.values() if abs(v) > 1e-8)
+        logger.info(
+            f"[FEATURE HEALTH] {_pair_key} (call #{build_feature_sequence._health_counter}): "
+            f"cross={cross_active}/{len(cross_names)} deriv={deriv_active}/{len(deriv_names)} | "
+            f"rows={len(feat_df)} | "
+            f"cross={cross_vals} | deriv={deriv_vals}"
+        )
+
     # Take last seq_len rows
     feat_arr = feat_df.tail(seq_len).values.astype(np.float32)
 

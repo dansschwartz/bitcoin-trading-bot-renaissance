@@ -2300,8 +2300,19 @@ class RenaissanceTradingBot:
                 if tier_scores:
                     _tier_multiplier = sum(tier_scores) / len(tier_scores)
 
+            # Cap prediction strength for sizing — strong predictions (>0.06) lose money
+            # Data: weak (<0.02) = 67.5% win/$4.52, strong (>0.10) = 48.7% win/-$3.63
+            PREDICTION_CAP = 0.06
+            sizing_signal = weighted_signal
+            if abs(weighted_signal) > PREDICTION_CAP:
+                sizing_signal = PREDICTION_CAP * (1.0 if weighted_signal > 0 else -1.0)
+                self.logger.info(
+                    f"PREDICTION CAPPED: {weighted_signal:+.4f} -> {sizing_signal:+.4f} "
+                    f"for sizing (direction unchanged)"
+                )
+
             sizing_result = self.position_sizer.calculate_size(
-                signal_strength=weighted_signal,
+                signal_strength=sizing_signal,
                 confidence=confidence,
                 current_price=current_price,
                 product_id=product_id,

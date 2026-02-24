@@ -353,6 +353,16 @@ class PositionReEvaluator:
                 urgency="high",
             )
 
+        # Aged profitable: after 70% of TTL, take any profit — edge is decaying
+        # Data: <5min holds = 97% win, >15min = 47% win. Don't let winners become losers.
+        if pos.time_elapsed_pct >= 0.7 and pos.is_profitable:
+            return self._close_result(
+                pos, "AGED_PROFITABLE",
+                f"past 70%% TTL ({pos.age_seconds:.0f}s/{pos.signal_ttl_seconds}s) with profit ({pos.unrealized_pnl_bps:.1f}bps)",
+                pos.current_confidence, pos.remaining_edge_bps,
+                urgency="normal",
+            )
+
         # Risk budget exhausted
         max_loss_bps = self._cfg(pos, "max_position_loss_bps")
         if pos.unrealized_pnl_bps < -max_loss_bps:
