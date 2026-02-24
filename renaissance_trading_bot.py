@@ -3079,8 +3079,8 @@ class RenaissanceTradingBot:
             if not getattr(self, '_history_preloaded', False):
                 self._history_preloaded = True
                 # Preload ALL pairs from Binance (300 candles for 200-bar rolling windows)
-                preload_pairs = self.breakout_scanner.get_always_scan_pairs() if self.scanner_enabled else \
-                    list(self.product_ids)
+                # corr_z needs rolling(50).corr→rolling(200).mean = 250 bars minimum
+                preload_pairs = list(self.product_ids)
                 for pid in preload_pairs:
                     try:
                         bsym = self._pair_binance_symbols.get(pid, to_binance_symbol(pid))
