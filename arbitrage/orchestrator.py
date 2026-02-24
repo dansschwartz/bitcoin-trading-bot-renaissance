@@ -38,6 +38,7 @@ from arbitrage.inventory.manager import InventoryManager
 from arbitrage.tracking.performance import PerformanceTracker
 from arbitrage.exchanges.base import Trade
 from arbitrage.safety.contract_verifier import ContractVerifier
+from arbitrage.detector.pair_discovery import PairDiscoveryEngine
 
 logger = logging.getLogger("arb.orchestrator")
 
@@ -94,6 +95,15 @@ class ArbitrageOrchestrator:
         # Contract verification safety layer
         self.contract_verifier = ContractVerifier(
             self.mexc, self.binance, config=self.config,
+        )
+
+        # Dynamic pair discovery for cross-exchange arb
+        self.pair_discovery = PairDiscoveryEngine(
+            mexc=self.mexc,
+            binance=self.binance,
+            book_manager=self.book_manager,
+            contract_verifier=self.contract_verifier,
+            config=self.config,
         )
 
         # Strategies
@@ -208,11 +218,22 @@ class ArbitrageOrchestrator:
         cross_exchange_enabled = self.config.get('cross_exchange', {}).get('enabled', True)
         if not cross_exchange_enabled:
             logger.info("Cross-exchange arbitrage DISABLED by config")
+        pair_discovery_enabled = (
+            cross_exchange_enabled
+            and self.config.get('pair_discovery', {}).get('enabled', False)
+        )
+        if pair_discovery_enabled:
+            logger.info("Dynamic pair discovery ENABLED for cross-exchange arb")
+
         tasks = [
             asyncio.create_task(self._run_book_manager(), name="book_manager"),
             *(
                 [asyncio.create_task(self._run_cross_exchange(), name="cross_exchange")]
                 if cross_exchange_enabled else []
+            ),
+            *(
+                [asyncio.create_task(self._run_pair_discovery(), name="pair_discovery")]
+                if pair_discovery_enabled else []
             ),
             asyncio.create_task(self._run_execution_loop(), name="executor"),
             asyncio.create_task(self._run_funding_arb(), name="funding_arb"),
@@ -239,6 +260,7 @@ class ArbitrageOrchestrator:
     async def stop(self):
         self._running = False
         self.cross_exchange_detector.stop()
+        self.pair_discovery.stop()
         self.funding_arb.stop()
         self.triangular_arb.stop()
         if self.triangular_arb_bybit:
@@ -268,6 +290,14 @@ class ArbitrageOrchestrator:
             await self.cross_exchange_detector.run()
         except Exception as e:
             logger.error(f"Cross-exchange detector error: {e}")
+
+    async def _run_pair_discovery(self):
+        """Run dynamic pair discovery for cross-exchange arb."""
+        await asyncio.sleep(15)  # Wait for exchange connections + initial books
+        try:
+            await self.pair_discovery.run()
+        except Exception as e:
+            logger.error(f"Pair discovery error: {e}")
 
     async def _run_execution_loop(self):
         """Consume signals from queue and execute trades."""
@@ -503,6 +533,16 @@ class ArbitrageOrchestrator:
         logger.info(f"  Risk: {'HALTED' if risk_status['halted'] else 'OK'} | "
                     f"Daily PnL: ${risk_status['daily_pnl_usd']:.2f} | "
                     f"Exposure: ${risk_status['total_exposure_usd']:.2f}")
+        try:
+            disc_stats = self.pair_discovery.get_stats()
+            if disc_stats.get('scan_count', 0) > 0:
+                logger.info(
+                    f"  Discovery: {disc_stats['total_overlapping']} overlapping | "
+                    f"{disc_stats['above_threshold']} above threshold | "
+                    f"{disc_stats['active_discovered_pairs']} active"
+                )
+        except Exception:
+            pass
         logger.info("=" * 60)
 
     def get_full_status(self) -> dict:
@@ -544,6 +584,10 @@ class ArbitrageOrchestrator:
             contract_stats = self.contract_verifier.get_stats()
         except Exception:
             contract_stats = {}
+        try:
+            discovery_stats = self.pair_discovery.get_stats()
+        except Exception:
+            discovery_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -556,6 +600,7 @@ class ArbitrageOrchestrator:
             "risk": risk_status,
             "tracker_summary": tracker_summary,
             "contract_verification": contract_stats,
+            "pair_discovery": discovery_stats,
         }
 
     def _log_final_summary(self):

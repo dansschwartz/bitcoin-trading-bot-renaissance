@@ -117,13 +117,18 @@ class UnifiedPairView:
 
 
 class UnifiedBookManager:
-    """Manages order books for all monitored pairs across both exchanges."""
+    """Manages order books for all monitored pairs across both exchanges.
+
+    Supports dynamic pair addition/removal via add_pair()/remove_pair()
+    for use by PairDiscoveryEngine.
+    """
 
     def __init__(self, mexc_client, binance_client, pairs: Optional[List[str]] = None,
                  bar_aggregator=None):
         self.mexc = mexc_client
         self.binance = binance_client
         self.monitored_pairs = pairs or PHASE_1_PAIRS
+        self._initial_pairs: List[str] = list(self.monitored_pairs)  # Static pairs (never demoted)
         self.pairs: Dict[str, UnifiedPairView] = {}
         self._bar_aggregator = bar_aggregator
         self._running = False
@@ -157,6 +162,45 @@ class UnifiedBookManager:
         self._running = False
         if self._validation_task:
             self._validation_task.cancel()
+
+    async def add_pair(self, pair: str) -> bool:
+        """Dynamically add a pair to active monitoring. Returns True if newly added."""
+        if pair in self.pairs:
+            return False
+        self.pairs[pair] = UnifiedPairView(symbol=pair)
+        # Subscribe MEXC order book (per-symbol WebSocket, works immediately)
+        try:
+            await self.mexc.subscribe_order_book(
+                pair,
+                callback=lambda book, p=pair: self._on_mexc_update(p, book),
+                depth=20,
+            )
+        except Exception as e:
+            logger.warning(f"MEXC subscribe failed for dynamic pair {pair}: {e}")
+        # Binance: initial REST fetch (no WS reconnect needed — REST refresh handles it)
+        try:
+            rest_book = await self.binance.get_order_book(pair, depth=20)
+            if pair in self.pairs:
+                self.pairs[pair].binance_book = rest_book
+                self.pairs[pair].binance_last_update = datetime.utcnow()
+        except Exception as e:
+            logger.debug(f"Binance initial fetch failed for dynamic pair {pair}: {e}")
+        return True
+
+    async def remove_pair(self, pair: str) -> bool:
+        """Dynamically remove a pair from active monitoring.
+
+        Only removes dynamically-added pairs; initial (static) pairs are protected.
+        Returns True if the pair was removed.
+        """
+        if pair not in self.pairs:
+            return False
+        if pair in self._initial_pairs:
+            logger.debug(f"Cannot remove static pair {pair}")
+            return False
+        del self.pairs[pair]
+        # MEXC WS callback cleanup happens naturally (no messages for removed symbol)
+        return True
 
     async def _on_mexc_update(self, pair: str, book: OrderBook):
         if pair in self.pairs:
@@ -192,43 +236,58 @@ class UnifiedBookManager:
                 except Exception:
                     pass
 
-    async def _validation_loop(self):
-        """Every 30s, validate local books against REST snapshots on both exchanges."""
-        while self._running:
-            await asyncio.sleep(30)
-            for pair in self.monitored_pairs:
-                # Validate + refresh MEXC
-                try:
-                    rest_book = await self.mexc.get_order_book(pair, depth=20)
-                    local_book = self.pairs[pair].mexc_book
-                    if local_book and rest_book and rest_book.best_bid and local_book.best_bid:
-                        diff = abs(local_book.best_bid - rest_book.best_bid)
-                        if rest_book.best_bid > 0 and diff / rest_book.best_bid > Decimal('0.001'):
-                            logger.warning(
-                                f"Book drift: {pair} MEXC local={local_book.best_bid} "
-                                f"rest={rest_book.best_bid}"
-                            )
-                    # Always refresh to keep books fresh (critical for REST fallback)
-                    self.pairs[pair].mexc_book = rest_book
-                    self.pairs[pair].mexc_last_update = datetime.utcnow()
-                except Exception as e:
-                    logger.debug(f"MEXC validation error {pair}: {e}")
+    async def _refresh_pair(self, pair: str) -> None:
+        """REST-refresh a single pair on both exchanges (used by validation loop)."""
+        # MEXC
+        try:
+            rest_book = await self.mexc.get_order_book(pair, depth=20)
+            if pair in self.pairs:
+                local_book = self.pairs[pair].mexc_book
+                if local_book and rest_book and rest_book.best_bid and local_book.best_bid:
+                    diff = abs(local_book.best_bid - rest_book.best_bid)
+                    if rest_book.best_bid > 0 and diff / rest_book.best_bid > Decimal('0.001'):
+                        logger.warning(
+                            f"Book drift: {pair} MEXC local={local_book.best_bid} "
+                            f"rest={rest_book.best_bid}"
+                        )
+                self.pairs[pair].mexc_book = rest_book
+                self.pairs[pair].mexc_last_update = datetime.utcnow()
+        except Exception as e:
+            logger.debug(f"MEXC validation error {pair}: {e}")
 
-                # Validate + refresh Binance
-                try:
-                    rest_book = await self.binance.get_order_book(pair, depth=20)
-                    local_book = self.pairs[pair].binance_book
-                    if local_book and rest_book and rest_book.best_bid and local_book.best_bid:
-                        diff = abs(local_book.best_bid - rest_book.best_bid)
-                        if rest_book.best_bid > 0 and diff / rest_book.best_bid > Decimal('0.001'):
-                            logger.warning(
-                                f"Book drift: {pair} Binance local={local_book.best_bid} "
-                                f"rest={rest_book.best_bid}"
-                            )
-                    self.pairs[pair].binance_book = rest_book
-                    self.pairs[pair].binance_last_update = datetime.utcnow()
-                except Exception as e:
-                    logger.debug(f"Binance validation error {pair}: {e}")
+        # Binance
+        try:
+            rest_book = await self.binance.get_order_book(pair, depth=20)
+            if pair in self.pairs:
+                local_book = self.pairs[pair].binance_book
+                if local_book and rest_book and rest_book.best_bid and local_book.best_bid:
+                    diff = abs(local_book.best_bid - rest_book.best_bid)
+                    if rest_book.best_bid > 0 and diff / rest_book.best_bid > Decimal('0.001'):
+                        logger.warning(
+                            f"Book drift: {pair} Binance local={local_book.best_bid} "
+                            f"rest={rest_book.best_bid}"
+                        )
+                self.pairs[pair].binance_book = rest_book
+                self.pairs[pair].binance_last_update = datetime.utcnow()
+        except Exception as e:
+            logger.debug(f"Binance validation error {pair}: {e}")
+
+    async def _validation_loop(self):
+        """Periodically refresh all pairs via REST (parallel).
+
+        Uses self.pairs.keys() instead of self.monitored_pairs so dynamically
+        added pairs are also refreshed. Runs every 10s to keep dynamic pairs fresh.
+        """
+        while self._running:
+            await asyncio.sleep(10)
+            pairs = list(self.pairs.keys())
+            if not pairs:
+                continue
+            # Parallel refresh — 40 pairs × 2 exchanges = 80 calls, well within rate limits
+            await asyncio.gather(
+                *[self._refresh_pair(p) for p in pairs],
+                return_exceptions=True,
+            )
 
     def get_status(self) -> dict:
         fresh = sum(1 for v in self.pairs.values() if v.is_tradeable)

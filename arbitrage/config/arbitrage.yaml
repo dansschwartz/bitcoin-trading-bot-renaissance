@@ -53,7 +53,7 @@ pairs:
     - ENJ/USDT
 
 cross_exchange:
-  enabled: false                       # Disabled — paper fills are phantom (976K trades, $643K fake P&L)
+  enabled: true                        # Re-enabled with dynamic pair discovery
   min_net_spread_bps: 1.0
   signal_ttl_seconds: 5
   min_trade_usd: 10                    # Low for paper trading — raise to $100+ for live
@@ -62,6 +62,22 @@ cross_exchange:
   fill_timeout_seconds: 3
   emergency_close_seconds: 5
   order_type: LIMIT_MAKER
+
+pair_discovery:
+  enabled: true
+  scan_interval_sec: 60                # How often to scan all tickers
+  max_active_pairs: 40                 # Top N pairs to monitor with full order books
+  min_gross_spread_bps: 3.0            # Minimum gross spread to consider a pair
+  min_volume_usdt: 10000               # Minimum 24h USDT volume (from Binance)
+  demotion_grace_scans: 3              # Keep pair for N scans after it drops below threshold
+  excluded_bases:                      # Additional exclusions beyond hardcoded set
+    - USDC
+    - BUSD
+    - DAI
+    - TUSD
+    - FDUSD
+    - WBTC
+    - WETH
 
 funding_rate:
   enabled: true
