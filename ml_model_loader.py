@@ -1000,7 +1000,9 @@ def build_feature_sequence(
     if price_df is None or len(price_df) < seq_len:
         return None
 
-    df = price_df.tail(seq_len + 50).copy()
+    # Need 250+ rows for rolling-window features (corr_z needs rolling(50).corr
+    # then rolling(200).mean = 250 bars).  seq_len + 270 → 300 rows.
+    df = price_df.tail(seq_len + 270).copy()
 
     # Trim derivatives_data to match
     if derivatives_data is not None:
@@ -1015,7 +1017,7 @@ def build_feature_sequence(
         for p, cdf in cross_data.items():
             if p == pair_name:
                 continue
-            _cross[p] = cdf.tail(seq_len + 50).copy().reset_index(drop=True)
+            _cross[p] = cdf.tail(seq_len + 270).copy().reset_index(drop=True)
         cross_data = _cross if _cross else None
 
     df = df.reset_index(drop=True)
