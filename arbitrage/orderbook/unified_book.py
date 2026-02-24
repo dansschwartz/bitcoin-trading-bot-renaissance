@@ -273,19 +273,25 @@ class UnifiedBookManager:
             logger.debug(f"Binance validation error {pair}: {e}")
 
     async def _validation_loop(self):
-        """Periodically refresh all pairs via REST (parallel).
+        """Periodically refresh all pairs via REST (parallel with concurrency limit).
 
         Uses self.pairs.keys() instead of self.monitored_pairs so dynamically
-        added pairs are also refreshed. Runs every 10s to keep dynamic pairs fresh.
+        added pairs are also refreshed. Semaphore limits concurrent REST calls
+        to avoid hitting Binance rate limits (1200 weight/min, depth=20 costs 5 each).
         """
+        sem = asyncio.Semaphore(5)  # Max 5 concurrent pair refreshes (= 10 REST calls)
+
+        async def _limited_refresh(pair: str) -> None:
+            async with sem:
+                await self._refresh_pair(pair)
+
         while self._running:
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)  # 30s refresh — 40 pairs × 2 × 5 weight / 30s = 667 wt/min (under 1200)
             pairs = list(self.pairs.keys())
             if not pairs:
                 continue
-            # Parallel refresh — 40 pairs × 2 exchanges = 80 calls, well within rate limits
             await asyncio.gather(
-                *[self._refresh_pair(p) for p in pairs],
+                *[_limited_refresh(p) for p in pairs],
                 return_exceptions=True,
             )
 
