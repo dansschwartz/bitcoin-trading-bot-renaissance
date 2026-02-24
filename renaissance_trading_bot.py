@@ -3838,11 +3838,7 @@ class RenaissanceTradingBot:
                             if self.regime_overlay and self.regime_overlay.enabled:
                                 _sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
 
-                            # Scanner data from DB
-                            _sa_scanner = self._get_polymarket_scanner_data()
-
                             await self.polymarket_executor.execute_cycle(
-                                scanner_data=_sa_scanner,
                                 ml_predictions=_sa_ml_preds,
                                 current_prices=_sa_prices,
                                 current_regime=_sa_regime,
@@ -5311,25 +5307,7 @@ class RenaissanceTradingBot:
         edge = max(0.0, accuracy - 0.5)
         return min(edge, 0.15)
 
-    def _get_polymarket_scanner_data(self) -> list:
-        """Read latest scanner results from database for Strategy A."""
-        try:
-            import sqlite3 as _sa_sql
-            db_path = self.config.get("database", {}).get("path", "data/renaissance_bot.db")
-            conn = _sa_sql.connect(db_path)
-            conn.row_factory = _sa_sql.Row
-            rows = conn.execute("""
-                SELECT condition_id AS market_id, slug, question, market_type, asset,
-                       yes_price AS crowd_prob_yes, our_probability, edge, direction,
-                       volume_24h, deadline
-                FROM polymarket_scanner
-                WHERE scan_time = (SELECT MAX(scan_time) FROM polymarket_scanner)
-                  AND direction IS NOT NULL
-            """).fetchall()
-            conn.close()
-            return [dict(r) for r in rows]
-        except Exception:
-            return []
+    # _get_polymarket_scanner_data() removed — Strategy A now discovers markets directly
 
     def _update_dynamic_thresholds(self, product_id: str, market_data: Dict[str, Any]):
         """Adjusts BUY/SELL thresholds based on volatility and confidence (Step 8)"""

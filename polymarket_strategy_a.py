@@ -21,8 +21,11 @@ Conviction Evolution (Lifecycle Checkpoints):
     SIDEWAYS:  no clear direction -> skip
     CONFLICTED: ML flip-flopped -> skip
 
-NOTE: As of 2026-02-23, no 15m direction markets exist on Polymarket.
-      This framework will auto-activate when they appear.
+Market Discovery:
+  Rolling 15m direction markets use slug pattern: {asset}-updown-15m-{unix_timestamp}
+  where unix_timestamp is aligned to 900-second (15-min) boundaries.
+  Discovered via direct Gamma API lookup (no scanner dependency).
+  Confirmed assets: BTC, ETH, SOL, XRP.
 """
 
 import json
@@ -105,7 +108,7 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
         name="BTC 15m Confirmed Momentum",
         asset="BTC",
         ml_pair="BTC-USD",
-        slug_pattern=r"(?:btc|bitcoin).*(?:up|down).*(?:15|minute)|(?:btc|bitcoin).*(?:15|minute).*(?:up|down)",
+        slug_pattern="btc-updown-15m-{ts}",
         min_price_move_pct=0.15,
         max_price_chop_ratio=0.40,
         min_ml_confidence=55.0,
@@ -127,7 +130,7 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
         name="ETH 15m Confirmed Momentum",
         asset="ETH",
         ml_pair="ETH-USD",
-        slug_pattern=r"(?:eth|ethereum).*(?:up|down).*(?:15|minute)|(?:eth|ethereum).*(?:15|minute).*(?:up|down)",
+        slug_pattern="eth-updown-15m-{ts}",
         min_price_move_pct=0.15,
         max_price_chop_ratio=0.45,
         min_ml_confidence=50.0,
@@ -149,7 +152,7 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
         name="SOL 15m Confirmed Momentum",
         asset="SOL",
         ml_pair="SOL-USD",
-        slug_pattern=r"(?:sol|solana).*(?:up|down).*(?:15|minute)|(?:sol|solana).*(?:15|minute).*(?:up|down)",
+        slug_pattern="sol-updown-15m-{ts}",
         min_price_move_pct=0.25,
         max_price_chop_ratio=0.45,
         min_ml_confidence=50.0,
@@ -165,13 +168,13 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
         lead_must_agree=True,
     )
 
-    # 4. DOGE 15m Direction
-    # Least efficient crowd (~240s reprice). Meme risk handled by ML filter.
+    # 4. DOGE 15m Direction — DISABLED (no 15m direction market on Polymarket)
     instruments["doge_15m"] = InstrumentConfig(
         name="DOGE 15m Confirmed Momentum",
         asset="DOGE",
         ml_pair="DOGE-USD",
-        slug_pattern=r"(?:doge|dogecoin).*(?:up|down).*(?:15|minute)|(?:doge|dogecoin).*(?:15|minute).*(?:up|down)",
+        slug_pattern="doge-updown-15m-{ts}",
+        enabled=False,
         min_price_move_pct=0.15,
         max_price_chop_ratio=0.50,
         min_ml_confidence=45.0,
@@ -193,7 +196,7 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
         name="XRP 15m Confirmed Momentum",
         asset="XRP",
         ml_pair="BTC-USD",  # Fallback: use BTC model
-        slug_pattern=r"xrp.*(?:up|down).*(?:15|minute)|xrp.*(?:15|minute).*(?:up|down)",
+        slug_pattern="xrp-updown-15m-{ts}",
         min_price_move_pct=0.15,
         max_price_chop_ratio=0.35,
         min_ml_confidence=50.0,
@@ -445,16 +448,20 @@ class ConvictionTracker:
 # THE EXECUTOR
 # ===================================================================
 
+GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
+MARKET_CACHE_TTL = 120  # 2-minute cache per slug
+
+
 class StrategyAExecutor:
     """
     Executes Strategy A (Confirmed Momentum) across 5 instruments.
 
     Each cycle:
-    1. Fetch active direction markets from scanner data
+    1. Discover current 15m direction markets via slug construction + Gamma API
     2. Match markets to registered instruments
     3. Record checkpoint data at T=0, T=5, T=10
     4. At T=10: compute conviction, evaluate, place bet if all pass
-    5. Check resolution of open positions
+    5. Check resolution of open positions (API + price-based fallback)
     """
 
     def __init__(self, config: dict, db_path: str, logger: Optional[logging.Logger] = None):
@@ -482,6 +489,9 @@ class StrategyAExecutor:
 
         # Conviction trackers: slug -> ConvictionTracker
         self.trackers: Dict[str, ConvictionTracker] = {}
+
+        # Market cache: slug -> (market_dict, fetch_timestamp)
+        self._market_cache: Dict[str, Tuple[dict, float]] = {}
 
         # Database
         self._ensure_tables()
@@ -692,7 +702,6 @@ class StrategyAExecutor:
 
     async def execute_cycle(
         self,
-        scanner_data: list,
         ml_predictions: dict,
         current_prices: dict,
         current_regime: str = "unknown",
@@ -701,7 +710,6 @@ class StrategyAExecutor:
         Called every bot cycle from the main trading loop.
 
         Args:
-            scanner_data: Polymarket scanner results (list of dicts)
             ml_predictions: {pair: {prediction, agreement, confidence}}
             current_prices: {pair: current_price}
             current_regime: regime detector label
@@ -716,9 +724,9 @@ class StrategyAExecutor:
             self.hourly_reset = now
 
         # Check resolution of open positions
-        self._check_resolutions()
+        self._check_resolutions(current_prices)
 
-        # Find direction markets matching our instruments
+        # Discover and process current 15m direction markets
         for inst_key, inst in self.instruments.items():
             if not inst.enabled:
                 continue
@@ -736,8 +744,8 @@ class StrategyAExecutor:
                 self.logger.debug(f"[{inst.asset}] Skipping: regime '{current_regime}' excluded")
                 continue
 
-            # Find matching market in scanner data
-            market = self._find_market(inst, scanner_data)
+            # Discover market via slug construction + Gamma API
+            market = self._discover_market(inst)
             if not market:
                 continue
 
@@ -747,7 +755,9 @@ class StrategyAExecutor:
 
             slug = market.get("slug", "")
             current_price = current_prices.get(inst.ml_pair, 0)
-            crowd_up = market.get("crowd_prob_yes", 0.5)
+
+            # Parse crowd pricing from Gamma API response
+            crowd_up = self._parse_crowd_up(market)
 
             # ML data
             ml_data = ml_predictions.get(inst.ml_pair, {})
@@ -810,7 +820,8 @@ class StrategyAExecutor:
                 f"Price=${current_price:.2f} | "
                 f"Crowd UP={crowd_up:.0%} | "
                 f"ML={'UP' if ml_pred > 0 else 'DOWN'} conf={ml_conf:.0f} | "
-                f"Regime={current_regime}"
+                f"Regime={current_regime} | "
+                f"Slug={slug}"
             )
 
             # DECISION AT T=10 ONLY
@@ -1025,18 +1036,135 @@ class StrategyAExecutor:
         }
 
     # ----------------------------------------------------------
-    # MARKET FINDING + TIMING
+    # MARKET DISCOVERY (direct slug construction + Gamma API)
     # ----------------------------------------------------------
 
-    def _find_market(self, inst: InstrumentConfig, scanner_data: list) -> Optional[dict]:
-        """Find an active Polymarket market matching this instrument."""
-        for mkt in scanner_data:
-            if mkt.get("market_type") != "DIRECTION":
-                continue
-            slug = mkt.get("slug", "")
-            if re.search(inst.slug_pattern, slug, re.IGNORECASE):
-                return mkt
+    def _discover_market(self, inst: InstrumentConfig) -> Optional[dict]:
+        """
+        Discover the current 15m direction market for an instrument.
+        Constructs the slug from current time, fetches from Gamma API with cache.
+        """
+        now_ts = int(time.time())
+        window_ts = (now_ts // 900) * 900
+        slug = inst.slug_pattern.format(ts=window_ts)
+
+        # Check cache
+        cached = self._market_cache.get(slug)
+        if cached:
+            market_data, cache_time = cached
+            if now_ts - cache_time < MARKET_CACHE_TTL:
+                return market_data
+
+        # Fetch from Gamma API
+        market = self._fetch_market_by_slug(slug)
+        if market:
+            self._market_cache[slug] = (market, now_ts)
+            return market
+
+        # If current window not found, try previous window (may still be open)
+        prev_slug = inst.slug_pattern.format(ts=window_ts - 900)
+        cached_prev = self._market_cache.get(prev_slug)
+        if cached_prev:
+            market_data, cache_time = cached_prev
+            if now_ts - cache_time < MARKET_CACHE_TTL:
+                return market_data
+
+        market = self._fetch_market_by_slug(prev_slug)
+        if market:
+            self._market_cache[prev_slug] = (market, now_ts)
+            return market
+
         return None
+
+    def _fetch_market_by_slug(self, slug: str) -> Optional[dict]:
+        """Fetch a single market from Gamma API by slug. Returns normalized dict."""
+        try:
+            resp = requests.get(
+                GAMMA_MARKETS_URL,
+                params={"slug": slug},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return None
+
+            markets = resp.json()
+            if not markets:
+                return None
+
+            m = markets[0]
+
+            # Parse end date
+            end_date = m.get("endDate", "")
+            # Parse outcome prices
+            crowd_up = self._parse_crowd_up(m)
+
+            return {
+                "slug": m.get("slug", slug),
+                "question": m.get("question", ""),
+                "market_type": "DIRECTION",
+                "asset": self._extract_asset(m.get("question", "")),
+                "condition_id": m.get("conditionId", ""),
+                "market_id": m.get("id", ""),
+                "crowd_prob_yes": crowd_up,
+                "deadline": end_date,
+                "volume_24h": float(m.get("volume24hr", 0) or 0),
+                "liquidity": float(m.get("liquidity", 0) or 0),
+                "end_date_source": m.get("endDateIso", end_date),
+                "resolved": m.get("resolved", False),
+                "gamma_raw": m,  # Keep raw for resolution checks
+            }
+        except Exception as e:
+            self.logger.debug(f"Gamma API fetch failed for {slug}: {e}")
+            return None
+
+    @staticmethod
+    def _parse_crowd_up(market: dict) -> float:
+        """Extract YES price (crowd probability of UP) from market data."""
+        # If already parsed (from cache)
+        if "crowd_prob_yes" in market and market["crowd_prob_yes"] is not None:
+            raw = market.get("gamma_raw")
+            if raw is None:
+                return float(market["crowd_prob_yes"])
+
+        # Parse from Gamma API raw response
+        raw = market.get("gamma_raw", market)
+        prices = raw.get("outcomePrices", "[]")
+        if isinstance(prices, str):
+            try:
+                prices = json.loads(prices)
+            except (json.JSONDecodeError, TypeError):
+                prices = []
+
+        if isinstance(prices, list) and len(prices) >= 1:
+            try:
+                return float(prices[0])
+            except (ValueError, TypeError):
+                pass
+
+        # Fallback: bestAsk/bestBid
+        best_ask = raw.get("bestAsk")
+        if best_ask:
+            try:
+                return float(best_ask)
+            except (ValueError, TypeError):
+                pass
+
+        return 0.5
+
+    @staticmethod
+    def _extract_asset(question: str) -> str:
+        """Extract asset name from question like 'Bitcoin Up or Down - ...'."""
+        q = question.lower()
+        for name, symbol in [
+            ("bitcoin", "BTC"), ("btc", "BTC"),
+            ("ethereum", "ETH"), ("eth", "ETH"),
+            ("solana", "SOL"), ("sol", "SOL"),
+            ("dogecoin", "DOGE"), ("doge", "DOGE"),
+            ("xrp", "XRP"), ("ripple", "XRP"),
+        ]:
+            if name in q:
+                return symbol
+        return "UNKNOWN"
 
     def _get_minutes_remaining(self, market: dict) -> Optional[float]:
         """Get minutes remaining until market resolution."""
@@ -1053,10 +1181,8 @@ class StrategyAExecutor:
 
     def _cleanup_stale_trackers(self) -> None:
         """Remove trackers older than 20 minutes."""
-        now_iso = datetime.now(timezone.utc).isoformat()
         stale = []
         for slug, tracker in self.trackers.items():
-            # If T=0 was recorded > 20 min ago, it's stale
             if 0 in tracker.checkpoints:
                 t0_ts = tracker.checkpoints[0].get("timestamp", "")
                 if t0_ts:
@@ -1069,6 +1195,12 @@ class StrategyAExecutor:
                         stale.append(slug)
         for slug in stale:
             del self.trackers[slug]
+
+        # Also clean up old cache entries
+        now_ts = int(time.time())
+        stale_cache = [k for k, (_, ts) in self._market_cache.items() if now_ts - ts > 1800]
+        for k in stale_cache:
+            del self._market_cache[k]
 
     # ----------------------------------------------------------
     # BET PLACEMENT
@@ -1117,8 +1249,11 @@ class StrategyAExecutor:
     # RESOLUTION
     # ----------------------------------------------------------
 
-    def _check_resolutions(self) -> None:
-        """Check if open Strategy A positions have resolved."""
+    def _check_resolutions(self, current_prices: Optional[dict] = None) -> None:
+        """
+        Check if open Strategy A positions have resolved.
+        Uses Gamma API + price-based fallback for stale positions.
+        """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         open_positions = conn.execute(
@@ -1130,123 +1265,201 @@ class StrategyAExecutor:
             if not slug:
                 continue
 
-            try:
-                resp = requests.get(
-                    f"https://gamma-api.polymarket.com/markets?slug={slug}",
-                    timeout=10,
-                )
-                if resp.status_code != 200:
-                    continue
-
-                markets = resp.json()
-                if not markets:
-                    continue
-
-                market = None
-                for m in markets:
-                    if m.get("resolved"):
-                        market = m
-                        break
-                if not market:
-                    # Check if deadline passed
-                    deadline_str = pos["deadline"]
-                    if deadline_str:
-                        try:
-                            deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
-                            if (datetime.now(timezone.utc) - deadline).total_seconds() > 300:
-                                market = markets[0] if markets else None
-                        except (ValueError, TypeError):
-                            pass
-
-                if not market:
-                    continue
-
-                is_resolved = market.get("resolved", False)
-                prices = market.get("outcomePrices", "[]")
-                if isinstance(prices, str):
-                    prices = json.loads(prices)
-
-                if not prices or len(prices) < 2:
-                    continue
-
-                yes_price = float(prices[0])
-                no_price = float(prices[1])
-
-                is_definitive = (yes_price >= 0.95 and no_price <= 0.05) or \
-                               (yes_price <= 0.05 and no_price >= 0.95)
-
-                if not (is_resolved or is_definitive):
-                    # Update unrealized P&L
-                    direction = pos["direction"]
-                    current_price = yes_price if direction == "UP" else no_price
-                    unrealized = (current_price - pos["entry_price"]) * pos["shares"]
-                    conn.execute(
-                        "UPDATE polymarket_positions SET notes = ? WHERE position_id = ?",
-                        (f"unrealized={unrealized:.2f},price={current_price:.3f}", pos["position_id"]),
-                    )
-                    continue
-
-                # RESOLVED
-                direction = pos["direction"]
-                won = (yes_price >= 0.95) if direction == "UP" else (no_price >= 0.95)
-
-                exit_price = 1.0 if won else 0.0
-                pnl = round((exit_price * pos["shares"]) - pos["bet_amount"], 2)
-                status = "won" if won else "lost"
-
-                conn.execute("""
-                    UPDATE polymarket_positions
-                    SET status = ?, exit_price = ?, pnl = ?, closed_at = datetime('now')
-                    WHERE position_id = ?
-                """, (status, exit_price, pnl, pos["position_id"]))
-
-                if won:
-                    self.bankroll += pos["bet_amount"] + pnl
-
-                self.logger.info(
-                    f"{'WON' if won else 'LOST'} RESOLVED [{pos['asset']}]: "
-                    f"{status.upper()} {pos['direction']} | "
-                    f"P&L: ${pnl:+.2f} | Bankroll: ${self.bankroll:.2f}"
-                )
-
-                # Set cooldown on loss
-                if not won:
-                    inst = self.instruments.get(pos.get("registry_key", ""), None)
-                    cooldown_secs = inst.cooldown_after_loss_seconds if inst else 900
-                    self.cooldowns[pos["asset"]] = time.time() + cooldown_secs
-
-                # Update lifecycle table with resolution data
-                final_result = "UP" if yes_price >= 0.95 else "DOWN"
+            # Check if deadline has passed — use price-based resolution if stale
+            deadline_str = pos["deadline"]
+            deadline_passed = False
+            seconds_past_deadline = 0
+            if deadline_str:
                 try:
+                    deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+                    seconds_past_deadline = (datetime.now(timezone.utc) - deadline).total_seconds()
+                    if seconds_past_deadline > 0:
+                        deadline_passed = True
+                except (ValueError, TypeError):
+                    pass
+
+            try:
+                # Try Gamma API resolution
+                market = self._fetch_market_by_slug(slug)
+
+                if market and market.get("gamma_raw"):
+                    raw = market["gamma_raw"]
+                    is_resolved = raw.get("resolved", False)
+                    prices = raw.get("outcomePrices", "[]")
+                    if isinstance(prices, str):
+                        prices = json.loads(prices)
+
+                    if isinstance(prices, list) and len(prices) >= 2:
+                        yes_price = float(prices[0])
+                        no_price = float(prices[1])
+
+                        is_definitive = (yes_price >= 0.95 and no_price <= 0.05) or \
+                                       (yes_price <= 0.05 and no_price >= 0.95)
+
+                        if is_resolved or is_definitive:
+                            self._resolve_position(conn, pos, yes_price, no_price, current_prices, "gamma_api")
+                            continue
+
+                        if not deadline_passed:
+                            # Update unrealized P&L
+                            direction = pos["direction"]
+                            cur_price = yes_price if direction == "UP" else no_price
+                            unrealized = (cur_price - pos["entry_price"]) * pos["shares"]
+                            conn.execute(
+                                "UPDATE polymarket_positions SET notes = ? WHERE position_id = ?",
+                                (f"unrealized={unrealized:.2f},price={cur_price:.3f}", pos["position_id"]),
+                            )
+                            continue
+
+                # Price-based fallback for stale positions (>2 min past deadline)
+                if deadline_passed and seconds_past_deadline > 120 and current_prices:
+                    inst_key = pos.get("registry_key", "")
+                    inst = self.instruments.get(inst_key)
+                    if inst:
+                        current_asset_price = current_prices.get(inst.ml_pair, 0)
+                        t0_price = self._get_lifecycle_t0_price(slug)
+
+                        if current_asset_price > 0 and t0_price > 0:
+                            price_change = ((current_asset_price - t0_price) / t0_price) * 100
+                            actual_direction = "UP" if price_change > 0 else "DOWN"
+                            direction = pos["direction"]
+
+                            won = (actual_direction == direction)
+                            yes_price = 1.0 if actual_direction == "UP" else 0.0
+                            no_price = 1.0 - yes_price
+
+                            self.logger.info(
+                                f"PRICE-BASED RESOLUTION [{pos['asset']}]: "
+                                f"T0=${t0_price:.2f} → T15=${current_asset_price:.2f} "
+                                f"({price_change:+.3f}%) → {actual_direction} | "
+                                f"Bet was {direction} → {'WON' if won else 'LOST'}"
+                            )
+                            self._resolve_position(conn, pos, yes_price, no_price, current_prices, "price_fallback")
+                            continue
+
+                # If >30 min past deadline and no resolution, force-expire
+                if deadline_passed and seconds_past_deadline > 1800:
+                    self.logger.info(f"FORCE-EXPIRE [{pos['asset']}]: {slug} (30min past deadline)")
                     conn.execute("""
-                        UPDATE polymarket_lifecycle
-                        SET t15_timestamp = datetime('now'),
-                            t15_final_result = ?,
-                            t15_won = ?,
-                            t15_pnl = ?,
-                            final_5min_reversed = CASE
-                                WHEN t10_price_direction IS NOT NULL AND ? != t10_price_direction THEN 1
-                                ELSE 0 END,
-                            ml_accuracy = CASE
-                                WHEN t10_ml_direction = ? THEN 1
-                                ELSE 0 END
+                        UPDATE polymarket_positions
+                        SET status = 'expired', pnl = 0, closed_at = datetime('now'),
+                            notes = 'Force-expired: 30min past deadline, no resolution data'
                         WHERE position_id = ?
-                    """, (
-                        final_result,
-                        1 if won else 0,
-                        pnl,
-                        final_result,
-                        final_result,
-                        pos["position_id"],
-                    ))
-                except Exception as e:
-                    self.logger.debug(f"Lifecycle resolution update failed: {e}")
+                    """, (pos["position_id"],))
+                    self.bankroll += pos["bet_amount"]
+                    self._log_bankroll("force_expired", pos["position_id"], pos["bet_amount"])
 
             except Exception as e:
                 self.logger.debug(f"Resolution check failed for {pos['position_id']}: {e}")
 
         conn.commit()
         conn.close()
+
+    def _resolve_position(
+        self, conn, pos, yes_price: float, no_price: float,
+        current_prices: Optional[dict], source: str,
+    ) -> None:
+        """Resolve a position and record T=15 lifecycle data."""
+        direction = pos["direction"]
+        won = (yes_price >= 0.95) if direction == "UP" else (no_price >= 0.95)
+
+        exit_price = 1.0 if won else 0.0
+        pnl = round((exit_price * pos["shares"]) - pos["bet_amount"], 2)
+        status = "won" if won else "lost"
+
+        conn.execute("""
+            UPDATE polymarket_positions
+            SET status = ?, exit_price = ?, pnl = ?, closed_at = datetime('now'),
+                notes = COALESCE(notes, '') || ' | resolved_via=' || ?
+            WHERE position_id = ?
+        """, (status, exit_price, pnl, source, pos["position_id"]))
+
+        if won:
+            self.bankroll += pos["bet_amount"] + pnl
+
+        self.logger.info(
+            f"{'WON' if won else 'LOST'} RESOLVED [{pos['asset']}]: "
+            f"{status.upper()} {pos['direction']} | "
+            f"P&L: ${pnl:+.2f} | Bankroll: ${self.bankroll:.2f} | via {source}"
+        )
+
+        # Set cooldown on loss
+        if not won:
+            inst = self.instruments.get(pos.get("registry_key", ""), None)
+            cooldown_secs = inst.cooldown_after_loss_seconds if inst else 900
+            self.cooldowns[pos["asset"]] = time.time() + cooldown_secs
+
+        # Record T=15 in lifecycle
+        final_result = "UP" if yes_price >= 0.95 else "DOWN"
+        t15_price = None
+        if current_prices:
+            inst = self.instruments.get(pos.get("registry_key", ""))
+            if inst:
+                t15_price = current_prices.get(inst.ml_pair, 0)
+
+        t0_price = self._get_lifecycle_t0_price(pos["slug"])
+        t10_price = self._get_lifecycle_t10_price(pos["slug"])
+
+        try:
+            conn.execute("""
+                UPDATE polymarket_lifecycle
+                SET t15_timestamp = datetime('now'),
+                    t15_asset_price = ?,
+                    t15_final_result = ?,
+                    t15_price_change_from_t0 = CASE WHEN ? > 0 AND ? > 0
+                        THEN ((? - ?) / ? * 100) ELSE NULL END,
+                    t15_price_change_from_t10 = CASE WHEN ? > 0 AND ? > 0
+                        THEN ((? - ?) / ? * 100) ELSE NULL END,
+                    t15_won = ?,
+                    t15_pnl = ?,
+                    final_5min_reversed = CASE
+                        WHEN t10_price_direction IS NOT NULL AND ? != t10_price_direction THEN 1
+                        ELSE 0 END,
+                    ml_accuracy = CASE
+                        WHEN t10_ml_direction = ? THEN 1
+                        ELSE 0 END
+                WHERE position_id = ?
+            """, (
+                t15_price,
+                final_result,
+                t15_price, t0_price, t15_price, t0_price, t0_price,     # t15 vs t0
+                t15_price, t10_price, t15_price, t10_price, t10_price,   # t15 vs t10
+                1 if won else 0,
+                pnl,
+                final_result,
+                final_result,
+                pos["position_id"],
+            ))
+        except Exception as e:
+            self.logger.debug(f"Lifecycle T=15 update failed: {e}")
+
+        self._log_bankroll(f"resolved_{status}", pos["position_id"], pnl)
+
+    def _get_lifecycle_t0_price(self, slug: str) -> float:
+        """Get T=0 asset price from lifecycle table."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            row = conn.execute(
+                "SELECT t0_asset_price FROM polymarket_lifecycle WHERE slug = ? ORDER BY id DESC LIMIT 1",
+                (slug,)
+            ).fetchone()
+            conn.close()
+            return float(row[0]) if row and row[0] else 0.0
+        except Exception:
+            return 0.0
+
+    def _get_lifecycle_t10_price(self, slug: str) -> float:
+        """Get T=10 asset price from lifecycle table."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            row = conn.execute(
+                "SELECT t10_asset_price FROM polymarket_lifecycle WHERE slug = ? ORDER BY id DESC LIMIT 1",
+                (slug,)
+            ).fetchone()
+            conn.close()
+            return float(row[0]) if row and row[0] else 0.0
+        except Exception:
+            return 0.0
 
     # ----------------------------------------------------------
     # LIFECYCLE PERSISTENCE
