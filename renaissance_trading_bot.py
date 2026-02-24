@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections import deque
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict
 import time
@@ -553,6 +554,7 @@ class RenaissanceTradingBot:
         }
         self.market_data_provider = LiveMarketDataProvider(self.config, logger=self.logger)
         self.derivatives_provider = DerivativesDataProvider(cache_ttl_seconds=60)
+        self._derivatives_history: Dict[str, deque] = {}  # pair → accumulated snapshots
         
         # Unified Signal Fusion (Step 16+)
         self.signal_fusion = SignalFusion()
@@ -1293,7 +1295,7 @@ class RenaissanceTradingBot:
             self._tech_indicators[product_id] = EnhancedTechnicalIndicators()
         return self._tech_indicators[product_id]
 
-    def _load_price_df_from_db(self, product_id: str, limit: int = 100):
+    def _load_price_df_from_db(self, product_id: str, limit: int = 300):
         """Load recent OHLCV bars from DB for ML inference when tech indicators are sparse."""
         try:
             import pandas as _pd
@@ -3076,13 +3078,13 @@ class RenaissanceTradingBot:
             # ── Preload candle history on first cycle (eliminates cold-start) ──
             if not getattr(self, '_history_preloaded', False):
                 self._history_preloaded = True
-                # Preload always-scan majors from Binance (or Coinbase fallback)
-                preload_pairs = self.breakout_scanner.get_always_scan_pairs()[:15] if self.scanner_enabled else \
-                    [p for p in self.product_ids if self._pair_tiers.get(p, 1) == 1][:15]
+                # Preload ALL pairs from Binance (300 candles for 200-bar rolling windows)
+                preload_pairs = self.breakout_scanner.get_always_scan_pairs() if self.scanner_enabled else \
+                    list(self.product_ids)
                 for pid in preload_pairs:
                     try:
                         bsym = self._pair_binance_symbols.get(pid, to_binance_symbol(pid))
-                        raw_candles = await self.binance_spot.fetch_candles(bsym, '5m', 200)
+                        raw_candles = await self.binance_spot.fetch_candles(bsym, '5m', 300)
                         if not raw_candles:
                             # Fallback to Coinbase
                             raw_candles_cb = await asyncio.to_thread(
@@ -3172,7 +3174,7 @@ class RenaissanceTradingBot:
                     _tech = self._get_tech(_pid)
                     _cdf = _tech._to_dataframe()
                     if _cdf is None or len(_cdf) < 30:
-                        _cdf = self._load_price_df_from_db(_pid, limit=100)
+                        _cdf = self._load_price_df_from_db(_pid, limit=300)
                     if _cdf is not None and len(_cdf) > 0:
                         cross_data[_pid] = _cdf
                 except Exception:
@@ -3397,13 +3399,29 @@ class RenaissanceTradingBot:
                 market_data['_pair_name'] = product_id
 
                 # Fetch derivatives snapshot (Binance futures + Fear & Greed) for ML features
+                # Only fetch for core pairs + active positions to avoid API spam
+                _CORE_DERIV_PAIRS = {'BTC-USD', 'ETH-USD', 'SOL-USD', 'LINK-USD',
+                                     'AVAX-USD', 'DOGE-USD', 'XRP-USD'}
                 try:
-                    deriv_snap = await self.derivatives_provider.get_derivatives_snapshot(product_id)
-                    if deriv_snap:
-                        market_data['_derivatives_data'] = {
-                            k: pd.Series([v]) for k, v in deriv_snap.items()
-                            if not (isinstance(v, float) and np.isnan(v))
-                        }
+                    _active_pos = {p.product_id for p in self.position_manager.positions.values()}
+                    _should_fetch_deriv = product_id in _CORE_DERIV_PAIRS or product_id in _active_pos
+                    if _should_fetch_deriv:
+                        deriv_snap = await self.derivatives_provider.get_derivatives_snapshot(product_id)
+                        if deriv_snap:
+                            if product_id not in self._derivatives_history:
+                                self._derivatives_history[product_id] = deque(maxlen=500)
+                            self._derivatives_history[product_id].append(deriv_snap)
+
+                    # Build accumulated time series from history (for any pair with data)
+                    if product_id in self._derivatives_history:
+                        _hist = list(self._derivatives_history[product_id])
+                        if _hist:
+                            _deriv_series = {}
+                            for _dk in ['funding_rate', 'open_interest', 'long_short_ratio',
+                                        'taker_buy_vol', 'taker_sell_vol', 'fear_greed']:
+                                _vals = [h.get(_dk, float('nan')) for h in _hist]
+                                _deriv_series[_dk] = pd.Series(_vals)
+                            market_data['_derivatives_data'] = _deriv_series
                 except Exception as _de:
                     self.logger.debug(f"Derivatives fetch skipped for {product_id}: {_de}")
 
@@ -3580,7 +3598,7 @@ class RenaissanceTradingBot:
                 price_df = _tech_inst._to_dataframe()
                 # Fallback: if tech indicators have <30 rows, load from DB bars
                 if len(price_df) < 30:
-                    price_df = self._load_price_df_from_db(product_id, limit=100)
+                    price_df = self._load_price_df_from_db(product_id, limit=300)
 
                 # 2.1 ML Enhanced Signal Fusion (Unified from Enhanced Bot)
                 ml_package = None

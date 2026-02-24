@@ -860,6 +860,7 @@ def _build_cross_features(
 def _build_derivatives_features(
     n_rows: int,
     derivatives_data: Optional[Dict[str, 'pd.Series']] = None,
+    df_index=None,
 ) -> Dict[str, 'pd.Series']:
     """Compute 7 derivatives + sentiment features.
 
@@ -872,24 +873,39 @@ def _build_derivatives_features(
             - 'taker_buy_vol': pd.Series of taker buy volume
             - 'taker_sell_vol': pd.Series of taker sell volume
             - 'fear_greed': pd.Series of Fear & Greed index (0-100)
-            All series must be aligned to the same index as price_df.
-            Missing keys → zeros with has_derivatives_data=0.
+            Series can be shorter than n_rows — they'll be right-aligned
+            (most recent at end) and NaN-padded at the start.
+        df_index: The index of the price DataFrame — ensures alignment.
 
     Returns:
         Dict of 7 feature_name → pd.Series
     """
     import pandas as pd
 
-    idx = pd.RangeIndex(n_rows)
+    idx = df_index if df_index is not None else pd.RangeIndex(n_rows)
     feats: Dict[str, pd.Series] = {}
 
     has_deriv = False
+
+    def _right_align(raw_series: 'pd.Series') -> 'pd.Series':
+        """Right-align a shorter Series to the target index.
+
+        Extracts raw values, pads with NaN at the start if shorter than
+        n_rows, then assigns the target index so DataFrame alignment works.
+        """
+        vals = np.array(raw_series.values, dtype=float)
+        n = len(vals)
+        if n >= n_rows:
+            aligned = vals[-n_rows:]
+        else:
+            aligned = np.concatenate([np.full(n_rows - n, np.nan), vals])
+        return pd.Series(aligned, index=idx)
 
     if derivatives_data is not None:
         # ── Funding rate z-score (50-bar window) ────────────────────────
         fr = derivatives_data.get('funding_rate')
         if fr is not None and len(fr) > 0:
-            fr = fr.astype(float)
+            fr = _right_align(fr)
             fr_mean = fr.rolling(50, min_periods=5).mean()
             fr_std = fr.rolling(50, min_periods=5).std()
             feats['funding_rate_z'] = (fr - fr_mean) / (fr_std + 1e-10)
@@ -900,7 +916,7 @@ def _build_derivatives_features(
         # ── Open interest 5-bar % change ────────────────────────────────
         oi = derivatives_data.get('open_interest')
         if oi is not None and len(oi) > 0:
-            oi = oi.astype(float)
+            oi = _right_align(oi)
             feats['oi_change_pct'] = oi.pct_change(5)
             has_deriv = True
         else:
@@ -909,7 +925,7 @@ def _build_derivatives_features(
         # ── Long/short ratio (raw, already scale-invariant) ─────────────
         ls = derivatives_data.get('long_short_ratio')
         if ls is not None and len(ls) > 0:
-            feats['long_short_ratio'] = ls.astype(float)
+            feats['long_short_ratio'] = _right_align(ls)
             has_deriv = True
         else:
             feats['long_short_ratio'] = pd.Series(0.0, index=idx)
@@ -918,8 +934,8 @@ def _build_derivatives_features(
         buy_vol = derivatives_data.get('taker_buy_vol')
         sell_vol = derivatives_data.get('taker_sell_vol')
         if buy_vol is not None and sell_vol is not None and len(buy_vol) > 0:
-            bv = buy_vol.astype(float)
-            sv = sell_vol.astype(float)
+            bv = _right_align(buy_vol)
+            sv = _right_align(sell_vol)
             feats['taker_buy_sell_ratio'] = bv / (sv + 1e-10)
             has_deriv = True
         else:
@@ -928,7 +944,7 @@ def _build_derivatives_features(
         # ── Fear & Greed (normalized + 3-day ROC) ──────────────────────
         fg = derivatives_data.get('fear_greed')
         if fg is not None and len(fg) > 0:
-            fg = fg.astype(float)
+            fg = _right_align(fg)
             feats['fear_greed_norm'] = fg / 100.0
             # 3-day ROC: for 5-min bars, 3 days = 3 * 288 = 864 bars
             # But FnG is daily (forward-filled), so diff(864) gives ~3-day change
@@ -1017,7 +1033,7 @@ def build_feature_sequence(
         features.update(cross_feats)
 
     # 7 derivatives + sentiment features
-    deriv_feats = _build_derivatives_features(len(df), derivatives_data)
+    deriv_feats = _build_derivatives_features(len(df), derivatives_data, df_index=df.index)
     features.update(deriv_feats)
 
     feat_df = pd.DataFrame(features, index=df.index)
@@ -1129,7 +1145,7 @@ def build_full_feature_matrix(
         features.update(cross_feats)
 
     # 7 derivatives + sentiment features
-    deriv_feats = _build_derivatives_features(len(df), derivatives_data)
+    deriv_feats = _build_derivatives_features(len(df), derivatives_data, df_index=df.index)
     features.update(deriv_feats)
 
     feat_df = pd.DataFrame(features, index=df.index)
