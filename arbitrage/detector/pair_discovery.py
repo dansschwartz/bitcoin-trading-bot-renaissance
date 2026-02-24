@@ -23,7 +23,7 @@ import time
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Set
 
-import aiohttp
+import requests
 
 logger = logging.getLogger("arb.pair_discovery")
 
@@ -241,15 +241,9 @@ class PairDiscoveryEngine:
                 )
 
     async def _fetch_mexc_tickers_direct(self) -> Dict[str, dict]:
-        """Fetch all MEXC tickers via direct REST (bypasses ccxt which fails on VPS)."""
-        url = "https://api.mexc.com/api/v3/ticker/bookTicker"
+        """Fetch all MEXC tickers via direct REST in a thread (bypasses event loop congestion)."""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"PAIR_DISCOVERY: MEXC bookTicker HTTP {resp.status}")
-                        return {}
-                    data = await resp.json()
+            data = await asyncio.to_thread(self._fetch_mexc_sync)
         except Exception as e:
             logger.warning(f"PAIR_DISCOVERY: MEXC direct REST failed: {type(e).__name__}: {e}")
             return {}
@@ -257,7 +251,6 @@ class PairDiscoveryEngine:
         result: Dict[str, dict] = {}
         for t in data:
             raw_sym = t.get('symbol', '')
-            # Normalize: BTCUSDT → BTC/USDT
             symbol = self._normalize_symbol(raw_sym)
             if not symbol:
                 continue
@@ -277,15 +270,9 @@ class PairDiscoveryEngine:
         return result
 
     async def _fetch_binance_tickers_direct(self) -> Dict[str, dict]:
-        """Fetch all Binance tickers via direct REST (bypasses ccxt)."""
-        url = "https://api.binance.com/api/v3/ticker/24hr"
+        """Fetch all Binance tickers via direct REST in a thread (bypasses event loop congestion)."""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"PAIR_DISCOVERY: Binance 24hr HTTP {resp.status}")
-                        return {}
-                    data = await resp.json()
+            data = await asyncio.to_thread(self._fetch_binance_sync)
         except Exception as e:
             logger.warning(f"PAIR_DISCOVERY: Binance direct REST failed: {type(e).__name__}: {e}")
             return {}
@@ -311,6 +298,26 @@ class PairDiscoveryEngine:
                 'volume_24h': volume,
             }
         return result
+
+    @staticmethod
+    def _fetch_mexc_sync() -> list:
+        """Synchronous MEXC bookTicker fetch (runs in thread pool)."""
+        resp = requests.get(
+            "https://api.mexc.com/api/v3/ticker/bookTicker",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    @staticmethod
+    def _fetch_binance_sync() -> list:
+        """Synchronous Binance 24hr fetch (runs in thread pool)."""
+        resp = requests.get(
+            "https://api.binance.com/api/v3/ticker/24hr",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     @staticmethod
     def _normalize_symbol(raw: str) -> Optional[str]:
