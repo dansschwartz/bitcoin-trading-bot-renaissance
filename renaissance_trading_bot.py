@@ -611,7 +611,7 @@ class RenaissanceTradingBot:
         # "Small bets, many times. We are the casino, not the gambler."
         self.position_sizer = RenaissancePositionSizer(
             config={
-                "default_balance_usd": 50000.0,    # Fallback if balance fetch fails
+                "default_balance_usd": 10000.0,    # Fallback if balance fetch fails
                 "max_position_pct": 10.0,          # Max 10% of balance per position
                 "max_total_exposure_pct": 50.0,    # Max 50% total exposure
                 "kelly_fraction": 0.50,            # Half-Kelly for drawdown control
@@ -2437,7 +2437,7 @@ class RenaissanceTradingBot:
 
             # ── FINAL SIZE NORMALIZATION — predictable sizing from signal quality ──
             if action != 'HOLD' and position_size > 0 and current_price > 0:
-                balance = self._cached_balance_usd or 50000.0
+                balance = self._cached_balance_usd or 10000.0
                 base_usd = balance * 0.03                                 # 3% of equity
                 sig_scalar = min(abs(weighted_signal) / 0.02, 2.0)        # signal quality
                 sig_scalar = max(sig_scalar, 0.5)
@@ -2832,29 +2832,28 @@ class RenaissanceTradingBot:
             self.logger.error(f"Performance attribution failed: {e}")
 
     def _fetch_account_balance(self) -> float:
-        """Fetch current USD account balance from Coinbase (or paper trader).
+        """Fetch current USD account balance, hard-capped to prevent phantom inflation.
 
-        Includes sanity cap: paper trading balance cannot exceed 2x initial
-        to prevent phantom inflation from short-sell accounting.
+        Paper trading short-sell accounting inflates the cash balance because
+        borrowed-share liabilities aren't tracked.  We cap at INITIAL_CAPITAL
+        so position sizing stays anchored to real capital.
         """
+        INITIAL_CAPITAL = 10_000.0
+        MAX_BALANCE = INITIAL_CAPITAL * 1.5  # Allow some growth, but cap phantom inflation
+
         try:
             portfolio = self.coinbase_client.get_portfolio_breakdown()
             if "error" not in portfolio:
                 balance = portfolio.get("total_balance_usd", 0.0)
                 if balance > 0:
-                    # Safety cap for paper trading
-                    if getattr(self.coinbase_client, 'paper_trading', False):
-                        initial = getattr(
-                            getattr(self.coinbase_client, 'paper_trader', None),
-                            'INITIAL_BALANCE_USD', 10000.0
-                        )
-                        balance = min(balance, initial * 2.0)
+                    # Hard cap: never size off more than 1.5x initial capital
+                    balance = min(balance, MAX_BALANCE)
                     self._cached_balance_usd = balance
                     return balance
         except Exception as e:
             self.logger.debug(f"Balance fetch failed: {e}")
-        # Return cached or default
-        return self._cached_balance_usd if self._cached_balance_usd > 0 else 50000.0
+        # Return cached or default (INITIAL_CAPITAL, not phantom 50K)
+        return self._cached_balance_usd if self._cached_balance_usd > 0 else INITIAL_CAPITAL
 
     async def execute_trading_cycle(self) -> TradingDecision:
         """Execute one complete trading cycle across all products"""
@@ -2866,12 +2865,11 @@ class RenaissanceTradingBot:
             account_balance = self._fetch_account_balance()
             self.logger.info(f"Account balance: ${account_balance:,.2f}")
 
-            # Dynamically update position manager limits — selective: 1 per product, 15 max
-            # With 43 pairs we scan widely but trade selectively (max 15 simultaneous)
-            # Each trade is $1K-$5K (3-10% of equity), so 50% cap ≈ 5-25 simultaneous trades
+            # Dynamically update position manager limits — selective: 1 per product, 10 max
+            # Each trade is ~$1K (10% of $10K), 50% cap → ~5 simultaneous max from exposure
             self.position_manager.risk_limits.max_position_size_usd = account_balance * 0.10
             self.position_manager.risk_limits.max_total_exposure_usd = account_balance * 0.50
-            self.position_manager.risk_limits.max_total_positions = min(len(self.product_ids), 15)
+            self.position_manager.risk_limits.max_total_positions = min(len(self.product_ids), 10)
             self.position_manager.risk_limits.max_positions_per_product = 1
 
             # ── Drawdown tracking (Renaissance discipline) ──
