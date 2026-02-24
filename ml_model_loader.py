@@ -1061,7 +1061,7 @@ def build_feature_sequence(
     if build_feature_sequence._health_counter % 100 == 1:
         last_row = feat_df.iloc[-1]
         cross_names = [c for c in feat_df.columns if c.startswith(('lead_', 'corr_', 'spread_', 'mkt_'))]
-        deriv_names = [c for c in feat_df.columns if c.startswith(('funding_', 'oi_', 'taker_', 'fear_', 'ls_ratio', 'net_taker'))]
+        deriv_names = [c for c in feat_df.columns if c.startswith(('funding_', 'oi_', 'taker_', 'fear_', 'long_short', 'has_deriv'))]
         cross_vals = {c: round(float(last_row.get(c, 0)), 4) for c in cross_names}
         deriv_vals = {c: round(float(last_row.get(c, 0)), 4) for c in deriv_names}
         cross_active = sum(1 for v in cross_vals.values() if abs(v) > 1e-8)
