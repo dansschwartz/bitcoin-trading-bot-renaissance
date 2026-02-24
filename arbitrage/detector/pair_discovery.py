@@ -5,8 +5,11 @@ by scanning ALL overlapping USDT pairs between MEXC and Binance.
 Replaces the static 30-pair list with a dynamic top-40 ranked by gross spread.
 Promotes/demotes pairs in UnifiedBookManager automatically.
 
+Uses direct REST calls (aiohttp) to fetch all tickers — bypasses ccxt which
+fails on VPS due to geo-blocking / missing market data.
+
 Flow (every 60s):
-  1. get_all_tickers() on both exchanges (1 REST call each, all pairs)
+  1. Direct REST to both exchanges (1 call each, all pairs)
   2. Intersect to find overlapping USDT pairs (~300-500)
   3. Exclude stablecoins, wrapped tokens, blocklisted
   4. Compute gross spread from bid/ask in both directions
@@ -17,8 +20,10 @@ Flow (every 60s):
 import asyncio
 import logging
 import time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Set
+
+import aiohttp
 
 logger = logging.getLogger("arb.pair_discovery")
 
@@ -104,10 +109,10 @@ class PairDiscoveryEngine:
         """Single discovery scan cycle."""
         t0 = time.monotonic()
 
-        # 1. Fetch all tickers from both exchanges in parallel
+        # 1. Fetch all tickers from both exchanges via direct REST (parallel)
         mexc_tickers, binance_tickers = await asyncio.gather(
-            self._safe_get_tickers(self.mexc, "MEXC"),
-            self._safe_get_tickers(self.binance, "Binance"),
+            self._fetch_mexc_tickers_direct(),
+            self._fetch_binance_tickers_direct(),
         )
 
         if not mexc_tickers or not binance_tickers:
@@ -231,13 +236,88 @@ class PairDiscoveryEngine:
                     f"vol=${float(c['volume_usdt']):>12,.0f} {c['direction']}"
                 )
 
-    async def _safe_get_tickers(self, client, name: str) -> Dict[str, dict]:
-        """Fetch all tickers with error handling."""
+    async def _fetch_mexc_tickers_direct(self) -> Dict[str, dict]:
+        """Fetch all MEXC tickers via direct REST (bypasses ccxt which fails on VPS)."""
+        url = "https://api.mexc.com/api/v3/ticker/bookTicker"
         try:
-            return await client.get_all_tickers()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"PAIR_DISCOVERY: MEXC bookTicker HTTP {resp.status}")
+                        return {}
+                    data = await resp.json()
         except Exception as e:
-            logger.warning(f"PAIR_DISCOVERY: {name} get_all_tickers failed: {e}")
+            logger.warning(f"PAIR_DISCOVERY: MEXC direct REST failed: {e}")
             return {}
+
+        result: Dict[str, dict] = {}
+        for t in data:
+            raw_sym = t.get('symbol', '')
+            # Normalize: BTCUSDT → BTC/USDT
+            symbol = self._normalize_symbol(raw_sym)
+            if not symbol:
+                continue
+            try:
+                bid = Decimal(str(t.get('bidPrice', '0') or '0'))
+                ask = Decimal(str(t.get('askPrice', '0') or '0'))
+            except (InvalidOperation, ValueError):
+                continue
+            mid = (bid + ask) / 2 if bid > 0 and ask > 0 else Decimal('0')
+            result[symbol] = {
+                'symbol': symbol,
+                'last_price': mid,
+                'bid': bid,
+                'ask': ask,
+                'volume_24h': Decimal('0'),  # bookTicker doesn't include volume
+            }
+        return result
+
+    async def _fetch_binance_tickers_direct(self) -> Dict[str, dict]:
+        """Fetch all Binance tickers via direct REST (bypasses ccxt)."""
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"PAIR_DISCOVERY: Binance 24hr HTTP {resp.status}")
+                        return {}
+                    data = await resp.json()
+        except Exception as e:
+            logger.warning(f"PAIR_DISCOVERY: Binance direct REST failed: {e}")
+            return {}
+
+        result: Dict[str, dict] = {}
+        for t in data:
+            raw_sym = t.get('symbol', '')
+            symbol = self._normalize_symbol(raw_sym)
+            if not symbol:
+                continue
+            try:
+                bid = Decimal(str(t.get('bidPrice', '0') or '0'))
+                ask = Decimal(str(t.get('askPrice', '0') or '0'))
+                last = Decimal(str(t.get('lastPrice', '0') or '0'))
+                volume = Decimal(str(t.get('volume', '0') or '0'))
+            except (InvalidOperation, ValueError):
+                continue
+            result[symbol] = {
+                'symbol': symbol,
+                'last_price': last,
+                'bid': bid,
+                'ask': ask,
+                'volume_24h': volume,
+            }
+        return result
+
+    @staticmethod
+    def _normalize_symbol(raw: str) -> Optional[str]:
+        """Convert exchange symbol (BTCUSDT) to normalized format (BTC/USDT)."""
+        raw = raw.upper()
+        for quote in ('USDT', 'USDC', 'BTC', 'ETH'):
+            if raw.endswith(quote):
+                base = raw[:-len(quote)]
+                if base:
+                    return f"{base}/{quote}"
+        return None
 
     async def _verify_pair(self, pair: str) -> None:
         """Background contract verification for a newly promoted pair."""
