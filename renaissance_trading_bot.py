@@ -3815,18 +3815,16 @@ class RenaissanceTradingBot:
                     # 3.17 Strategy A — Confirmed Momentum executor (runs every cycle)
                     if self.polymarket_executor:
                         try:
-                            # Gather ML predictions for all pairs
-                            _sa_ml_preds = {}
-                            for _sa_pair in self.product_ids:
-                                _sa_pred = getattr(self, '_latest_ml_package', {})
-                                if isinstance(_sa_pred, dict):
-                                    _sa_ml_preds[_sa_pair] = _sa_pred.get(_sa_pair, {})
-                                elif ml_package:
-                                    _sa_ml_preds[_sa_pair] = {
-                                        "prediction": float(ml_package.ensemble_score),
-                                        "agreement": float(ml_package.confidence_score),
-                                        "confidence": float(ml_package.confidence_score * 100),
-                                    }
+                            # Accumulate ML predictions per pair across iterations
+                            if not hasattr(self, '_sa_ml_cache'):
+                                self._sa_ml_cache = {}
+
+                            if ml_package and hasattr(ml_package, 'ensemble_score'):
+                                self._sa_ml_cache[product_id] = {
+                                    "prediction": float(ml_package.ensemble_score),
+                                    "agreement": float(ml_package.confidence_score),
+                                    "confidence": float(ml_package.confidence_score * 100),
+                                }
 
                             # Current prices
                             _sa_prices = {}
@@ -3839,7 +3837,7 @@ class RenaissanceTradingBot:
                                 _sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
 
                             await self.polymarket_executor.execute_cycle(
-                                ml_predictions=_sa_ml_preds,
+                                ml_predictions=self._sa_ml_cache,
                                 current_prices=_sa_prices,
                                 current_regime=_sa_regime,
                             )

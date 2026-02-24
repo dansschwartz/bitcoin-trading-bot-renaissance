@@ -945,8 +945,8 @@ class StrategyAExecutor:
         # 2. ML CONFIRMATION
         ml_data = ml_predictions.get(inst.ml_pair, {})
         ml_pred = ml_data.get("prediction", 0)
-        ml_conf = ml_data.get("confidence", 0)
-        ml_agree = ml_data.get("agreement", 0)
+        ml_conf = ml_data.get("confidence", 50)  # Default 50 = neutral
+        ml_agree = ml_data.get("agreement", 0.5)  # Default 50% agreement
         ml_direction = "UP" if ml_pred > 0 else "DOWN"
 
         if inst.ml_must_agree_with_price and ml_direction != price_direction:

@@ -53,6 +53,7 @@ pairs:
     - ENJ/USDT
 
 cross_exchange:
+  enabled: false                       # Disabled — paper fills are phantom (976K trades, $643K fake P&L)
   min_net_spread_bps: 1.0
   signal_ttl_seconds: 5
   min_trade_usd: 10                    # Low for paper trading — raise to $100+ for live

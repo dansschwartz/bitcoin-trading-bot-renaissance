@@ -205,9 +205,15 @@ class ArbitrageOrchestrator:
             logger.warning(f"Initial inventory check failed: {e}")
 
         # Start all async tasks
+        cross_exchange_enabled = self.config.get('cross_exchange', {}).get('enabled', True)
+        if not cross_exchange_enabled:
+            logger.info("Cross-exchange arbitrage DISABLED by config")
         tasks = [
             asyncio.create_task(self._run_book_manager(), name="book_manager"),
-            asyncio.create_task(self._run_cross_exchange(), name="cross_exchange"),
+            *(
+                [asyncio.create_task(self._run_cross_exchange(), name="cross_exchange")]
+                if cross_exchange_enabled else []
+            ),
             asyncio.create_task(self._run_execution_loop(), name="executor"),
             asyncio.create_task(self._run_funding_arb(), name="funding_arb"),
             asyncio.create_task(self._run_triangular_arb(), name="triangular_arb"),
