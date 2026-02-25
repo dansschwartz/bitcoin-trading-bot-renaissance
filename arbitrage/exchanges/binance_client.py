@@ -78,7 +78,7 @@ class BinanceClient(ExchangeClient):
 
         # Shared aiohttp session for direct REST calls (browser-like UA avoids WAF blocks)
         self._http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=8),
+            timeout=aiohttp.ClientTimeout(total=20),
             headers=_HTTP_HEADERS,
         )
 
@@ -182,6 +182,7 @@ class BinanceClient(ExchangeClient):
             ping_interval=20,
             ping_timeout=60,
             close_timeout=5,
+            open_timeout=30,  # VPS event loop is CPU-starved during startup
         ) as ws:
             logger.info(f"Binance WebSocket connected ({len(streams)} streams)")
 

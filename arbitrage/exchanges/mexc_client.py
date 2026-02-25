@@ -85,7 +85,7 @@ class MEXCClient(ExchangeClient):
 
         self._exchange = ccxt_async.mexc(config)
         self._http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=8),
+            timeout=aiohttp.ClientTimeout(total=20),
             headers=_HTTP_HEADERS,
         )
 
@@ -167,6 +167,7 @@ class MEXCClient(ExchangeClient):
             WS_ENDPOINT,
             ping_interval=None,  # We send our own PING
             close_timeout=5,
+            open_timeout=30,  # VPS event loop is CPU-starved during startup
         ) as ws:
             logger.info("MEXC WebSocket connected")
 
@@ -411,6 +412,7 @@ class MEXCClient(ExchangeClient):
             WS_ENDPOINT,
             ping_interval=None,
             close_timeout=5,
+            open_timeout=30,
         ) as ws:
             logger.info("MEXC all-ticker WebSocket connected")
 
@@ -567,7 +569,7 @@ class MEXCClient(ExchangeClient):
         """
         url = "https://api.mexc.com/api/v3/ticker/bookTicker"
         session = self._http_session or aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10), headers=_HTTP_HEADERS)
+            timeout=aiohttp.ClientTimeout(total=20), headers=_HTTP_HEADERS)
         close_after = self._http_session is None
         data = None
         try:
