@@ -37,7 +37,7 @@ class UnifiedPairView:
     @property
     def is_fresh(self) -> bool:
         now = datetime.utcnow()
-        max_age = timedelta(seconds=10)  # 10s — tolerant of REST fallback polling
+        max_age = timedelta(seconds=90)  # 90s — tolerant of sequential REST polling (30 pairs × 2 exchanges)
         return (
             (now - self.mexc_last_update) < max_age
             and (now - self.binance_last_update) < max_age
