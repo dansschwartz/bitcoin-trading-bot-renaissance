@@ -96,8 +96,17 @@ class BinanceClient(ExchangeClient):
     # --- Market Data ---
 
     async def get_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        """Fetch order book via direct REST (avoids ccxt load_markets overhead)."""
-        return await self._fetch_order_book_direct(symbol, depth)
+        """Fetch order book via direct REST, with sync thread fallback.
+
+        Primary: aiohttp (async). Falls back to urllib in a thread when the
+        event loop is CPU-starved (common during VPS startup).
+        """
+        try:
+            return await asyncio.wait_for(
+                self._fetch_order_book_direct(symbol, depth), timeout=3
+            )
+        except (asyncio.TimeoutError, Exception):
+            return await asyncio.to_thread(self._fetch_order_book_sync, symbol, depth)
 
     async def _fetch_order_book_direct(self, symbol: str, depth: int = 20) -> OrderBook:
         """Direct REST API call — bypasses ccxt (which may fail if market load failed)."""
@@ -114,6 +123,24 @@ class BinanceClient(ExchangeClient):
         finally:
             if close_after:
                 await session.close()
+        bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get("bids", [])[:depth]]
+        asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get("asks", [])[:depth]]
+        return OrderBook(
+            exchange="binance", symbol=symbol, timestamp=datetime.utcnow(),
+            bids=bids, asks=asks,
+        )
+
+    def _fetch_order_book_sync(self, symbol: str, depth: int = 20) -> OrderBook:
+        """Synchronous HTTP fallback for order book fetch (runs in thread pool)."""
+        import urllib.request
+        import json as _json
+
+        api_sym = symbol.replace("/", "")
+        url = f"https://api.binance.com/api/v3/depth?symbol={api_sym}&limit={depth}"
+        req = urllib.request.Request(url, headers=_HTTP_HEADERS)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read())
+
         bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get("bids", [])[:depth]]
         asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get("asks", [])[:depth]]
         return OrderBook(

@@ -116,7 +116,7 @@ class MEXCClient(ExchangeClient):
         """
         try:
             return await asyncio.wait_for(
-                self._fetch_order_book_direct(symbol, depth), timeout=15
+                self._fetch_order_book_direct(symbol, depth), timeout=3
             )
         except (asyncio.TimeoutError, Exception):
             # Event loop too busy for aiohttp — use sync HTTP in thread
@@ -807,7 +807,7 @@ class MEXCClient(ExchangeClient):
         raw_sym = self._normalized_to_mexc_sym(symbol)
         url = f"https://api.mexc.com/api/v3/depth?symbol={raw_sym}&limit={depth}"
         req = urllib.request.Request(url, headers=_HTTP_HEADERS)
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = _json.loads(resp.read())
 
         bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:depth]]
