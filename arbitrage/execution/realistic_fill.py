@@ -1,23 +1,24 @@
 """
-Realistic Cross-Exchange Paper Fill — models the REAL costs that the naive
-paper fill engine ignores, eliminating phantom P&L.
+Realistic Cross-Exchange Paper Fill — models the REAL costs for simultaneous
+execution (inventory-based arb, NOT transfer-based arb).
 
-Cross-exchange arb requires inventory on BOTH exchanges. After each trade,
-inventory drifts: the buy-side accumulates base tokens, the sell-side
-accumulates USDT. Eventually you must rebalance (withdraw + deposit),
-which costs real money in:
+The system uses SynchronizedExecutor — both legs fire at the same time.
+There is NO token transfer between exchanges during a trade. USDT is
+pre-funded on both exchanges.
 
-1. Withdrawal fees (network/exchange)
-2. Taker fees (at least one leg needs speed in practice)
-3. Adverse price movement (spread decay during execution window)
-4. Opportunity cost of locked capital during transfer
+REAL costs per trade:
+1. Taker fee on Binance leg (0.075% with BNB discount)
+2. MEXC maker fee: 0% (LIMIT_MAKER)
+3. Amortized rebalancing: ~$0.01/trade (periodic inventory transfers)
 
-This module wraps execution results with realistic cost adjustments.
+NOT a cost per trade (simultaneous execution):
+- Withdrawal fee: NO withdrawal happens during a trade
+- Transfer time slippage: both legs execute within milliseconds
 """
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Optional
 
 logger = logging.getLogger("arb.realistic_fill")
 
@@ -25,9 +26,9 @@ logger = logging.getLogger("arb.realistic_fill")
 @dataclass
 class RealisticCostBreakdown:
     """Breakdown of realistic costs applied to a cross-exchange paper fill."""
-    withdrawal_fee_usd: Decimal     # Amortized withdrawal fee for rebalancing
-    taker_fee_usd: Decimal          # Extra fee for the taker leg
-    adverse_move_usd: Decimal       # Spread decay during execution window
+    withdrawal_fee_usd: Decimal     # Amortized rebalancing cost (NOT per-trade withdrawal)
+    taker_fee_usd: Decimal          # Binance taker fee on the Binance leg
+    adverse_move_usd: Decimal       # Reserved for future use (0 for simultaneous)
     total_realistic_cost_usd: Decimal
     realistic_profit_usd: Decimal   # original profit - total cost
     edge_survived: bool             # True if realistic profit > 0
@@ -36,68 +37,33 @@ class RealisticCostBreakdown:
 class RealisticCrossExchangeFill:
     """Applies realistic cost adjustments to cross-exchange paper fills.
 
-    The key insight: cross-exchange arb looks much more profitable on paper
-    than in practice because the paper engine assumes:
-    - 0% fee on both sides (MEXC maker + Binance maker)
-    - Instant simultaneous execution
-    - No inventory rebalancing costs
-    - No adverse price movement
+    The system uses inventory-based arb (both legs fire simultaneously).
+    The only real cost per trade is the Binance taker fee (0.075% with BNB
+    or 0.1% without). MEXC charges 0% for LIMIT_MAKER orders.
 
-    In reality:
-    - At least one leg is effectively taker (speed matters)
-    - Withdrawal fees eat 10-100bps on small trades
-    - Spread can decay 1-3bps during execution window
-    - You need to rebalance every N trades
+    Periodic inventory rebalancing costs are amortized as a tiny per-trade cost.
     """
 
-    # Withdrawal fees by token (in USD) — sourced from MEXC/Binance fee pages
-    # These are the cheapest network for each token
-    DEFAULT_WITHDRAWAL_FEES: Dict[str, float] = {
-        # Major tokens
-        'BTC': 8.00,       # Lightning or on-chain (~0.0001 BTC)
-        'ETH': 2.50,       # Arbitrum/Optimism bridge
-        'SOL': 0.01,       # Solana native (practically free)
-        'BNB': 0.05,       # BSC native
-        'XRP': 0.25,       # XRP Ledger
-        'DOGE': 2.00,      # DOGE network
-        'ADA': 1.00,       # Cardano native
-        'AVAX': 0.10,      # Avalanche C-Chain
-        'LINK': 0.30,      # Arbitrum
-        'DOT': 1.00,       # Polkadot native
-        'NEAR': 0.10,      # NEAR native
-        'ALGO': 0.10,      # Algorand
-        'ATOM': 0.01,      # Cosmos
-        'FIL': 0.10,       # Filecoin
-        'IMX': 0.50,       # Immutable X
-        'ARB': 0.10,       # Arbitrum native
-        'OP': 0.10,        # Optimism native
-        'APE': 0.50,       # ERC-20
-        'SAND': 0.50,      # ERC-20
-        'MANA': 0.50,      # ERC-20
-        'GALA': 0.50,      # ERC-20
-        'ENJ': 0.50,       # ERC-20
-        'USDT': 1.00,      # TRC-20 (cheapest stable transfer)
-    }
-    DEFAULT_FEE_FALLBACK = 1.50     # Conservative default for unlisted tokens
+    # Binance fee rates
+    BINANCE_TAKER_FEE = Decimal('0.00075')   # 0.075% with BNB discount
+    MEXC_MAKER_FEE = Decimal('0')            # 0% maker (LIMIT_MAKER)
 
     def __init__(self, config: Optional[dict] = None):
         cfg = (config or {}).get('realistic_fill', {})
 
-        # How many trades before needing to rebalance inventory
-        self.trades_per_rebalance = cfg.get('trades_per_rebalance', 15)
+        # Amortized rebalancing cost per trade
+        # Periodic USDT rebalancing between exchanges costs ~$10-20/day
+        # across hundreds of trades = negligible per trade
+        self.rebalance_cost_per_trade = Decimal(str(
+            cfg.get('rebalance_cost_per_trade', 0.01)
+        ))
 
-        # Adverse price movement model (bps lost during execution window)
-        self.adverse_move_bps = Decimal(str(cfg.get('adverse_move_bps', 1.5)))
-
-        # Taker fee penalty — in practice, one leg must cross the spread
-        # MEXC taker = 5bps, Binance taker = 7.5bps
-        # We model a blended penalty assuming one leg is taker ~50% of the time
-        self.taker_penalty_bps = Decimal(str(cfg.get('taker_penalty_bps', 3.0)))
-
-        # Custom withdrawal fees from config (override defaults)
-        custom_fees = cfg.get('withdrawal_fees', {})
-        self.withdrawal_fees = dict(self.DEFAULT_WITHDRAWAL_FEES)
-        self.withdrawal_fees.update(custom_fees)
+        # Whether Binance BNB fee discount is active
+        self.bnb_discount = cfg.get('bnb_discount', True)
+        self.binance_taker_fee = (
+            self.BINANCE_TAKER_FEE if self.bnb_discount
+            else Decimal('0.001')  # 0.1% without BNB
+        )
 
         # Stats
         self._total_applied = 0
@@ -109,47 +75,34 @@ class RealisticCrossExchangeFill:
         symbol: str,
         trade_size_usd: Decimal,
         paper_profit_usd: Decimal,
+        buy_exchange: str = 'binance',
+        sell_exchange: str = 'mexc',
     ) -> RealisticCostBreakdown:
-        """Calculate realistic costs for a cross-exchange paper fill.
+        """Calculate realistic costs for a simultaneous cross-exchange fill.
 
         Args:
             symbol: Trading pair (e.g., "BTC/USDT")
             trade_size_usd: Notional value of the trade
             paper_profit_usd: Profit as calculated by the naive paper fill
+            buy_exchange: Exchange where buy order was placed
+            sell_exchange: Exchange where sell order was placed
 
         Returns:
             RealisticCostBreakdown with all cost components
         """
-        base = symbol.split('/')[0] if '/' in symbol else symbol
+        # Taker fee on Binance leg(s) only
+        # MEXC = 0% maker (LIMIT_MAKER), Binance = 0.075% (with BNB)
+        taker_fee = Decimal('0')
+        if buy_exchange == 'binance':
+            taker_fee += trade_size_usd * self.binance_taker_fee
+        if sell_exchange == 'binance':
+            taker_fee += trade_size_usd * self.binance_taker_fee
 
-        # 1. Amortized withdrawal fee
-        # After each trade, you need to eventually move tokens back.
-        # The withdrawal fee is amortized over trades_per_rebalance trades.
-        raw_withdrawal_fee = Decimal(str(
-            self.withdrawal_fees.get(base, self.DEFAULT_FEE_FALLBACK)
-        ))
-        # Also need to rebalance USDT back to the buy exchange
-        usdt_withdrawal_fee = Decimal(str(
-            self.withdrawal_fees.get('USDT', 1.00)
-        ))
-        # Total rebalance cost = withdraw base + withdraw USDT
-        total_rebalance_fee = raw_withdrawal_fee + usdt_withdrawal_fee
-        amortized_withdrawal = total_rebalance_fee / self.trades_per_rebalance
-
-        # 2. Taker fee penalty
-        # In practice, cross-exchange arb requires speed. At least one leg
-        # must cross the spread (taker). The paper engine assumes both legs
-        # are maker, which is unrealistic.
-        taker_fee_usd = trade_size_usd * (self.taker_penalty_bps / Decimal('10000'))
-
-        # 3. Adverse price movement
-        # During the ~100-500ms execution window, the spread can narrow.
-        # This is especially true for pairs discovered by the scanner —
-        # other bots are also watching these spreads.
-        adverse_move_usd = trade_size_usd * (self.adverse_move_bps / Decimal('10000'))
+        # Amortized rebalancing cost (NOT a withdrawal fee per trade)
+        rebalance_cost = self.rebalance_cost_per_trade
 
         # Total realistic cost
-        total_cost = amortized_withdrawal + taker_fee_usd + adverse_move_usd
+        total_cost = taker_fee + rebalance_cost
 
         # Adjusted profit
         realistic_profit = paper_profit_usd - total_cost
@@ -162,9 +115,9 @@ class RealisticCrossExchangeFill:
             self._edge_survived_count += 1
 
         return RealisticCostBreakdown(
-            withdrawal_fee_usd=amortized_withdrawal,
-            taker_fee_usd=taker_fee_usd,
-            adverse_move_usd=adverse_move_usd,
+            withdrawal_fee_usd=rebalance_cost,  # DB compat: rebalance cost in this field
+            taker_fee_usd=taker_fee,
+            adverse_move_usd=Decimal('0'),  # Not applicable for simultaneous execution
             total_realistic_cost_usd=total_cost,
             realistic_profit_usd=realistic_profit,
             edge_survived=edge_survived,
@@ -182,7 +135,6 @@ class RealisticCrossExchangeFill:
             'edge_survival_rate': (
                 self._edge_survived_count / max(1, self._total_applied)
             ),
-            'trades_per_rebalance': self.trades_per_rebalance,
-            'adverse_move_bps': float(self.adverse_move_bps),
-            'taker_penalty_bps': float(self.taker_penalty_bps),
+            'binance_taker_fee_bps': float(self.binance_taker_fee * 10000),
+            'rebalance_cost_per_trade': float(self.rebalance_cost_per_trade),
         }

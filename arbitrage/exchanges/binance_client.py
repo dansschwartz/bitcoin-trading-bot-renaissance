@@ -46,6 +46,8 @@ class BinanceClient(ExchangeClient):
         self._ws_running = False
         self._last_books: Dict[str, OrderBook] = {}
         self._ws_task: Optional[asyncio.Task] = None
+        # Volume limiter (set by orchestrator for fill rate degradation)
+        self.volume_limiter = None
 
     async def connect(self) -> None:
         config = {
@@ -474,7 +476,11 @@ class BinanceClient(ExchangeClient):
             fee = order.quantity * (fill_price or Decimal('0')) * fee_rate     # quote units
 
         import random
-        if order.order_type == OrderType.LIMIT_MAKER and random.random() > 0.90:
+        base_fill_rate = 0.90
+        if self.volume_limiter:
+            vol_rate = self.volume_limiter.get_fill_rate_modifier(order.symbol)
+            base_fill_rate = min(base_fill_rate, vol_rate)
+        if order.order_type == OrderType.LIMIT_MAKER and random.random() > base_fill_rate:
             return OrderResult(
                 exchange="binance", symbol=order.symbol,
                 order_id=f"paper_{int(time.time()*1000)}",

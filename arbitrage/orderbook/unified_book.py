@@ -274,27 +274,35 @@ class UnifiedBookManager:
             logger.debug(f"Binance validation error {pair}: {e}")
 
     async def _validation_loop(self):
-        """Periodically refresh all pairs via REST (parallel with concurrency limit).
+        """Periodically refresh all pairs via REST in batches.
 
         Uses self.pairs.keys() instead of self.monitored_pairs so dynamically
-        added pairs are also refreshed. Semaphore limits concurrent REST calls
-        to avoid hitting Binance rate limits (1200 weight/min, depth=20 costs 5 each).
-        """
-        sem = asyncio.Semaphore(5)  # Max 5 concurrent pair refreshes (= 10 REST calls)
+        added pairs are also refreshed.
 
-        async def _limited_refresh(pair: str) -> None:
-            async with sem:
-                await self._refresh_pair(pair)
+        Batches 5 pairs at a time with 300ms spacing between batches to avoid
+        MEXC 403/429 rate limits. 40 pairs = 8 batches × 300ms = ~2.4s total,
+        well within both exchanges' rate limits.
+        """
+        BATCH_SIZE = 5
+        BATCH_DELAY = 0.3  # 300ms between batches
 
         while self._running:
-            await asyncio.sleep(30)  # 30s refresh — 40 pairs × 2 × 5 weight / 30s = 667 wt/min (under 1200)
+            await asyncio.sleep(30)
             pairs = list(self.pairs.keys())
             if not pairs:
                 continue
-            await asyncio.gather(
-                *[_limited_refresh(p) for p in pairs],
-                return_exceptions=True,
-            )
+
+            for i in range(0, len(pairs), BATCH_SIZE):
+                if not self._running:
+                    break
+                batch = pairs[i:i + BATCH_SIZE]
+                await asyncio.gather(
+                    *[self._refresh_pair(p) for p in batch],
+                    return_exceptions=True,
+                )
+                # Spacing between batches (skip delay after last batch)
+                if i + BATCH_SIZE < len(pairs):
+                    await asyncio.sleep(BATCH_DELAY)
 
     def get_status(self) -> dict:
         fresh = sum(1 for v in self.pairs.values() if v.is_tradeable)

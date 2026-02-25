@@ -38,7 +38,7 @@ from arbitrage.inventory.manager import InventoryManager
 from arbitrage.tracking.performance import PerformanceTracker
 from arbitrage.exchanges.base import Trade
 from arbitrage.safety.contract_verifier import ContractVerifier
-from arbitrage.safety.concentration_limiter import ConcentrationLimiter
+from arbitrage.safety.volume_limiter import VolumeParticipationLimiter
 from arbitrage.detector.pair_discovery import PairDiscoveryEngine
 
 logger = logging.getLogger("arb.orchestrator")
@@ -98,8 +98,12 @@ class ArbitrageOrchestrator:
             self.mexc, self.binance, config=self.config,
         )
 
-        # Concentration limits for cross-exchange arb
-        self.concentration_limiter = ConcentrationLimiter(config=self.config)
+        # Volume participation limiter for cross-exchange arb
+        self.volume_limiter = VolumeParticipationLimiter(config=self.config)
+
+        # Wire volume limiter into exchange clients for fill rate degradation
+        self.mexc.volume_limiter = self.volume_limiter
+        self.binance.volume_limiter = self.volume_limiter
 
         # Dynamic pair discovery for cross-exchange arb
         self.pair_discovery = PairDiscoveryEngine(
@@ -108,6 +112,7 @@ class ArbitrageOrchestrator:
             book_manager=self.book_manager,
             contract_verifier=self.contract_verifier,
             config=self.config,
+            volume_limiter=self.volume_limiter,
         )
 
         # Strategies
@@ -319,11 +324,14 @@ class ArbitrageOrchestrator:
                 if datetime.utcnow() > signal.expires_at:
                     continue
 
-                # Concentration limit check (per-pair rate + cooldown)
+                # Volume participation check (replaces flat concentration limits)
                 if signal.signal_type == "cross_exchange":
-                    allowed, reason = self.concentration_limiter.check(signal.symbol)
+                    trade_size = float(signal.recommended_quantity * signal.buy_price)
+                    allowed, reason = self.volume_limiter.check(
+                        signal.symbol, trade_size_usd=trade_size
+                    )
                     if not allowed:
-                        logger.debug(f"Concentration blocked {signal.symbol}: {reason}")
+                        logger.debug(f"Volume limiter blocked {signal.symbol}: {reason}")
                         continue
 
                 # Execute
@@ -332,10 +340,11 @@ class ArbitrageOrchestrator:
                 # Track
                 self.tracker.record_trade(result)
 
-                # Record outcome in concentration limiter
+                # Record outcome in volume limiter
                 if signal.signal_type == "cross_exchange":
-                    self.concentration_limiter.record_trade(
-                        signal.symbol, result.status
+                    trade_vol = float(signal.recommended_quantity * signal.buy_price)
+                    self.volume_limiter.record_trade(
+                        signal.symbol, trade_vol, result.status
                     )
 
                 # Update risk engine with realistic profit (not phantom paper profit)
@@ -571,15 +580,17 @@ class ArbitrageOrchestrator:
         except Exception:
             pass
         try:
-            conc_stats = self.concentration_limiter.get_stats()
-            rej = conc_stats.get('rejections', {})
+            vol_stats = self.volume_limiter.get_stats()
+            rej = vol_stats.get('rejections', {})
             total_rej = rej.get('total', 0)
-            if total_rej > 0 or conc_stats.get('blocked_count', 0) > 0:
+            if total_rej > 0 or vol_stats.get('blocked_count', 0) > 0:
                 logger.info(
-                    f"  Concentration: {conc_stats['active_pairs']} active pairs | "
-                    f"{conc_stats['blocked_count']} blocked | "
+                    f"  Volume limiter: {vol_stats['pairs_liquid']} liquid / "
+                    f"{vol_stats['pairs_tracked']} tracked | "
+                    f"{vol_stats['blocked_count']} blocked | "
                     f"Rejected: {total_rej} "
-                    f"(rate={rej.get('rate_limit',0)} cool={rej.get('cooldown',0)} block={rej.get('blocked',0)})"
+                    f"(vol={rej.get('volume',0)} part={rej.get('participation',0)} "
+                    f"block={rej.get('blocked',0)})"
                 )
         except Exception:
             pass
@@ -629,9 +640,9 @@ class ArbitrageOrchestrator:
         except Exception:
             discovery_stats = {}
         try:
-            concentration_stats = self.concentration_limiter.get_stats()
+            volume_limiter_stats = self.volume_limiter.get_stats()
         except Exception:
-            concentration_stats = {}
+            volume_limiter_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -645,7 +656,7 @@ class ArbitrageOrchestrator:
             "tracker_summary": tracker_summary,
             "contract_verification": contract_stats,
             "pair_discovery": discovery_stats,
-            "concentration": concentration_stats,
+            "volume_limiter": volume_limiter_stats,
         }
 
     def _log_final_summary(self):

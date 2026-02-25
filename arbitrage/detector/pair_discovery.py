@@ -52,11 +52,13 @@ class PairDiscoveryEngine:
         book_manager,
         contract_verifier=None,
         config: Optional[dict] = None,
+        volume_limiter=None,
     ):
         self.mexc = mexc
         self.binance = binance
         self.book_manager = book_manager
         self.contract_verifier = contract_verifier
+        self.volume_limiter = volume_limiter
 
         # Load config with defaults
         cfg = (config or {}).get('pair_discovery', {})
@@ -120,6 +122,10 @@ class PairDiscoveryEngine:
             logger.warning("PAIR_DISCOVERY: One or both ticker fetches returned empty")
             return
 
+        # Feed volume data to volume limiter (Binance has 24h volume)
+        if self.volume_limiter and binance_tickers:
+            self.volume_limiter.update_pair_volumes(binance_tickers)
+
         # 2. Find overlapping USDT pairs
         mexc_usdt = {s for s in mexc_tickers if s.endswith('/USDT')}
         binance_usdt = {s for s in binance_tickers if s.endswith('/USDT')}
@@ -149,6 +155,10 @@ class PairDiscoveryEngine:
             b_last = b.get('last_price', Decimal('0'))
             volume_usdt = b_volume * b_last if b_last > 0 else Decimal('0')
             if volume_usdt < self.min_volume_usdt:
+                continue
+
+            # 4b. Volume limiter liquidity check (cross-exchange needs $500K+/day)
+            if self.volume_limiter and not self.volume_limiter.is_pair_liquid_enough(pair):
                 continue
 
             # 5. Compute gross spread in both directions

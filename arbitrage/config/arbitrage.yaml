@@ -167,20 +167,17 @@ safety:
   blocked_tokens: []                # Manual blocklist: ["LUNC", "WBTC"] etc.
   cache_ttl_hours: 24               # How often to refresh contract data
 
-concentration:
-  max_trades_per_pair_per_hour: 5    # Max fills per symbol per hour
-  cooldown_after_fill_sec: 60        # Wait N seconds after each fill before trading same pair
+volume_participation:
+  max_participation_rate: 0.02       # 2% of hourly market volume — beyond this we move the price
+  min_daily_volume_usd: 500000       # $500K minimum to be tradeable (VANRY excluded at $180K)
   one_sided_block_threshold: 0.20    # Auto-block pair if >20% of trades are one-sided
-  one_sided_min_samples: 10          # Need N+ samples before evaluating one-sided rate
+  one_sided_min_samples: 50          # Need 50+ samples before evaluating one-sided rate
+  # Fill rate degrades with participation (models market impact):
+  # 0-0.5%: 85%, 0.5-1%: 75%, 1-2%: 60%, 2-5%: 35%, 5%+: 10%
 
 realistic_fill:
-  trades_per_rebalance: 15          # How many cross-exchange trades before inventory rebalance
-  adverse_move_bps: 1.5             # Average adverse price movement during execution window
-  taker_penalty_bps: 3.0            # Blended taker fee penalty (one leg crosses spread ~50% of time)
-  # Per-token withdrawal fees can override defaults:
-  # withdrawal_fees:
-  #   BTC: 8.0
-  #   ETH: 2.5
+  rebalance_cost_per_trade: 0.01    # $0.01 amortized rebalancing per trade
+  bnb_discount: true                 # Binance BNB fee discount active (0.075% vs 0.1%)
 
 paper_trading:
   enabled: true

@@ -189,12 +189,14 @@ class ArbitrageExecutor:
             realized_cost = self._calculate_realized_cost(buy_result, sell_result, signal)
             self._total_profit += paper_profit
 
-            # Apply realistic cross-exchange costs (withdrawal fees, taker penalty, adverse move)
+            # Apply realistic cross-exchange costs (Binance taker fee + rebalancing)
             trade_size_usd = buy_result.filled_quantity * (buy_result.average_fill_price or signal.buy_price)
             realistic = self._realistic_fill.calculate_realistic_costs(
                 symbol=signal.symbol,
                 trade_size_usd=trade_size_usd,
                 paper_profit_usd=paper_profit,
+                buy_exchange=signal.buy_exchange,
+                sell_exchange=signal.sell_exchange,
             )
             self._realistic_profit += realistic.realistic_profit_usd
 

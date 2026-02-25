@@ -887,22 +887,59 @@ async def arb_cross_exchange_discovery(request: Request):
 
 @router.get("/cross-exchange/concentration")
 async def arb_cross_exchange_concentration(request: Request):
-    """Concentration limiter status — per-pair limits, blocked pairs, cooldowns."""
+    """Volume participation limiter status — per-pair limits, blocked pairs."""
     orch = getattr(request.app.state, "arb_orchestrator", None)
 
-    if orch and hasattr(orch, "concentration_limiter"):
+    if orch and hasattr(orch, "volume_limiter"):
         try:
-            stats = orch.concentration_limiter.get_stats()
+            stats = orch.volume_limiter.get_stats()
             return _sanitize_for_json(stats)
         except Exception as e:
             return {"error": str(e)}
 
     return {
-        "note": "Concentration limiter not initialized (orchestrator not running)",
-        "active_pairs": 0,
+        "note": "Volume limiter not initialized (orchestrator not running)",
+        "pairs_tracked": 0,
         "blocked_pairs": [],
         "rejections": {"total": 0},
     }
+
+
+@router.get("/volume-participation")
+async def arb_volume_participation(request: Request):
+    """Volume participation stats for all tracked pairs — shows capacity utilization."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+
+    if not orch or not hasattr(orch, "volume_limiter"):
+        return {"error": "Volume limiter not initialized (orchestrator not running)"}
+
+    try:
+        stats = orch.volume_limiter.get_stats()
+        pair_details = stats.get("pair_details", {})
+
+        # Sort by participation rate descending (most active first)
+        sorted_pairs = dict(
+            sorted(
+                pair_details.items(),
+                key=lambda x: x[1].get('participation_rate', 0),
+                reverse=True,
+            )
+        )
+
+        return _sanitize_for_json({
+            "config": stats.get("config", {}),
+            "summary": {
+                "pairs_tracked": stats.get("pairs_tracked", 0),
+                "pairs_liquid": stats.get("pairs_liquid", 0),
+                "pairs_excluded": stats.get("pairs_excluded", 0),
+                "blocked_pairs": stats.get("blocked_pairs", []),
+                "total_remaining_capacity_usd": stats.get("total_remaining_capacity_usd", 0),
+                "rejections": stats.get("rejections", {}),
+            },
+            "pairs": sorted_pairs,
+        })
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @router.get("/cross-exchange/realistic")
