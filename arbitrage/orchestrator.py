@@ -113,6 +113,7 @@ class ArbitrageOrchestrator:
         )
         self.executor = ArbitrageExecutor(
             self.mexc, self.binance, self.cost_model, self.risk_engine,
+            config=self.config,
         )
         # Support modules (tracker must be created before funding_arb and triangular_arb)
         self.inventory = InventoryManager(self.mexc, self.binance)
@@ -320,9 +321,14 @@ class ArbitrageOrchestrator:
                 # Track
                 self.tracker.record_trade(result)
 
-                # Update risk engine
+                # Update risk engine with realistic profit (not phantom paper profit)
                 if result.status == "filled":
-                    self.risk_engine.record_trade_result(result.actual_profit_usd)
+                    realistic_pnl = (
+                        result.realistic_costs.realistic_profit_usd
+                        if result.realistic_costs
+                        else result.actual_profit_usd
+                    )
+                    self.risk_engine.record_trade_result(realistic_pnl)
                 elif result.status and "one_sided" in result.status:
                     self.risk_engine.record_trade_result(Decimal('0'), one_sided=True)
 
@@ -515,10 +521,14 @@ class ArbitrageOrchestrator:
         logger.info(f"  Detector: {detector_stats['scan_count']} scans | "
                     f"{detector_stats['signals_generated']} signals | "
                     f"{detector_stats['signals_approved']} approved")
+        paper_pnl = executor_stats.get('paper_profit_usd', executor_stats.get('total_profit_usd', 0))
+        realistic_pnl = executor_stats.get('realistic_profit_usd', paper_pnl)
+        edge_rate = executor_stats.get('edge_survival_rate', 0)
         logger.info(f"  Executor: {executor_stats['total_trades']} trades | "
                     f"{executor_stats['total_fills']} fills | "
-                    f"Profit: ${executor_stats['total_profit_usd']:.2f} | "
-                    f"Win rate: {executor_stats['win_rate']*100:.0f}%")
+                    f"Paper: ${paper_pnl:.2f} | "
+                    f"Realistic: ${realistic_pnl:.2f} | "
+                    f"Edge survival: {edge_rate*100:.0f}%")
         logger.info(f"  Funding: {funding_stats['open_positions']} open positions | "
                     f"Collected: ${funding_stats['total_funding_collected_usd']:.2f}")
         logger.info(f"  Triangular: {tri_stats['scan_count']} scans | "

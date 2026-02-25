@@ -136,12 +136,33 @@ class PerformanceTracker:
             conn.execute("ALTER TABLE arb_trades ADD COLUMN path TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        # Realistic cross-exchange cost columns (Part B)
+        for col, coltype in [
+            ("withdrawal_fee_usd", "REAL DEFAULT 0"),
+            ("taker_fee_usd", "REAL DEFAULT 0"),
+            ("adverse_move_usd", "REAL DEFAULT 0"),
+            ("realistic_profit_usd", "REAL"),
+            ("edge_survived", "INTEGER DEFAULT 1"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {coltype}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         conn.commit()
         conn.close()
 
     def record_trade(self, execution_result):
         """Record a completed trade execution."""
         signal = execution_result.signal
+
+        # Extract realistic cost breakdown (Part B)
+        rc = execution_result.realistic_costs
+        withdrawal_fee = float(rc.withdrawal_fee_usd) if rc else 0.0
+        taker_fee = float(rc.taker_fee_usd) if rc else 0.0
+        adverse_move = float(rc.adverse_move_usd) if rc else 0.0
+        realistic_profit = float(rc.realistic_profit_usd) if rc else float(execution_result.actual_profit_usd)
+        edge_survived = int(rc.edge_survived) if rc else 1
+
         trade = {
             'trade_id': execution_result.trade_id,
             'strategy': signal.signal_type,
@@ -166,6 +187,11 @@ class PerformanceTracker:
             'leg1_depth_usd': 0.0,
             'leg2_depth_usd': 0.0,
             'leg3_depth_usd': 0.0,
+            'withdrawal_fee_usd': withdrawal_fee,
+            'taker_fee_usd': taker_fee,
+            'adverse_move_usd': adverse_move,
+            'realistic_profit_usd': realistic_profit,
+            'edge_survived': edge_survived,
         }
 
         self._trades.append(trade)

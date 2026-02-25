@@ -167,6 +167,15 @@ safety:
   blocked_tokens: []                # Manual blocklist: ["LUNC", "WBTC"] etc.
   cache_ttl_hours: 24               # How often to refresh contract data
 
+realistic_fill:
+  trades_per_rebalance: 15          # How many cross-exchange trades before inventory rebalance
+  adverse_move_bps: 1.5             # Average adverse price movement during execution window
+  taker_penalty_bps: 3.0            # Blended taker fee penalty (one leg crosses spread ~50% of time)
+  # Per-token withdrawal fees can override defaults:
+  # withdrawal_fees:
+  #   BTC: 8.0
+  #   ETH: 2.5
+
 paper_trading:
   enabled: true
   simulated_latency_ms: 50

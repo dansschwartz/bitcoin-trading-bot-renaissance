@@ -19,6 +19,7 @@ from ..exchanges.base import (
     OrderRequest, OrderResult, OrderSide, OrderType, OrderStatus, TimeInForce,
 )
 from ..detector.cross_exchange import ArbitrageSignal
+from .realistic_fill import RealisticCrossExchangeFill, RealisticCostBreakdown
 
 logger = logging.getLogger("arb.execution")
 
@@ -33,6 +34,7 @@ class ExecutionResult:
     emergency_close: Optional[OrderResult] = None
     actual_profit_usd: Decimal = Decimal('0')
     realized_cost_bps: Decimal = Decimal('0')
+    realistic_costs: Optional[RealisticCostBreakdown] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
 
@@ -41,16 +43,19 @@ class ArbitrageExecutor:
     FILL_TIMEOUT_SECONDS = 3.0
     EMERGENCY_CLOSE_SECONDS = 5.0
 
-    def __init__(self, mexc_client, binance_client, cost_model, risk_engine):
+    def __init__(self, mexc_client, binance_client, cost_model, risk_engine,
+                 config: Optional[dict] = None):
         self.clients = {
             "mexc": mexc_client,
             "binance": binance_client,
         }
         self.costs = cost_model
         self.risk = risk_engine
+        self._realistic_fill = RealisticCrossExchangeFill(config=config)
         self._active_trades: Dict[str, ExecutionResult] = {}
         self._completed_trades: List[ExecutionResult] = []
         self._total_profit = Decimal('0')
+        self._realistic_profit = Decimal('0')
         self._trade_count = 0
         self._fill_count = 0
 
@@ -180,9 +185,18 @@ class ArbitrageExecutor:
         if buy_ok and sell_ok:
             # SUCCESS
             self._fill_count += 1
-            actual_profit = self._calculate_actual_profit(buy_result, sell_result)
+            paper_profit = self._calculate_actual_profit(buy_result, sell_result)
             realized_cost = self._calculate_realized_cost(buy_result, sell_result, signal)
-            self._total_profit += actual_profit
+            self._total_profit += paper_profit
+
+            # Apply realistic cross-exchange costs (withdrawal fees, taker penalty, adverse move)
+            trade_size_usd = buy_result.filled_quantity * (buy_result.average_fill_price or signal.buy_price)
+            realistic = self._realistic_fill.calculate_realistic_costs(
+                symbol=signal.symbol,
+                trade_size_usd=trade_size_usd,
+                paper_profit_usd=paper_profit,
+            )
+            self._realistic_profit += realistic.realistic_profit_usd
 
             # Feed cost model
             self.costs.update_from_execution({
@@ -196,19 +210,23 @@ class ArbitrageExecutor:
             result = ExecutionResult(
                 trade_id=trade_id, status="filled", signal=signal,
                 buy_result=buy_result, sell_result=sell_result,
-                actual_profit_usd=actual_profit, realized_cost_bps=realized_cost,
+                actual_profit_usd=paper_profit, realized_cost_bps=realized_cost,
+                realistic_costs=realistic,
             )
             self._completed_trades.append(result)
 
+            edge_tag = "EDGE_SURVIVED" if realistic.edge_survived else "EDGE_LOST"
             logger.info(
                 f"ARB FILLED: {signal.symbol} | "
                 f"Buy: {float(buy_result.filled_quantity):.6f} @ {float(buy_result.average_fill_price or 0):.2f} "
                 f"({signal.buy_exchange}) | "
                 f"Sell: {float(sell_result.filled_quantity):.6f} @ {float(sell_result.average_fill_price or 0):.2f} "
                 f"({signal.sell_exchange}) | "
-                f"Profit: ${float(actual_profit):.4f} | "
-                f"Buy fee: ${float(buy_result.fee_amount):.4f} | "
-                f"Sell fee: ${float(sell_result.fee_amount):.4f}"
+                f"Paper: ${float(paper_profit):.4f} | "
+                f"Realistic: ${float(realistic.realistic_profit_usd):.4f} [{edge_tag}] | "
+                f"Costs: wdraw=${float(realistic.withdrawal_fee_usd):.3f} "
+                f"taker=${float(realistic.taker_fee_usd):.3f} "
+                f"adverse=${float(realistic.adverse_move_usd):.3f}"
             )
 
             # CRITICAL: Verify MEXC charged 0 maker fee
@@ -359,13 +377,23 @@ class ArbitrageExecutor:
         wins = [t for t in self._completed_trades if t.actual_profit_usd > 0]
         losses = [t for t in self._completed_trades if t.actual_profit_usd < 0]
         one_sided = [t for t in self._completed_trades if "one_sided" in t.status]
+        # Realistic wins = trades where edge survived after realistic costs
+        realistic_wins = [
+            t for t in self._completed_trades
+            if t.realistic_costs and t.realistic_costs.edge_survived
+        ]
         return {
             "total_trades": self._trade_count,
             "total_fills": self._fill_count,
-            "total_profit_usd": float(self._total_profit),
+            "paper_profit_usd": float(self._total_profit),
+            "realistic_profit_usd": float(self._realistic_profit),
+            "total_profit_usd": float(self._realistic_profit),  # Use realistic as canonical
             "wins": len(wins),
             "losses": len(losses),
+            "realistic_wins": len(realistic_wins),
             "one_sided_events": len(one_sided),
             "win_rate": len(wins) / max(1, len(wins) + len(losses)),
-            "avg_profit_per_fill": float(self._total_profit / max(1, self._fill_count)),
+            "edge_survival_rate": len(realistic_wins) / max(1, self._fill_count),
+            "avg_profit_per_fill": float(self._realistic_profit / max(1, self._fill_count)),
+            "realistic_fill_stats": self._realistic_fill.get_stats(),
         }
