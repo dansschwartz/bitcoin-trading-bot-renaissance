@@ -23,12 +23,7 @@ import time
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Set
 
-import requests
-
 logger = logging.getLogger("arb.pair_discovery")
-
-# Akamai WAF blocks default python-requests user-agent — use a browser-like UA
-_HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
 
 # Tokens to exclude from cross-exchange arb (stablecoins, wrapped, gold, fiat, junk)
 EXCLUDED_BASES: Set[str] = {
@@ -254,85 +249,23 @@ class PairDiscoveryEngine:
                 )
 
     async def _fetch_mexc_tickers_direct(self) -> Dict[str, dict]:
-        """Fetch all MEXC tickers via direct REST in a thread (bypasses event loop congestion)."""
+        """Fetch all MEXC tickers via exchange client (async, no thread pool)."""
         try:
-            data = await asyncio.to_thread(self._fetch_mexc_sync)
+            return await self.mexc.get_all_tickers()
         except Exception as e:
-            logger.warning(f"PAIR_DISCOVERY: MEXC direct REST failed: {type(e).__name__}: {e}")
+            logger.warning(f"PAIR_DISCOVERY: MEXC tickers failed: {type(e).__name__}: {e}")
             return {}
-
-        result: Dict[str, dict] = {}
-        for t in data:
-            raw_sym = t.get('symbol', '')
-            symbol = self._normalize_symbol(raw_sym)
-            if not symbol:
-                continue
-            try:
-                bid = Decimal(str(t.get('bidPrice', '0') or '0'))
-                ask = Decimal(str(t.get('askPrice', '0') or '0'))
-            except (InvalidOperation, ValueError):
-                continue
-            mid = (bid + ask) / 2 if bid > 0 and ask > 0 else Decimal('0')
-            result[symbol] = {
-                'symbol': symbol,
-                'last_price': mid,
-                'bid': bid,
-                'ask': ask,
-                'volume_24h': Decimal('0'),  # bookTicker doesn't include volume
-            }
-        return result
 
     async def _fetch_binance_tickers_direct(self) -> Dict[str, dict]:
-        """Fetch all Binance tickers via direct REST in a thread (bypasses event loop congestion)."""
+        """Fetch all Binance tickers via exchange client (async, no thread pool).
+
+        Note: Binance bookTicker lacks volume; we merge from 24hr endpoint.
+        """
         try:
-            data = await asyncio.to_thread(self._fetch_binance_sync)
+            return await self.binance.get_all_tickers()
         except Exception as e:
-            logger.warning(f"PAIR_DISCOVERY: Binance direct REST failed: {type(e).__name__}: {e}")
+            logger.warning(f"PAIR_DISCOVERY: Binance tickers failed: {type(e).__name__}: {e}")
             return {}
-
-        result: Dict[str, dict] = {}
-        for t in data:
-            raw_sym = t.get('symbol', '')
-            symbol = self._normalize_symbol(raw_sym)
-            if not symbol:
-                continue
-            try:
-                bid = Decimal(str(t.get('bidPrice', '0') or '0'))
-                ask = Decimal(str(t.get('askPrice', '0') or '0'))
-                last = Decimal(str(t.get('lastPrice', '0') or '0'))
-                volume = Decimal(str(t.get('volume', '0') or '0'))
-            except (InvalidOperation, ValueError):
-                continue
-            result[symbol] = {
-                'symbol': symbol,
-                'last_price': last,
-                'bid': bid,
-                'ask': ask,
-                'volume_24h': volume,
-            }
-        return result
-
-    @staticmethod
-    def _fetch_mexc_sync() -> list:
-        """Synchronous MEXC bookTicker fetch (runs in thread pool)."""
-        resp = requests.get(
-            "https://api.mexc.com/api/v3/ticker/bookTicker",
-            timeout=30,
-            headers=_HTTP_HEADERS,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    @staticmethod
-    def _fetch_binance_sync() -> list:
-        """Synchronous Binance 24hr fetch (runs in thread pool)."""
-        resp = requests.get(
-            "https://api.binance.com/api/v3/ticker/24hr",
-            timeout=30,
-            headers=_HTTP_HEADERS,
-        )
-        resp.raise_for_status()
-        return resp.json()
 
     @staticmethod
     def _normalize_symbol(raw: str) -> Optional[str]:
