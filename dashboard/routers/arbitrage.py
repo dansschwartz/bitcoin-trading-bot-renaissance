@@ -897,12 +897,27 @@ async def arb_cross_exchange_concentration(request: Request):
         except Exception as e:
             return {"error": str(e)}
 
-    return {
-        "note": "Volume limiter not initialized (orchestrator not running)",
-        "pairs_tracked": 0,
-        "blocked_pairs": [],
-        "rejections": {"total": 0},
-    }
+    # DB fallback: compute from recent trades
+    try:
+        with _arb_conn() as c:
+            # Trades per pair in last hour
+            rows = c.execute("""
+                SELECT symbol, COUNT(*) as trades, SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills,
+                       SUM(CASE WHEN status='filled' THEN COALESCE(trade_size_usd, 0) ELSE 0 END) as volume_usd
+                FROM arb_trades WHERE strategy='cross_exchange'
+                  AND timestamp > datetime('now', '-1 hour')
+                GROUP BY symbol ORDER BY trades DESC
+            """).fetchall()
+            return {
+                "note": "DB fallback — live limiter not available",
+                "pairs_tracked": len(rows),
+                "blocked_pairs": [],
+                "rejections": {"total": 0},
+                "pair_activity_1h": {r["symbol"]: {"trades": r["trades"], "fills": r["fills"],
+                                                    "volume_usd": round(r["volume_usd"] or 0, 2)} for r in rows},
+            }
+    except Exception:
+        return {"pairs_tracked": 0, "blocked_pairs": [], "rejections": {"total": 0}}
 
 
 @router.get("/volume-participation")
@@ -910,36 +925,61 @@ async def arb_volume_participation(request: Request):
     """Volume participation stats for all tracked pairs — shows capacity utilization."""
     orch = getattr(request.app.state, "arb_orchestrator", None)
 
-    if not orch or not hasattr(orch, "volume_limiter"):
-        return {"error": "Volume limiter not initialized (orchestrator not running)"}
+    if orch and hasattr(orch, "volume_limiter"):
+        try:
+            stats = orch.volume_limiter.get_stats()
+            pair_details = stats.get("pair_details", {})
 
-    try:
-        stats = orch.volume_limiter.get_stats()
-        pair_details = stats.get("pair_details", {})
-
-        # Sort by participation rate descending (most active first)
-        sorted_pairs = dict(
-            sorted(
-                pair_details.items(),
-                key=lambda x: x[1].get('participation_rate', 0),
-                reverse=True,
+            # Sort by participation rate descending (most active first)
+            sorted_pairs = dict(
+                sorted(
+                    pair_details.items(),
+                    key=lambda x: x[1].get('participation_rate', 0),
+                    reverse=True,
+                )
             )
-        )
 
-        return _sanitize_for_json({
-            "config": stats.get("config", {}),
-            "summary": {
-                "pairs_tracked": stats.get("pairs_tracked", 0),
-                "pairs_liquid": stats.get("pairs_liquid", 0),
-                "pairs_excluded": stats.get("pairs_excluded", 0),
-                "blocked_pairs": stats.get("blocked_pairs", []),
-                "total_remaining_capacity_usd": stats.get("total_remaining_capacity_usd", 0),
-                "rejections": stats.get("rejections", {}),
-            },
-            "pairs": sorted_pairs,
-        })
+            return _sanitize_for_json({
+                "config": stats.get("config", {}),
+                "summary": {
+                    "pairs_tracked": stats.get("pairs_tracked", 0),
+                    "pairs_liquid": stats.get("pairs_liquid", 0),
+                    "pairs_excluded": stats.get("pairs_excluded", 0),
+                    "blocked_pairs": stats.get("blocked_pairs", []),
+                    "total_remaining_capacity_usd": stats.get("total_remaining_capacity_usd", 0),
+                    "rejections": stats.get("rejections", {}),
+                },
+                "pairs": sorted_pairs,
+            })
+        except Exception as e:
+            return {"error": str(e)}
+
+    # DB fallback: show recent trade activity by pair
+    try:
+        with _arb_conn() as c:
+            rows = c.execute("""
+                SELECT symbol, COUNT(*) as trades,
+                       SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills,
+                       SUM(CASE WHEN status='filled' THEN COALESCE(trade_size_usd, 0) ELSE 0 END) as volume_usd,
+                       SUM(CASE WHEN status='filled' THEN COALESCE(paper_profit_usd, 0) ELSE 0 END) as paper_pnl,
+                       SUM(CASE WHEN status='filled' THEN COALESCE(realistic_profit_usd, 0) ELSE 0 END) as real_pnl
+                FROM arb_trades WHERE strategy='cross_exchange'
+                  AND timestamp > datetime('now', '-1 hour')
+                GROUP BY symbol ORDER BY volume_usd DESC
+            """).fetchall()
+            return {
+                "note": "DB fallback — live volume limiter not available",
+                "config": {"max_participation_rate": 0.02, "min_daily_volume_usd": 500000},
+                "summary": {"pairs_active_1h": len(rows)},
+                "pairs": {r["symbol"]: {
+                    "trades_1h": r["trades"], "fills_1h": r["fills"],
+                    "volume_usd_1h": round(r["volume_usd"] or 0, 2),
+                    "paper_pnl_1h": round(r["paper_pnl"] or 0, 4),
+                    "realistic_pnl_1h": round(r["real_pnl"] or 0, 4),
+                } for r in rows},
+            }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"DB fallback failed: {e}"}
 
 
 @router.get("/cross-exchange/realistic")
