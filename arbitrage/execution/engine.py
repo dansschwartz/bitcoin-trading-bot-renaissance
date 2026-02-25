@@ -52,7 +52,7 @@ class ArbitrageExecutor:
     EMERGENCY_CLOSE_SECONDS = 5.0
 
     # Pre-execution gates
-    MAX_BOOK_AGE_SEC = 5.0   # Reject if either book is older than this
+    MAX_BOOK_AGE_SEC = 30.0  # Reject if either book is older than this (REST polls every ~15s)
     MIN_DEPTH_RATIO = 0.8    # Need at least 80% of target qty available
     PRICE_TOLERANCE = Decimal('0.002')  # 0.2% tolerance for depth check
 
@@ -159,14 +159,16 @@ class ArbitrageExecutor:
         fresh_ok, fresh_reason = self._check_book_freshness(signal)
         if not fresh_ok:
             self._freshness_rejects += 1
-            logger.debug(f"Freshness reject {signal.symbol}: {fresh_reason}")
+            if self._freshness_rejects <= 5 or self._freshness_rejects % 100 == 0:
+                logger.info(f"GATE: freshness reject #{self._freshness_rejects} {signal.symbol}: {fresh_reason}")
             return ExecutionResult(trade_id=trade_id, status="book_stale", signal=signal)
 
         # LAYER 2: Book depth gate
         depth_ok, depth_reason = self._check_book_depth(signal)
         if not depth_ok:
             self._depth_rejects += 1
-            logger.debug(f"Depth reject {signal.symbol}: {depth_reason}")
+            if self._depth_rejects <= 5 or self._depth_rejects % 100 == 0:
+                logger.info(f"GATE: depth reject #{self._depth_rejects} {signal.symbol}: {depth_reason}")
             return ExecutionResult(trade_id=trade_id, status="depth_insufficient", signal=signal)
 
         buy_client = self.clients[signal.buy_exchange]
