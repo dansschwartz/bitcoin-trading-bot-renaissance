@@ -109,15 +109,8 @@ class MEXCClient(ExchangeClient):
     # --- Market Data ---
 
     async def get_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        """Fetch order book — direct REST first (ccxt is geo-blocked on VPS)."""
-        try:
-            return await self._fetch_order_book_direct(symbol, depth)
-        except Exception:
-            try:
-                raw = await self._exchange.fetch_order_book(symbol, limit=depth)
-                return self._parse_order_book(raw, symbol)
-            except Exception:
-                raise
+        """Fetch order book via direct REST (ccxt load_markets is geo-blocked on VPS)."""
+        return await self._fetch_order_book_direct(symbol, depth)
 
     async def subscribe_order_book(
         self, symbol: str,
@@ -564,26 +557,8 @@ class MEXCClient(ExchangeClient):
         }
 
     async def get_all_tickers(self) -> Dict[str, dict]:
-        """Fetch all tickers — direct REST first (ccxt is geo-blocked on VPS)."""
-        try:
-            return await self._fetch_all_tickers_direct()
-        except Exception as e:
-            logger.debug(f"Direct REST tickers failed ({e}), trying ccxt")
-            try:
-                raw = await self._exchange.fetch_tickers()
-                result = {}
-                for symbol, ticker in raw.items():
-                    result[symbol] = {
-                        'symbol': symbol,
-                        'last_price': Decimal(str(ticker.get('last', 0) or 0)),
-                        'bid': Decimal(str(ticker.get('bid', 0) or 0)),
-                        'ask': Decimal(str(ticker.get('ask', 0) or 0)),
-                        'volume_24h': Decimal(str(ticker.get('baseVolume', 0) or 0)),
-                    }
-                return result
-            except Exception as e2:
-                logger.error(f"Both direct REST and ccxt tickers failed: {e2}")
-                raise
+        """Fetch all tickers via direct REST (avoids ccxt load_markets overhead)."""
+        return await self._fetch_all_tickers_direct()
 
     async def _fetch_all_tickers_direct(self) -> Dict[str, dict]:
         """Fetch all tickers directly from MEXC spot REST API, bypassing ccxt.
