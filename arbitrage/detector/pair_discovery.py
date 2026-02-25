@@ -27,6 +27,9 @@ import requests
 
 logger = logging.getLogger("arb.pair_discovery")
 
+# Akamai WAF blocks default python-requests user-agent — use a browser-like UA
+_HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
+
 # Tokens to exclude from cross-exchange arb (stablecoins, wrapped, gold, fiat, junk)
 EXCLUDED_BASES: Set[str] = {
     # Stablecoins
@@ -315,6 +318,7 @@ class PairDiscoveryEngine:
         resp = requests.get(
             "https://api.mexc.com/api/v3/ticker/bookTicker",
             timeout=30,
+            headers=_HTTP_HEADERS,
         )
         resp.raise_for_status()
         return resp.json()
@@ -325,6 +329,7 @@ class PairDiscoveryEngine:
         resp = requests.get(
             "https://api.binance.com/api/v3/ticker/24hr",
             timeout=30,
+            headers=_HTTP_HEADERS,
         )
         resp.raise_for_status()
         return resp.json()
