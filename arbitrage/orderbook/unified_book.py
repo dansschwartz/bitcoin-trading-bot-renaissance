@@ -286,6 +286,8 @@ class UnifiedBookManager:
 
         logger.info("Validation loop started — will refresh every 15s")
 
+        import time as _time
+
         while self._running:
             try:
                 await asyncio.sleep(15)  # 15s between refresh cycles
@@ -293,14 +295,18 @@ class UnifiedBookManager:
                 if not pairs:
                     continue
 
+                t_start = _time.monotonic()
+                logger.info(f"Validation cycle starting — {len(pairs)} pairs")
+
                 mexc_ok = 0
                 binance_ok = 0
                 mexc_fail = 0
                 binance_fail = 0
 
-                for pair in pairs:
+                for i, pair in enumerate(pairs):
                     if not self._running:
                         break
+                    t_pair = _time.monotonic()
                     # MEXC
                     try:
                         rest_book = await self.mexc.get_order_book(pair, depth=20)
@@ -309,8 +315,10 @@ class UnifiedBookManager:
                             self.pairs[pair].mexc_last_update = datetime.utcnow()
                             self.pairs[pair].mexc_update_count += 1
                             mexc_ok += 1
-                    except Exception:
+                    except Exception as e:
                         mexc_fail += 1
+                        if i < 3:  # Log first 3 failures for debugging
+                            logger.debug(f"Validation MEXC fail {pair}: {type(e).__name__}: {e}")
 
                     # Binance
                     try:
@@ -320,17 +328,24 @@ class UnifiedBookManager:
                             self.pairs[pair].binance_last_update = datetime.utcnow()
                             self.pairs[pair].binance_update_count += 1
                             binance_ok += 1
-                    except Exception:
+                    except Exception as e:
                         binance_fail += 1
+                        if i < 3:
+                            logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}: {e}")
+
+                    elapsed_pair = _time.monotonic() - t_pair
+                    if i == 0:
+                        logger.info(f"First pair {pair}: {elapsed_pair:.2f}s (M:{'ok' if mexc_ok else 'fail'} B:{'ok' if binance_ok else 'fail'})")
 
                     await asyncio.sleep(PAIR_DELAY)
 
+                elapsed = _time.monotonic() - t_start
                 tradeable = sum(1 for v in self.pairs.values() if v.is_tradeable)
                 logger.info(
                     f"Book refresh: {len(pairs)} pairs | "
                     f"MEXC {mexc_ok}ok/{mexc_fail}fail | "
                     f"Binance {binance_ok}ok/{binance_fail}fail | "
-                    f"{tradeable} tradeable"
+                    f"{tradeable} tradeable | {elapsed:.1f}s"
                 )
             except asyncio.CancelledError:
                 break
