@@ -74,7 +74,10 @@ class MEXCClient(ExchangeClient):
             'apiKey': self._api_key,
             'secret': self._api_secret,
             'enableRateLimit': True,
-            'options': {'defaultType': 'spot'},
+            'options': {
+                'defaultType': 'spot',
+                'fetchMarkets': ['spot'],  # Skip contract API (geo-blocked on VPS)
+            },
         }
         if not self._api_key:
             config.pop('apiKey')
@@ -318,52 +321,55 @@ class MEXCClient(ExchangeClient):
 
     async def _rest_fallback_loop(self):
         """REST polling fallback when WS fails repeatedly.
-        Uses direct HTTP to bypass ccxt contract API issues.
+        Sequential to avoid MEXC rate limiting (parallel requests → 403).
         """
         end_time = time.monotonic() + WS_FALLBACK_DURATION
-        logger.info("MEXC entering REST fallback mode")
+        symbols = list(self._ws_callbacks.items())
+        logger.info(f"MEXC entering REST fallback mode ({len(symbols)} symbols, sequential)")
+        ok_count = 0
+        fail_count = 0
         while self._ws_running and time.monotonic() < end_time:
-            async def _fetch_one(sym, cb):
+            for sym, cb in symbols:
+                if not self._ws_running or time.monotonic() >= end_time:
+                    break
                 try:
                     book = await self._fetch_order_book_direct(sym, depth=20)
                     self._last_books[sym] = book
                     await cb(book)
+                    ok_count += 1
                 except Exception as e:
+                    fail_count += 1
                     logger.debug(f"MEXC REST fallback error {sym}: {e}")
-
-            tasks = [_fetch_one(s, c) for s, c in list(self._ws_callbacks.items())]
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(0.5)
-        logger.info("MEXC REST fallback complete, retrying WebSocket")
+                await asyncio.sleep(0.15)  # 150ms between calls
+            await asyncio.sleep(1.0)
+        logger.info(f"MEXC REST fallback complete — {ok_count} ok, {fail_count} failed")
 
     async def _rest_fallback_loop_permanent(self):
         """Permanent REST polling when WS is geo-blocked.
-        Uses direct HTTP to MEXC spot API to bypass ccxt contract API issues.
+        Sequential to avoid MEXC rate limiting.
         """
-        logger.info(f"MEXC running permanent REST polling (WS unavailable) — {len(self._ws_callbacks)} symbols")
+        symbols = list(self._ws_callbacks.items())
+        logger.info(f"MEXC running permanent REST polling (WS unavailable) — {len(symbols)} symbols")
         poll_count = 0
-        error_count = 0
+        ok_count = 0
+        fail_count = 0
         while self._ws_running:
-            async def _fetch_one(sym, cb):
+            for sym, cb in list(self._ws_callbacks.items()):
+                if not self._ws_running:
+                    break
                 try:
                     book = await self._fetch_order_book_direct(sym, depth=20)
                     self._last_books[sym] = book
                     await cb(book)
+                    ok_count += 1
                 except Exception as e:
+                    fail_count += 1
                     logger.warning(f"MEXC REST poll error {sym}: {e}")
-
-            tasks = [_fetch_one(s, c) for s, c in list(self._ws_callbacks.items())]
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                poll_count += 1
-                for r in results:
-                    if isinstance(r, Exception):
-                        error_count += 1
-                        logger.warning(f"MEXC REST gather exception: {r}")
-                if poll_count % 20 == 1:  # Log every ~60s
-                    logger.info(f"MEXC REST poll #{poll_count}: {len(tasks)} symbols, {error_count} total errors")
-            await asyncio.sleep(3)  # 10 pairs × 1 req each = 10 req/3s ≈ 3.3 req/s (within MEXC limits)
+                await asyncio.sleep(0.15)  # 150ms between calls
+            poll_count += 1
+            if poll_count % 10 == 1:  # Log every ~10 cycles
+                logger.info(f"MEXC REST poll #{poll_count}: {len(self._ws_callbacks)} symbols, {ok_count} ok/{fail_count} fail")
+            await asyncio.sleep(1.0)
 
     # ========== All-Ticker WebSocket Feed ==========
 

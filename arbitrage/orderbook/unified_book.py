@@ -282,69 +282,61 @@ class UnifiedBookManager:
         Sequential with 200ms spacing to avoid MEXC 403/429 rate limits.
         30 pairs × 200ms = ~6s per cycle, well within both exchanges' limits.
         """
-        PAIR_DELAY = 0.2  # 200ms between pairs
+        PAIR_DELAY = 0.15  # 150ms between pairs
+
+        logger.info("Validation loop started — will refresh every 15s")
 
         while self._running:
-            await asyncio.sleep(15)  # 15s between refresh cycles
-            pairs = list(self.pairs.keys())
-            if not pairs:
-                continue
+            try:
+                await asyncio.sleep(15)  # 15s between refresh cycles
+                pairs = list(self.pairs.keys())
+                if not pairs:
+                    continue
 
-            mexc_ok = 0
-            binance_ok = 0
-            mexc_fail = 0
-            binance_fail = 0
+                mexc_ok = 0
+                binance_ok = 0
+                mexc_fail = 0
+                binance_fail = 0
 
-            for pair in pairs:
-                if not self._running:
-                    break
-                # MEXC
-                try:
-                    rest_book = await self.mexc.get_order_book(pair, depth=20)
-                    if pair in self.pairs:
-                        local_book = self.pairs[pair].mexc_book
-                        if local_book and rest_book and rest_book.best_bid and local_book.best_bid:
-                            diff = abs(local_book.best_bid - rest_book.best_bid)
-                            if rest_book.best_bid > 0 and diff / rest_book.best_bid > Decimal('0.001'):
-                                logger.warning(
-                                    f"Book drift: {pair} MEXC local={local_book.best_bid} "
-                                    f"rest={rest_book.best_bid}"
-                                )
-                        self.pairs[pair].mexc_book = rest_book
-                        self.pairs[pair].mexc_last_update = datetime.utcnow()
-                        self.pairs[pair].mexc_update_count += 1
-                        mexc_ok += 1
-                except Exception:
-                    mexc_fail += 1
+                for pair in pairs:
+                    if not self._running:
+                        break
+                    # MEXC
+                    try:
+                        rest_book = await self.mexc.get_order_book(pair, depth=20)
+                        if pair in self.pairs:
+                            self.pairs[pair].mexc_book = rest_book
+                            self.pairs[pair].mexc_last_update = datetime.utcnow()
+                            self.pairs[pair].mexc_update_count += 1
+                            mexc_ok += 1
+                    except Exception:
+                        mexc_fail += 1
 
-                # Binance
-                try:
-                    rest_book = await self.binance.get_order_book(pair, depth=20)
-                    if pair in self.pairs:
-                        local_book = self.pairs[pair].binance_book
-                        if local_book and rest_book and rest_book.best_bid and local_book.best_bid:
-                            diff = abs(local_book.best_bid - rest_book.best_bid)
-                            if rest_book.best_bid > 0 and diff / rest_book.best_bid > Decimal('0.001'):
-                                logger.warning(
-                                    f"Book drift: {pair} Binance local={local_book.best_bid} "
-                                    f"rest={rest_book.best_bid}"
-                                )
-                        self.pairs[pair].binance_book = rest_book
-                        self.pairs[pair].binance_last_update = datetime.utcnow()
-                        self.pairs[pair].binance_update_count += 1
-                        binance_ok += 1
-                except Exception:
-                    binance_fail += 1
+                    # Binance
+                    try:
+                        rest_book = await self.binance.get_order_book(pair, depth=20)
+                        if pair in self.pairs:
+                            self.pairs[pair].binance_book = rest_book
+                            self.pairs[pair].binance_last_update = datetime.utcnow()
+                            self.pairs[pair].binance_update_count += 1
+                            binance_ok += 1
+                    except Exception:
+                        binance_fail += 1
 
-                await asyncio.sleep(PAIR_DELAY)
+                    await asyncio.sleep(PAIR_DELAY)
 
-            tradeable = sum(1 for v in self.pairs.values() if v.is_tradeable)
-            logger.info(
-                f"Book refresh: {len(pairs)} pairs | "
-                f"MEXC {mexc_ok}ok/{mexc_fail}fail | "
-                f"Binance {binance_ok}ok/{binance_fail}fail | "
-                f"{tradeable} tradeable"
-            )
+                tradeable = sum(1 for v in self.pairs.values() if v.is_tradeable)
+                logger.info(
+                    f"Book refresh: {len(pairs)} pairs | "
+                    f"MEXC {mexc_ok}ok/{mexc_fail}fail | "
+                    f"Binance {binance_ok}ok/{binance_fail}fail | "
+                    f"{tradeable} tradeable"
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Validation loop error: {type(e).__name__}: {e}")
+                await asyncio.sleep(5)
 
     def get_status(self) -> dict:
         fresh = sum(1 for v in self.pairs.values() if v.is_tradeable)
