@@ -122,7 +122,7 @@ class ArbitrageOrchestrator:
         )
         self.executor = ArbitrageExecutor(
             self.mexc, self.binance, self.cost_model, self.risk_engine,
-            config=self.config,
+            config=self.config, book_manager=self.book_manager,
         )
         # Support modules (tracker must be created before funding_arb and triangular_arb)
         self.inventory = InventoryManager(self.mexc, self.binance)

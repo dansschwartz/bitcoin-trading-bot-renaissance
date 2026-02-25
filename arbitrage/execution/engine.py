@@ -7,19 +7,24 @@ CRITICAL PRINCIPLES:
 2. MAKER FIRST. LIMIT_MAKER orders for zero fee on MEXC.
 3. SPEED. Both orders placed concurrently via asyncio.
 4. VERIFY. If one side fills and other doesn't → emergency close.
+5. PRE-CHECK. Verify book depth and freshness before firing.
 """
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, TYPE_CHECKING
 
 from ..exchanges.base import (
     OrderRequest, OrderResult, OrderSide, OrderType, OrderStatus, TimeInForce,
 )
 from ..detector.cross_exchange import ArbitrageSignal
 from .realistic_fill import RealisticCrossExchangeFill, RealisticCostBreakdown
+
+if TYPE_CHECKING:
+    from ..orderbook.unified_book import UnifiedBookManager
 
 logger = logging.getLogger("arb.execution")
 
@@ -40,17 +45,28 @@ class ExecutionResult:
 
 class ArbitrageExecutor:
 
-    FILL_TIMEOUT_SECONDS = 15.0
-    EMERGENCY_CLOSE_SECONDS = 10.0
+    # Paper fills are instant — no need to wait long.
+    # Live fills need more time for exchange round-trip.
+    FILL_TIMEOUT_PAPER = 2.0
+    FILL_TIMEOUT_LIVE = 5.0
+    EMERGENCY_CLOSE_SECONDS = 5.0
+
+    # Pre-execution gates
+    MAX_BOOK_AGE_SEC = 5.0   # Reject if either book is older than this
+    MIN_DEPTH_RATIO = 0.8    # Need at least 80% of target qty available
+    PRICE_TOLERANCE = Decimal('0.002')  # 0.2% tolerance for depth check
 
     def __init__(self, mexc_client, binance_client, cost_model, risk_engine,
-                 config: Optional[dict] = None):
+                 config: Optional[dict] = None,
+                 book_manager: Optional['UnifiedBookManager'] = None):
         self.clients = {
             "mexc": mexc_client,
             "binance": binance_client,
         }
         self.costs = cost_model
         self.risk = risk_engine
+        self.book_manager = book_manager
+        self._paper_mode = getattr(mexc_client, 'paper_trading', True)
         self._realistic_fill = RealisticCrossExchangeFill(config=config)
         self._active_trades: Dict[str, ExecutionResult] = {}
         self._completed_trades: List[ExecutionResult] = []
@@ -58,6 +74,77 @@ class ArbitrageExecutor:
         self._realistic_profit = Decimal('0')
         self._trade_count = 0
         self._fill_count = 0
+        self._depth_rejects = 0
+        self._freshness_rejects = 0
+
+    # ── Pre-execution gates ────────────────────────────────────────
+
+    def _check_book_freshness(self, signal: ArbitrageSignal) -> tuple:
+        """Reject if either book is stale. Returns (ok, reason)."""
+        if not self.book_manager:
+            return True, "no_book_manager"
+
+        view = self.book_manager.pairs.get(signal.symbol)
+        if not view:
+            return False, "pair_not_monitored"
+
+        now = datetime.utcnow()
+        mexc_age = (now - view.mexc_last_update).total_seconds()
+        binance_age = (now - view.binance_last_update).total_seconds()
+
+        if mexc_age > self.MAX_BOOK_AGE_SEC:
+            return False, f"mexc_stale:{mexc_age:.1f}s"
+        if binance_age > self.MAX_BOOK_AGE_SEC:
+            return False, f"binance_stale:{binance_age:.1f}s"
+        return True, f"fresh:M={mexc_age:.1f}s,B={binance_age:.1f}s"
+
+    def _check_book_depth(self, signal: ArbitrageSignal) -> tuple:
+        """Reject if either book lacks depth at target price. Returns (ok, reason)."""
+        if not self.book_manager:
+            return True, "no_book_manager"
+
+        view = self.book_manager.pairs.get(signal.symbol)
+        if not view or not view.mexc_book or not view.binance_book:
+            return False, "missing_book"
+
+        buy_book = view.mexc_book if signal.buy_exchange == "mexc" else view.binance_book
+        sell_book = view.mexc_book if signal.sell_exchange == "mexc" else view.binance_book
+
+        target_qty = signal.recommended_quantity
+
+        # Check buy side: asks at/below our buy price (+tolerance)
+        max_buy = signal.buy_price * (1 + self.PRICE_TOLERANCE)
+        available_buy = Decimal('0')
+        for level in buy_book.asks:
+            if level.price <= max_buy:
+                available_buy += level.quantity
+            else:
+                break
+
+        if available_buy < target_qty * Decimal(str(self.MIN_DEPTH_RATIO)):
+            return False, (
+                f"buy_depth:{float(available_buy):.4f}<"
+                f"{float(target_qty * Decimal(str(self.MIN_DEPTH_RATIO))):.4f}"
+            )
+
+        # Check sell side: bids at/above our sell price (-tolerance)
+        min_sell = signal.sell_price * (1 - self.PRICE_TOLERANCE)
+        available_sell = Decimal('0')
+        for level in sell_book.bids:
+            if level.price >= min_sell:
+                available_sell += level.quantity
+            else:
+                break
+
+        if available_sell < target_qty * Decimal(str(self.MIN_DEPTH_RATIO)):
+            return False, (
+                f"sell_depth:{float(available_sell):.4f}<"
+                f"{float(target_qty * Decimal(str(self.MIN_DEPTH_RATIO))):.4f}"
+            )
+
+        return True, "depth_ok"
+
+    # ── Main execution ─────────────────────────────────────────────
 
     async def execute_arbitrage(self, signal: ArbitrageSignal) -> ExecutionResult:
         """Execute a cross-exchange arbitrage trade."""
@@ -67,6 +154,20 @@ class ArbitrageExecutor:
         if datetime.utcnow() > signal.expires_at:
             logger.debug(f"Signal expired: {trade_id}")
             return ExecutionResult(trade_id=trade_id, status="expired", signal=signal)
+
+        # LAYER 1: Book freshness gate
+        fresh_ok, fresh_reason = self._check_book_freshness(signal)
+        if not fresh_ok:
+            self._freshness_rejects += 1
+            logger.debug(f"Freshness reject {signal.symbol}: {fresh_reason}")
+            return ExecutionResult(trade_id=trade_id, status="book_stale", signal=signal)
+
+        # LAYER 2: Book depth gate
+        depth_ok, depth_reason = self._check_book_depth(signal)
+        if not depth_ok:
+            self._depth_rejects += 1
+            logger.debug(f"Depth reject {signal.symbol}: {depth_reason}")
+            return ExecutionResult(trade_id=trade_id, status="depth_insufficient", signal=signal)
 
         buy_client = self.clients[signal.buy_exchange]
         sell_client = self.clients[signal.sell_exchange]
@@ -129,14 +230,15 @@ class ArbitrageExecutor:
             f"Expected profit: ${float(signal.expected_profit_usd):.2f}"
         )
 
+        # LAYER 4: Order type — MEXC LIMIT_MAKER (0% fee), Binance IOC (fill-or-kill)
         buy_order = OrderRequest(
             exchange=signal.buy_exchange,
             symbol=signal.symbol,
             side=OrderSide.BUY,
-            order_type=OrderType.LIMIT_MAKER,
+            order_type=OrderType.LIMIT_MAKER if signal.buy_exchange == "mexc" else OrderType.LIMIT,
             quantity=buy_qty,
             price=buy_price,
-            time_in_force=TimeInForce.GTX,
+            time_in_force=TimeInForce.GTX if signal.buy_exchange == "mexc" else TimeInForce.IOC,
             client_order_id=f"{trade_id}_buy",
         )
 
@@ -144,14 +246,15 @@ class ArbitrageExecutor:
             exchange=signal.sell_exchange,
             symbol=signal.symbol,
             side=OrderSide.SELL,
-            order_type=OrderType.LIMIT_MAKER,
+            order_type=OrderType.LIMIT_MAKER if signal.sell_exchange == "mexc" else OrderType.LIMIT,
             quantity=sell_qty,
             price=sell_price,
-            time_in_force=TimeInForce.GTX,
+            time_in_force=TimeInForce.GTX if signal.sell_exchange == "mexc" else TimeInForce.IOC,
             client_order_id=f"{trade_id}_sell",
         )
 
-        # FIRE BOTH SIMULTANEOUSLY
+        # FIRE BOTH SIMULTANEOUSLY — LAYER 3: tight timeout
+        fill_timeout = self.FILL_TIMEOUT_PAPER if self._paper_mode else self.FILL_TIMEOUT_LIVE
         try:
             buy_result, sell_result = await asyncio.wait_for(
                 asyncio.gather(
@@ -159,7 +262,7 @@ class ArbitrageExecutor:
                     sell_client.place_order(sell_order),
                     return_exceptions=True,
                 ),
-                timeout=self.FILL_TIMEOUT_SECONDS,
+                timeout=fill_timeout,
             )
         except asyncio.TimeoutError:
             logger.error(f"Execution timeout: {trade_id}")
@@ -399,5 +502,7 @@ class ArbitrageExecutor:
             "win_rate": len(wins) / max(1, len(wins) + len(losses)),
             "edge_survival_rate": len(realistic_wins) / max(1, self._fill_count),
             "avg_profit_per_fill": float(self._realistic_profit / max(1, self._fill_count)),
+            "depth_rejects": self._depth_rejects,
+            "freshness_rejects": self._freshness_rejects,
             "realistic_fill_stats": self._realistic_fill.get_stats(),
         }

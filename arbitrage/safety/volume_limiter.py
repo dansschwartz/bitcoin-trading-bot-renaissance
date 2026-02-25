@@ -51,9 +51,9 @@ class VolumeParticipationLimiter:
         # Pairs with less than this daily volume are excluded entirely
         self.min_daily_volume_usd = float(cfg.get('min_daily_volume_usd', 500_000))
 
-        # One-sided fill auto-blocking (kept from ConcentrationLimiter)
-        self.one_sided_block_threshold = float(cfg.get('one_sided_block_threshold', 0.20))
-        self.one_sided_min_samples = int(cfg.get('one_sided_min_samples', 50))
+        # One-sided fill auto-blocking — aggressive to protect against naked exposure
+        self.one_sided_block_threshold = float(cfg.get('one_sided_block_threshold', 0.10))
+        self.one_sided_min_samples = int(cfg.get('one_sided_min_samples', 20))
 
         # State tracking
         self._volume_history: Dict[str, deque] = defaultdict(
