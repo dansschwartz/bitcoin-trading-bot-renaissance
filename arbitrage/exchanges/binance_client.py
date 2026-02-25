@@ -11,6 +11,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional, Callable, Awaitable, Dict
 
+import aiohttp
 import ccxt.async_support as ccxt_async
 import websockets
 
@@ -54,7 +55,10 @@ class BinanceClient(ExchangeClient):
             'apiKey': self._api_key,
             'secret': self._api_secret,
             'enableRateLimit': True,
-            'options': {'defaultType': 'spot'},
+            'options': {
+                'defaultType': 'spot',
+                'fetchMarkets': ['spot'],  # Skip derivatives (dapi.binance.com geo-blocked on VPS)
+            },
         }
         if not self._api_key:
             config.pop('apiKey')
@@ -79,8 +83,28 @@ class BinanceClient(ExchangeClient):
     # --- Market Data ---
 
     async def get_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        raw = await self._exchange.fetch_order_book(symbol, limit=depth)
-        return self._parse_order_book(raw, symbol)
+        """Fetch order book — direct REST first, ccxt fallback."""
+        try:
+            return await self._fetch_order_book_direct(symbol, depth)
+        except Exception:
+            raw = await self._exchange.fetch_order_book(symbol, limit=depth)
+            return self._parse_order_book(raw, symbol)
+
+    async def _fetch_order_book_direct(self, symbol: str, depth: int = 20) -> OrderBook:
+        """Direct REST API call — bypasses ccxt (which may fail if market load failed)."""
+        api_sym = symbol.replace("/", "")
+        url = f"https://api.binance.com/api/v3/depth?symbol={api_sym}&limit={depth}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Binance REST {resp.status}")
+                data = await resp.json()
+        bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get("bids", [])[:depth]]
+        asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get("asks", [])[:depth]]
+        return OrderBook(
+            exchange="binance", symbol=symbol, timestamp=datetime.utcnow(),
+            bids=bids, asks=asks,
+        )
 
     async def subscribe_order_book(
         self, symbol: str,
@@ -216,23 +240,33 @@ class BinanceClient(ExchangeClient):
         asyncio.get_event_loop().create_task(cb(trade))
 
     async def _rest_fallback_loop(self):
-        """REST polling fallback when WS fails repeatedly."""
+        """REST polling fallback when WS fails repeatedly. Batched to avoid rate limits."""
         end_time = time.monotonic() + WS_FALLBACK_DURATION
         logger.info("Binance entering REST fallback mode")
+        BATCH_SIZE = 5
+        BATCH_DELAY = 0.3
         while self._ws_running and time.monotonic() < end_time:
-            async def _fetch_one(sym, cb):
-                try:
-                    raw = await self._exchange.fetch_order_book(sym, limit=20)
-                    book = self._parse_order_book(raw, sym)
-                    self._last_books[sym] = book
-                    await cb(book)
-                except Exception as e:
-                    logger.debug(f"Binance REST fallback error {sym}: {e}")
+            items = list(self._ws_callbacks.items())
+            for i in range(0, len(items), BATCH_SIZE):
+                if not self._ws_running or time.monotonic() >= end_time:
+                    break
+                batch = items[i:i + BATCH_SIZE]
 
-            tasks = [_fetch_one(s, c) for s, c in list(self._ws_callbacks.items())]
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(0.5)
+                async def _fetch_one(sym, cb):
+                    try:
+                        book = await self._fetch_order_book_direct(sym, 20)
+                        self._last_books[sym] = book
+                        await cb(book)
+                    except Exception as e:
+                        logger.debug(f"Binance REST fallback error {sym}: {e}")
+
+                await asyncio.gather(
+                    *[_fetch_one(s, c) for s, c in batch],
+                    return_exceptions=True,
+                )
+                if i + BATCH_SIZE < len(items):
+                    await asyncio.sleep(BATCH_DELAY)
+            await asyncio.sleep(1.0)
         logger.info("Binance REST fallback complete, retrying WebSocket")
 
     # ========== Symbol Conversion ==========
@@ -266,6 +300,11 @@ class BinanceClient(ExchangeClient):
         }
 
     async def get_all_tickers(self) -> Dict[str, dict]:
+        """Fetch all tickers — direct REST first, ccxt fallback."""
+        try:
+            return await self._fetch_all_tickers_direct()
+        except Exception:
+            pass
         raw = await self._exchange.fetch_tickers()
         result = {}
         for symbol, ticker in raw.items():
@@ -275,6 +314,29 @@ class BinanceClient(ExchangeClient):
                 'bid': Decimal(str(ticker.get('bid', 0) or 0)),
                 'ask': Decimal(str(ticker.get('ask', 0) or 0)),
                 'volume_24h': Decimal(str(ticker.get('baseVolume', 0) or 0)),
+            }
+        return result
+
+    async def _fetch_all_tickers_direct(self) -> Dict[str, dict]:
+        """Direct REST call for all book tickers — bypasses ccxt."""
+        url = "https://api.binance.com/api/v3/ticker/bookTicker"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Binance REST {resp.status}")
+                data = await resp.json()
+        result = {}
+        for item in data:
+            raw_sym = item.get("symbol", "")
+            symbol = self._binance_sym_to_normalized(raw_sym)
+            if "/" not in symbol:
+                continue
+            result[symbol] = {
+                'symbol': symbol,
+                'last_price': Decimal('0'),
+                'bid': Decimal(str(item.get('bidPrice', '0') or '0')),
+                'ask': Decimal(str(item.get('askPrice', '0') or '0')),
+                'volume_24h': Decimal('0'),
             }
         return result
 
