@@ -38,6 +38,7 @@ from arbitrage.inventory.manager import InventoryManager
 from arbitrage.tracking.performance import PerformanceTracker
 from arbitrage.exchanges.base import Trade
 from arbitrage.safety.contract_verifier import ContractVerifier
+from arbitrage.safety.concentration_limiter import ConcentrationLimiter
 from arbitrage.detector.pair_discovery import PairDiscoveryEngine
 
 logger = logging.getLogger("arb.orchestrator")
@@ -96,6 +97,9 @@ class ArbitrageOrchestrator:
         self.contract_verifier = ContractVerifier(
             self.mexc, self.binance, config=self.config,
         )
+
+        # Concentration limits for cross-exchange arb
+        self.concentration_limiter = ConcentrationLimiter(config=self.config)
 
         # Dynamic pair discovery for cross-exchange arb
         self.pair_discovery = PairDiscoveryEngine(
@@ -315,11 +319,24 @@ class ArbitrageOrchestrator:
                 if datetime.utcnow() > signal.expires_at:
                     continue
 
+                # Concentration limit check (per-pair rate + cooldown)
+                if signal.signal_type == "cross_exchange":
+                    allowed, reason = self.concentration_limiter.check(signal.symbol)
+                    if not allowed:
+                        logger.debug(f"Concentration blocked {signal.symbol}: {reason}")
+                        continue
+
                 # Execute
                 result = await self.executor.execute_arbitrage(signal)
 
                 # Track
                 self.tracker.record_trade(result)
+
+                # Record outcome in concentration limiter
+                if signal.signal_type == "cross_exchange":
+                    self.concentration_limiter.record_trade(
+                        signal.symbol, result.status
+                    )
 
                 # Update risk engine with realistic profit (not phantom paper profit)
                 if result.status == "filled":
@@ -553,6 +570,19 @@ class ArbitrageOrchestrator:
                 )
         except Exception:
             pass
+        try:
+            conc_stats = self.concentration_limiter.get_stats()
+            rej = conc_stats.get('rejections', {})
+            total_rej = rej.get('total', 0)
+            if total_rej > 0 or conc_stats.get('blocked_count', 0) > 0:
+                logger.info(
+                    f"  Concentration: {conc_stats['active_pairs']} active pairs | "
+                    f"{conc_stats['blocked_count']} blocked | "
+                    f"Rejected: {total_rej} "
+                    f"(rate={rej.get('rate_limit',0)} cool={rej.get('cooldown',0)} block={rej.get('blocked',0)})"
+                )
+        except Exception:
+            pass
         logger.info("=" * 60)
 
     def get_full_status(self) -> dict:
@@ -598,6 +628,10 @@ class ArbitrageOrchestrator:
             discovery_stats = self.pair_discovery.get_stats()
         except Exception:
             discovery_stats = {}
+        try:
+            concentration_stats = self.concentration_limiter.get_stats()
+        except Exception:
+            concentration_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -611,6 +645,7 @@ class ArbitrageOrchestrator:
             "tracker_summary": tracker_summary,
             "contract_verification": contract_stats,
             "pair_discovery": discovery_stats,
+            "concentration": concentration_stats,
         }
 
     def _log_final_summary(self):

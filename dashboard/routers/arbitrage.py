@@ -791,6 +791,203 @@ async def arb_sizing(request: Request):
     return _sanitize_for_json(result)
 
 
+@router.get("/cross-exchange/discovery")
+async def arb_cross_exchange_discovery(request: Request):
+    """Dynamic pair discovery stats — overlapping pairs, promotions, demotions."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+
+    result = {
+        "discovery": {},
+        "book_status": {},
+        "cross_exchange_24h": {},
+    }
+
+    # Live discovery stats
+    if orch and hasattr(orch, "pair_discovery"):
+        try:
+            result["discovery"] = orch.pair_discovery.get_stats()
+        except Exception as e:
+            logger.debug(f"Discovery stats error: {e}")
+
+    # Live book status
+    if orch and hasattr(orch, "book_manager"):
+        try:
+            result["book_status"] = orch.book_manager.get_status()
+        except Exception as e:
+            logger.debug(f"Book status error: {e}")
+
+    # 24h cross-exchange performance from DB
+    try:
+        with _arb_conn() as c:
+            row = c.execute("""
+                SELECT COUNT(*) as trades,
+                       SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills,
+                       COALESCE(SUM(CASE WHEN status='filled' THEN actual_profit_usd ELSE 0 END), 0) as paper_profit,
+                       COALESCE(SUM(CASE WHEN status='filled' THEN realistic_profit_usd ELSE 0 END), 0) as realistic_profit,
+                       SUM(CASE WHEN edge_survived=1 AND status='filled' THEN 1 ELSE 0 END) as edge_survived,
+                       SUM(CASE WHEN edge_survived=0 AND status='filled' THEN 1 ELSE 0 END) as edge_lost,
+                       COALESCE(SUM(withdrawal_fee_usd), 0) as total_withdrawal_fees,
+                       COALESCE(SUM(taker_fee_usd), 0) as total_taker_fees,
+                       COALESCE(SUM(adverse_move_usd), 0) as total_adverse_move
+                FROM arb_trades
+                WHERE strategy='cross_exchange'
+                  AND timestamp >= datetime('now', '-24 hours')
+            """).fetchone()
+
+            fills = row["fills"] or 0
+            edge_survived = row["edge_survived"] or 0
+            result["cross_exchange_24h"] = {
+                "trades": row["trades"] or 0,
+                "fills": fills,
+                "paper_profit_usd": round(float(row["paper_profit"]), 4),
+                "realistic_profit_usd": round(float(row["realistic_profit"] or 0), 4),
+                "edge_survived": edge_survived,
+                "edge_lost": row["edge_lost"] or 0,
+                "edge_survival_rate": round(edge_survived / max(1, fills), 3),
+                "cost_breakdown": {
+                    "withdrawal_fees": round(float(row["total_withdrawal_fees"]), 4),
+                    "taker_fees": round(float(row["total_taker_fees"]), 4),
+                    "adverse_move": round(float(row["total_adverse_move"]), 4),
+                },
+            }
+
+            # Per-pair breakdown (top 10 by trade count)
+            pair_rows = c.execute("""
+                SELECT symbol,
+                       COUNT(*) as trades,
+                       SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills,
+                       COALESCE(SUM(CASE WHEN status='filled' THEN actual_profit_usd ELSE 0 END), 0) as paper_profit,
+                       COALESCE(SUM(CASE WHEN status='filled' THEN realistic_profit_usd ELSE 0 END), 0) as realistic_profit,
+                       SUM(CASE WHEN edge_survived=1 AND status='filled' THEN 1 ELSE 0 END) as survived
+                FROM arb_trades
+                WHERE strategy='cross_exchange'
+                  AND timestamp >= datetime('now', '-24 hours')
+                GROUP BY symbol
+                ORDER BY trades DESC
+                LIMIT 10
+            """).fetchall()
+            result["cross_exchange_24h"]["by_pair"] = [
+                {
+                    "symbol": r["symbol"],
+                    "trades": r["trades"],
+                    "fills": r["fills"],
+                    "paper_profit": round(float(r["paper_profit"]), 4),
+                    "realistic_profit": round(float(r["realistic_profit"] or 0), 4),
+                    "edge_survival_rate": round(
+                        (r["survived"] or 0) / max(1, r["fills"]), 3
+                    ),
+                }
+                for r in pair_rows
+            ]
+    except Exception as e:
+        result["cross_exchange_24h"]["error"] = str(e)
+
+    return _sanitize_for_json(result)
+
+
+@router.get("/cross-exchange/concentration")
+async def arb_cross_exchange_concentration(request: Request):
+    """Concentration limiter status — per-pair limits, blocked pairs, cooldowns."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+
+    if orch and hasattr(orch, "concentration_limiter"):
+        try:
+            stats = orch.concentration_limiter.get_stats()
+            return _sanitize_for_json(stats)
+        except Exception as e:
+            return {"error": str(e)}
+
+    return {
+        "note": "Concentration limiter not initialized (orchestrator not running)",
+        "active_pairs": 0,
+        "blocked_pairs": [],
+        "rejections": {"total": 0},
+    }
+
+
+@router.get("/cross-exchange/realistic")
+async def arb_cross_exchange_realistic(request: Request):
+    """Paper vs Realistic P&L comparison for cross-exchange arb."""
+    result = {
+        "live_stats": {},
+        "all_time": {},
+        "daily": [],
+    }
+
+    # Live executor stats (includes realistic fill stats)
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch and hasattr(orch, "executor"):
+        try:
+            result["live_stats"] = orch.executor.get_stats()
+        except Exception as e:
+            logger.debug(f"Live executor stats error: {e}")
+
+    # All-time and daily breakdown from DB
+    try:
+        with _arb_conn() as c:
+            # All-time
+            row = c.execute("""
+                SELECT COUNT(*) as fills,
+                       COALESCE(SUM(actual_profit_usd), 0) as paper_total,
+                       COALESCE(SUM(realistic_profit_usd), 0) as realistic_total,
+                       COALESCE(SUM(withdrawal_fee_usd), 0) as wfees,
+                       COALESCE(SUM(taker_fee_usd), 0) as tfees,
+                       COALESCE(SUM(adverse_move_usd), 0) as adverse,
+                       SUM(CASE WHEN edge_survived=1 THEN 1 ELSE 0 END) as survived,
+                       SUM(CASE WHEN edge_survived=0 THEN 1 ELSE 0 END) as lost
+                FROM arb_trades
+                WHERE strategy='cross_exchange' AND status='filled'
+            """).fetchone()
+
+            fills = row["fills"] or 0
+            result["all_time"] = {
+                "fills": fills,
+                "paper_profit_usd": round(float(row["paper_total"]), 4),
+                "realistic_profit_usd": round(float(row["realistic_total"] or 0), 4),
+                "phantom_pnl_usd": round(
+                    float(row["paper_total"]) - float(row["realistic_total"] or row["paper_total"]), 4
+                ),
+                "total_withdrawal_fees": round(float(row["wfees"]), 4),
+                "total_taker_fees": round(float(row["tfees"]), 4),
+                "total_adverse_move": round(float(row["adverse"]), 4),
+                "edge_survived": row["survived"] or 0,
+                "edge_lost": row["lost"] or 0,
+                "edge_survival_rate": round(
+                    (row["survived"] or 0) / max(1, fills), 3
+                ),
+            }
+
+            # Daily breakdown (last 7 days)
+            daily_rows = c.execute("""
+                SELECT date(timestamp) as day,
+                       COUNT(*) as fills,
+                       COALESCE(SUM(actual_profit_usd), 0) as paper,
+                       COALESCE(SUM(realistic_profit_usd), 0) as realistic,
+                       SUM(CASE WHEN edge_survived=1 THEN 1 ELSE 0 END) as survived
+                FROM arb_trades
+                WHERE strategy='cross_exchange' AND status='filled'
+                  AND timestamp >= datetime('now', '-7 days')
+                GROUP BY day
+                ORDER BY day DESC
+            """).fetchall()
+            result["daily"] = [
+                {
+                    "date": r["day"],
+                    "fills": r["fills"],
+                    "paper_profit": round(float(r["paper"]), 4),
+                    "realistic_profit": round(float(r["realistic"] or 0), 4),
+                    "edge_survival_rate": round(
+                        (r["survived"] or 0) / max(1, r["fills"]), 3
+                    ),
+                }
+                for r in daily_rows
+            ]
+    except Exception as e:
+        result["error"] = str(e)
+
+    return _sanitize_for_json(result)
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

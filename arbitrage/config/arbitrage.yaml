@@ -167,6 +167,12 @@ safety:
   blocked_tokens: []                # Manual blocklist: ["LUNC", "WBTC"] etc.
   cache_ttl_hours: 24               # How often to refresh contract data
 
+concentration:
+  max_trades_per_pair_per_hour: 5    # Max fills per symbol per hour
+  cooldown_after_fill_sec: 60        # Wait N seconds after each fill before trading same pair
+  one_sided_block_threshold: 0.20    # Auto-block pair if >20% of trades are one-sided
+  one_sided_min_samples: 10          # Need N+ samples before evaluating one-sided rate
+
 realistic_fill:
   trades_per_rebalance: 15          # How many cross-exchange trades before inventory rebalance
   adverse_move_bps: 1.5             # Average adverse price movement during execution window
