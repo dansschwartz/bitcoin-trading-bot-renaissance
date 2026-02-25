@@ -961,7 +961,7 @@ async def arb_volume_participation(request: Request):
                 SELECT symbol, COUNT(*) as trades,
                        SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills,
                        SUM(CASE WHEN status='filled' THEN COALESCE(trade_size_usd, 0) ELSE 0 END) as volume_usd,
-                       SUM(CASE WHEN status='filled' THEN COALESCE(paper_profit_usd, 0) ELSE 0 END) as paper_pnl,
+                       SUM(CASE WHEN status='filled' THEN COALESCE(actual_profit_usd, 0) ELSE 0 END) as paper_pnl,
                        SUM(CASE WHEN status='filled' THEN COALESCE(realistic_profit_usd, 0) ELSE 0 END) as real_pnl
                 FROM arb_trades WHERE strategy='cross_exchange'
                   AND timestamp > datetime('now', '-1 hour')
