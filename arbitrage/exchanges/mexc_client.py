@@ -25,6 +25,9 @@ from .base import (
 
 logger = logging.getLogger("arb.mexc")
 
+# Akamai WAF blocks default aiohttp user-agent — use a browser-like UA
+_HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
+
 # MEXC documented rate limit: 5 orders per second
 ORDER_RATE_LIMIT_PER_SECOND = 5
 
@@ -63,6 +66,8 @@ class MEXCClient(ExchangeClient):
         self._ws_ticker_callback: Optional[Callable] = None
         # Volume limiter (set by orchestrator for fill rate degradation)
         self.volume_limiter = None
+        # Shared aiohttp session for REST calls (reuses TCP connections)
+        self._http_session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> None:
         config = {
@@ -76,6 +81,10 @@ class MEXCClient(ExchangeClient):
             config.pop('secret')
 
         self._exchange = ccxt_async.mexc(config)
+        self._http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=8),
+            headers=_HTTP_HEADERS,
+        )
 
         try:
             await self._exchange.load_markets()
@@ -87,6 +96,9 @@ class MEXCClient(ExchangeClient):
         self._ws_running = False
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()
+        if self._http_session:
+            await self._http_session.close()
+            self._http_session = None
         if self._exchange:
             await self._exchange.close()
             self._exchange = None
@@ -573,10 +585,13 @@ class MEXCClient(ExchangeClient):
         Retries on 403/429 with backoff.
         """
         url = "https://api.mexc.com/api/v3/ticker/bookTicker"
+        session = self._http_session or aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10), headers=_HTTP_HEADERS)
+        close_after = self._http_session is None
         data = None
-        for attempt in range(3):
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        try:
+            for attempt in range(3):
+                async with session.get(url) as resp:
                     if resp.status in (403, 429):
                         wait = (attempt + 1) * 2
                         if attempt < 2:
@@ -588,6 +603,9 @@ class MEXCClient(ExchangeClient):
                         raise Exception(f"MEXC REST {resp.status}")
                     data = await resp.json()
                     break
+        finally:
+            if close_after:
+                await session.close()
         if data is None:
             raise Exception("MEXC bookTicker fetch returned no data")
         result = {}
@@ -753,14 +771,17 @@ class MEXCClient(ExchangeClient):
     async def _fetch_order_book_direct(self, symbol: str, depth: int = 20) -> OrderBook:
         """Fetch order book directly from MEXC spot REST API, bypassing ccxt.
 
-        Retries on 403/429 with exponential backoff to handle rate limiting.
+        Uses shared HTTP session with browser-like User-Agent to avoid Akamai WAF blocks.
         """
         raw_sym = self._normalized_to_mexc_sym(symbol)
         url = f"https://api.mexc.com/api/v3/depth?symbol={raw_sym}&limit={depth}"
+        session = self._http_session or aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=5), headers=_HTTP_HEADERS)
+        close_after = self._http_session is None
 
-        for attempt in range(2):
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+        try:
+            for attempt in range(2):
+                async with session.get(url) as resp:
                     if resp.status in (403, 429):
                         if attempt < 1:
                             await asyncio.sleep(0.5)
@@ -770,11 +791,14 @@ class MEXCClient(ExchangeClient):
                         raise Exception(f"MEXC REST {resp.status}: {await resp.text()}")
                     data = await resp.json()
 
-            bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:depth]]
-            asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get('asks', [])[:depth]]
-            ts = data.get('timestamp')
-            dt = datetime.utcfromtimestamp(ts / 1000) if ts else datetime.utcnow()
-            return OrderBook(exchange="mexc", symbol=symbol, timestamp=dt, bids=bids, asks=asks)
+                bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:depth]]
+                asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get('asks', [])[:depth]]
+                ts = data.get('timestamp')
+                dt = datetime.utcfromtimestamp(ts / 1000) if ts else datetime.utcnow()
+                return OrderBook(exchange="mexc", symbol=symbol, timestamp=dt, bids=bids, asks=asks)
+        finally:
+            if close_after:
+                await session.close()
 
         raise Exception(f"MEXC REST exhausted retries for {symbol}")
 

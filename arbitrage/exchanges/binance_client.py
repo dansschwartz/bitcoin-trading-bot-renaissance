@@ -23,6 +23,9 @@ from .base import (
 
 logger = logging.getLogger("arb.binance")
 
+# Akamai WAF blocks default aiohttp user-agent — use a browser-like UA
+_HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
+
 # WebSocket constants
 WS_ENDPOINT = "wss://stream.binance.com:9443/ws"
 WS_MAX_AGE_HOURS = 23
@@ -73,9 +76,10 @@ class BinanceClient(ExchangeClient):
         except Exception as e:
             logger.warning(f"Binance market load failed (read-only mode): {e}")
 
-        # Shared aiohttp session for direct REST calls
+        # Shared aiohttp session for direct REST calls (browser-like UA avoids WAF blocks)
         self._http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=8),
+            headers=_HTTP_HEADERS,
         )
 
     async def disconnect(self) -> None:
@@ -103,7 +107,8 @@ class BinanceClient(ExchangeClient):
         """Direct REST API call — bypasses ccxt (which may fail if market load failed)."""
         api_sym = symbol.replace("/", "")
         url = f"https://api.binance.com/api/v3/depth?symbol={api_sym}&limit={depth}"
-        session = self._http_session or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+        session = self._http_session or aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=5), headers=_HTTP_HEADERS)
         close_after = self._http_session is None
         try:
             async with session.get(url) as resp:
@@ -326,7 +331,8 @@ class BinanceClient(ExchangeClient):
     async def _fetch_all_tickers_direct(self) -> Dict[str, dict]:
         """Direct REST call for all book tickers — bypasses ccxt."""
         url = "https://api.binance.com/api/v3/ticker/bookTicker"
-        session = self._http_session or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        session = self._http_session or aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10), headers=_HTTP_HEADERS)
         close_after = self._http_session is None
         try:
             async with session.get(url) as resp:
