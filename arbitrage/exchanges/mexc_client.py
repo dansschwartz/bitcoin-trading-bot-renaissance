@@ -109,8 +109,18 @@ class MEXCClient(ExchangeClient):
     # --- Market Data ---
 
     async def get_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        """Fetch order book via direct REST (ccxt load_markets is geo-blocked on VPS)."""
-        return await self._fetch_order_book_direct(symbol, depth)
+        """Fetch order book via direct REST, with sync thread fallback.
+
+        Primary: aiohttp (async, efficient). Falls back to urllib in a thread
+        when the event loop is CPU-starved (common during VPS startup).
+        """
+        try:
+            return await asyncio.wait_for(
+                self._fetch_order_book_direct(symbol, depth), timeout=15
+            )
+        except (asyncio.TimeoutError, Exception):
+            # Event loop too busy for aiohttp — use sync HTTP in thread
+            return await asyncio.to_thread(self._fetch_order_book_sync, symbol, depth)
 
     async def subscribe_order_book(
         self, symbol: str,
@@ -784,6 +794,27 @@ class MEXCClient(ExchangeClient):
                 await session.close()
 
         raise Exception(f"MEXC REST exhausted retries for {symbol}")
+
+    def _fetch_order_book_sync(self, symbol: str, depth: int = 20) -> OrderBook:
+        """Synchronous HTTP fallback for order book fetch.
+
+        Uses urllib (stdlib) in a thread pool — bypasses asyncio event loop
+        entirely. Used when aiohttp times out due to CPU-starved event loop.
+        """
+        import urllib.request
+        import json as _json
+
+        raw_sym = self._normalized_to_mexc_sym(symbol)
+        url = f"https://api.mexc.com/api/v3/depth?symbol={raw_sym}&limit={depth}"
+        req = urllib.request.Request(url, headers=_HTTP_HEADERS)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read())
+
+        bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:depth]]
+        asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get('asks', [])[:depth]]
+        ts = data.get('timestamp')
+        dt = datetime.utcfromtimestamp(ts / 1000) if ts else datetime.utcnow()
+        return OrderBook(exchange="mexc", symbol=symbol, timestamp=dt, bids=bids, asks=asks)
 
     # --- Helpers ---
 
