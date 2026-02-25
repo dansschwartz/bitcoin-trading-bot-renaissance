@@ -758,16 +758,14 @@ class MEXCClient(ExchangeClient):
         raw_sym = self._normalized_to_mexc_sym(symbol)
         url = f"https://api.mexc.com/api/v3/depth?symbol={raw_sym}&limit={depth}"
 
-        for attempt in range(3):
+        for attempt in range(2):
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status in (403, 429):
-                        wait = (attempt + 1) * 2  # 2s, 4s, 6s
-                        if attempt < 2:
-                            logger.debug(f"MEXC rate limited ({resp.status}) for {symbol}, retry in {wait}s")
-                            await asyncio.sleep(wait)
+                        if attempt < 1:
+                            await asyncio.sleep(0.5)
                             continue
-                        raise Exception(f"MEXC REST {resp.status} after 3 retries")
+                        raise Exception(f"MEXC REST {resp.status}")
                     if resp.status != 200:
                         raise Exception(f"MEXC REST {resp.status}: {await resp.text()}")
                     data = await resp.json()

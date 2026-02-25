@@ -339,13 +339,12 @@ class UnifiedBookManager:
                 await asyncio.sleep(PAIR_DELAY)
 
             tradeable = sum(1 for v in self.pairs.values() if v.is_tradeable)
-            if mexc_ok + binance_ok > 0 or tradeable > 0:
-                logger.info(
-                    f"Book refresh: {len(pairs)} pairs | "
-                    f"MEXC {mexc_ok}ok/{mexc_fail}fail | "
-                    f"Binance {binance_ok}ok/{binance_fail}fail | "
-                    f"{tradeable} tradeable"
-                )
+            logger.info(
+                f"Book refresh: {len(pairs)} pairs | "
+                f"MEXC {mexc_ok}ok/{mexc_fail}fail | "
+                f"Binance {binance_ok}ok/{binance_fail}fail | "
+                f"{tradeable} tradeable"
+            )
 
     def get_status(self) -> dict:
         fresh = sum(1 for v in self.pairs.values() if v.is_tradeable)
