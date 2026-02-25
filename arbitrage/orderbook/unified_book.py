@@ -219,7 +219,8 @@ class UnifiedBookManager:
                 except Exception:
                     pass
         else:
-            logger.warning(f"MEXC update for unknown pair {pair!r} (known: {list(self.pairs.keys())[:3]})")
+            # Silently ignore — dynamic pairs may be demoted but WS subscription lingers
+            pass
 
     async def _on_binance_update(self, pair: str, book: OrderBook):
         if pair in self.pairs:
