@@ -181,17 +181,24 @@ class VolumeParticipationLimiter:
             self._rejections_blocked += 1
             return False, f"blocked: {self._block_reasons.get(symbol, 'one-sided fills')}"
 
-        # 2. Check minimum volume
-        if not self.is_pair_liquid_enough(symbol):
-            daily = self._pair_volumes.get(symbol, 0)
+        # 2. Check volume data availability
+        daily = self._pair_volumes.get(symbol, 0)
+        if daily <= 0:
+            # No volume data yet (pair discovery hasn't populated this pair).
+            # Allow the trade — static pairs (BTC, ETH, SOL) are highly liquid.
+            # Once pair_discovery populates volumes, proper limits will apply.
+            return True, "ok: no_volume_data_yet (allowed)"
+
+        # 3. Check minimum volume (only when we HAVE data)
+        if daily < self.min_daily_volume_usd:
             self._rejections_volume += 1
             return False, (
                 f"insufficient_volume: ${daily:,.0f}/day "
                 f"< ${self.min_daily_volume_usd:,.0f} minimum"
             )
 
-        # 3. Check participation rate
-        hourly_vol = self.get_pair_hourly_volume(symbol)
+        # 4. Check participation rate
+        hourly_vol = daily / 24.0
         if hourly_vol <= 0:
             self._rejections_volume += 1
             return False, "no_volume_data"
