@@ -40,8 +40,8 @@ class ExecutionResult:
 
 class ArbitrageExecutor:
 
-    FILL_TIMEOUT_SECONDS = 3.0
-    EMERGENCY_CLOSE_SECONDS = 5.0
+    FILL_TIMEOUT_SECONDS = 15.0
+    EMERGENCY_CLOSE_SECONDS = 10.0
 
     def __init__(self, mexc_client, binance_client, cost_model, risk_engine,
                  config: Optional[dict] = None):
@@ -269,7 +269,9 @@ class ArbitrageExecutor:
 
         else:
             # Neither filled — clean, no risk
-            logger.debug(f"Both orders unfilled: {trade_id}")
+            buy_detail = f"status={buy_result.status.value}" if isinstance(buy_result, OrderResult) else f"error={type(buy_result).__name__}"
+            sell_detail = f"status={sell_result.status.value}" if isinstance(sell_result, OrderResult) else f"error={type(sell_result).__name__}"
+            logger.info(f"NO FILL: {trade_id} — buy:{buy_detail}, sell:{sell_detail}")
             result = ExecutionResult(trade_id=trade_id, status="no_fill", signal=signal)
             self._completed_trades.append(result)
             return result

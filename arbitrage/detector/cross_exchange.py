@@ -7,10 +7,11 @@ Does NOT execute trades — only detects and signals.
 """
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Optional
+from typing import Dict, Optional
 import uuid
 
 logger = logging.getLogger("arb.detector")
@@ -86,6 +87,8 @@ class CrossExchangeDetector:
         self._contract_skips = 0
         self._price_sanity_skips = 0
         self._last_spreads: dict = {}  # pair -> last gross spread for stability check
+        self._last_signal_time: Dict[str, float] = {}  # pair -> monotonic time of last emitted signal
+        self.SIGNAL_COOLDOWN_SEC = 10.0  # Don't signal same pair more than once per 10s
 
     async def run(self):
         self._running = True
@@ -161,6 +164,12 @@ class CrossExchangeDetector:
                     _diag_below_notional += 1
                     continue
 
+                # Per-pair cooldown: don't flood queue with same pair
+                now_mono = time.monotonic()
+                last_emit = self._last_signal_time.get(pair, 0)
+                if now_mono - last_emit < self.SIGNAL_COOLDOWN_SEC:
+                    continue
+
                 expected_profit = notional * (net_spread / 10000)
 
                 signal = ArbitrageSignal(
@@ -193,6 +202,7 @@ class CrossExchangeDetector:
                     try:
                         self.signal_queue.put_nowait(signal)
                         self._signals_approved += 1
+                        self._last_signal_time[pair] = now_mono
                         logger.info(
                             f"ARB SIGNAL: {pair} {spread_info['direction']} | "
                             f"gross={float(spread_info['gross_spread_bps']):.1f}bps "
