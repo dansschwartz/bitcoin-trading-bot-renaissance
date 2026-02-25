@@ -47,6 +47,7 @@ class BinanceClient(ExchangeClient):
         self._ws_running = False
         self._last_books: Dict[str, OrderBook] = {}
         self._ws_task: Optional[asyncio.Task] = None
+        self._http_session: Optional[aiohttp.ClientSession] = None
         # Volume limiter (set by orchestrator for fill rate degradation)
         self.volume_limiter = None
 
@@ -72,10 +73,18 @@ class BinanceClient(ExchangeClient):
         except Exception as e:
             logger.warning(f"Binance market load failed (read-only mode): {e}")
 
+        # Shared aiohttp session for direct REST calls
+        self._http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=8),
+        )
+
     async def disconnect(self) -> None:
         self._ws_running = False
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()
+        if self._http_session:
+            await self._http_session.close()
+            self._http_session = None
         if self._exchange:
             await self._exchange.close()
             self._exchange = None
@@ -94,11 +103,16 @@ class BinanceClient(ExchangeClient):
         """Direct REST API call — bypasses ccxt (which may fail if market load failed)."""
         api_sym = symbol.replace("/", "")
         url = f"https://api.binance.com/api/v3/depth?symbol={api_sym}&limit={depth}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+        session = self._http_session or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+        close_after = self._http_session is None
+        try:
+            async with session.get(url) as resp:
                 if resp.status != 200:
                     raise Exception(f"Binance REST {resp.status}")
                 data = await resp.json()
+        finally:
+            if close_after:
+                await session.close()
         bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get("bids", [])[:depth]]
         asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get("asks", [])[:depth]]
         return OrderBook(
@@ -242,9 +256,11 @@ class BinanceClient(ExchangeClient):
     async def _rest_fallback_loop(self):
         """REST polling fallback when WS fails repeatedly. Batched to avoid rate limits."""
         end_time = time.monotonic() + WS_FALLBACK_DURATION
-        logger.info("Binance entering REST fallback mode")
+        logger.info(f"Binance entering REST fallback mode ({len(self._ws_callbacks)} symbols)")
         BATCH_SIZE = 5
         BATCH_DELAY = 0.3
+        success_count = 0
+        fail_count = 0
         while self._ws_running and time.monotonic() < end_time:
             items = list(self._ws_callbacks.items())
             for i in range(0, len(items), BATCH_SIZE):
@@ -253,12 +269,15 @@ class BinanceClient(ExchangeClient):
                 batch = items[i:i + BATCH_SIZE]
 
                 async def _fetch_one(sym, cb):
+                    nonlocal success_count, fail_count
                     try:
                         book = await self._fetch_order_book_direct(sym, 20)
                         self._last_books[sym] = book
                         await cb(book)
+                        success_count += 1
                     except Exception as e:
-                        logger.debug(f"Binance REST fallback error {sym}: {e}")
+                        fail_count += 1
+                        logger.warning(f"Binance REST fallback error {sym}: {e}")
 
                 await asyncio.gather(
                     *[_fetch_one(s, c) for s, c in batch],
@@ -267,7 +286,7 @@ class BinanceClient(ExchangeClient):
                 if i + BATCH_SIZE < len(items):
                     await asyncio.sleep(BATCH_DELAY)
             await asyncio.sleep(1.0)
-        logger.info("Binance REST fallback complete, retrying WebSocket")
+        logger.info(f"Binance REST fallback complete — {success_count} ok, {fail_count} failed")
 
     # ========== Symbol Conversion ==========
 
@@ -320,11 +339,16 @@ class BinanceClient(ExchangeClient):
     async def _fetch_all_tickers_direct(self) -> Dict[str, dict]:
         """Direct REST call for all book tickers — bypasses ccxt."""
         url = "https://api.binance.com/api/v3/ticker/bookTicker"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        session = self._http_session or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        close_after = self._http_session is None
+        try:
+            async with session.get(url) as resp:
                 if resp.status != 200:
                     raise Exception(f"Binance REST {resp.status}")
                 data = await resp.json()
+        finally:
+            if close_after:
+                await session.close()
         result = {}
         for item in data:
             raw_sym = item.get("symbol", "")
