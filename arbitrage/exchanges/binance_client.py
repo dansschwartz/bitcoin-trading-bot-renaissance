@@ -254,37 +254,24 @@ class BinanceClient(ExchangeClient):
         asyncio.get_event_loop().create_task(cb(trade))
 
     async def _rest_fallback_loop(self):
-        """REST polling fallback when WS fails repeatedly. Batched to avoid rate limits."""
+        """REST polling fallback when WS fails repeatedly. Sequential to avoid rate limits."""
         end_time = time.monotonic() + WS_FALLBACK_DURATION
         logger.info(f"Binance entering REST fallback mode ({len(self._ws_callbacks)} symbols)")
-        BATCH_SIZE = 5
-        BATCH_DELAY = 0.3
         success_count = 0
         fail_count = 0
         while self._ws_running and time.monotonic() < end_time:
-            items = list(self._ws_callbacks.items())
-            for i in range(0, len(items), BATCH_SIZE):
+            for sym, cb in list(self._ws_callbacks.items()):
                 if not self._ws_running or time.monotonic() >= end_time:
                     break
-                batch = items[i:i + BATCH_SIZE]
-
-                async def _fetch_one(sym, cb):
-                    nonlocal success_count, fail_count
-                    try:
-                        book = await self._fetch_order_book_direct(sym, 20)
-                        self._last_books[sym] = book
-                        await cb(book)
-                        success_count += 1
-                    except Exception as e:
-                        fail_count += 1
-                        logger.warning(f"Binance REST fallback error {sym}: {e}")
-
-                await asyncio.gather(
-                    *[_fetch_one(s, c) for s, c in batch],
-                    return_exceptions=True,
-                )
-                if i + BATCH_SIZE < len(items):
-                    await asyncio.sleep(BATCH_DELAY)
+                try:
+                    book = await self._fetch_order_book_direct(sym, 20)
+                    self._last_books[sym] = book
+                    await cb(book)
+                    success_count += 1
+                except Exception as e:
+                    fail_count += 1
+                    logger.debug(f"Binance REST poll error {sym}: {type(e).__name__}: {e}")
+                await asyncio.sleep(0.15)  # 150ms between calls — ~200 calls/30s, well under limit
             await asyncio.sleep(1.0)
         logger.info(f"Binance REST fallback complete — {success_count} ok, {fail_count} failed")
 
