@@ -36,7 +36,7 @@ WS_ENDPOINT = "wss://wbs-api.mexc.com/ws"
 WS_PING_INTERVAL = 15       # seconds
 WS_MAX_AGE_HOURS = 23       # reconnect before 24h limit
 WS_MAX_RECONNECT = 3        # attempts before REST fallback
-WS_FALLBACK_DURATION = 60   # seconds of REST fallback before retrying WS
+WS_FALLBACK_DURATION = 180  # seconds of REST fallback before retrying WS
 WS_DEPTH_LEVELS = 20
 
 
@@ -85,7 +85,7 @@ class MEXCClient(ExchangeClient):
 
         self._exchange = ccxt_async.mexc(config)
         self._http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=20),
+            timeout=aiohttp.ClientTimeout(total=5),
             headers=_HTTP_HEADERS,
         )
 
@@ -579,7 +579,7 @@ class MEXCClient(ExchangeClient):
         """
         url = "https://api.mexc.com/api/v3/ticker/bookTicker"
         session = self._http_session or aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=20), headers=_HTTP_HEADERS)
+            timeout=aiohttp.ClientTimeout(total=5), headers=_HTTP_HEADERS)
         close_after = self._http_session is None
         data = None
         try:

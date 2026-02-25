@@ -103,8 +103,13 @@ class VolumeParticipationLimiter:
         return daily / 24.0
 
     def is_pair_liquid_enough(self, symbol: str) -> bool:
-        """Check if pair meets minimum volume threshold."""
-        daily = self._pair_volumes.get(symbol, 0)
+        """Check if pair meets minimum volume threshold.
+
+        Returns True when no data exists — don't block on missing data.
+        """
+        daily = self._pair_volumes.get(symbol, None)
+        if daily is None:
+            return True  # No data yet — allow by default
         return daily >= self.min_daily_volume_usd
 
     def record_trade(self, symbol: str, volume_usd: float, status: str) -> None:
@@ -149,7 +154,7 @@ class VolumeParticipationLimiter:
         """
         hourly_vol = self.get_pair_hourly_volume(symbol)
         if hourly_vol <= 0:
-            return 1.0  # Unknown volume = assume we're 100% of market
+            return 0.0  # No volume data — assume invisible (don't degrade fill rate)
 
         now = time.time()
         cutoff = now - 3600
@@ -163,7 +168,12 @@ class VolumeParticipationLimiter:
 
         Higher participation = worse fills (market impact).
         Returns the effective fill rate (not a multiplier).
+        Returns 1.0 (no modification) when no volume data exists.
         """
+        # No data → passthrough (don't degrade)
+        if symbol not in self._pair_volumes or self._pair_volumes.get(symbol, 0) <= 0:
+            return 1.0
+
         rate = self.get_participation_rate(symbol)
         for threshold, fill_rate in sorted(self.FILL_DEGRADATION.items()):
             if rate <= threshold:
