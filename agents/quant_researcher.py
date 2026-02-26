@@ -630,7 +630,91 @@ KNOWLEDGE LIBRARY — import and use:
     result = KB.execute("math.kelly_optimal", p=0.54, b=1.2)
     from knowledge.shared.data_loader import load_pair_csv, get_aligned_returns
     from knowledge.shared.queries import weekly_performance, correlation_matrix
+    from knowledge.shared.queries import (
+        audit_model_accuracy, audit_signal_effectiveness, audit_regime_performance,
+        audit_sizing_chain_analysis, audit_cost_vs_edge, audit_confluence_effectiveness,
+        audit_feature_health, audit_raw_decisions,
+    )
+    from knowledge.regime_registry import REGIME_CONFIG, Regime, ParamType
     from knowledge.shared.dead_ends import is_dead_end
+
+DECISION AUDIT LOG — 97-column per-decision dataset:
+    from knowledge.shared.queries import (
+        audit_model_accuracy, audit_signal_effectiveness, audit_regime_performance,
+        audit_sizing_chain_analysis, audit_cost_vs_edge, audit_confluence_effectiveness,
+        audit_feature_health, audit_raw_decisions,
+    )
+    DB = 'data/renaissance_bot.db'
+
+    # Which models are actually working on live data?
+    acc = audit_model_accuracy(DB, days=7)
+    print(f"Ensemble: {{acc['ensemble_accuracy']:.1%}} on {{acc['ensemble_n']}} decisions")
+
+    # Which signals have predictive power?
+    sigs = audit_signal_effectiveness(DB, days=7)
+    for s in sigs['signals'][:5]:
+        print(f"  {{s['signal_name']}}: separation={{s['separation']:.4f}}")
+
+    # Performance by regime
+    rp = audit_regime_performance(DB, days=14)
+    for r in rp['by_regime']:
+        print(f"  {{r['regime']}}: trades={{r['trades']}}, return={{r['avg_return_bps']}}bps")
+
+    # Is the Devil eating the edge?
+    costs = audit_cost_vs_edge(DB, days=7)
+    for c in costs['by_pair']:
+        print(f"  {{c['product_id']}}: predicted={{c['avg_effective_edge_bps']}}bps actual={{c['avg_actual_return_bps']}}bps")
+
+    # Sizing chain bottlenecks
+    chain = audit_sizing_chain_analysis(DB, days=7)
+
+    # Does confluence boost help or hurt?
+    conf = audit_confluence_effectiveness(DB, days=14)
+
+    # Feature vector quality
+    fh = audit_feature_health(DB, days=3)
+
+    # Raw decision inspection
+    rows = audit_raw_decisions(DB, pair='BTC-USD', limit=10)
+
+    # Or query the table directly with SQL:
+    import sqlite3
+    conn = sqlite3.connect(f"file:data/renaissance_bot.db?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.execute(\"\"\"
+        SELECT product_id, final_action, final_confidence, effective_edge,
+               outcome_6bar, regime_label, timestamp
+        FROM decision_audit_log
+        WHERE outcome_6bar IS NOT NULL AND final_action != 'HOLD'
+        ORDER BY outcome_6bar ASC LIMIT 10
+    \"\"\")
+    for row in cursor: print(dict(row))
+
+REGIME CONFIG REGISTRY — structured parameter proposals:
+    from knowledge.regime_registry import REGIME_CONFIG, Regime, ParamType
+
+    # See all current values:
+    print(REGIME_CONFIG.manifest())
+
+    # See what applies in a specific regime:
+    entries = REGIME_CONFIG.get_all(regime=Regime.HIGH_VOL)
+    for e in entries:
+        print(f"  {{e.key}} = {{e.value}} ({{e.description}})")
+
+    # Propose a change (safe — does NOT modify runtime):
+    REGIME_CONFIG.propose_change(
+        key="sizing.regime_scalar", regime="trending",
+        current_value=1.20, proposed_value=1.05,
+        rationale="audit_regime_performance shows trending returns don't justify 1.2x"
+    )
+
+    # Include registry proposals in your proposals.json:
+    import json
+    proposals = [{{
+        "title": "Reduce trending regime sizing scalar",
+        "config_changes": {{"regime_config": REGIME_CONFIG.get_proposals()}},
+        ...
+    }}]
 
 DYNAMIC BRIEF:
 {brief}

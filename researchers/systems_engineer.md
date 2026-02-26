@@ -61,3 +61,9 @@ A brilliant signal that costs too much to execute is worthless.
 5. Be specific — exact latency numbers, cost calculations, query plans
 6. Include p-value and sample size for all statistical claims
 7. Prefer parameter_tune proposals over new_feature proposals
+
+## AUDIT DATA ACCESS
+You have access to the decision_audit_log (97 columns, every pipeline stage).
+Focus on: audit_cost_vs_edge (slippage reality), audit_sizing_chain_analysis (bottlenecks),
+audit_feature_health (system reliability), audit_raw_decisions (execution quality).
+Key question: Where is money leaking? Which execution paths have highest cost?

@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agents.proposal import (
@@ -199,6 +200,76 @@ class DeploymentMonitor:
             )
         except Exception as exc:
             logger.error("rollback_proposal failed: %s", exc)
+
+    def apply_regime_config_changes(self, proposal: Proposal) -> bool:
+        """Apply approved regime config changes to config.json.
+
+        For parameter_tune proposals with regime_config changes, this
+        updates the relevant config keys that are read at bot startup.
+
+        Returns True if changes were applied.
+        """
+        changes = (proposal.config_changes or {}).get("regime_config", [])
+        if not changes:
+            return False
+
+        try:
+            config_path = Path(self.config.get("config_path", "config/config.json"))
+            with open(config_path) as f:
+                config = json.load(f)
+
+            applied: list[str] = []
+            for change in changes:
+                key = change.get("key", "")
+                regime = change.get("regime", "")
+                new_val = change.get("proposed_value")
+
+                if key.startswith("safety."):
+                    logger.warning("BLOCKED: attempt to change safety param %s", key)
+                    continue
+
+                # Map registry keys to config.json paths
+                if key == "sizing.regime_scalar":
+                    config.setdefault("position_sizer", {})
+                    config["position_sizer"].setdefault("regime_scalars", {})
+                    config["position_sizer"]["regime_scalars"][regime] = new_val
+                    applied.append(f"{key}[{regime}] = {new_val}")
+
+                elif key == "sizing.kelly_fraction":
+                    config.setdefault("position_sizer", {})
+                    config["position_sizer"]["kelly_fraction"] = new_val
+                    applied.append(f"{key} = {new_val}")
+
+                elif key.startswith("signal_weight."):
+                    signal = key.split(".", 1)[1]
+                    config.setdefault("regime_signal_adjustments", {})
+                    config["regime_signal_adjustments"].setdefault(regime, {})
+                    config["regime_signal_adjustments"][regime][signal] = new_val
+                    applied.append(f"{key}[{regime}] = {new_val}")
+
+                elif key.startswith("threshold."):
+                    param = key.split(".", 1)[1]
+                    config.setdefault("regime_thresholds", {})
+                    config["regime_thresholds"].setdefault(regime, {})
+                    config["regime_thresholds"][regime][param] = new_val
+                    applied.append(f"{key}[{regime}] = {new_val}")
+
+                else:
+                    logger.warning("Unknown regime config key: %s", key)
+
+            if applied:
+                with open(config_path, "w") as f:
+                    json.dump(config, f, indent=2)
+                logger.info(
+                    "Applied %d regime config changes: %s",
+                    len(applied), "; ".join(applied),
+                )
+                return True
+
+        except Exception as exc:
+            logger.error("Failed to apply regime config changes: %s", exc)
+
+        return False
 
     def get_active_sandboxes(self) -> List[Dict[str, Any]]:
         """Return all currently sandboxing proposals."""

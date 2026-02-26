@@ -118,6 +118,13 @@ class SafetyGate:
         if not abs_check["passed"]:
             results["overall"] = False
 
+        # Validate regime config registry changes (if present)
+        if proposal.config_changes and "regime_config" in proposal.config_changes:
+            registry_check = self._validate_regime_config_changes(proposal)
+            results["gates"]["regime_config"] = registry_check
+            if not registry_check["passed"]:
+                results["overall"] = False
+
         # Update proposal
         proposal.safety_gate_results = results
         if results["overall"]:
@@ -219,6 +226,33 @@ class SafetyGate:
             "value": value,
             "reason": None if passed else f"sample size {value} < {threshold}",
         }
+
+    def _validate_regime_config_changes(self, p: Proposal) -> Dict[str, Any]:
+        """Validate regime config change proposals against registry constraints."""
+        changes = (p.config_changes or {}).get("regime_config", [])
+
+        if not changes:
+            return {"gate": "regime_config", "passed": True, "reason": "no registry changes"}
+
+        errors: list[str] = []
+        for change in changes:
+            if change.get("error"):
+                errors.append(f"{change.get('key', '?')}: {change['error']}")
+                continue
+
+            key = change.get("key", "")
+            # Block safety parameter changes
+            if key.startswith("safety."):
+                errors.append(f"{key}: safety parameters cannot be changed")
+
+        if errors:
+            return {
+                "gate": "regime_config",
+                "passed": False,
+                "reason": f"Invalid changes: {'; '.join(errors)}",
+            }
+
+        return {"gate": "regime_config", "passed": True, "reason": "all changes valid"}
 
     def _check_absolute_limits(self, p: Proposal) -> Dict[str, Any]:
         """Verify proposal doesn't exceed hard-coded absolute limits."""

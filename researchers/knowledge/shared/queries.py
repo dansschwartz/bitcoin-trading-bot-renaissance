@@ -112,6 +112,14 @@ def devil_tracker_summary(days: int = 7, use_snapshot: bool = True) -> Dict[str,
         conn.close()
     return result
 
+def _audit_table_exists(conn) -> bool:
+    """Check if decision_audit_log table exists."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='decision_audit_log'"
+    ).fetchone()
+    return row is not None
+
+
 def regime_history(days: int = 7, use_snapshot: bool = True) -> Dict[str, Any]:
     """Regime distribution, transitions, entropy."""
     conn = get_snapshot_db() if use_snapshot else get_db_connection()
@@ -142,3 +150,354 @@ def regime_history(days: int = 7, use_snapshot: bool = True) -> Dict[str, Any]:
     finally:
         conn.close()
     return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# DECISION AUDIT LOG QUERIES
+# ═══════════════════════════════════════════════════════════════
+
+def audit_model_accuracy(db_path: str, days: int = 7) -> Dict[str, Any]:
+    """Per-model live accuracy from evaluated predictions.
+
+    Returns dict with ensemble_accuracy, ensemble_n, per_model list,
+    and per_model_by_regime cross-tabulation.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    result: Dict[str, Any] = {}
+
+    try:
+        if not _audit_table_exists(conn):
+            return {"error": "decision_audit_log table not found"}
+
+        # Ensemble accuracy from audit log (correct = outcome same sign as weighted_signal)
+        row = conn.execute("""
+            SELECT COUNT(*) as n,
+                   SUM(CASE WHEN (outcome_6bar > 0 AND weighted_signal > 0)
+                             OR (outcome_6bar < 0 AND weighted_signal < 0) THEN 1 ELSE 0 END) as correct
+            FROM decision_audit_log
+            WHERE outcome_6bar IS NOT NULL
+              AND timestamp >= datetime('now', ? || ' days')
+        """, (f"-{days}",)).fetchone()
+        n = row['n'] or 0
+        correct = row['correct'] or 0
+        result['ensemble_accuracy'] = round(correct / max(n, 1), 4)
+        result['ensemble_n'] = n
+
+        # Per-model from ml_predictions
+        rows = conn.execute("""
+            SELECT model_name, COUNT(*) as n,
+                   SUM(is_correct) as correct,
+                   ROUND(1.0 * SUM(is_correct) / COUNT(*), 4) as accuracy
+            FROM ml_predictions
+            WHERE is_correct IS NOT NULL
+              AND timestamp >= datetime('now', ? || ' days')
+            GROUP BY model_name
+            ORDER BY accuracy DESC
+        """, (f"-{days}",)).fetchall()
+        result['per_model'] = [dict(r) for r in rows]
+
+        # Per-model by regime (join audit log for regime info)
+        rows = conn.execute("""
+            SELECT mp.model_name, dal.regime_label as regime,
+                   COUNT(*) as n,
+                   ROUND(1.0 * SUM(mp.is_correct) / COUNT(*), 4) as accuracy
+            FROM ml_predictions mp
+            JOIN decision_audit_log dal
+              ON mp.product_id = dal.product_id
+              AND ABS(JULIANDAY(mp.timestamp) - JULIANDAY(dal.timestamp)) < 0.001
+            WHERE mp.is_correct IS NOT NULL
+              AND mp.timestamp >= datetime('now', ? || ' days')
+            GROUP BY mp.model_name, dal.regime_label
+            HAVING COUNT(*) >= 20
+            ORDER BY mp.model_name, accuracy DESC
+        """, (f"-{days}",)).fetchall()
+        result['per_model_by_regime'] = [dict(r) for r in rows]
+
+    except Exception as e:
+        result["error"] = str(e)
+    finally:
+        conn.close()
+    return result
+
+
+def audit_signal_effectiveness(db_path: str, days: int = 7) -> Dict[str, Any]:
+    """Which signals predict outcomes?
+
+    Per-signal average value when outcome was positive vs negative.
+    Signals with large separation have predictive power.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    result: Dict[str, Any] = {'signals': []}
+
+    try:
+        if not _audit_table_exists(conn):
+            return {"error": "decision_audit_log table not found"}
+
+        signal_cols = [
+            'sig_macd', 'sig_rsi', 'sig_bollinger',
+            'sig_order_flow', 'sig_order_book', 'sig_volume',
+            'sig_volume_profile', 'sig_lead_lag', 'sig_stat_arb',
+            'sig_entropy', 'sig_ml_ensemble', 'sig_garch_vol',
+            'sig_fractal', 'sig_correlation_divergence',
+        ]
+
+        for col in signal_cols:
+            row = conn.execute(f"""
+                SELECT
+                    '{col}' as signal_name,
+                    AVG(CASE WHEN outcome_6bar > 0 THEN {col} END) as avg_when_up,
+                    AVG(CASE WHEN outcome_6bar < 0 THEN {col} END) as avg_when_down,
+                    AVG(CASE WHEN outcome_6bar > 0 THEN {col} END) -
+                    AVG(CASE WHEN outcome_6bar < 0 THEN {col} END) as separation,
+                    COUNT(*) as n
+                FROM decision_audit_log
+                WHERE outcome_6bar IS NOT NULL
+                  AND {col} IS NOT NULL
+                  AND timestamp >= datetime('now', ? || ' days')
+            """, (f"-{days}",)).fetchone()
+            if row and (row['n'] or 0) > 50:
+                result['signals'].append(dict(row))
+
+        result['signals'].sort(
+            key=lambda x: abs(x.get('separation', 0) or 0), reverse=True
+        )
+    except Exception as e:
+        result["error"] = str(e)
+    finally:
+        conn.close()
+    return result
+
+
+def audit_regime_performance(db_path: str, days: int = 14) -> Dict[str, Any]:
+    """P&L and accuracy breakdown by regime.
+
+    Shows decisions, trade rate, accuracy, avg return, confidence,
+    and sizing multipliers per regime.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    result: Dict[str, Any] = {}
+
+    try:
+        if not _audit_table_exists(conn):
+            return {"error": "decision_audit_log table not found"}
+
+        rows = conn.execute("""
+            SELECT
+                regime_label as regime,
+                COUNT(*) as decisions,
+                SUM(CASE WHEN final_action != 'HOLD' THEN 1 ELSE 0 END) as trades,
+                SUM(CASE WHEN outcome_6bar IS NOT NULL AND (
+                    (outcome_6bar > 0 AND weighted_signal > 0) OR
+                    (outcome_6bar < 0 AND weighted_signal < 0)
+                ) THEN 1 ELSE 0 END) as correct,
+                ROUND(AVG(outcome_6bar) * 10000, 2) as avg_return_bps,
+                ROUND(AVG(final_confidence), 4) as avg_confidence,
+                ROUND(AVG(effective_edge) * 10000, 2) as avg_edge_bps,
+                ROUND(AVG(market_impact_bps), 2) as avg_impact_bps
+            FROM decision_audit_log
+            WHERE timestamp >= datetime('now', ? || ' days')
+            GROUP BY regime_label
+            ORDER BY decisions DESC
+        """, (f"-{days}",)).fetchall()
+        result['by_regime'] = [dict(r) for r in rows]
+
+    except Exception as e:
+        result["error"] = str(e)
+    finally:
+        conn.close()
+    return result
+
+
+def audit_sizing_chain_analysis(db_path: str, days: int = 7) -> Dict[str, Any]:
+    """How is the sizing chain affecting trade size?
+
+    Shows average Kelly fraction, applied fraction, position size,
+    and per-pair breakdown for non-HOLD decisions.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    result: Dict[str, Any] = {}
+
+    try:
+        if not _audit_table_exists(conn):
+            return {"error": "decision_audit_log table not found"}
+
+        row = conn.execute("""
+            SELECT
+                ROUND(AVG(kelly_fraction), 4) as avg_kelly_f,
+                ROUND(AVG(applied_fraction), 4) as avg_applied_f,
+                ROUND(AVG(position_usd), 2) as avg_size_usd,
+                ROUND(AVG(market_impact_bps), 2) as avg_impact_bps,
+                ROUND(AVG(edge), 6) as avg_edge,
+                ROUND(AVG(effective_edge), 6) as avg_effective_edge,
+                COUNT(*) as n
+            FROM decision_audit_log
+            WHERE final_action != 'HOLD'
+              AND timestamp >= datetime('now', ? || ' days')
+        """, (f"-{days}",)).fetchone()
+        result['overall'] = dict(row) if row else {}
+
+        # Per-pair breakdown
+        rows = conn.execute("""
+            SELECT
+                product_id,
+                ROUND(AVG(position_usd), 2) as avg_size_usd,
+                ROUND(AVG(market_impact_bps), 2) as avg_impact_bps,
+                ROUND(AVG(kelly_fraction), 4) as avg_kelly_f,
+                COUNT(*) as n
+            FROM decision_audit_log
+            WHERE final_action != 'HOLD'
+              AND timestamp >= datetime('now', ? || ' days')
+            GROUP BY product_id
+            ORDER BY avg_size_usd DESC
+        """, (f"-{days}",)).fetchall()
+        result['by_pair'] = [dict(r) for r in rows]
+
+    except Exception as e:
+        result["error"] = str(e)
+    finally:
+        conn.close()
+    return result
+
+
+def audit_cost_vs_edge(db_path: str, days: int = 7) -> Dict[str, Any]:
+    """Is the Devil eating the edge?
+
+    Compares predicted edge vs actual return for traded decisions.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    result: Dict[str, Any] = {}
+
+    try:
+        if not _audit_table_exists(conn):
+            return {"error": "decision_audit_log table not found"}
+
+        rows = conn.execute("""
+            SELECT
+                product_id,
+                COUNT(*) as n,
+                ROUND(AVG(edge) * 10000, 2) as avg_predicted_edge_bps,
+                ROUND(AVG(effective_edge) * 10000, 2) as avg_effective_edge_bps,
+                ROUND(AVG(market_impact_bps), 2) as avg_impact_bps,
+                ROUND(AVG(outcome_6bar) * 10000, 2) as avg_actual_return_bps,
+                ROUND(AVG(effective_edge * 10000) - AVG(outcome_6bar * 10000), 2)
+                    as edge_vs_reality_gap_bps
+            FROM decision_audit_log
+            WHERE outcome_6bar IS NOT NULL
+              AND final_action != 'HOLD'
+              AND timestamp >= datetime('now', ? || ' days')
+            GROUP BY product_id
+            ORDER BY edge_vs_reality_gap_bps DESC
+        """, (f"-{days}",)).fetchall()
+        result['by_pair'] = [dict(r) for r in rows]
+
+    except Exception as e:
+        result["error"] = str(e)
+    finally:
+        conn.close()
+    return result
+
+
+def audit_confluence_effectiveness(db_path: str, days: int = 14) -> Dict[str, Any]:
+    """Does the confluence boost actually help?
+
+    Compares accuracy and returns for boosted vs unboosted trades.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    result: Dict[str, Any] = {}
+
+    try:
+        if not _audit_table_exists(conn):
+            return {"error": "decision_audit_log table not found"}
+
+        rows = conn.execute("""
+            SELECT
+                CASE WHEN confluence_boost > 0 THEN 'boosted' ELSE 'unboosted' END as group_name,
+                COUNT(*) as n,
+                ROUND(AVG(outcome_6bar) * 10000, 2) as avg_return_bps,
+                ROUND(AVG(final_confidence), 4) as avg_confidence
+            FROM decision_audit_log
+            WHERE outcome_6bar IS NOT NULL
+              AND final_action != 'HOLD'
+              AND timestamp >= datetime('now', ? || ' days')
+            GROUP BY group_name
+        """, (f"-{days}",)).fetchall()
+        result['comparison'] = [dict(r) for r in rows]
+
+    except Exception as e:
+        result["error"] = str(e)
+    finally:
+        conn.close()
+    return result
+
+
+def audit_feature_health(db_path: str, days: int = 3) -> Dict[str, Any]:
+    """Feature vector quality and model activity over time.
+
+    Shows daily decision counts, average active models, and
+    feature vector hash diversity (unique hashes = diverse inputs).
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    result: Dict[str, Any] = {}
+
+    try:
+        if not _audit_table_exists(conn):
+            return {"error": "decision_audit_log table not found"}
+
+        rows = conn.execute("""
+            SELECT
+                DATE(timestamp) as date,
+                COUNT(*) as decisions,
+                ROUND(AVG(ml_model_count), 1) as avg_models_active,
+                COUNT(DISTINCT feature_vector_hash) as unique_feature_hashes,
+                ROUND(AVG(raw_signal_count), 1) as avg_signals_active
+            FROM decision_audit_log
+            WHERE timestamp >= datetime('now', ? || ' days')
+            GROUP BY DATE(timestamp)
+            ORDER BY date DESC
+        """, (f"-{days}",)).fetchall()
+        result['daily'] = [dict(r) for r in rows]
+
+    except Exception as e:
+        result["error"] = str(e)
+    finally:
+        conn.close()
+    return result
+
+
+def audit_raw_decisions(db_path: str, pair: Optional[str] = None,
+                        limit: int = 50) -> List[Dict]:
+    """Fetch raw audit rows for deep inspection."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    rows_out: List[Dict] = []
+
+    try:
+        if not _audit_table_exists(conn):
+            return [{"error": "decision_audit_log table not found"}]
+
+        where = "WHERE 1=1"
+        params: list = []
+        if pair:
+            where += " AND product_id = ?"
+            params.append(pair)
+
+        rows = conn.execute(f"""
+            SELECT * FROM decision_audit_log
+            {where}
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, params + [limit]).fetchall()
+        rows_out = [dict(r) for r in rows]
+
+    except Exception as e:
+        rows_out = [{"error": str(e)}]
+    finally:
+        conn.close()
+    return rows_out

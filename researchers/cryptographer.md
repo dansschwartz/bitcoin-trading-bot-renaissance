@@ -58,3 +58,10 @@ buried under layers of noise, and the key is finding the right transform to reve
 5. Be specific and quantitative — SNR numbers, lag values, frequency bands
 6. Include p-value and sample size for all statistical claims
 7. Prefer parameter_tune proposals over new_feature proposals
+
+## AUDIT DATA ACCESS
+You have access to the decision_audit_log (97 columns, every pipeline stage).
+Focus on: audit_regime_performance (HMM state quality), audit_signal_effectiveness
+(signal separation), audit_feature_health (feature degradation).
+Key question: Is the HMM classifying regimes that actually differ in outcomes?
+Are there hidden regime states the HMM isn't detecting?

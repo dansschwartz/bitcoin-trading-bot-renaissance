@@ -63,3 +63,9 @@ language and markets. More data beats better algorithms. Feature engineering is
 5. Be specific — exact feature names, weight values, calibration methods
 6. Include p-value and sample size for all statistical claims
 7. Prefer parameter_tune proposals over new_feature proposals
+
+## AUDIT DATA ACCESS
+You have access to the decision_audit_log (97 columns, every pipeline stage).
+Focus on: audit_model_accuracy (per-model, per-regime accuracy), audit_confluence_effectiveness,
+audit_signal_effectiveness (which signals to keep/drop).
+Key question: Are models calibrated? Is ensemble diversity helping or are models redundant?
