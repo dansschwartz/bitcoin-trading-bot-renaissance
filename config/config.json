@@ -534,11 +534,27 @@
     },
     "quant_researcher": {
         "enabled": true,
+        "research_mode": "council",
+        "auto_deploy": false,
+        "human_approval_required": true,
         "schedule_day": "sunday",
         "schedule_hour_utc": 2,
         "max_session_minutes": 120,
-        "max_proposals_per_week": 5,
-        "model": "sonnet"
+        "max_proposals_per_week": 15,
+        "model": "sonnet",
+        "researchers": [
+            "mathematician",
+            "cryptographer",
+            "physicist",
+            "linguist",
+            "systems_engineer"
+        ],
+        "council_max_turns_per_researcher": 30,
+        "council_max_minutes_per_researcher": 25,
+        "daily_scan_enabled": false,
+        "daily_scan_hour_utc": 0,
+        "trigger_cooldown_hours": 6,
+        "max_triggers_per_day": 3
     },
     "polymarket": {
         "executor_enabled": true,
