@@ -1,8 +1,18 @@
 {
     "trading": {
         "product_ids": [
-            "BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "XRP-USD", "ADA-USD",
-            "AVAX-USD", "LINK-USD", "DOT-USD", "MATIC-USD", "UNI-USD", "ATOM-USD"
+            "BTC-USD",
+            "ETH-USD",
+            "SOL-USD",
+            "DOGE-USD",
+            "XRP-USD",
+            "ADA-USD",
+            "AVAX-USD",
+            "LINK-USD",
+            "DOT-USD",
+            "MATIC-USD",
+            "UNI-USD",
+            "ATOM-USD"
         ],
         "cycle_interval_seconds": 300,
         "paper_trading": true,
@@ -549,7 +559,7 @@
             "linguist",
             "systems_engineer"
         ],
-        "council_max_turns": 30,
+        "council_max_turns": 50,
         "council_max_minutes": 25,
         "daily_scan_enabled": false,
         "daily_scan_hour_utc": 0,

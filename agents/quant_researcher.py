@@ -57,12 +57,20 @@ class QuantResearcherAgent(BaseAgent):
         self._project_root = Path(self.db_path).resolve().parent.parent
         self._claude_available = self._check_claude_available()
 
+    @staticmethod
+    def _clean_env() -> dict:
+        """Return env dict with CLAUDECODE unset so nested sessions work."""
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        return env
+
     def _check_claude_available(self) -> bool:
         """Check if the claude CLI is available on PATH."""
         try:
             result = subprocess.run(
                 ["claude", "--version"],
                 capture_output=True, text=True, timeout=10,
+                env=self._clean_env(),
             )
             version = (result.stdout or "").strip()
             self.logger.info("Claude CLI available: %s", version or "unknown version")
@@ -358,6 +366,7 @@ because they deploy immediately without sandbox overhead.
                 text=True,
                 timeout=timeout_seconds,
                 cwd=str(self._project_root),
+                env=self._clean_env(),
             )
 
             # Save raw output
@@ -563,6 +572,7 @@ because they deploy immediately without sandbox overhead.
                 text=True,
                 timeout=timeout_minutes * 60,
                 cwd=str(project_root),
+                env=self._clean_env(),
             )
             (output_dir / "claude_output.txt").write_text(result.stdout or "")
             if result.stderr:
