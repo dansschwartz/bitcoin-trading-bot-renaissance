@@ -2573,17 +2573,29 @@ class RenaissanceTradingBot:
                         f"{product_id} @ ${current_price:.2f} (maker, 0% fee)"
                     )
 
-            # Devil Tracker — record fill (actual execution price vs signal price)
+            # Devil Tracker — record fill with spread-calibrated slippage
             if success and self.devil_tracker:
                 try:
                     _dtid = getattr(self, '_last_devil_trade_id', {}).get(product_id)
                     if _dtid:
                         self.devil_tracker.record_order_submission(_dtid, current_price)
+                        # Spread-calibrated fill: use bid/ask to model realistic execution
+                        _ticker = market_data.get('ticker', {})
+                        _bid = self._force_float(_ticker.get('bid', 0))
+                        _ask = self._force_float(_ticker.get('ask', 0))
+                        if _bid > 0 and _ask > 0:
+                            # BUY fills at ask (higher), SELL fills at bid (lower)
+                            _calibrated_fill = _ask if decision.action == 'BUY' else _bid
+                        else:
+                            _calibrated_fill = current_price
+                        # MEXC maker fee = 0%, non-MEXC = 5bps taker
+                        _fee_bps = 0.0 if is_mexc_execution else 5.0
+                        _fill_fee = _fee_bps / 10000.0 * decision.position_size * current_price
                         self.devil_tracker.record_fill(
                             _dtid,
-                            fill_price=current_price,
+                            fill_price=_calibrated_fill,
                             fill_quantity=decision.position_size,
-                            fill_fee=slippage_risk.get('predicted_slippage', 0.0) * decision.position_size * current_price / 10000,
+                            fill_fee=_fill_fee,
                         )
                 except Exception as _dt_err:
                     self.logger.debug(f"Devil tracker fill record failed: {_dt_err}")
@@ -4206,6 +4218,13 @@ class RenaissanceTradingBot:
                                     _move = (current_price - _pos.entry_price) / _pos.entry_price * 10000
                                     _pnl_bps = _move if _side == "long" else -_move
                                 _signal_ttl = self.config.get('reevaluation', {}).get('signal_ttl_seconds', 3600)
+                                # Compute actual spread from live bid/ask
+                                _rv_ticker = market_data.get('ticker', {})
+                                _rv_bid = self._force_float(_rv_ticker.get('bid', 0))
+                                _rv_ask = self._force_float(_rv_ticker.get('ask', 0))
+                                _rv_mid = (_rv_ask + _rv_bid) / 2.0 if _rv_bid > 0 and _rv_ask > 0 else 0
+                                _rv_spread_bps = ((_rv_ask - _rv_bid) / _rv_mid * 10000) if _rv_mid > 0 else 1.0
+                                _rv_cost_bps = _rv_spread_bps  # roundtrip cost ≈ full spread
                                 _ctx = PositionContext(
                                     position_id=_pos.position_id,
                                     pair=product_id,
@@ -4218,12 +4237,12 @@ class RenaissanceTradingBot:
                                     entry_timestamp=_pos.entry_time.timestamp(),
                                     entry_confidence=decision.confidence,
                                     entry_expected_move_bps=10.0,
-                                    entry_cost_estimate_bps=2.0,
-                                    entry_net_edge_bps=8.0,
+                                    entry_cost_estimate_bps=_rv_cost_bps,
+                                    entry_net_edge_bps=max(10.0 - _rv_cost_bps, 0),
                                     entry_regime=_regime_label,
                                     entry_volatility=0.02,
                                     entry_book_depth_usd=_D("50000"),
-                                    entry_spread_bps=1.0,
+                                    entry_spread_bps=_rv_spread_bps,
                                     signal_ttl_seconds=_signal_ttl,
                                     current_size=_D(str(_pos.size)),
                                     current_size_usd=_D(str(_pos.size * current_price)),
@@ -4231,6 +4250,8 @@ class RenaissanceTradingBot:
                                     unrealized_pnl_bps=_pnl_bps,
                                     current_confidence=decision.confidence,
                                     current_regime=_regime_label,
+                                    current_cost_to_exit_bps=_rv_spread_bps / 2.0,  # half-spread to exit
+                                    current_spread_bps=_rv_spread_bps,
                                 )
                                 _contexts.append(_ctx)
                             _reeval_results = self.position_reevaluator.reevaluate_all(

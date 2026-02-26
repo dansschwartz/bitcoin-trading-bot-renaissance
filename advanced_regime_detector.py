@@ -379,3 +379,142 @@ class AdvancedRegimeDetector:
             "volatility_boost": 1.0,
             "flow_boost": 1.0,
         })
+
+    # ------------------------------------------------------------------
+    # HMM Transition Diagnostics (Doc 17 — infrastructure monitoring)
+    # ------------------------------------------------------------------
+
+    def compute_transition_diagnostics(
+        self, price_df: pd.DataFrame
+    ) -> Optional[Dict[str, Any]]:
+        """Compute transition rate and state degeneracy metrics.
+
+        Returns dict with:
+        - transition_count: total regime transitions in the hidden state sequence
+        - decision_count: total decisions (= sequence length)
+        - transition_rate: transitions / decisions (healthy: 0.02-0.08)
+        - transition_matrix: current NxN transition probability matrix
+        - state_occupancy: fraction of time in each regime
+        - degenerate_pairs: list of (regime_a, regime_b, kl_divergence) with KL < threshold
+        """
+        if not self.is_fitted or self._model is None:
+            return None
+
+        features = self._build_features(price_df)
+        if features is None or len(features) < 10:
+            return None
+
+        try:
+            normalized = (features - self._feature_means) / self._feature_stds
+            hidden_states = self._model.predict(normalized)
+            n_decisions = len(hidden_states)
+
+            # Transition count
+            transitions = sum(
+                1 for i in range(1, n_decisions)
+                if hidden_states[i] != hidden_states[i - 1]
+            )
+            transition_rate = transitions / n_decisions if n_decisions > 0 else 0.0
+
+            # State occupancy
+            state_occupancy = {}
+            for state_idx, regime in self._regime_map.items():
+                count = int(np.sum(hidden_states == state_idx))
+                state_occupancy[regime.value] = count / n_decisions if n_decisions > 0 else 0.0
+
+            # Transition matrix
+            trans_matrix = self._model.transmat_
+
+            # State degeneracy detection via KL divergence on emission means/covars
+            degenerate_pairs = self._detect_degeneracy(kl_threshold=0.1)
+
+            return {
+                "transition_count": transitions,
+                "decision_count": n_decisions,
+                "transition_rate": round(transition_rate, 4),
+                "transition_rate_healthy": 0.02 <= transition_rate <= 0.08,
+                "transition_matrix": trans_matrix.tolist() if trans_matrix is not None else None,
+                "state_occupancy": state_occupancy,
+                "degenerate_pairs": degenerate_pairs,
+                "n_degenerate": len(degenerate_pairs),
+            }
+        except Exception as e:
+            self.logger.error(f"Transition diagnostics failed: {e}")
+            return None
+
+    def _detect_degeneracy(self, kl_threshold: float = 0.1) -> List[Dict[str, Any]]:
+        """Detect state pairs with near-identical emission distributions.
+
+        Computes symmetric KL divergence between all state pairs using the
+        Gaussian emission parameters. States with KL < threshold are flagged
+        as potentially degenerate (should be merged).
+        """
+        if self._model is None:
+            return []
+
+        try:
+            means = self._model.means_         # (n_states, n_features)
+            covars = self._model.covars_        # (n_states, n_features, n_features) for 'full'
+            n_states = means.shape[0]
+            n_features = means.shape[1]
+
+            degenerate = []
+            for i in range(n_states):
+                for j in range(i + 1, n_states):
+                    # Approximate symmetric KL for multivariate Gaussians
+                    kl = self._gaussian_kl_symmetric(
+                        means[i], covars[i], means[j], covars[j], n_features
+                    )
+                    regime_i = self._regime_map.get(i, MarketRegime.NEUTRAL_SIDEWAYS).value
+                    regime_j = self._regime_map.get(j, MarketRegime.NEUTRAL_SIDEWAYS).value
+                    if kl < kl_threshold:
+                        degenerate.append({
+                            "state_a": regime_i,
+                            "state_b": regime_j,
+                            "kl_divergence": round(kl, 4),
+                        })
+            return degenerate
+        except Exception as e:
+            self.logger.debug(f"Degeneracy detection error: {e}")
+            return []
+
+    @staticmethod
+    def _gaussian_kl_symmetric(
+        mu1: np.ndarray, cov1: np.ndarray,
+        mu2: np.ndarray, cov2: np.ndarray,
+        d: int,
+    ) -> float:
+        """Symmetric KL divergence between two multivariate Gaussians.
+
+        KL_sym = 0.5 * (KL(p||q) + KL(q||p))
+        """
+        try:
+            # Add small regularization for numerical stability
+            reg = np.eye(d) * 1e-6
+            cov1_r = cov1 + reg
+            cov2_r = cov2 + reg
+
+            inv1 = np.linalg.inv(cov1_r)
+            inv2 = np.linalg.inv(cov2_r)
+
+            diff = mu1 - mu2
+
+            # KL(p1 || p2)
+            kl_12 = 0.5 * (
+                np.trace(inv2 @ cov1_r)
+                + diff @ inv2 @ diff
+                - d
+                + np.log(np.linalg.det(cov2_r) / (np.linalg.det(cov1_r) + 1e-12))
+            )
+
+            # KL(p2 || p1)
+            kl_21 = 0.5 * (
+                np.trace(inv1 @ cov2_r)
+                + diff @ inv1 @ diff
+                - d
+                + np.log(np.linalg.det(cov1_r) / (np.linalg.det(cov2_r) + 1e-12))
+            )
+
+            return max(0.0, float(0.5 * (kl_12 + kl_21)))
+        except (np.linalg.LinAlgError, ValueError):
+            return float('inf')  # can't compare → treat as non-degenerate

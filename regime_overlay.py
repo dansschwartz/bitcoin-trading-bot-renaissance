@@ -27,6 +27,11 @@ except ImportError:
 BOOTSTRAP_MIN_BARS = 20
 HMM_MIN_BARS = 200
 
+# Bar gap detection thresholds
+MIN_BAR_COMPLETENESS = 0.85   # suppress regime if <85% bars present
+BAR_DURATION_S = 300          # 5-minute bars
+GAP_THRESHOLD_S = 600         # gaps > 10 minutes are logged
+
 
 class BootstrapRegimeClassifier:
     """
@@ -174,6 +179,14 @@ class RegimeOverlay:
             self.logger.info("Advanced 5-state HMM regime detector initialized")
 
         self.current_regime = None
+        self._last_valid_regime: Optional[Dict[str, Any]] = None  # fallback for gap-poisoned data
+        self._bar_gap_ratio: float = 1.0
+        # Transition monitoring
+        self._prev_regime_label: Optional[str] = None
+        self._transition_count: int = 0
+        self._decision_count: int = 0
+        self._last_transition_diag_cycle: int = 0
+        self._transition_diagnostics: Optional[Dict[str, Any]] = None
         self.logger.info(
             f"RegimeOverlay initialized (Enabled: {self.enabled}, "
             f"Advanced HMM: {ADVANCED_HMM_AVAILABLE}, Bootstrap: ready)"
@@ -218,6 +231,77 @@ class RegimeOverlay:
                         bars_df = alt
 
             self._bar_count = len(bars_df)
+
+            # --- Bar gap detection: suppress regime if data has significant gaps ---
+            self._bar_gap_ratio = 1.0
+            _gap_poisoned = False
+            if len(bars_df) >= BOOTSTRAP_MIN_BARS and 'bar_start' in bars_df.columns:
+                try:
+                    # bar_start may be Unix epoch (float) or ISO string
+                    raw = bars_df['bar_start']
+                    if pd.api.types.is_numeric_dtype(raw):
+                        timestamps = pd.to_datetime(raw, unit='s').sort_values()
+                    else:
+                        timestamps = pd.to_datetime(raw).sort_values()
+                    time_span_s = (timestamps.iloc[-1] - timestamps.iloc[0]).total_seconds()
+                    expected_bars = int(time_span_s / BAR_DURATION_S) + 1
+                    if expected_bars > 0:
+                        self._bar_gap_ratio = len(bars_df) / expected_bars
+
+                    # Log significant gaps (> 10 min)
+                    diffs = timestamps.diff().dt.total_seconds().dropna()
+                    big_gaps = diffs[diffs > GAP_THRESHOLD_S]
+                    if len(big_gaps) > 0:
+                        max_gap_min = big_gaps.max() / 60
+                        self.logger.debug(
+                            f"Bar gaps: {len(big_gaps)} gaps >{GAP_THRESHOLD_S}s "
+                            f"(max={max_gap_min:.0f}min, ratio={self._bar_gap_ratio:.2f})"
+                        )
+
+                    if self._bar_gap_ratio < MIN_BAR_COMPLETENESS:
+                        _gap_poisoned = True
+                        self.logger.warning(
+                            f"REGIME GUARD: bar_gap_ratio={self._bar_gap_ratio:.2f} < "
+                            f"{MIN_BAR_COMPLETENESS} — data too gappy for regime classification"
+                        )
+                except Exception as gap_err:
+                    self.logger.debug(f"Gap detection error: {gap_err}")
+
+            # --- Run HMM diagnostics periodically (every 50 cycles, independent of gap status) ---
+            if (self._advanced_detector is not None
+                    and self._advanced_detector.is_fitted
+                    and self._cycle_count % 50 == 0
+                    and self._cycle_count != self._last_transition_diag_cycle
+                    and len(bars_df) >= HMM_MIN_BARS):
+                self._last_transition_diag_cycle = self._cycle_count
+                diag = self._advanced_detector.compute_transition_diagnostics(bars_df)
+                if diag:
+                    self._transition_diagnostics = diag
+                    self.logger.info(
+                        f"HMM DIAG: transition_rate={diag['transition_rate']:.3f} "
+                        f"({'healthy' if diag['transition_rate_healthy'] else 'UNHEALTHY'}), "
+                        f"degenerate_pairs={diag['n_degenerate']}, "
+                        f"occupancy={diag['state_occupancy']}"
+                    )
+                    if diag['n_degenerate'] > 0:
+                        for pair in diag['degenerate_pairs']:
+                            self.logger.warning(
+                                f"HMM DEGENERACY: {pair['state_a']} ↔ {pair['state_b']} "
+                                f"KL={pair['kl_divergence']:.4f} (threshold=0.1)"
+                            )
+
+            # If data is gap-poisoned, fall back to last valid regime
+            if _gap_poisoned and self._last_valid_regime is not None:
+                self.current_regime = dict(self._last_valid_regime)
+                self.current_regime['gap_poisoned'] = True
+                self.current_regime['bar_gap_ratio'] = self._bar_gap_ratio
+                self.current_regime['classifier'] = f"{self._active_classifier}+stale"
+                self.logger.info(
+                    f"Regime fallback: using last valid regime "
+                    f"{self.current_regime.get('hmm_regime', 'unknown')} "
+                    f"(gap_ratio={self._bar_gap_ratio:.2f})"
+                )
+                return self.current_regime
 
             # --- Path A: HMM with proper OHLCV bars (>= 200 bars) ---
             hmm_classified = False
@@ -292,9 +376,31 @@ class RegimeOverlay:
 
             regime_label = self.current_regime.get('hmm_regime', 'unknown')
             conf = self.current_regime.get('hmm_confidence', 0.0)
+
+            # Store bar quality metadata
+            self.current_regime['bar_gap_ratio'] = self._bar_gap_ratio
+            self.current_regime['gap_poisoned'] = False
+
+            # --- Transition rate tracking ---
+            self._decision_count += 1
+            if self._prev_regime_label is not None and regime_label != self._prev_regime_label:
+                self._transition_count += 1
+            self._prev_regime_label = regime_label
+            live_transition_rate = (
+                self._transition_count / self._decision_count
+                if self._decision_count > 0 else 0.0
+            )
+            self.current_regime['transition_rate'] = round(live_transition_rate, 4)
+            self.current_regime['transition_count'] = self._transition_count
+
+            # Save this as last valid regime for gap-poisoned fallback
+            if regime_label != 'unknown' and conf > 0:
+                self._last_valid_regime = dict(self.current_regime)
+
             self.logger.info(
                 f"Market Regime: {regime_label} [{self._active_classifier}] "
                 f"(conf={conf:.2f}, bars={self._bar_count}, "
+                f"gap_ratio={self._bar_gap_ratio:.2f}, "
                 f"Persist={self.current_regime['trend_persistence']:.2f})"
             )
 
@@ -389,6 +495,23 @@ class RegimeOverlay:
         if self.current_regime:
             return self.current_regime.get('hmm_regime', 'unknown')
         return 'unknown'
+
+    def get_transition_diagnostics(self) -> Dict[str, Any]:
+        """Return HMM transition rate monitoring and degeneracy detection results.
+
+        Used by dashboard and research council for regime health assessment.
+        """
+        result = {
+            "live_transition_rate": round(
+                self._transition_count / self._decision_count, 4
+            ) if self._decision_count > 0 else 0.0,
+            "live_transition_count": self._transition_count,
+            "live_decision_count": self._decision_count,
+            "bar_gap_ratio": self._bar_gap_ratio,
+        }
+        if self._transition_diagnostics:
+            result.update(self._transition_diagnostics)
+        return result
 
     def get_transition_warning(self) -> Dict[str, Any]:
         """
