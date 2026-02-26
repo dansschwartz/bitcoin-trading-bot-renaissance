@@ -12,12 +12,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PROJ_DIR = Path(__file__).parent.parent
-DB_PATH = PROJ_DIR / "data" / "renaissance_bot.db"
 LEDGER_PATH = PROJ_DIR / "data" / "council_memory" / "outcome_ledger.json"
 
 
+def find_db():
+    for name in ["trading.db", "renaissance_bot.db"]:
+        p = PROJ_DIR / "data" / name
+        if p.exists():
+            return p
+    return None
+
+
 def update() -> None:
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5.0)
+    db = find_db()
+    if not db:
+        print("No database found")
+        return
+
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
 
     # Deployed proposals

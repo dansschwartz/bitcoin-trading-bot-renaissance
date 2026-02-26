@@ -417,8 +417,8 @@ because they deploy immediately without sandbox overhead.
             "mathematician", "cryptographer", "physicist",
             "linguist", "systems_engineer",
         ])
-        max_turns = self.researcher_cfg.get("council_max_turns_per_researcher", 30)
-        max_minutes = self.researcher_cfg.get("council_max_minutes_per_researcher", 25)
+        max_turns = self.researcher_cfg.get("council_max_turns", 30)
+        max_minutes = self.researcher_cfg.get("council_max_minutes", 25)
         project_root = self._project_root
 
         # Prepare snapshot
@@ -602,9 +602,28 @@ because they deploy immediately without sandbox overhead.
     ) -> str:
         """Build the hypothesis-phase prompt for a researcher."""
         report_path = session_dir / "weekly_report.json"
+        project_root = self._project_root
+
+        # Load dynamic brief if available
+        brief_path = project_root / "data" / "council_memory" / "briefs" / f"{name}_brief.md"
+        brief = brief_path.read_text() if brief_path.exists() else "(No brief available)"
+
         return f"""You are the {name.replace('_', ' ').title()} on the Executive Research Council.
 
 {profile}
+
+KNOWLEDGE LIBRARY — import and use:
+    import sys; sys.path.insert(0, 'researchers')
+    from knowledge.registry import KB
+    from knowledge.atoms import *
+    print(KB.manifest("{name}"))
+    result = KB.execute("math.kelly_optimal", p=0.54, b=1.2)
+    from knowledge.shared.data_loader import load_pair_csv, get_aligned_returns
+    from knowledge.shared.queries import weekly_performance, correlation_matrix
+    from knowledge.shared.dead_ends import is_dead_end
+
+DYNAMIC BRIEF:
+{brief}
 
 YOUR RESEARCH JOURNAL (institutional memory — what you've done before):
 {journal}
@@ -618,11 +637,13 @@ HISTORICAL DATA: {snapshot_dir}/training_data/ (5-year CSVs per pair)
 
 YOUR TASK:
 1. Analyze the weekly report through YOUR specific scientific lens
-2. Check your journal — build on standing hypotheses, do NOT repropose failed ideas
-3. Generate 1-3 improvement proposals based on your domain expertise
-4. For each proposal, write implementation code and run a backtest if possible:
+2. Import and run your diagnostic: KB.diagnostic("{name}")
+3. Check dead ends before proposing: from knowledge.shared.dead_ends import is_dead_end
+4. Check your journal — build on standing hypotheses, do NOT repropose failed ideas
+5. Generate 1-3 improvement proposals based on your domain expertise
+6. For each proposal, write implementation code and run a backtest if possible:
    .venv/bin/python3 -m backtesting.engine --walk-forward --pairs BTC-USD ETH-USD SOL-USD --total-months 3 --train-months 2 --test-months 1
-5. Save results to {output_dir}/proposals.json using this exact format:
+7. Save results to {output_dir}/proposals.json using this exact format:
 [
   {{
     "title": "Short descriptive title",
@@ -674,6 +695,7 @@ CONSTRAINTS:
                     pass
 
         if not other_proposals:
+            (output_dir / "reviews.json").write_text("[]")
             return "No proposals from other researchers to review. Session complete."
 
         return f"""You are the {name.replace('_', ' ').title()} on the Executive Research Council.

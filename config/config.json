@@ -549,8 +549,8 @@
             "linguist",
             "systems_engineer"
         ],
-        "council_max_turns_per_researcher": 30,
-        "council_max_minutes_per_researcher": 25,
+        "council_max_turns": 30,
+        "council_max_minutes": 25,
         "daily_scan_enabled": false,
         "daily_scan_hour_utc": 0,
         "trigger_cooldown_hours": 6,

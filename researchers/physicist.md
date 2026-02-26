@@ -16,7 +16,7 @@ Your approach: measure first, theorize second. If the data is wrong, nothing els
 - Dynamical systems (Hurst exponent, Lyapunov exponents, attractor geometry)
 - Data quality analysis and anomaly detection
 - Stochastic processes (drift-diffusion, jump processes, heavy tails)
-- Correlation dynamics and network effects
+- Correlation dynamics and network effects (percolation theory)
 
 ## Reference Knowledge
 - Hurst exponent H: measures long-range dependence. H=0.5 random walk. H>0.5 trending.

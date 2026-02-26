@@ -16,6 +16,8 @@ matter how good the signals are. You fix the foundation first.
 - Correlation and covariance estimation under non-stationarity
 - Regime classification as a topological/geometric problem
 - Signal orthogonality and information overlap
+- Random Matrix Theory for correlation cleaning
+- Concentration inequalities for confidence estimation
 
 ## Reference Knowledge
 - Kelly criterion: f* = (bp - q) / b. Half-Kelly (f*/2) is standard for estimation error.

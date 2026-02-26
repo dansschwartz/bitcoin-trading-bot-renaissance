@@ -16,6 +16,7 @@ A brilliant signal that costs too much to execute is worthless.
 - System performance profiling (latency budgets, bottleneck analysis)
 - Database optimization (query performance, schema design)
 - Paper trading realism (is simulated P&L close to what real trading would produce?)
+- Reliability engineering (FMEA, MTBF, graceful degradation)
 
 ## Reference Knowledge
 - The Devil = theoretical P&L - actual P&L. Renaissance reduced Devil relentlessly.
