@@ -2029,6 +2029,48 @@ class RenaissanceTradingBot:
         if action == 'HOLD' and abs(weighted_signal) > 0.001:
             self._signal_filter_stats['filtered_threshold'] += 1
 
+        # ── SELL Inversion Gate: SELL signals are 23.2% accurate (anti-predictive) ──
+        # Require GRU model confirmation (pred < -0.005) to allow any SELL trade.
+        # Council proposals #5/#8: two independent researchers confirmed the asymmetry.
+        _sell_gate_threshold = -0.005
+        if action == 'SELL' and ml_package and ml_package.ml_predictions:
+            gru_pred = None
+            for mp in ml_package.ml_predictions:
+                _name, _val = None, None
+                if isinstance(mp, (tuple, list)) and len(mp) >= 2:
+                    _name, _val = mp[0], mp[1]
+                elif isinstance(mp, dict):
+                    _name = mp.get('model', mp.get('name', ''))
+                    _val = mp.get('prediction', mp.get('value', None))
+                if _name and str(_name).lower() == 'gru' and isinstance(_val, (int, float)):
+                    gru_pred = float(_val)
+                    break
+            if gru_pred is not None and gru_pred >= _sell_gate_threshold:
+                self.logger.info(
+                    f"SELL INVERSION GATE: {product_id} blocked — "
+                    f"GRU pred={gru_pred:+.4f} >= {_sell_gate_threshold} (not bearish enough)"
+                )
+                self._signal_filter_stats['filtered_agreement'] += 1
+                if audit_logger:
+                    audit_logger.record_gate('sell_inversion', False,
+                                             f'gru={gru_pred:+.4f}>={_sell_gate_threshold}')
+                action = 'HOLD'
+            elif gru_pred is None:
+                # No GRU prediction available — block SELL as precaution
+                self.logger.info(
+                    f"SELL INVERSION GATE: {product_id} blocked — no GRU prediction available"
+                )
+                if audit_logger:
+                    audit_logger.record_gate('sell_inversion', False, 'no_gru_pred')
+                action = 'HOLD'
+            else:
+                self.logger.info(
+                    f"SELL INVERSION GATE: {product_id} PASSED — "
+                    f"GRU confirms bearish (pred={gru_pred:+.4f})"
+                )
+                if audit_logger:
+                    audit_logger.record_gate('sell_inversion', True, f'gru={gru_pred:+.4f}')
+
         # ── ML Agreement Gate: only trade when models agree strongly ──
         # Threshold is regime-adjusted: 0.65 with-trend, 0.71 neutral, 0.80 counter-trend
         if action != 'HOLD' and ml_package and ml_package.ml_predictions:

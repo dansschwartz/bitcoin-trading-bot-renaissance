@@ -28,7 +28,7 @@ BOOTSTRAP_MIN_BARS = 20
 HMM_MIN_BARS = 200
 
 # Bar gap detection thresholds
-MIN_BAR_COMPLETENESS = 0.85   # suppress regime if <85% bars present
+MIN_BAR_COMPLETENESS = 0.70   # suppress regime if <70% bars present (Council #7)
 BAR_DURATION_S = 300          # 5-minute bars
 GAP_THRESHOLD_S = 600         # gaps > 10 minutes are logged
 
@@ -290,16 +290,22 @@ class RegimeOverlay:
                                 f"KL={pair['kl_divergence']:.4f} (threshold=0.1)"
                             )
 
-            # If data is gap-poisoned, fall back to last valid regime
-            if _gap_poisoned and self._last_valid_regime is not None:
-                self.current_regime = dict(self._last_valid_regime)
-                self.current_regime['gap_poisoned'] = True
-                self.current_regime['bar_gap_ratio'] = self._bar_gap_ratio
-                self.current_regime['classifier'] = f"{self._active_classifier}+stale"
-                self.logger.info(
-                    f"Regime fallback: using last valid regime "
-                    f"{self.current_regime.get('hmm_regime', 'unknown')} "
-                    f"(gap_ratio={self._bar_gap_ratio:.2f})"
+            # If data is gap-poisoned, fall back to neutral_sideways (Council #7).
+            # Previous behavior used last_valid_regime which was often the corrupt
+            # bear_trending itself (54% of decisions). neutral_sideways has the best
+            # signal-to-noise ratio (29.8% zero rate vs 81.5% for bear_trending).
+            if _gap_poisoned:
+                self.current_regime = {
+                    'hmm_regime': 'neutral_sideways',
+                    'hmm_confidence': 0.50,
+                    'gap_poisoned': True,
+                    'bar_gap_ratio': self._bar_gap_ratio,
+                    'classifier': f"{self._active_classifier}+gap_guard",
+                    'trend_persistence': self.current_regime.get('trend_persistence', 0.0),
+                }
+                self.logger.warning(
+                    f"GAP GUARD: bar_gap_ratio={self._bar_gap_ratio:.2f} < {MIN_BAR_COMPLETENESS} — "
+                    f"forcing neutral_sideways (was {self._last_valid_regime.get('hmm_regime', 'unknown') if self._last_valid_regime else 'none'})"
                 )
                 return self.current_regime
 
