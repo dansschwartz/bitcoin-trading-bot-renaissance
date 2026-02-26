@@ -19,6 +19,7 @@ import logging
 import os
 import subprocess
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -154,12 +155,18 @@ class QuantResearcherAgent(BaseAgent):
             # Step 2: Prepare research session directory
             session_dir = self._prepare_session(report)
 
-            # Step 3: Launch Claude Code (if enabled)
-            if self.researcher_cfg.get("enabled", False):
-                proposals = self._launch_claude_session(session_dir)
+            # Step 3: Launch research session (single or council mode)
+            research_mode = self.researcher_cfg.get("research_mode", "single")
+
+            if research_mode == "council":
+                proposals = self._run_council_cycle(session_dir, report)
             else:
-                self.logger.info("QuantResearcher: Claude Code disabled, skipping launch")
-                proposals = []
+                # Existing single-researcher mode (PRESERVED)
+                if self.researcher_cfg.get("enabled", False):
+                    proposals = self._launch_claude_session(session_dir)
+                else:
+                    self.logger.info("QuantResearcher: Claude Code disabled, skipping launch")
+                    proposals = []
 
             # Step 4: Evaluate proposals through safety gate
             if proposals:
@@ -393,6 +400,343 @@ because they deploy immediately without sandbox overhead.
                 continue
         return []
 
+    # ── Council mode methods ──
+
+    def _run_council_cycle(
+        self, session_dir: Path, report: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Run the full Executive Research Council cycle.
+
+        Phase 1: Hypothesis generation — 5 specialist sessions
+        Phase 2: Peer review — 5 review sessions
+        Phase 3: Consensus scoring — pure Python
+
+        Returns proposals that pass consensus threshold (for SafetyGate).
+        """
+        researchers = self.researcher_cfg.get("researchers", [
+            "mathematician", "cryptographer", "physicist",
+            "linguist", "systems_engineer",
+        ])
+        max_turns = self.researcher_cfg.get("council_max_turns_per_researcher", 30)
+        max_minutes = self.researcher_cfg.get("council_max_minutes_per_researcher", 25)
+        project_root = self._project_root
+
+        # Prepare snapshot
+        snapshot_script = project_root / "scripts" / "prepare_research_snapshot.sh"
+        if snapshot_script.exists():
+            try:
+                subprocess.run(
+                    ["bash", str(snapshot_script)], timeout=120,
+                    capture_output=True, cwd=str(project_root),
+                )
+                self.logger.info("Research snapshot created")
+            except Exception as exc:
+                self.logger.warning("Snapshot creation failed (continuing): %s", exc)
+
+        snapshot_dir = project_root / "data" / "research_snapshots" / "latest"
+
+        # Phase 1: Hypothesis generation
+        self.logger.info(
+            "Council Phase 1: Hypothesis generation (%d researchers)", len(researchers),
+        )
+        for name in researchers:
+            self.logger.info("  Launching researcher: %s", name)
+            try:
+                self._launch_researcher_session(
+                    researcher_name=name,
+                    phase="hypothesize",
+                    session_dir=session_dir,
+                    snapshot_dir=snapshot_dir,
+                    project_root=project_root,
+                    max_turns=max_turns,
+                    timeout_minutes=max_minutes,
+                )
+            except Exception as exc:
+                self.logger.warning("Researcher %s hypothesis session failed: %s", name, exc)
+
+        # Phase 2: Peer review
+        self.logger.info(
+            "Council Phase 2: Peer review (%d researchers)", len(researchers),
+        )
+        for name in researchers:
+            self.logger.info("  Launching reviewer: %s", name)
+            try:
+                self._launch_researcher_session(
+                    researcher_name=name,
+                    phase="review",
+                    session_dir=session_dir,
+                    snapshot_dir=snapshot_dir,
+                    project_root=project_root,
+                    max_turns=max(10, max_turns // 2),
+                    timeout_minutes=max(10, max_minutes // 2),
+                )
+            except Exception as exc:
+                self.logger.warning("Researcher %s review session failed: %s", name, exc)
+
+        # Phase 3: Consensus scoring
+        self.logger.info("Council Phase 3: Consensus scoring")
+        try:
+            scripts_dir = str(project_root / "scripts")
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            from score_proposals import score
+            passing_proposals = score(session_dir)
+        except Exception as exc:
+            self.logger.error("Consensus scoring failed: %s", exc)
+            passing_proposals = self._collect_all_proposals(session_dir, researchers)
+
+        # Update outcome ledger
+        try:
+            updater = project_root / "scripts" / "update_council_memory.py"
+            if updater.exists():
+                subprocess.run(
+                    [str(project_root / ".venv" / "bin" / "python3"), str(updater)],
+                    timeout=30, capture_output=True, cwd=str(project_root),
+                )
+        except Exception:
+            pass
+
+        self.logger.info(
+            "Council cycle complete: %d proposals pass consensus", len(passing_proposals),
+        )
+        return passing_proposals
+
+    def _launch_researcher_session(
+        self,
+        researcher_name: str,
+        phase: str,
+        session_dir: Path,
+        snapshot_dir: Path,
+        project_root: Path,
+        max_turns: int = 30,
+        timeout_minutes: int = 25,
+    ) -> None:
+        """Launch a single Claude Code session for one researcher in one phase."""
+        # Load researcher profile
+        profile_path = project_root / "researchers" / f"{researcher_name}.md"
+        if not profile_path.exists():
+            self.logger.warning("Researcher profile not found: %s", profile_path)
+            return
+        researcher_profile = profile_path.read_text()
+
+        # Load journal (institutional memory)
+        journal_path = (
+            project_root / "data" / "council_memory" / "journals"
+            / f"{researcher_name}_journal.md"
+        )
+        journal_content = journal_path.read_text() if journal_path.exists() else "(No previous sessions)"
+
+        # Load outcome ledger
+        ledger_path = project_root / "data" / "council_memory" / "outcome_ledger.json"
+        ledger_content = ledger_path.read_text() if ledger_path.exists() else "{}"
+
+        # Create per-researcher output directory
+        if phase == "hypothesize":
+            output_dir = session_dir / "proposals" / researcher_name
+        else:
+            output_dir = session_dir / "reviews" / researcher_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build prompt
+        if phase == "hypothesize":
+            prompt = self._build_hypothesis_prompt(
+                researcher_name, researcher_profile, journal_content,
+                ledger_content, session_dir, snapshot_dir, output_dir,
+            )
+        elif phase == "review":
+            prompt = self._build_review_prompt(
+                researcher_name, researcher_profile, journal_content,
+                session_dir, output_dir,
+            )
+        else:
+            self.logger.error("Unknown phase: %s", phase)
+            return
+
+        # Save prompt for debugging
+        (output_dir / f"{phase}_prompt.md").write_text(prompt)
+
+        # Launch Claude Code
+        try:
+            result = subprocess.run(
+                ["claude", "--print", "--max-turns", str(max_turns), "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=timeout_minutes * 60,
+                cwd=str(project_root),
+            )
+            (output_dir / "claude_output.txt").write_text(result.stdout or "")
+            if result.stderr:
+                (output_dir / "claude_stderr.txt").write_text(result.stderr)
+
+            # Check for proposals.json or reviews.json
+            expected_file = "proposals.json" if phase == "hypothesize" else "reviews.json"
+            if not (output_dir / expected_file).exists():
+                extracted = self._extract_proposals_from_output(result.stdout or "")
+                if extracted:
+                    (output_dir / expected_file).write_text(
+                        json.dumps(extracted, indent=2, default=str)
+                    )
+
+            # Harvest updated journal
+            self._harvest_journal_update(researcher_name, result.stdout or "", project_root)
+
+        except subprocess.TimeoutExpired:
+            self.logger.warning(
+                "Researcher %s %s timed out after %dm",
+                researcher_name, phase, timeout_minutes,
+            )
+        except FileNotFoundError:
+            self.logger.warning("'claude' CLI not found — skipping session")
+        except Exception as exc:
+            self.logger.error("Researcher %s %s failed: %s", researcher_name, phase, exc)
+
+    def _build_hypothesis_prompt(
+        self,
+        name: str,
+        profile: str,
+        journal: str,
+        ledger: str,
+        session_dir: Path,
+        snapshot_dir: Path,
+        output_dir: Path,
+    ) -> str:
+        """Build the hypothesis-phase prompt for a researcher."""
+        report_path = session_dir / "weekly_report.json"
+        return f"""You are the {name.replace('_', ' ').title()} on the Executive Research Council.
+
+{profile}
+
+YOUR RESEARCH JOURNAL (institutional memory — what you've done before):
+{journal}
+
+SHARED OUTCOME LEDGER (what the whole council has deployed/rolled back):
+{ledger}
+
+WEEKLY REPORT: Read the file at {report_path}
+DATABASE SNAPSHOT: {snapshot_dir}/trading_snapshot.db (read-only SQLite — query freely)
+HISTORICAL DATA: {snapshot_dir}/training_data/ (5-year CSVs per pair)
+
+YOUR TASK:
+1. Analyze the weekly report through YOUR specific scientific lens
+2. Check your journal — build on standing hypotheses, do NOT repropose failed ideas
+3. Generate 1-3 improvement proposals based on your domain expertise
+4. For each proposal, write implementation code and run a backtest if possible:
+   .venv/bin/python3 -m backtesting.engine --walk-forward --pairs BTC-USD ETH-USD SOL-USD --total-months 3 --train-months 2 --test-months 1
+5. Save results to {output_dir}/proposals.json using this exact format:
+[
+  {{
+    "title": "Short descriptive title",
+    "description": "What to change and why",
+    "category": "parameter_tune",
+    "deployment_mode": "parameter_tune",
+    "config_changes": {{}},
+    "backtest_sharpe": 0.0,
+    "backtest_drawdown": 0.0,
+    "backtest_accuracy": 0.0,
+    "backtest_sample_size": 0,
+    "backtest_p_value": 0.0,
+    "expected_improvement_bps": 0.0,
+    "notes": ""
+  }}
+]
+
+FINAL TASK: Update your research journal at data/council_memory/journals/{name}_journal.md
+with what you proposed, what you learned, and standing hypotheses for next week.
+
+CONSTRAINTS:
+- NEVER modify risk_gateway.py, safety limits, or circuit breakers
+- NEVER propose increasing leverage
+- Save ALL work to {output_dir}/ — never modify production code directly
+"""
+
+    def _build_review_prompt(
+        self,
+        name: str,
+        profile: str,
+        journal: str,
+        session_dir: Path,
+        output_dir: Path,
+    ) -> str:
+        """Build the peer-review prompt for a researcher."""
+        researchers = [
+            'mathematician', 'cryptographer', 'physicist',
+            'linguist', 'systems_engineer',
+        ]
+        other_proposals: Dict[str, Any] = {}
+        for other in researchers:
+            if other == name:
+                continue
+            prop_file = session_dir / "proposals" / other / "proposals.json"
+            if prop_file.exists():
+                try:
+                    other_proposals[other] = json.loads(prop_file.read_text())
+                except Exception:
+                    pass
+
+        if not other_proposals:
+            return "No proposals from other researchers to review. Session complete."
+
+        return f"""You are the {name.replace('_', ' ').title()} on the Executive Research Council.
+You are now in PEER REVIEW mode.
+
+{profile}
+
+YOUR JOURNAL (for context on your own domain expertise):
+{journal}
+
+YOUR TASK: Review the following proposals from your fellow researchers.
+For each proposal, provide your verdict:
+- ENDORSE — the proposal is sound from your domain perspective
+- CHALLENGE — the proposal has issues but could be improved (explain how)
+- REJECT — the proposal is fundamentally flawed (explain why)
+
+PROPOSALS TO REVIEW:
+{json.dumps(other_proposals, indent=2, default=str)}
+
+Save your reviews to {output_dir}/reviews.json in this format:
+[
+  {{
+    "researcher": "name_of_proposer",
+    "proposal_title": "title from their proposal",
+    "verdict": "endorse|challenge|reject",
+    "reasoning": "Your domain-specific analysis (2-4 sentences)",
+    "suggested_improvements": "If challenging, what would fix it",
+    "confidence": 0.8
+  }}
+]
+
+Be rigorous. Challenge weak reasoning. Endorse only what you'd stake your reputation on.
+"""
+
+    def _collect_all_proposals(
+        self, session_dir: Path, researchers: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Fallback: collect all proposals without consensus filtering."""
+        all_props: List[Dict[str, Any]] = []
+        for name in researchers:
+            prop_file = session_dir / "proposals" / name / "proposals.json"
+            if prop_file.exists():
+                try:
+                    props = json.loads(prop_file.read_text())
+                    for p in props:
+                        p["_source_researcher"] = name
+                    all_props.extend(props)
+                except Exception:
+                    pass
+        return all_props
+
+    def _harvest_journal_update(
+        self, researcher_name: str, stdout: str, project_root: Path,
+    ) -> None:
+        """Check if the researcher updated their journal during the session."""
+        journal_path = (
+            project_root / "data" / "council_memory" / "journals"
+            / f"{researcher_name}_journal.md"
+        )
+        if journal_path.exists():
+            lines = len(journal_path.read_text().splitlines())
+            self.logger.info("Journal for %s: %d lines", researcher_name, lines)
+
     def _evaluate_proposals(
         self, proposals: List[Dict[str, Any]], report: Dict[str, Any],
     ) -> None:
@@ -468,6 +812,7 @@ def _main() -> None:
     parser.add_argument("--manual", action="store_true", help="Run one research cycle manually")
     parser.add_argument("--no-claude", action="store_true", help="Skip Claude Code launch (report only)")
     parser.add_argument("--report-only", action="store_true", help="Only compile report, no Claude Code")
+    parser.add_argument("--council", action="store_true", help="Run full council cycle instead of single researcher")
     parser.add_argument("--db", default="data/renaissance_bot.db", help="DB path")
     parser.add_argument("--config", default="config/config.json", help="Config path")
     args = parser.parse_args()
@@ -489,7 +834,7 @@ def _main() -> None:
         print(f"\nFull report: {filepath}")
         return
 
-    if args.manual:
+    if args.manual or args.council:
         from agents.event_bus import EventBus
         from agents.db_schema import ensure_agent_tables
         ensure_agent_tables(args.db)
@@ -500,6 +845,10 @@ def _main() -> None:
         # --no-claude disables Claude launch; --manual alone respects config
         if args.no_claude:
             config_copy["quant_researcher"]["enabled"] = False
+        # --council overrides mode
+        if args.council:
+            config_copy["quant_researcher"]["research_mode"] = "council"
+            config_copy["quant_researcher"]["enabled"] = True
 
         researcher = QuantResearcherAgent(
             event_bus=bus,
@@ -507,8 +856,9 @@ def _main() -> None:
             config=config_copy,
         )
         asyncio.run(researcher.run_weekly_research())
+        mode = config_copy["quant_researcher"].get("research_mode", "single")
         claude_status = "disabled (--no-claude)" if args.no_claude else (
-            "enabled" if config_copy["quant_researcher"].get("enabled") else "disabled (config)"
+            f"enabled ({mode} mode)" if config_copy["quant_researcher"].get("enabled") else "disabled (config)"
         )
         print(f"\nManual research cycle complete (Claude Code: {claude_status}).")
 
