@@ -635,49 +635,89 @@ KNOWLEDGE LIBRARY — import and use:
 DYNAMIC BRIEF:
 {brief}
 
-YOUR RESEARCH JOURNAL (institutional memory — what you've done before):
+JOURNAL (institutional memory):
 {journal}
 
-SHARED OUTCOME LEDGER (what the whole council has deployed/rolled back):
+OUTCOME LEDGER:
 {ledger}
 
 WEEKLY REPORT: Read the file at {report_path}
 DATABASE SNAPSHOT: {snapshot_dir}/trading_snapshot.db (read-only SQLite — query freely)
 HISTORICAL DATA: {snapshot_dir}/training_data/ (5-year CSVs per pair)
 
-YOUR TASK:
-1. Analyze the weekly report through YOUR specific scientific lens
-2. Import and run your diagnostic: KB.diagnostic("{name}")
-3. Check dead ends before proposing: from knowledge.shared.dead_ends import is_dead_end
-4. Check your journal — build on standing hypotheses, do NOT repropose failed ideas
-5. Generate 1-3 improvement proposals based on your domain expertise
-6. For each proposal, write implementation code and run a backtest if possible:
-   .venv/bin/python3 -m backtesting.engine --walk-forward --pairs BTC-USD ETH-USD SOL-USD --total-months 3 --train-months 2 --test-months 1
-7. Save results to {output_dir}/proposals.json using this exact format:
+===============================================================
+CRITICAL: OUTPUT-FIRST WORKFLOW — Follow this EXACT sequence
+===============================================================
+
+You have a LIMITED number of turns. You MUST produce proposals.json
+before doing deep analysis. Follow this sequence:
+
+TURNS 1-5: QUICK ASSESSMENT
+  - Read the weekly report at {report_path}
+  - Check your journal for standing hypotheses
+  - Check dead ends: from knowledge.shared.dead_ends import is_dead_end
+  - Identify 1-3 improvement opportunities from your domain lens
+
+TURNS 6-12: WRITE PROPOSALS.JSON FIRST
+  - Write {output_dir}/proposals.json with your 1-3 proposals
+  - Use the EXACT format below — every field must be present
+  - For infrastructure proposals (no traditional backtest), use:
+    category: "infrastructure", deployment_mode: "infrastructure"
+    Set backtest fields to null and explain in notes why no backtest applies
+  - For parameter tunes with backtests, fill all fields with real numbers
+
+TURNS 13+: DEEPER ANALYSIS (only if time permits)
+  - Run backtests to fill in missing metrics
+  - Update proposals.json with backtest results
+  - Run KB.diagnostic("{name}") for domain-specific analysis
+  - Update your journal at data/council_memory/journals/{name}_journal.md
+
+THIS ORDER IS MANDATORY. A session that produces brilliant analysis
+but no proposals.json is a FAILED session. A session that produces
+proposals.json with incomplete metrics but clear reasoning is a
+SUCCESSFUL session that can be improved next week.
+
+===============================================================
+PROPOSAL FORMAT — proposals.json
+===============================================================
+
+Save to: {output_dir}/proposals.json
+
 [
   {{
-    "title": "Short descriptive title",
-    "description": "What to change and why",
-    "category": "parameter_tune",
-    "deployment_mode": "parameter_tune",
-    "config_changes": {{}},
-    "backtest_sharpe": 0.0,
-    "backtest_drawdown": 0.0,
-    "backtest_accuracy": 0.0,
-    "backtest_sample_size": 0,
-    "backtest_p_value": 0.0,
-    "expected_improvement_bps": 0.0,
-    "notes": ""
+    "title": "Short descriptive title (max 80 chars)",
+    "description": "What to change, why, and expected impact (2-4 sentences)",
+    "category": "parameter_tune|modify_existing|new_feature|infrastructure",
+    "deployment_mode": "parameter_tune|modify_existing|new_feature|infrastructure",
+    "config_changes": {{"key": "value"}},
+    "backtest_sharpe": 1.2,
+    "backtest_drawdown": 0.03,
+    "backtest_accuracy": 0.54,
+    "backtest_sample_size": 200,
+    "backtest_p_value": 0.02,
+    "expected_improvement_bps": 5.0,
+    "notes": "Additional context, caveats, or why backtest metrics are N/A"
   }}
 ]
 
-FINAL TASK: Update your research journal at data/council_memory/journals/{name}_journal.md
-with what you proposed, what you learned, and standing hypotheses for next week.
+Category guide:
+  parameter_tune   — change a number in config (signal weight, threshold)
+                     Deploys immediately. No sandbox. Prefer this.
+  modify_existing  — change module behavior. 24h sandbox.
+  new_feature      — add capability. 72h sandbox. Human approval.
+  infrastructure   — measurement/monitoring/data quality improvement.
+                     No backtest required. Human approval required.
+                     Use when the proposal improves OBSERVABILITY or COST
+                     MEASUREMENT rather than directly changing trading signals.
+                     Set backtest_* fields to null and explain in notes.
+
+===============================================================
 
 CONSTRAINTS:
 - NEVER modify risk_gateway.py, safety limits, or circuit breakers
 - NEVER propose increasing leverage
 - Save ALL work to {output_dir}/ — never modify production code directly
+- Check dead ends before proposing — don't waste time on known failures
 """
 
     def _build_review_prompt(
@@ -708,24 +748,26 @@ CONSTRAINTS:
             (output_dir / "reviews.json").write_text("[]")
             return "No proposals from other researchers to review. Session complete."
 
-        return f"""You are the {name.replace('_', ' ').title()} on the Executive Research Council.
-You are now in PEER REVIEW mode.
+        return f"""You are the {name.replace('_', ' ').title()} in PEER REVIEW mode.
 
 {profile}
 
-YOUR JOURNAL (for context on your own domain expertise):
-{journal}
+JOURNAL: {journal}
 
-YOUR TASK: Review the following proposals from your fellow researchers.
-For each proposal, provide your verdict:
-- ENDORSE — the proposal is sound from your domain perspective
-- CHALLENGE — the proposal has issues but could be improved (explain how)
-- REJECT — the proposal is fundamentally flawed (explain why)
+Review these proposals. For each: ENDORSE, CHALLENGE, or REJECT.
 
-PROPOSALS TO REVIEW:
+REVIEW GUIDELINES:
+- For parameter_tune proposals: Does the math support the change? Is the effect size realistic?
+- For infrastructure proposals: Does this improve our ability to MEASURE or MONITOR?
+  Infrastructure proposals don't need backtests — they improve observability.
+  Evaluate whether the measurement methodology is sound.
+- For all proposals: Check the dead ends list mentally. Don't endorse known failures.
+- Cross-domain endorsements carry extra weight in consensus scoring.
+
+PROPOSALS:
 {json.dumps(other_proposals, indent=2, default=str)}
 
-Save your reviews to {output_dir}/reviews.json in this format:
+Save to {output_dir}/reviews.json:
 [
   {{
     "researcher": "name_of_proposer",

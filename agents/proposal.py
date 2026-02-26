@@ -25,6 +25,7 @@ class DeploymentMode(str, Enum):
     NEW_FEATURE = "new_feature"             # 72h sandbox, human approval
     NEW_STRATEGY = "new_strategy"           # 168h sandbox, human approval
     MODEL_RETRAIN = "model_retrain"         # No sandbox (has own safety gate), no approval
+    INFRASTRUCTURE = "infrastructure"       # No sandbox, human approval required
 
 
 # Sandbox durations in hours
@@ -34,6 +35,7 @@ SANDBOX_HOURS: Dict[DeploymentMode, int] = {
     DeploymentMode.NEW_FEATURE: 72,
     DeploymentMode.NEW_STRATEGY: 168,
     DeploymentMode.MODEL_RETRAIN: 0,
+    DeploymentMode.INFRASTRUCTURE: 0,
 }
 
 # Which modes require human approval
@@ -43,6 +45,7 @@ REQUIRES_APPROVAL: Dict[DeploymentMode, bool] = {
     DeploymentMode.NEW_FEATURE: True,
     DeploymentMode.NEW_STRATEGY: True,
     DeploymentMode.MODEL_RETRAIN: False,
+    DeploymentMode.INFRASTRUCTURE: True,
 }
 
 

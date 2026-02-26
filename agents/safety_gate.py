@@ -40,12 +40,64 @@ class SafetyGate:
         self.current_max_dd = current_max_dd
 
     def evaluate(self, proposal: Proposal) -> Dict[str, Any]:
-        """Run all 5 gates.  Returns a dict with per-gate results + overall pass/fail."""
+        """Run all gates.  Infrastructure proposals get relaxed backtest requirements."""
         results: Dict[str, Any] = {
             "overall": True,
             "gates": {},
         }
 
+        # Infrastructure proposals: relaxed backtest gates, human approval required
+        is_infrastructure = (
+            proposal.deployment_mode == DeploymentMode.INFRASTRUCTURE
+            or proposal.category == "infrastructure"
+        )
+
+        if is_infrastructure:
+            # Only check absolute limits — no backtest metrics required
+            abs_check = self._check_absolute_limits(proposal)
+            results["gates"]["absolute_limits"] = abs_check
+            if not abs_check["passed"]:
+                results["overall"] = False
+
+            # Check it has a meaningful description
+            has_description = bool(
+                proposal.description and len(proposal.description) > 20
+            )
+            results["gates"]["infrastructure_description"] = {
+                "gate": "infrastructure_description",
+                "passed": has_description,
+                "reason": None if has_description else (
+                    "Infrastructure proposals need a clear description (>20 chars)"
+                ),
+            }
+            if not has_description:
+                results["overall"] = False
+
+            # Mark as requiring human approval
+            results["gates"]["human_approval"] = {
+                "gate": "human_approval",
+                "passed": True,
+                "reason": (
+                    "Infrastructure proposal — requires human approval before deployment"
+                ),
+            }
+            results["requires_human_approval"] = True
+
+            # Update proposal status
+            proposal.safety_gate_results = results
+            if results["overall"]:
+                proposal.status = ProposalStatus.AWAITING_APPROVAL
+            else:
+                proposal.status = ProposalStatus.SAFETY_FAILED
+
+            logger.info(
+                "SafetyGate: infrastructure proposal '%s' — %s (awaiting human approval)",
+                proposal.title,
+                "PASSED" if results["overall"] else "FAILED",
+            )
+            return results
+
+        # Standard proposals: all 5 gates + absolute limits must pass
         gates = [
             self._gate_sharpe(proposal),
             self._gate_drawdown(proposal),
