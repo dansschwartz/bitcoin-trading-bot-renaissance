@@ -4110,34 +4110,41 @@ class RenaissanceTradingBot:
                 # ── Audit Logger: collect pre-decision data ──
                 _audit = self.audit_logger if self.db_enabled else None
                 if _audit:
-                    _audit.start_decision(product_id, self.scan_cycle_count)
-                    _ticker = market_data.get('ticker', {})
-                    _ob = market_data.get('order_book_snapshot')
-                    _ob_depth = 0.0
-                    if _ob and hasattr(_ob, 'bids') and hasattr(_ob, 'asks'):
-                        _ob_depth = sum(float(getattr(lv, 'size', 0)) * float(getattr(lv, 'price', 0))
-                                        for lv in (list(getattr(_ob, 'bids', []))[:10] + list(getattr(_ob, 'asks', []))[:10]))
-                    _audit.record_market_snapshot(
-                        price=current_price,
-                        bid=self._force_float(_ticker.get('bid', 0)),
-                        ask=self._force_float(_ticker.get('ask', 0)),
-                        volume_24h=self._force_float(_ticker.get('volume', 0)),
-                        ob_depth=_ob_depth,
-                    )
-                    _audit.record_raw_signals(signals)
-                    _rl = self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else "unknown"
-                    _rc = 0.0
-                    if self.regime_overlay.current_regime and isinstance(self.regime_overlay.current_regime, dict):
-                        _rc = float(self.regime_overlay.current_regime.get('confidence', 0.0))
-                    _audit.record_regime(_rl, _rc, 'hmm')
-                    _audit.record_weights(
-                        base_weights=original_weights,
-                        cycle_weights=cycle_weights,
-                        contributions=contributions,
-                        weighted_signal=weighted_signal,
-                    )
-                    _audit.record_ml(ml_package, rt_result, self.config.get("ml_signal_scale", 10.0))
-                    _audit.record_confluence(confluence_data)
+                    try:
+                        _audit.start_decision(product_id, self.scan_cycle_count)
+                        _ticker = market_data.get('ticker', {})
+                        _ob = market_data.get('order_book_snapshot')
+                        _ob_depth = 0.0
+                        try:
+                            if _ob and hasattr(_ob, 'bids') and hasattr(_ob, 'asks'):
+                                _ob_depth = sum(float(getattr(lv, 'size', 0)) * float(getattr(lv, 'price', 0))
+                                                for lv in (list(getattr(_ob, 'bids', []))[:10] + list(getattr(_ob, 'asks', []))[:10]))
+                        except Exception:
+                            _ob_depth = 0.0
+                        _audit.record_market_snapshot(
+                            price=current_price,
+                            bid=self._force_float(_ticker.get('bid', 0)),
+                            ask=self._force_float(_ticker.get('ask', 0)),
+                            volume_24h=self._force_float(_ticker.get('volume', 0)),
+                            ob_depth=_ob_depth,
+                        )
+                        _audit.record_raw_signals(signals)
+                        _rl = self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else "unknown"
+                        _rc = 0.0
+                        if self.regime_overlay.current_regime and isinstance(self.regime_overlay.current_regime, dict):
+                            _rc = float(self.regime_overlay.current_regime.get('confidence', 0.0))
+                        _audit.record_regime(_rl, _rc, 'hmm')
+                        _audit.record_weights(
+                            base_weights=original_weights,
+                            cycle_weights=cycle_weights,
+                            contributions=contributions,
+                            weighted_signal=weighted_signal,
+                        )
+                        _audit.record_ml(ml_package, rt_result, self.config.get("ml_signal_scale", 10.0))
+                        _audit.record_confluence(confluence_data)
+                    except Exception as _audit_err:
+                        self.logger.warning(f"Audit pre-decision collection failed: {_audit_err}")
+                        _audit = None  # Disable audit for this decision
 
                 decision = self.make_trading_decision(weighted_signal, contributions,
                                                     current_price=current_price,
@@ -4150,26 +4157,29 @@ class RenaissanceTradingBot:
 
                 # ── Audit Logger: record decision + finalize ──
                 if _audit:
-                    _audit.record_decision(decision.action, decision.position_size)
-                    _audit.record_execution(
-                        mode=market_data.get('execution_mode', 'PAPER'),
-                    )
-                    if ml_package and hasattr(ml_package, 'feature_vector') and ml_package.feature_vector is not None:
-                        _audit.record_feature_vector(ml_package.feature_vector)
-                    _open_count = 0
                     try:
-                        with self.position_manager._lock:
-                            _open_count = sum(1 for p in self.position_manager.positions.values() if p.status == PositionStatus.OPEN)
-                    except Exception:
-                        pass
-                    _audit.record_system_state(
-                        drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
-                        daily_pnl=self.daily_pnl,
-                        balance=self._high_watermark_usd if hasattr(self, '_high_watermark_usd') else 10000.0,
-                        open_positions_count=_open_count,
-                        scan_tier=getattr(self, '_current_scan_tier', 0),
-                    )
-                    self._track_task(_audit.finalize())
+                        _audit.record_decision(decision.action, decision.position_size)
+                        _audit.record_execution(
+                            mode=market_data.get('execution_mode', 'PAPER'),
+                        )
+                        if ml_package and hasattr(ml_package, 'feature_vector') and ml_package.feature_vector is not None:
+                            _audit.record_feature_vector(ml_package.feature_vector)
+                        _open_count = 0
+                        try:
+                            with self.position_manager._lock:
+                                _open_count = sum(1 for p in self.position_manager.positions.values() if p.status == PositionStatus.OPEN)
+                        except Exception:
+                            pass
+                        _audit.record_system_state(
+                            drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
+                            daily_pnl=self.daily_pnl,
+                            balance=self._high_watermark_usd if hasattr(self, '_high_watermark_usd') else 10000.0,
+                            open_positions_count=_open_count,
+                            scan_tier=getattr(self, '_current_scan_tier', 0),
+                        )
+                        self._track_task(_audit.finalize())
+                    except Exception as _audit_err:
+                        self.logger.warning(f"Audit finalize failed: {_audit_err}")
 
                 # 5.05 Devil Tracker — record signal detection price for cost tracking
                 if self.devil_tracker and decision.action != 'HOLD':
