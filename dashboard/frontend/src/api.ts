@@ -151,4 +151,15 @@ export const api = {
     get<Record<string, unknown>[]>(`/api/agents/improvements?limit=${limit}`),
   agentLatestReport: () => get<Record<string, unknown>>('/api/agents/reports/latest'),
   agentModels: () => get<Record<string, unknown>[]>('/api/agents/models'),
+
+  // Council
+  councilSessions: () => get<Record<string, unknown>[]>('/api/council/sessions'),
+  councilSession: (id: string) => get<Record<string, unknown>>(`/api/council/sessions/${id}`),
+  councilLatest: () => get<Record<string, unknown>>('/api/council/latest'),
+  councilResearcher: (sessionId: string, name: string) =>
+    get<Record<string, unknown>>(`/api/council/sessions/${sessionId}/researchers/${name}`),
+
+  // Audit
+  auditSummary: (hours = 24) => get<Record<string, unknown>>(`/api/audit/summary?hours=${hours}`),
+  auditRecent: (limit = 50) => get<Record<string, unknown>[]>(`/api/audit/recent?limit=${limit}`),
 };

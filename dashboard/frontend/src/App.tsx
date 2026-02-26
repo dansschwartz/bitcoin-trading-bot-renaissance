@@ -34,6 +34,7 @@ export default function App() {
                 <Route path="/breakout" element={<BreakoutScanner />} />
                 <Route path="/polymarket" element={<Polymarket />} />
                 <Route path="/agents" element={<Agents />} />
+                <Route path="/intelligence" element={<Agents />} />
               </Routes>
             </main>
           </div>
