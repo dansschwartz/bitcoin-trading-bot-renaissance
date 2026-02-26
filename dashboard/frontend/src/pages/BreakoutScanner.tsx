@@ -146,7 +146,7 @@ export default function BreakoutScanner() {
                       {s.signal_strength?.toFixed(3) ?? '--'}
                     </td>
                     <td className="py-2 px-2 text-right text-gray-300">
-                      {s.volume_surge?.toFixed(1) ?? '--'}x
+                      {s.volume_surge != null ? `${s.volume_surge.toFixed(1)}x` : '--'}
                     </td>
                     <td className="py-2 px-2 text-right text-gray-300">
                       {s.momentum?.toFixed(3) ?? '--'}

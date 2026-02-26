@@ -123,6 +123,13 @@ async def breakout_signals(request: Request, limit: int = 30):
             signals = [dict(r) for r in rows]
             total_scanned = signals[0]["total_scanned"] if signals else 0
 
+            # Add computed alias fields expected by frontend
+            for sig in signals:
+                sig["signal_strength"] = sig.get("score", 0) / 100.0
+                sig["volume_surge"] = sig.get("volume_score", 0) / 10.0
+                sig["momentum"] = sig.get("momentum_score", 0) / 100.0
+                sig["timestamp"] = latest
+
             return {
                 "scan_time": latest,
                 "total_scanned": total_scanned,
@@ -194,6 +201,9 @@ async def breakout_heatmap(request: Request):
                 ORDER BY score DESC
                 LIMIT 100
             """, (latest,)).fetchall()
-            return {"pairs": [dict(r) for r in rows]}
+            pairs = [dict(r) for r in rows]
+            for p in pairs:
+                p["tier"] = "T1" if p["score"] >= 70 else "T2" if p["score"] >= 50 else "T3" if p["score"] >= 30 else "T4"
+            return {"pairs": pairs}
     except Exception:
         return {"pairs": []}

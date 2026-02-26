@@ -502,7 +502,8 @@ class StrategyAExecutor:
         # Database
         self._ensure_tables()
         self._load_bankroll()
-        self._close_non_strategy_a_positions()
+        # Legacy migration complete — no longer cancel non-strategy-a positions on startup
+        # self._close_non_strategy_a_positions()
 
     # ----------------------------------------------------------
     # DATABASE SETUP

@@ -277,17 +277,18 @@ export default function Agents() {
 
   // Derive funnel stats
   const totalDecisions = (auditSummary as Record<string, unknown>)?.total_decisions as number ?? 0;
-  const passedGates = (auditSummary as Record<string, unknown>)?.passed_gates as number ?? 0;
-  const totalTrades = (auditSummary as Record<string, unknown>)?.total_trades as number ?? 0;
+  const holds = (auditSummary as Record<string, unknown>)?.holds as number ?? 0;
+  const passedGates = totalDecisions - holds;
+  const totalTrades = (auditSummary as Record<string, unknown>)?.trades as number ?? 0;
 
-  // Derive regime distribution
+  // Derive regime distribution (API returns list of {label, count, avg_confidence})
   const regimeDist: { label: string; count: number }[] = [];
   if (auditSummary) {
-    const rd = (auditSummary as Record<string, unknown>).regime_distribution as Record<string, number> | undefined;
-    if (rd) {
-      Object.entries(rd)
-        .sort((a, b) => b[1] - a[1])
-        .forEach(([label, count]) => regimeDist.push({ label, count }));
+    const regimes = (auditSummary as Record<string, unknown>).regimes as { label: string; count: number }[] | undefined;
+    if (regimes && Array.isArray(regimes)) {
+      regimes
+        .sort((a, b) => b.count - a.count)
+        .forEach((r) => regimeDist.push({ label: r.label, count: r.count }));
     }
   }
   const totalRegime = regimeDist.reduce((s, r) => s + r.count, 0) || 1;
@@ -930,17 +931,17 @@ export default function Agents() {
                     )}
 
                     {/* ML Accuracy badge */}
-                    {auditSummary && (auditSummary as Record<string, unknown>).ml_accuracy != null && (
+                    {auditSummary && (auditSummary as Record<string, unknown>).ml_accuracy_pct != null && (
                       <div className="mt-2 flex items-center gap-2">
                         <span className="text-[10px] text-gray-500 uppercase">ML Accuracy:</span>
                         <span className={`text-xs font-mono font-medium ${
-                          ((auditSummary as Record<string, unknown>).ml_accuracy as number) > 0.52
+                          ((auditSummary as Record<string, unknown>).ml_accuracy_pct as number) > 52
                             ? 'text-accent-green'
-                            : ((auditSummary as Record<string, unknown>).ml_accuracy as number) >= 0.50
+                            : ((auditSummary as Record<string, unknown>).ml_accuracy_pct as number) >= 50
                             ? 'text-accent-yellow'
                             : 'text-accent-red'
                         }`}>
-                          {(((auditSummary as Record<string, unknown>).ml_accuracy as number) * 100).toFixed(1)}%
+                          {((auditSummary as Record<string, unknown>).ml_accuracy_pct as number).toFixed(1)}%
                         </span>
                         {(auditSummary as Record<string, unknown>).ml_evaluated != null && (
                           <span className="text-[10px] text-gray-600">
