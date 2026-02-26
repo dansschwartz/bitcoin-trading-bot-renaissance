@@ -81,7 +81,7 @@
         "ml_ensemble": 0.20,
         "ml_cnn": 0.0
     },
-    "weight_lock": false,
+    "weight_lock": true,
     "mean_reversion": {
         "window_size": 240,
         "min_history": 60,

@@ -1121,14 +1121,14 @@ class RenaissanceTradingBot:
             'lead_lag': 0.03,                 # Cross-Asset Lead-Lag
             'correlation_divergence': 0.06,   # Correlation Network Divergence
             'garch_vol': 0.06,                # GARCH Volatility Signal
-            'ml_ensemble': 0.05,              # ML 7-model ensemble prediction
-            'ml_cnn': 0.03,                   # ML CNN model prediction
+            'ml_ensemble': 0.20,              # ML 7-model ensemble prediction (Council #5: boosted from 0.05)
+            'ml_cnn': 0.0,                    # ML CNN model prediction (decommissioned, Council #1)
             'breakout': 0.08,                 # Breakout scanner signal (Binance-wide)
         })
         self.signal_weights = {str(k): float(self._force_float(v)) for k, v in raw_weights.items()}
 
         # Ensure ML weights always present (genetic optimizer may drop them)
-        _ml_required = {'ml_ensemble': 0.05, 'ml_cnn': 0.03}
+        _ml_required = {'ml_ensemble': 0.20, 'ml_cnn': 0.0}
         for k, v in _ml_required.items():
             if k not in self.signal_weights:
                 self.signal_weights[k] = v
@@ -2883,7 +2883,7 @@ class RenaissanceTradingBot:
                 return
 
             # Ensure ML weights survive genetic optimization
-            _ml_required = {'ml_ensemble': 0.05, 'ml_cnn': 0.03}
+            _ml_required = {'ml_ensemble': 0.20, 'ml_cnn': 0.0}
             for k, v in _ml_required.items():
                 if k not in weights:
                     weights[k] = v
