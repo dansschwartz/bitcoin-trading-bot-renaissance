@@ -1236,3 +1236,131 @@ def get_model_accuracy(db_path: str, hours: int = 24) -> Dict[str, Any]:
         "overall_accuracy": round(overall_accuracy, 4),
         "models": models,
     })
+
+
+# ─── Decision Audit Log ──────────────────────────────────────────────────
+
+def _audit_table_exists(conn) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='decision_audit_log'"
+    ).fetchone()
+    return row is not None
+
+
+def get_audit_summary(db_path: str, hours: int = 24) -> Dict[str, Any]:
+    """Aggregated audit summary: gate blocks, signal attribution, regime distribution."""
+    with _conn(db_path) as c:
+        if not _audit_table_exists(c):
+            return {"error": "decision_audit_log table not found", "total_decisions": 0}
+
+        cutoff = f"-{hours}"
+
+        # Total decisions, trades, holds
+        totals = c.execute('''
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN final_action != 'HOLD' THEN 1 ELSE 0 END) as trades,
+                SUM(CASE WHEN final_action = 'HOLD' THEN 1 ELSE 0 END) as holds
+            FROM decision_audit_log
+            WHERE datetime(timestamp) > datetime('now', ? || ' hours')
+        ''', (cutoff,)).fetchone()
+
+        total = totals["total"] or 0
+        trades = totals["trades"] or 0
+        holds = totals["holds"] or 0
+
+        # Gate block counts
+        gate_cols = [
+            'gate_cost_prescreen', 'gate_confidence', 'gate_regime_filter',
+            'gate_ml_agreement', 'gate_anti_churn', 'gate_signal_reversal',
+            'gate_anti_stacking', 'gate_risk_regime', 'gate_daily_loss',
+            'gate_vae', 'gate_risk_gateway', 'gate_health_monitor',
+        ]
+        gate_blocks: Dict[str, int] = {}
+        for col in gate_cols:
+            try:
+                row = c.execute(f'''
+                    SELECT COUNT(*) as cnt FROM decision_audit_log
+                    WHERE {col} = 0
+                      AND datetime(timestamp) > datetime('now', ? || ' hours')
+                ''', (cutoff,)).fetchone()
+                cnt = row["cnt"] if row else 0
+                if cnt > 0:
+                    gate_blocks[col.replace('gate_', '')] = cnt
+            except Exception:
+                pass
+
+        # blocked_by distribution
+        blocked_rows = c.execute('''
+            SELECT blocked_by, COUNT(*) as cnt
+            FROM decision_audit_log
+            WHERE blocked_by IS NOT NULL
+              AND datetime(timestamp) > datetime('now', ? || ' hours')
+            GROUP BY blocked_by
+            ORDER BY cnt DESC
+        ''', (cutoff,)).fetchall()
+        blocked_by = {r["blocked_by"]: r["cnt"] for r in blocked_rows}
+
+        # Regime distribution
+        regime_rows = c.execute('''
+            SELECT regime_label, COUNT(*) as cnt,
+                   AVG(final_confidence) as avg_conf
+            FROM decision_audit_log
+            WHERE datetime(timestamp) > datetime('now', ? || ' hours')
+            GROUP BY regime_label
+            ORDER BY cnt DESC
+        ''', (cutoff,)).fetchall()
+        regimes = [
+            {"label": r["regime_label"], "count": r["cnt"],
+             "avg_confidence": round(r["avg_conf"] or 0, 4)}
+            for r in regime_rows
+        ]
+
+        # Avg confidence for trades vs holds
+        conf_row = c.execute('''
+            SELECT
+                AVG(CASE WHEN final_action != 'HOLD' THEN final_confidence END) as avg_trade_conf,
+                AVG(CASE WHEN final_action = 'HOLD' THEN final_confidence END) as avg_hold_conf
+            FROM decision_audit_log
+            WHERE datetime(timestamp) > datetime('now', ? || ' hours')
+        ''', (cutoff,)).fetchone()
+
+        # ML accuracy from outcomes
+        ml_row = c.execute('''
+            SELECT COUNT(*) as evaluated,
+                   SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct
+            FROM ml_predictions
+            WHERE is_correct IS NOT NULL
+              AND datetime(timestamp) > datetime('now', ? || ' hours')
+        ''', (cutoff,)).fetchone()
+        ml_evaluated = (ml_row["evaluated"] or 0) if ml_row else 0
+        ml_correct = (ml_row["correct"] or 0) if ml_row else 0
+
+        return _sanitize_floats({
+            "window_hours": hours,
+            "total_decisions": total,
+            "trades": trades,
+            "holds": holds,
+            "trade_rate_pct": round(trades / max(total, 1) * 100, 1),
+            "gate_blocks": gate_blocks,
+            "blocked_by": blocked_by,
+            "regimes": regimes,
+            "avg_trade_confidence": round(conf_row["avg_trade_conf"] or 0, 4) if conf_row else 0,
+            "avg_hold_confidence": round(conf_row["avg_hold_conf"] or 0, 4) if conf_row else 0,
+            "ml_evaluated": ml_evaluated,
+            "ml_correct": ml_correct,
+            "ml_accuracy_pct": round(ml_correct / max(ml_evaluated, 1) * 100, 1),
+        })
+
+
+def get_audit_recent(db_path: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Return most recent audit rows as flat dicts."""
+    with _conn(db_path) as c:
+        if not _audit_table_exists(c):
+            return []
+        rows = c.execute('''
+            SELECT * FROM decision_audit_log
+            ORDER BY id DESC
+            LIMIT ?
+        ''', (limit,)).fetchall()
+        return _sanitize_floats(_rows_to_dicts(rows))

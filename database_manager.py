@@ -173,6 +173,112 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_pos ON position_snapshots(position_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_time ON position_snapshots(snapshot_time)')
 
+            # ── Decision Audit Log: flat, fully-indexed pipeline trace ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS decision_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                cycle_number INTEGER,
+
+                -- Stage 1: Market Snapshot
+                price REAL, bid REAL, ask REAL, spread_bps REAL,
+                volume_24h_usd REAL, order_book_depth_usd REAL,
+
+                -- Stage 2: Raw Signals
+                sig_order_flow REAL, sig_order_book REAL, sig_volume REAL,
+                sig_macd REAL, sig_rsi REAL, sig_bollinger REAL,
+                sig_alternative REAL, sig_volume_profile REAL,
+                sig_stat_arb REAL, sig_lead_lag REAL, sig_fractal REAL,
+                sig_entropy REAL, sig_ml_ensemble REAL, sig_ml_cnn REAL,
+                sig_quantum REAL, sig_correlation_divergence REAL,
+                sig_garch_vol REAL, sig_medallion_analog REAL,
+                raw_signal_count INTEGER,
+
+                -- Stage 3: Regime
+                regime_label TEXT, regime_confidence REAL,
+                regime_classifier TEXT, bar_gap_ratio REAL, gap_poisoned INTEGER,
+
+                -- Stage 4: Weights & Fusion
+                weighted_signal REAL, signal_contributions TEXT,
+                weight_adjustments TEXT,
+
+                -- Stage 5: ML Predictions
+                ml_ensemble_score REAL, ml_confidence REAL,
+                ml_model_count INTEGER, ml_agreement_pct REAL,
+                ml_predictions_json TEXT, ml_scale_factor REAL,
+
+                -- Stage 6: Confluence
+                confluence_boost REAL, confluence_active_count INTEGER,
+
+                -- Stage 7: Confidence
+                signal_strength REAL, signal_consensus REAL,
+                raw_confidence REAL, regime_conf_boost REAL,
+                ml_conf_boost REAL, final_confidence REAL,
+
+                -- Stage 8: Risk Gates
+                gate_cost_prescreen INTEGER,
+                gate_confidence INTEGER,
+                gate_regime_filter INTEGER, gate_regime_filter_detail TEXT,
+                gate_ml_agreement INTEGER, gate_ml_agreement_detail TEXT,
+                gate_anti_churn INTEGER, gate_anti_churn_detail TEXT,
+                gate_signal_reversal INTEGER,
+                gate_anti_stacking INTEGER,
+                gate_risk_regime INTEGER,
+                gate_daily_loss INTEGER,
+                gate_vae INTEGER, gate_vae_detail TEXT,
+                gate_risk_gateway INTEGER,
+                gate_health_monitor INTEGER,
+                blocked_by TEXT,
+
+                -- Stage 9: Position Sizing
+                kelly_fraction REAL, applied_fraction REAL,
+                edge REAL, effective_edge REAL, win_probability REAL,
+                position_usd REAL, position_units REAL,
+                market_impact_bps REAL, capacity_pct REAL,
+                sizing_chain_json TEXT,
+                buy_threshold REAL, sell_threshold REAL,
+                garch_pos_multiplier REAL,
+
+                -- Stage 10: Final Decision
+                final_action TEXT, final_position_size REAL,
+
+                -- Stage 11: Execution
+                execution_mode TEXT, devil_trade_id TEXT,
+
+                -- Stage 12: Feature Vector
+                feature_vector_hash TEXT, feature_top5_json TEXT,
+
+                -- Stage 13: System State
+                drawdown_pct REAL, daily_pnl REAL,
+                account_balance REAL, open_positions_count INTEGER,
+                scan_tier INTEGER,
+
+                -- Outcome (filled asynchronously)
+                outcome_1bar REAL, outcome_6bar REAL,
+                outcome_12bar REAL, outcome_24bar REAL,
+                outcome_evaluated_at TEXT
+            )''')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_product_ts ON decision_audit_log(product_id, timestamp DESC)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_action ON decision_audit_log(final_action)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_blocked ON decision_audit_log(blocked_by)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_cycle ON decision_audit_log(cycle_number)')
+
+            # Add outcome columns to ml_predictions (backward-compatible migration)
+            for col_def in [
+                "price_at_prediction REAL",
+                "actual_return_1bar REAL",
+                "actual_return_6bar REAL",
+                "actual_direction INTEGER",
+                "is_correct INTEGER",
+                "evaluated_at TEXT",
+                "price_at_evaluation REAL",
+            ]:
+                try:
+                    cursor.execute(f"ALTER TABLE ml_predictions ADD COLUMN {col_def}")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
 
@@ -514,3 +620,196 @@ class DatabaseManager:
         except Exception as e:
             self.logger.error(f"Error getting daily PnL: {e}")
             return 0.0
+
+    # ──────────────────────────────────────────────
+    #  Decision Audit Log
+    # ──────────────────────────────────────────────
+
+    # Canonical column order for decision_audit_log INSERT
+    _AUDIT_COLUMNS = [
+        'timestamp', 'product_id', 'cycle_number',
+        # Market snapshot
+        'price', 'bid', 'ask', 'spread_bps',
+        'volume_24h_usd', 'order_book_depth_usd',
+        # Raw signals
+        'sig_order_flow', 'sig_order_book', 'sig_volume',
+        'sig_macd', 'sig_rsi', 'sig_bollinger',
+        'sig_alternative', 'sig_volume_profile',
+        'sig_stat_arb', 'sig_lead_lag', 'sig_fractal',
+        'sig_entropy', 'sig_ml_ensemble', 'sig_ml_cnn',
+        'sig_quantum', 'sig_correlation_divergence',
+        'sig_garch_vol', 'sig_medallion_analog',
+        'raw_signal_count',
+        # Regime
+        'regime_label', 'regime_confidence',
+        'regime_classifier', 'bar_gap_ratio', 'gap_poisoned',
+        # Weights & Fusion
+        'weighted_signal', 'signal_contributions', 'weight_adjustments',
+        # ML Predictions
+        'ml_ensemble_score', 'ml_confidence',
+        'ml_model_count', 'ml_agreement_pct',
+        'ml_predictions_json', 'ml_scale_factor',
+        # Confluence
+        'confluence_boost', 'confluence_active_count',
+        # Confidence
+        'signal_strength', 'signal_consensus',
+        'raw_confidence', 'regime_conf_boost',
+        'ml_conf_boost', 'final_confidence',
+        # Risk Gates
+        'gate_cost_prescreen',
+        'gate_confidence',
+        'gate_regime_filter', 'gate_regime_filter_detail',
+        'gate_ml_agreement', 'gate_ml_agreement_detail',
+        'gate_anti_churn', 'gate_anti_churn_detail',
+        'gate_signal_reversal',
+        'gate_anti_stacking',
+        'gate_risk_regime',
+        'gate_daily_loss',
+        'gate_vae', 'gate_vae_detail',
+        'gate_risk_gateway',
+        'gate_health_monitor',
+        'blocked_by',
+        # Position Sizing
+        'kelly_fraction', 'applied_fraction',
+        'edge', 'effective_edge', 'win_probability',
+        'position_usd', 'position_units',
+        'market_impact_bps', 'capacity_pct',
+        'sizing_chain_json',
+        'buy_threshold', 'sell_threshold',
+        'garch_pos_multiplier',
+        # Final Decision
+        'final_action', 'final_position_size',
+        # Execution
+        'execution_mode', 'devil_trade_id',
+        # Feature Vector
+        'feature_vector_hash', 'feature_top5_json',
+        # System State
+        'drawdown_pct', 'daily_pnl',
+        'account_balance', 'open_positions_count',
+        'scan_tier',
+    ]
+
+    async def store_audit_log(self, audit_data: Dict[str, Any]) -> None:
+        """Insert one row into decision_audit_log from a flat dict."""
+        try:
+            values = [audit_data.get(col) for col in self._AUDIT_COLUMNS]
+            placeholders = ', '.join(['?'] * len(self._AUDIT_COLUMNS))
+            col_names = ', '.join(self._AUDIT_COLUMNS)
+            with self._get_connection() as conn:
+                conn.execute(
+                    f"INSERT INTO decision_audit_log ({col_names}) VALUES ({placeholders})",
+                    values,
+                )
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error storing audit log: {e}")
+
+    async def evaluate_audit_outcomes(self, lookback_minutes: int = 60) -> int:
+        """Fill outcome columns for audit rows where enough time has elapsed.
+
+        Compares decision-time price to current price for the product.
+        Returns number of rows updated.
+        """
+        updated = 0
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # Find rows that need outcome evaluation (outcome_1bar IS NULL and old enough)
+                rows = cursor.execute('''
+                    SELECT id, product_id, price, timestamp
+                    FROM decision_audit_log
+                    WHERE outcome_1bar IS NULL
+                      AND price IS NOT NULL
+                      AND datetime(timestamp) < datetime('now', ? || ' minutes')
+                    ORDER BY id
+                    LIMIT 500
+                ''', (f"-{lookback_minutes}",)).fetchall()
+
+                if not rows:
+                    return 0
+
+                # Get latest prices per product from market_data
+                products = list({r[1] for r in rows})
+                latest_prices: Dict[str, float] = {}
+                for pid in products:
+                    px_row = cursor.execute('''
+                        SELECT price FROM market_data
+                        WHERE product_id = ?
+                        ORDER BY timestamp DESC LIMIT 1
+                    ''', (pid,)).fetchone()
+                    if px_row:
+                        latest_prices[pid] = float(px_row[0])
+
+                now_ts = datetime.now(timezone.utc).isoformat()
+                for row_id, pid, entry_price, ts in rows:
+                    current_px = latest_prices.get(pid)
+                    if not current_px or entry_price <= 0:
+                        continue
+                    ret = (current_px - entry_price) / entry_price
+                    cursor.execute('''
+                        UPDATE decision_audit_log
+                        SET outcome_1bar = ?, outcome_evaluated_at = ?
+                        WHERE id = ?
+                    ''', (round(ret, 6), now_ts, row_id))
+                    updated += 1
+
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error evaluating audit outcomes: {e}")
+        return updated
+
+    async def evaluate_ml_outcomes(self, lookback_minutes: int = 60) -> int:
+        """Fill outcome columns for ml_predictions that lack evaluation.
+
+        Returns number of rows updated.
+        """
+        updated = 0
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                rows = cursor.execute('''
+                    SELECT id, product_id, prediction, price_at_prediction, timestamp
+                    FROM ml_predictions
+                    WHERE is_correct IS NULL
+                      AND price_at_prediction IS NOT NULL
+                      AND datetime(timestamp) < datetime('now', ? || ' minutes')
+                    ORDER BY id
+                    LIMIT 500
+                ''', (f"-{lookback_minutes}",)).fetchall()
+
+                if not rows:
+                    return 0
+
+                products = list({r[1] for r in rows})
+                latest_prices: Dict[str, float] = {}
+                for pid in products:
+                    px_row = cursor.execute('''
+                        SELECT price FROM market_data
+                        WHERE product_id = ?
+                        ORDER BY timestamp DESC LIMIT 1
+                    ''', (pid,)).fetchone()
+                    if px_row:
+                        latest_prices[pid] = float(px_row[0])
+
+                now_ts = datetime.now(timezone.utc).isoformat()
+                for row_id, pid, prediction, entry_px, ts in rows:
+                    current_px = latest_prices.get(pid)
+                    if not current_px or not entry_px or entry_px <= 0:
+                        continue
+                    actual_return = (current_px - entry_px) / entry_px
+                    actual_dir = 1 if actual_return > 0.001 else (-1 if actual_return < -0.001 else 0)
+                    pred_dir = 1 if prediction > 0 else (-1 if prediction < 0 else 0)
+                    is_correct = 1 if (pred_dir != 0 and pred_dir == actual_dir) else 0
+                    cursor.execute('''
+                        UPDATE ml_predictions
+                        SET actual_return_1bar = ?, actual_direction = ?,
+                            is_correct = ?, evaluated_at = ?,
+                            price_at_evaluation = ?
+                        WHERE id = ?
+                    ''', (round(actual_return, 6), actual_dir, is_correct, now_ts, current_px, row_id))
+                    updated += 1
+
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error evaluating ML outcomes: {e}")
+        return updated

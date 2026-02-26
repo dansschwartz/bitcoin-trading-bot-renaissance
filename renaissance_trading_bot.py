@@ -79,6 +79,7 @@ from position_sizer import RenaissancePositionSizer
 
 from renaissance_types import SignalType, OrderType, MLSignalPackage, TradingDecision
 from ml_integration_bridge import MLIntegrationBridge
+from decision_audit_logger import DecisionAuditLogger
 
 # Renaissance Medallion-Style Engines
 from advanced_mean_reversion_engine import AdvancedMeanReversionEngine
@@ -786,6 +787,7 @@ class RenaissanceTradingBot:
         db_cfg = self.config.get("database", {"path": "data/renaissance_bot.db", "enabled": True})
         self.db_enabled = db_cfg.get("enabled", True)
         self.db_manager = DatabaseManager(db_cfg)
+        self.audit_logger = DecisionAuditLogger(self.db_manager)
         self.attribution_engine = PerformanceAttributionEngine()
         
         # Initialize Evolutionary & Global Intelligence
@@ -1875,7 +1877,8 @@ class RenaissanceTradingBot:
                               current_price: float = 0.0, real_time_result: Optional[Dict[str, Any]] = None,
                               product_id: str = "BTC-USD", ml_package: Optional[MLSignalPackage] = None,
                               market_data: Optional[Dict[str, Any]] = None,
-                              drawdown_pct: float = 0.0) -> TradingDecision:
+                              drawdown_pct: float = 0.0,
+                              audit_logger: Optional['DecisionAuditLogger'] = None) -> TradingDecision:
         """Make final trading decision with Renaissance methodology + Kelly position sizing"""
 
         # ── COST PRE-SCREEN: "The edge must exceed the vig" — Medallion Principle ──
@@ -1893,6 +1896,9 @@ class RenaissanceTradingBot:
                     f"COST PRE-SCREEN: {product_id} signal {weighted_signal:.4f} < "
                     f"min viable {min_viable_signal:.4f}"
                 )
+                if audit_logger:
+                    audit_logger.record_gate('cost_prescreen', False, f'signal={weighted_signal:.4f}<{min_viable_signal:.4f}')
+                    audit_logger.record_decision('HOLD', 0.0, blocked_by='cost_prescreen')
                 return TradingDecision(
                     action='HOLD', confidence=0.0, position_size=0.0,
                     reasoning={'blocked_by': 'cost_pre_screen',
@@ -1900,6 +1906,9 @@ class RenaissanceTradingBot:
                                'min_viable': min_viable_signal},
                     timestamp=datetime.now()
                 )
+            else:
+                if audit_logger:
+                    audit_logger.record_gate('cost_prescreen', True)
         except Exception:
             pass  # Don't let cost pre-screen crash the decision pipeline
 
@@ -1931,6 +1940,19 @@ class RenaissanceTradingBot:
             confidence = float(np.clip(confidence + (overlay * consciousness_factor), 0.0, 1.0))
             self.logger.info(f"ML confidence adjustment: {(overlay * consciousness_factor):+.4f} (Consciousness: {consciousness_factor:.2f})")
 
+        # Record confidence breakdown for audit
+        if audit_logger:
+            _regime_boost = self.regime_overlay.get_confidence_boost()
+            _ml_boost = (overlay * consciousness_factor) if ml_package else 0.0
+            audit_logger.record_confidence(
+                signal_strength=signal_strength,
+                consensus=signal_consensus,
+                raw_conf=float(np.sqrt(signal_strength * signal_consensus)),
+                regime_boost=_regime_boost,
+                ml_boost=_ml_boost,
+                final_conf=confidence,
+            )
+
         # ── Regime-biased entry thresholds ──
         # In bearish regimes, require higher conviction for longs (and vice versa).
         # Trading WITH the regime: lower bar. AGAINST: higher bar.
@@ -1951,12 +1973,20 @@ class RenaissanceTradingBot:
         # Determine action direction
         if confidence < self.min_confidence:
             action = 'HOLD'
+            if audit_logger:
+                audit_logger.record_gate('confidence', False, f'conf={confidence:.4f}<min={self.min_confidence}')
         elif weighted_signal > self.buy_threshold:
             action = 'BUY'
+            if audit_logger:
+                audit_logger.record_gate('confidence', True)
         elif weighted_signal < self.sell_threshold:
             action = 'SELL'
+            if audit_logger:
+                audit_logger.record_gate('confidence', True)
         else:
             action = 'HOLD'
+            if audit_logger:
+                audit_logger.record_gate('confidence', False, f'signal={weighted_signal:.4f} in dead zone')
 
         # Apply regime bias to thresholds based on trade direction
         if action != 'HOLD' and _regime_label and _regime_label not in ('neutral_sideways', 'unknown', 'low_volatility'):
@@ -1975,12 +2005,16 @@ class RenaissanceTradingBot:
                         f"REGIME FILTER: {product_id} {action} in {_regime_label} — "
                         f"|signal|={abs(weighted_signal):.4f} < {_pred_thresh} (counter-trend blocked)"
                     )
+                    if audit_logger:
+                        audit_logger.record_gate('regime_filter', False, f'counter-trend {action} in {_regime_label}')
                     action = 'HOLD'
                 else:
                     self.logger.info(
                         f"REGIME FILTER: {product_id} {action} in {_regime_label} — "
                         f"raised thresholds to pred>{_pred_thresh} agree>{_agree_thresh}"
                     )
+                    if audit_logger:
+                        audit_logger.record_gate('regime_filter', True, f'counter-trend passed {_regime_label}')
             elif _with_trend:
                 # Trading with regime — lower the bar
                 _pred_thresh = 0.05
@@ -2019,7 +2053,12 @@ class RenaissanceTradingBot:
                             f"only {agreement:.0%} model agreement (need >{_agree_thresh:.0%})"
                         )
                         self._signal_filter_stats['filtered_agreement'] += 1
+                        if audit_logger:
+                            audit_logger.record_gate('ml_agreement', False, f'agree={agreement:.2f}<{_agree_thresh}')
                         action = 'HOLD'
+                    else:
+                        if audit_logger:
+                            audit_logger.record_gate('ml_agreement', True, f'agree={agreement:.2f}')
 
         # Track traded signals
         if action != 'HOLD':
@@ -2058,6 +2097,8 @@ class RenaissanceTradingBot:
                 self.logger.info(
                     f"ANTI-CHURN: {product_id} cooldown — {cycle_num - last_trade}/{min_hold_cycles} cycles since last trade"
                 )
+                if audit_logger:
+                    audit_logger.record_gate('anti_churn', False, f'cooldown {cycle_num - last_trade}/{min_hold_cycles}')
                 action = 'HOLD'
 
             # 2. Signal persistence — require 2 consecutive signals in same direction
@@ -2065,7 +2106,12 @@ class RenaissanceTradingBot:
                 self.logger.info(
                     f"ANTI-CHURN: {product_id} signal flip ({hist[-2]} -> {action}) — waiting for persistence"
                 )
+                if audit_logger:
+                    audit_logger.record_gate('anti_churn', False, f'flip {hist[-2]}->{action}')
                 action = 'HOLD'
+            else:
+                if audit_logger:
+                    audit_logger.record_gate('anti_churn', True)
 
             # 3. Signal reversal on open position — close the existing position
             # instead of blocking the signal (the old behavior trapped losing positions)
@@ -2101,8 +2147,13 @@ class RenaissanceTradingBot:
                                 f"SIGNAL REVERSAL: {product_id} closed {pos_side} position — {close_msg}"
                             )
                             # Don't also open a new opposing position — just exit
+                            if audit_logger:
+                                audit_logger.record_gate('signal_reversal', False, f'closed {pos_side}')
                             action = 'HOLD'
                             break
+                    else:
+                        if audit_logger:
+                            audit_logger.record_gate('signal_reversal', True)
                 except Exception as e:
                     self.logger.error(f"NETTING CHECK FAILED for {product_id}: {e} — blocking trade for safety")
                     action = 'HOLD'
@@ -2125,7 +2176,12 @@ class RenaissanceTradingBot:
                             f"ALREADY POSITIONED: {product_id} already has {len(same_dir)} "
                             f"{same_dir[0].side.value} position(s) — holding"
                         )
+                        if audit_logger:
+                            audit_logger.record_gate('anti_stacking', False, f'{len(same_dir)} existing')
                         action = 'HOLD'
+                    else:
+                        if audit_logger:
+                            audit_logger.record_gate('anti_stacking', True)
                 except Exception as e:
                     self.logger.error(f"ANTI-STACK CHECK FAILED for {product_id}: {e} — blocking trade for safety")
                     action = 'HOLD'
@@ -2134,12 +2190,22 @@ class RenaissanceTradingBot:
         risk_assessment = self.risk_manager.assess_risk_regime(ml_package)
         if risk_assessment['recommended_action'] == 'fallback_mode':
             self.logger.warning("ML Risk assessment triggered FALLBACK MODE - halting trades")
+            if audit_logger:
+                audit_logger.record_gate('risk_regime', False, 'fallback_mode')
             action = 'HOLD'
+        else:
+            if audit_logger:
+                audit_logger.record_gate('risk_regime', True)
 
         # Daily loss limit check
         if abs(self.daily_pnl) >= self.daily_loss_limit:
+            if audit_logger:
+                audit_logger.record_gate('daily_loss', False, f'pnl=${self.daily_pnl:.2f}>=${self.daily_loss_limit:.2f}')
             action = 'HOLD'
             self.logger.warning(f"Daily loss limit reached: ${self.daily_pnl}")
+        else:
+            if audit_logger:
+                audit_logger.record_gate('daily_loss', True)
 
         # Gate through VAE Anomaly Detection
         vae_loss = 0.0
@@ -2169,7 +2235,14 @@ class RenaissanceTradingBot:
             )
             if not is_allowed:
                 self.logger.warning(f"Risk Gateway BLOCKED {action} order (reason={gate_reason}, vae_loss={vae_loss:.4f})")
+                if audit_logger:
+                    audit_logger.record_gate('vae', False, f'vae_loss={vae_loss:.4f}')
+                    audit_logger.record_gate('risk_gateway', False, gate_reason)
                 action = 'HOLD'
+            else:
+                if audit_logger:
+                    audit_logger.record_gate('vae', True, f'vae_loss={vae_loss:.4f}')
+                    audit_logger.record_gate('risk_gateway', True)
 
         # ── Renaissance Position Sizing (Kelly + cost gate + vol normalization) ──
         position_size = 0.0
@@ -2279,7 +2352,12 @@ class RenaissanceTradingBot:
                 _tier_multiplier *= health_mult
                 if self.health_monitor.is_exits_only():
                     action = 'HOLD'
+                    if audit_logger:
+                        audit_logger.record_gate('health_monitor', False, 'exits_only')
                     self.logger.warning("HEALTH MONITOR: EXITS-ONLY mode — blocking new entries")
+                else:
+                    if audit_logger:
+                        audit_logger.record_gate('health_monitor', True)
             sc = self._signal_scorecard.get(product_id, {})
             if sc:
                 # Find the dominant signal contributors
@@ -2332,6 +2410,16 @@ class RenaissanceTradingBot:
                 tier_size_multiplier=_tier_multiplier,
             )
             position_size = sizing_result.asset_units
+
+            # Record sizing result for audit
+            if audit_logger:
+                audit_logger.record_sizing(
+                    sizing_result=sizing_result,
+                    chain=_chain,
+                    buy_thresh=self.buy_threshold,
+                    sell_thresh=self.sell_threshold,
+                    garch_mult=1.0,
+                )
 
             if position_size <= 0:
                 action = 'HOLD'
@@ -4019,13 +4107,46 @@ class RenaissanceTradingBot:
                 execution_mode = self.strategy_selector.select_mode(market_data, regime_data)
                 market_data['execution_mode'] = execution_mode
 
+                # ── Audit Logger: collect pre-decision data ──
+                _audit = self.audit_logger if self.db_enabled else None
+                if _audit:
+                    _audit.start_decision(product_id, self.scan_cycle_count)
+                    _ticker = market_data.get('ticker', {})
+                    _ob = market_data.get('order_book_snapshot')
+                    _ob_depth = 0.0
+                    if _ob and hasattr(_ob, 'bids') and hasattr(_ob, 'asks'):
+                        _ob_depth = sum(float(getattr(lv, 'size', 0)) * float(getattr(lv, 'price', 0))
+                                        for lv in (list(getattr(_ob, 'bids', []))[:10] + list(getattr(_ob, 'asks', []))[:10]))
+                    _audit.record_market_snapshot(
+                        price=current_price,
+                        bid=self._force_float(_ticker.get('bid', 0)),
+                        ask=self._force_float(_ticker.get('ask', 0)),
+                        volume_24h=self._force_float(_ticker.get('volume', 0)),
+                        ob_depth=_ob_depth,
+                    )
+                    _audit.record_raw_signals(signals)
+                    _rl = self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else "unknown"
+                    _rc = 0.0
+                    if self.regime_overlay.current_regime and isinstance(self.regime_overlay.current_regime, dict):
+                        _rc = float(self.regime_overlay.current_regime.get('confidence', 0.0))
+                    _audit.record_regime(_rl, _rc, 'hmm')
+                    _audit.record_weights(
+                        base_weights=original_weights,
+                        cycle_weights=cycle_weights,
+                        contributions=contributions,
+                        weighted_signal=weighted_signal,
+                    )
+                    _audit.record_ml(ml_package, rt_result, self.config.get("ml_signal_scale", 10.0))
+                    _audit.record_confluence(confluence_data)
+
                 decision = self.make_trading_decision(weighted_signal, contributions,
                                                     current_price=current_price,
                                                     real_time_result=rt_result,
                                                     product_id=product_id,
                                                     ml_package=ml_package,
                                                     market_data=market_data,
-                                                    drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0))
+                                                    drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
+                                                    audit_logger=_audit)
 
                 # 5.05 Devil Tracker — record signal detection price for cost tracking
                 if self.devil_tracker and decision.action != 'HOLD':
@@ -4135,7 +4256,37 @@ class RenaissanceTradingBot:
                             'model_name': model_name,
                             'prediction': pred,
                             'confidence': conf,
+                            'price_at_prediction': current_price,
                         }))
+
+                    # ── Audit Logger: finalize and persist ──
+                    if _audit:
+                        _audit.record_decision(decision.action, decision.position_size)
+                        _audit.record_execution(
+                            mode=market_data.get('execution_mode', 'PAPER'),
+                            devil_trade_id=self._last_devil_trade_id.get(product_id) if hasattr(self, '_last_devil_trade_id') else None,
+                        )
+                        if ml_package and ml_package.feature_vector is not None:
+                            _audit.record_feature_vector(ml_package.feature_vector)
+                        _open_count = 0
+                        try:
+                            with self.position_manager._lock:
+                                _open_count = sum(1 for p in self.position_manager.positions.values() if p.status == PositionStatus.OPEN)
+                        except Exception:
+                            pass
+                        _audit.record_system_state(
+                            drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
+                            daily_pnl=self.daily_pnl,
+                            balance=self._high_watermark_usd if hasattr(self, '_high_watermark_usd') else 10000.0,
+                            open_positions_count=_open_count,
+                            scan_tier=getattr(self, '_current_scan_tier', 0),
+                        )
+                        self._track_task(_audit.finalize())
+
+                    # Periodic outcome evaluation (every 10 cycles)
+                    if self.scan_cycle_count % 10 == 0:
+                        self._track_task(self.db_manager.evaluate_ml_outcomes())
+                        self._track_task(self.db_manager.evaluate_audit_outcomes())
 
                 # 5.5 Exit Engine — Monitor open positions for alpha decay
                 try:
