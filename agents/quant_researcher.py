@@ -45,14 +45,7 @@ RESEARCHER_SETTINGS_JSON = {
             "Read",
             "Glob",
             "Grep",
-            "Write(proposals.json)",
-            "Write(proposals/*)",
-            "Write(reviews.json)",
-            "Write(analysis/*)",
-            "Write(*.py)",
-            "Write(*.json)",
-            "Write(*.md)",
-            "Write(*.csv)",
+            "Write",
             "Bash(python*)",
             "Bash(.venv/bin/python*)",
             "Bash(cat *)",
@@ -71,6 +64,7 @@ RESEARCHER_SETTINGS_JSON = {
             "Bash(diff *)",
         ],
         "deny": [
+            # Block editing ANY production file
             "Edit(renaissance_trading_bot.py)",
             "Edit(risk_gateway.py)",
             "Edit(position_sizer.py)",
@@ -88,6 +82,20 @@ RESEARCHER_SETTINGS_JSON = {
             "Edit(monitors/*)",
             "Edit(arbitrage/*)",
             "Edit(models/*)",
+            # Block writing to production files (Write = create/overwrite)
+            "Write(renaissance_trading_bot.py)",
+            "Write(risk_gateway.py)",
+            "Write(position_sizer.py)",
+            "Write(kelly_position_sizer.py)",
+            "Write(portfolio_engine.py)",
+            "Write(regime_overlay.py)",
+            "Write(real_time_pipeline.py)",
+            "Write(ml_model_loader.py)",
+            "Write(database_manager.py)",
+            "Write(config/*)",
+            "Write(agents/*)",
+            "Write(core/*)",
+            # Block dangerous shell commands
             "Bash(sqlite3 data/*)",
             "Bash(sqlite3 */renaissance_bot*)",
             "Bash(sqlite3 */trading*)",
@@ -754,6 +762,20 @@ because they deploy immediately without sandbox overhead.
             f'    return results[0] if results else {{}}\n'
         )
 
+        # Snapshot untracked files BEFORE session (for integrity comparison)
+        pre_session_untracked: set[str] = set()
+        try:
+            pre_result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(self._project_root),
+            )
+            pre_session_untracked = {
+                f.strip() for f in (pre_result.stdout or "").strip().split("\n") if f.strip()
+            }
+        except Exception:
+            pass
+
         # Launch Claude Code — cwd=output_dir so it reads restrictive settings.json
         try:
             result = subprocess.run(
@@ -781,7 +803,7 @@ because they deploy immediately without sandbox overhead.
             self._harvest_journal_update(researcher_name, result.stdout or "", project_root)
 
             # ── DEFENSE IN DEPTH: Post-session integrity check ──
-            integrity = self._verify_session_integrity(output_dir)
+            integrity = self._verify_session_integrity(output_dir, pre_session_untracked)
             if not integrity["passed"]:
                 self.logger.error(
                     "SESSION INTEGRITY FAILED for %s — discarding proposals: %s",
@@ -810,13 +832,17 @@ because they deploy immediately without sandbox overhead.
         except Exception as exc:
             self.logger.error("Researcher %s %s failed: %s", researcher_name, phase, exc)
 
-    def _verify_session_integrity(self, output_dir: Path) -> Dict[str, Any]:
+    def _verify_session_integrity(
+        self,
+        output_dir: Path,
+        pre_session_untracked: set[str] | None = None,
+    ) -> Dict[str, Any]:
         """Post-session integrity check: verify researcher didn't escape sandbox.
 
         Checks:
         1. DB snapshot still has read-only permissions (chmod 444)
         2. No critical project files were modified (git diff)
-        3. No unauthorized files created outside output_dir
+        3. No NEW unauthorized files created during session
         """
         result: Dict[str, Any] = {"passed": True, "violations": []}
 
@@ -862,30 +888,31 @@ because they deploy immediately without sandbox overhead.
         except Exception as exc:
             self.logger.warning("Git diff check failed: %s", exc)
 
-        # Check 3: No new files created in project root (outside output_dir)
+        # Check 3: No NEW files created in project root during session
         try:
             untracked_result = subprocess.run(
                 ["git", "ls-files", "--others", "--exclude-standard"],
                 capture_output=True, text=True, timeout=10,
                 cwd=str(self._project_root),
             )
-            untracked = (untracked_result.stdout or "").strip().split("\n")
-            # Filter to suspicious files (not in data/research_sessions/ or output_dir)
+            post_untracked = {
+                f.strip() for f in (untracked_result.stdout or "").strip().split("\n")
+                if f.strip()
+            }
+            # Only flag files that are genuinely NEW (not pre-existing)
+            new_files = post_untracked - (pre_session_untracked or set())
             try:
                 session_rel = str(output_dir.relative_to(self._project_root))
             except ValueError:
-                session_rel = ""  # output_dir outside project root (shouldn't happen)
-            for f in untracked:
-                f = f.strip()
-                if not f:
-                    continue
+                session_rel = ""
+            for f in sorted(new_files):
                 if f.startswith("data/research_sessions/"):
                     continue  # Expected
-                if f.startswith(session_rel):
+                if session_rel and f.startswith(session_rel):
                     continue  # Expected
-                # Suspicious: new .py or config file in project root
+                # Suspicious: new code/config file created during session
                 if f.endswith((".py", ".json", ".yaml", ".yml", ".sh")):
-                    result["violations"].append(f"Suspicious untracked file: {f}")
+                    result["violations"].append(f"New file created during session: {f}")
                     result["passed"] = False
         except Exception as exc:
             self.logger.warning("Untracked files check failed: %s", exc)
