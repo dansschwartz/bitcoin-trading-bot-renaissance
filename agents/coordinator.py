@@ -134,6 +134,20 @@ class AgentCoordinator:
             subscriber="coordinator",
         )
 
+        # Triggered research — specific events trigger specific researchers
+        self._trigger_cooldowns: Dict[str, float] = {}  # researcher -> last trigger timestamp
+
+        self.event_bus.subscribe(
+            "monitoring.model_degradation",
+            lambda ch, payload: self._maybe_trigger_research("linguist", payload),
+            subscriber="coordinator",
+        )
+        self.event_bus.subscribe(
+            "monitoring.sharpe_alert",
+            lambda ch, payload: self._maybe_trigger_research("mathematician", payload),
+            subscriber="coordinator",
+        )
+
         self.logger.info(
             "AgentCoordinator: ACTIVE — %d agents initialized", len(self.agents),
         )
@@ -210,6 +224,11 @@ class AgentCoordinator:
         retrain_hour = retrain_cfg.get("schedule_hour_utc", 6)
         last_retrain_week: Optional[int] = None
 
+        # Daily scan schedule (Systems Engineer)
+        daily_scan_enabled = researcher_cfg.get("daily_scan_enabled", False)
+        daily_scan_hour = researcher_cfg.get("daily_scan_hour_utc", 0)
+        last_daily_scan_date: Optional[str] = None
+
         if research_enabled:
             self.logger.info(
                 "AgentCoordinator: weekly research scheduled for %s %02d:00 UTC",
@@ -231,6 +250,35 @@ class AgentCoordinator:
                 await asyncio.sleep(3600)  # Check every hour
                 now = datetime.now(timezone.utc)
                 iso_week = now.isocalendar()[1]
+                today = now.strftime("%Y-%m-%d")
+
+                # ── Daily Systems Engineer scan ──
+                if (
+                    daily_scan_enabled
+                    and now.hour == daily_scan_hour
+                    and today != last_daily_scan_date
+                ):
+                    last_daily_scan_date = today
+                    self.logger.info("AgentCoordinator: triggering daily Systems Engineer scan")
+                    try:
+                        from agents.quant_researcher import QuantResearcherAgent
+                        daily_cfg = {
+                            **researcher_cfg,
+                            "research_mode": "council",
+                            "researchers": ["systems_engineer"],
+                            "council_max_turns_per_researcher": 20,
+                            "council_max_minutes_per_researcher": 15,
+                            "enabled": True,
+                        }
+                        researcher = QuantResearcherAgent(
+                            event_bus=self.event_bus,
+                            db_path=self.db_path,
+                            config={**self.config, "quant_researcher": daily_cfg},
+                            coordinator=self,
+                        )
+                        await researcher.run_weekly_research()
+                    except Exception as exc:
+                        self.logger.error("Daily scan failed: %s", exc)
 
                 # ── Weekly research ──
                 if (
@@ -505,6 +553,41 @@ class AgentCoordinator:
         except Exception as exc:
             self.logger.debug("_get_current_metrics failed: %s", exc)
         return {"sharpe": 0.0, "drawdown": 0.05, "win_rate": 0.5}
+
+    # ── Triggered research ──
+
+    def _maybe_trigger_research(self, researcher_name: str, payload: Dict[str, Any]) -> None:
+        """Trigger a single-researcher session if cooldown allows."""
+        now = time.time()
+        researcher_cfg = self.config.get("quant_researcher", {})
+        cooldown_hours = researcher_cfg.get("trigger_cooldown_hours", 6)
+        last = self._trigger_cooldowns.get(researcher_name, 0)
+
+        if now - last < cooldown_hours * 3600:
+            self.logger.debug("Trigger for %s suppressed (cooldown)", researcher_name)
+            return
+
+        # Count today's triggers
+        today_triggers = sum(
+            1 for ts in self._trigger_cooldowns.values()
+            if now - ts < 86400
+        )
+        max_daily = researcher_cfg.get("max_triggers_per_day", 3)
+        if today_triggers >= max_daily:
+            self.logger.debug("Daily trigger limit reached (%d/%d)", today_triggers, max_daily)
+            return
+
+        self._trigger_cooldowns[researcher_name] = now
+        self.logger.info("Triggered research: %s (reason: %s)", researcher_name, payload)
+
+        log_agent_event(
+            self.db_path,
+            agent_name="coordinator",
+            event_type="research_triggered",
+            channel="coordinator.trigger",
+            payload={"researcher": researcher_name, "reason": str(payload)},
+            severity="info",
+        )
 
     # ── Internal event handlers ──
 
