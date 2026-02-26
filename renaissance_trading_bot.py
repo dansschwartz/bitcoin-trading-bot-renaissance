@@ -4148,6 +4148,29 @@ class RenaissanceTradingBot:
                                                     drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
                                                     audit_logger=_audit)
 
+                # ── Audit Logger: record decision + finalize ──
+                if _audit:
+                    _audit.record_decision(decision.action, decision.position_size)
+                    _audit.record_execution(
+                        mode=market_data.get('execution_mode', 'PAPER'),
+                    )
+                    if ml_package and hasattr(ml_package, 'feature_vector') and ml_package.feature_vector is not None:
+                        _audit.record_feature_vector(ml_package.feature_vector)
+                    _open_count = 0
+                    try:
+                        with self.position_manager._lock:
+                            _open_count = sum(1 for p in self.position_manager.positions.values() if p.status == PositionStatus.OPEN)
+                    except Exception:
+                        pass
+                    _audit.record_system_state(
+                        drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
+                        daily_pnl=self.daily_pnl,
+                        balance=self._high_watermark_usd if hasattr(self, '_high_watermark_usd') else 10000.0,
+                        open_positions_count=_open_count,
+                        scan_tier=getattr(self, '_current_scan_tier', 0),
+                    )
+                    self._track_task(_audit.finalize())
+
                 # 5.05 Devil Tracker — record signal detection price for cost tracking
                 if self.devil_tracker and decision.action != 'HOLD':
                     try:
@@ -4258,30 +4281,6 @@ class RenaissanceTradingBot:
                             'confidence': conf,
                             'price_at_prediction': current_price,
                         }))
-
-                    # ── Audit Logger: finalize and persist ──
-                    if _audit:
-                        _audit.record_decision(decision.action, decision.position_size)
-                        _audit.record_execution(
-                            mode=market_data.get('execution_mode', 'PAPER'),
-                            devil_trade_id=self._last_devil_trade_id.get(product_id) if hasattr(self, '_last_devil_trade_id') else None,
-                        )
-                        if ml_package and ml_package.feature_vector is not None:
-                            _audit.record_feature_vector(ml_package.feature_vector)
-                        _open_count = 0
-                        try:
-                            with self.position_manager._lock:
-                                _open_count = sum(1 for p in self.position_manager.positions.values() if p.status == PositionStatus.OPEN)
-                        except Exception:
-                            pass
-                        _audit.record_system_state(
-                            drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
-                            daily_pnl=self.daily_pnl,
-                            balance=self._high_watermark_usd if hasattr(self, '_high_watermark_usd') else 10000.0,
-                            open_positions_count=_open_count,
-                            scan_tier=getattr(self, '_current_scan_tier', 0),
-                        )
-                        self._track_task(_audit.finalize())
 
                     # Periodic outcome evaluation (every 10 cycles)
                     if self.scan_cycle_count % 10 == 0:
