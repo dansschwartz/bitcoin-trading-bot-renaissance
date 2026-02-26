@@ -11,11 +11,26 @@ LATEST_LINK="$PROJ_DIR/data/research_snapshots/latest"
 echo "Creating research snapshot at $SNAPSHOT_DIR"
 mkdir -p "$SNAPSHOT_DIR"
 
-# 1. Frozen copy of trading database
-cp "$PROJ_DIR/data/trading.db" "$SNAPSHOT_DIR/trading_snapshot.db" 2>/dev/null || \
-  cp "$PROJ_DIR/data/renaissance_bot.db" "$SNAPSHOT_DIR/trading_snapshot.db" 2>/dev/null || \
-  echo "Warning: no database found to snapshot"
-chmod 444 "$SNAPSHOT_DIR/trading_snapshot.db" 2>/dev/null || true
+# 1. WAL-safe frozen copy of trading database (sqlite3 .backup API)
+#    cp is NOT safe for WAL-mode databases — use Python backup API instead
+"$PROJ_DIR/.venv/bin/python3" -c "
+import sqlite3, sys
+for name in ['renaissance_bot.db', 'trading.db']:
+    src = '$PROJ_DIR/data/' + name
+    try:
+        s = sqlite3.connect(src, timeout=10)
+        d = sqlite3.connect('$SNAPSHOT_DIR/research_db.sqlite')
+        s.backup(d)
+        d.close()
+        s.close()
+        print(f'Snapshot created from {name}')
+        sys.exit(0)
+    except Exception as e:
+        continue
+print('Warning: no database found to snapshot')
+sys.exit(1)
+" || echo "DB snapshot failed — continuing anyway"
+chmod 444 "$SNAPSHOT_DIR/research_db.sqlite" 2>/dev/null || true
 
 # 2. Symlink historical training data (large files, don't copy)
 if [ -d "$PROJ_DIR/data/training" ]; then
@@ -32,7 +47,7 @@ fi
 import sqlite3, json
 from datetime import datetime, timezone, timedelta
 
-conn = sqlite3.connect('$SNAPSHOT_DIR/trading_snapshot.db')
+conn = sqlite3.connect('$SNAPSHOT_DIR/research_db.sqlite')
 now = datetime.now(timezone.utc)
 week_ago = (now - timedelta(days=7)).isoformat()
 

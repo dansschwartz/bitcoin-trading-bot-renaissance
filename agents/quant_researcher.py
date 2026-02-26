@@ -35,6 +35,96 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Defense-in-depth: restrictive settings for researcher subprocesses ──
+# Written to session_dir/.claude/settings.json so Claude Code picks it up
+# when cwd=session_dir. Blocks production file edits, process kills,
+# direct DB writes, and destructive filesystem operations.
+RESEARCHER_SETTINGS_JSON = {
+    "permissions": {
+        "allow": [
+            "Read",
+            "Glob",
+            "Grep",
+            "Write(proposals.json)",
+            "Write(proposals/*)",
+            "Write(reviews.json)",
+            "Write(analysis/*)",
+            "Write(*.py)",
+            "Write(*.json)",
+            "Write(*.md)",
+            "Write(*.csv)",
+            "Bash(python*)",
+            "Bash(.venv/bin/python*)",
+            "Bash(cat *)",
+            "Bash(head *)",
+            "Bash(tail *)",
+            "Bash(wc *)",
+            "Bash(ls *)",
+            "Bash(find *)",
+            "Bash(grep *)",
+            "Bash(rg *)",
+            "Bash(echo *)",
+            "Bash(date*)",
+            "Bash(sort *)",
+            "Bash(uniq *)",
+            "Bash(awk *)",
+            "Bash(diff *)",
+        ],
+        "deny": [
+            "Edit(renaissance_trading_bot.py)",
+            "Edit(risk_gateway.py)",
+            "Edit(position_sizer.py)",
+            "Edit(kelly_position_sizer.py)",
+            "Edit(portfolio_engine.py)",
+            "Edit(regime_overlay.py)",
+            "Edit(real_time_pipeline.py)",
+            "Edit(ml_model_loader.py)",
+            "Edit(database_manager.py)",
+            "Edit(dashboard_api.py)",
+            "Edit(config/*)",
+            "Edit(agents/*)",
+            "Edit(core/*)",
+            "Edit(intelligence/*)",
+            "Edit(monitors/*)",
+            "Edit(arbitrage/*)",
+            "Edit(models/*)",
+            "Bash(sqlite3 data/*)",
+            "Bash(sqlite3 */renaissance_bot*)",
+            "Bash(sqlite3 */trading*)",
+            "Bash(kill *)",
+            "Bash(pkill *)",
+            "Bash(killall *)",
+            "Bash(rm *)",
+            "Bash(rm -rf *)",
+            "Bash(mv */renaissance*)",
+            "Bash(mv */data/*)",
+            "Bash(mv */config/*)",
+            "Bash(mv */agents/*)",
+            "Bash(mv */models/*)",
+            "Bash(cp * */data/renaissance*)",
+            "Bash(sudo *)",
+            "Bash(git push*)",
+            "Bash(git remote*)",
+            "Bash(git checkout*)",
+            "Bash(git reset*)",
+            "Bash(ssh *)",
+            "Bash(scp *)",
+            "Bash(curl -X POST*)",
+            "Bash(curl -X PUT*)",
+            "Bash(curl -X DELETE*)",
+            "Bash(wget *)",
+            "Bash(apt *)",
+            "Bash(brew *)",
+            "Bash(pip install*)",
+            "Bash(npm install*)",
+            "Bash(chmod 777*)",
+            "Bash(export *KEY*)",
+            "Bash(export *SECRET*)",
+            "Bash(export *PASSWORD*)",
+        ]
+    }
+}
+
 
 class QuantResearcherAgent(BaseAgent):
     """Outer Loop agent — launches weekly Claude Code research sessions."""
@@ -200,7 +290,7 @@ class QuantResearcherAgent(BaseAgent):
             self._state = "idle"
 
     def _prepare_session(self, report: Dict[str, Any]) -> Path:
-        """Write report + prompt to a session directory."""
+        """Write report + prompt to a session directory with frozen DB snapshot."""
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         session_dir = self._project_root / "data" / "research_sessions" / ts
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +298,63 @@ class QuantResearcherAgent(BaseAgent):
         # Write report
         (session_dir / "weekly_report.json").write_text(
             json.dumps(report, indent=2, default=str)
+        )
+
+        # ── DEFENSE IN DEPTH: Frozen read-only DB snapshot ──
+        db_source = Path(self.db_path)
+        db_snapshot = session_dir / "research_db.sqlite"
+        try:
+            # Use sqlite3 .backup for WAL-safe snapshot
+            src_conn = sqlite3.connect(str(db_source), timeout=10.0)
+            dst_conn = sqlite3.connect(str(db_snapshot))
+            src_conn.backup(dst_conn)
+            dst_conn.close()
+            src_conn.close()
+            # Make read-only at filesystem level
+            os.chmod(str(db_snapshot), 0o444)
+            self.logger.info("DB snapshot created: %s (read-only)", db_snapshot)
+        except Exception as exc:
+            self.logger.warning("Failed to create DB snapshot: %s", exc)
+            db_snapshot = None
+
+        # Write db_access.py helper for researchers
+        db_path_str = str(db_snapshot) if db_snapshot else str(db_source)
+        (session_dir / "db_access.py").write_text(
+            f'"""Read-only database access for research sessions.\n'
+            f'The snapshot is frozen at session start — writes are impossible.\n'
+            f'"""\n'
+            f'import sqlite3\n'
+            f'from typing import Any, Dict, List\n'
+            f'\n'
+            f'DB_PATH = "{db_path_str}"\n'
+            f'_RO_URI = f"file:{{DB_PATH}}?mode=ro"\n'
+            f'\n'
+            f'def get_connection() -> sqlite3.Connection:\n'
+            f'    """Get a READ-ONLY connection."""\n'
+            f'    conn = sqlite3.connect(_RO_URI, uri=True, timeout=10.0)\n'
+            f'    conn.row_factory = sqlite3.Row\n'
+            f'    return conn\n'
+            f'\n'
+            f'def query(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:\n'
+            f'    """Execute a read-only query and return results as dicts."""\n'
+            f'    conn = get_connection()\n'
+            f'    try:\n'
+            f'        rows = conn.execute(sql, params).fetchall()\n'
+            f'        return [dict(r) for r in rows]\n'
+            f'    finally:\n'
+            f'        conn.close()\n'
+            f'\n'
+            f'def query_one(sql: str, params: tuple = ()) -> Dict[str, Any]:\n'
+            f'    """Execute a read-only query and return first result."""\n'
+            f'    results = query(sql, params)\n'
+            f'    return results[0] if results else {{}}\n'
+        )
+
+        # ── DEFENSE IN DEPTH: Write restrictive settings.json ──
+        researcher_settings_dir = session_dir / ".claude"
+        researcher_settings_dir.mkdir(parents=True, exist_ok=True)
+        (researcher_settings_dir / "settings.json").write_text(
+            json.dumps(RESEARCHER_SETTINGS_JSON, indent=2)
         )
 
         # Build and write research prompt
@@ -564,14 +711,57 @@ because they deploy immediately without sandbox overhead.
         # Save prompt for debugging
         (output_dir / f"{phase}_prompt.md").write_text(prompt)
 
-        # Launch Claude Code
+        # ── DEFENSE IN DEPTH: Per-researcher DB snapshot + restrictive settings ──
+        db_snapshot = output_dir / "research_db.sqlite"
+        try:
+            db_source = Path(self.db_path)
+            src_conn = sqlite3.connect(str(db_source), timeout=10.0)
+            dst_conn = sqlite3.connect(str(db_snapshot))
+            src_conn.backup(dst_conn)
+            dst_conn.close()
+            src_conn.close()
+            os.chmod(str(db_snapshot), 0o444)
+        except Exception as exc:
+            self.logger.warning("Per-researcher DB snapshot failed: %s", exc)
+
+        # Write restrictive settings.json into output_dir so cwd picks it up
+        settings_dir = output_dir / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        (settings_dir / "settings.json").write_text(
+            json.dumps(RESEARCHER_SETTINGS_JSON, indent=2)
+        )
+
+        # Write db_access.py helper
+        db_path_str = str(db_snapshot) if db_snapshot.exists() else str(Path(self.db_path))
+        (output_dir / "db_access.py").write_text(
+            f'"""Read-only database access for research sessions."""\n'
+            f'import sqlite3\n'
+            f'from typing import Any, Dict, List\n'
+            f'DB_PATH = "{db_path_str}"\n'
+            f'_RO_URI = f"file:{{DB_PATH}}?mode=ro"\n'
+            f'def get_connection() -> sqlite3.Connection:\n'
+            f'    conn = sqlite3.connect(_RO_URI, uri=True, timeout=10.0)\n'
+            f'    conn.row_factory = sqlite3.Row\n'
+            f'    return conn\n'
+            f'def query(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:\n'
+            f'    conn = get_connection()\n'
+            f'    try:\n'
+            f'        return [dict(r) for r in conn.execute(sql, params).fetchall()]\n'
+            f'    finally:\n'
+            f'        conn.close()\n'
+            f'def query_one(sql: str, params: tuple = ()) -> Dict[str, Any]:\n'
+            f'    results = query(sql, params)\n'
+            f'    return results[0] if results else {{}}\n'
+        )
+
+        # Launch Claude Code — cwd=output_dir so it reads restrictive settings.json
         try:
             result = subprocess.run(
                 ["claude", "--print", "--max-turns", str(max_turns), "-p", prompt],
                 capture_output=True,
                 text=True,
                 timeout=timeout_minutes * 60,
-                cwd=str(project_root),
+                cwd=str(output_dir),
                 env=self._clean_env(),
             )
             (output_dir / "claude_output.txt").write_text(result.stdout or "")
@@ -590,6 +780,26 @@ because they deploy immediately without sandbox overhead.
             # Harvest updated journal
             self._harvest_journal_update(researcher_name, result.stdout or "", project_root)
 
+            # ── DEFENSE IN DEPTH: Post-session integrity check ──
+            integrity = self._verify_session_integrity(output_dir)
+            if not integrity["passed"]:
+                self.logger.error(
+                    "SESSION INTEGRITY FAILED for %s — discarding proposals: %s",
+                    researcher_name, integrity["violations"],
+                )
+                log_agent_event(
+                    self.db_path,
+                    agent_name=self.name,
+                    event_type="integrity_violation",
+                    channel="researcher.security",
+                    payload=integrity,
+                    severity="critical",
+                )
+                # Remove proposals/reviews from compromised session
+                compromised = output_dir / expected_file
+                if compromised.exists():
+                    compromised.unlink()
+
         except subprocess.TimeoutExpired:
             self.logger.warning(
                 "Researcher %s %s timed out after %dm",
@@ -599,6 +809,95 @@ because they deploy immediately without sandbox overhead.
             self.logger.warning("'claude' CLI not found — skipping session")
         except Exception as exc:
             self.logger.error("Researcher %s %s failed: %s", researcher_name, phase, exc)
+
+    def _verify_session_integrity(self, output_dir: Path) -> Dict[str, Any]:
+        """Post-session integrity check: verify researcher didn't escape sandbox.
+
+        Checks:
+        1. DB snapshot still has read-only permissions (chmod 444)
+        2. No critical project files were modified (git diff)
+        3. No unauthorized files created outside output_dir
+        """
+        result: Dict[str, Any] = {"passed": True, "violations": []}
+
+        # Check 1: DB snapshot permissions
+        db_snapshot = output_dir / "research_db.sqlite"
+        if db_snapshot.exists():
+            import stat
+            mode = db_snapshot.stat().st_mode
+            # Should be 444 (read-only for all)
+            if mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+                result["violations"].append(
+                    f"DB snapshot permissions changed: {oct(mode & 0o777)}"
+                )
+                result["passed"] = False
+
+        # Check 2: Critical files not modified (git diff)
+        critical_files = [
+            "renaissance_trading_bot.py",
+            "risk_gateway.py",
+            "position_sizer.py",
+            "kelly_position_sizer.py",
+            "core/portfolio_engine.py",
+            "regime_overlay.py",
+            "real_time_pipeline.py",
+            "ml_model_loader.py",
+            "database_manager.py",
+            "config/config.json",
+            "agents/safety_gate.py",
+            "agents/quant_researcher.py",
+        ]
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(self._project_root),
+            )
+            modified = set((diff_result.stdout or "").strip().split("\n"))
+            modified.discard("")
+            for f in critical_files:
+                if f in modified:
+                    result["violations"].append(f"Critical file modified: {f}")
+                    result["passed"] = False
+        except Exception as exc:
+            self.logger.warning("Git diff check failed: %s", exc)
+
+        # Check 3: No new files created in project root (outside output_dir)
+        try:
+            untracked_result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(self._project_root),
+            )
+            untracked = (untracked_result.stdout or "").strip().split("\n")
+            # Filter to suspicious files (not in data/research_sessions/ or output_dir)
+            try:
+                session_rel = str(output_dir.relative_to(self._project_root))
+            except ValueError:
+                session_rel = ""  # output_dir outside project root (shouldn't happen)
+            for f in untracked:
+                f = f.strip()
+                if not f:
+                    continue
+                if f.startswith("data/research_sessions/"):
+                    continue  # Expected
+                if f.startswith(session_rel):
+                    continue  # Expected
+                # Suspicious: new .py or config file in project root
+                if f.endswith((".py", ".json", ".yaml", ".yml", ".sh")):
+                    result["violations"].append(f"Suspicious untracked file: {f}")
+                    result["passed"] = False
+        except Exception as exc:
+            self.logger.warning("Untracked files check failed: %s", exc)
+
+        if result["passed"]:
+            self.logger.info("Session integrity check PASSED for %s", output_dir.name)
+        else:
+            self.logger.critical(
+                "Session integrity check FAILED: %d violations", len(result["violations"])
+            )
+
+        return result
 
     def _build_hypothesis_prompt(
         self,
@@ -638,13 +937,22 @@ KNOWLEDGE LIBRARY — import and use:
     from knowledge.regime_registry import REGIME_CONFIG, Regime, ParamType
     from knowledge.shared.dead_ends import is_dead_end
 
+DATABASE ACCESS (read-only snapshot — NEVER use the live DB):
+    # ALWAYS use the provided helper — never construct your own connection
+    from db_access import query, query_one, get_connection
+
+    rows = query("SELECT * FROM decision_audit_log ORDER BY timestamp DESC LIMIT 10")
+    stats = query_one("SELECT COUNT(*) as n, AVG(final_confidence) as avg_conf FROM decision_audit_log")
+
 DECISION AUDIT LOG — 97-column per-decision dataset:
+    import sys; sys.path.insert(0, '{project_root}/researchers')
     from knowledge.shared.queries import (
         audit_model_accuracy, audit_signal_effectiveness, audit_regime_performance,
         audit_sizing_chain_analysis, audit_cost_vs_edge, audit_confluence_effectiveness,
         audit_feature_health, audit_raw_decisions,
     )
-    DB = 'data/renaissance_bot.db'
+    # ALWAYS use the local snapshot — NEVER the live DB
+    DB = 'research_db.sqlite'
 
     # Which models are actually working on live data?
     acc = audit_model_accuracy(DB, days=7)
@@ -662,8 +970,6 @@ DECISION AUDIT LOG — 97-column per-decision dataset:
 
     # Is the Devil eating the edge?
     costs = audit_cost_vs_edge(DB, days=7)
-    for c in costs['by_pair']:
-        print(f"  {{c['product_id']}}: predicted={{c['avg_effective_edge_bps']}}bps actual={{c['avg_actual_return_bps']}}bps")
 
     # Sizing chain bottlenecks
     chain = audit_sizing_chain_analysis(DB, days=7)
@@ -677,18 +983,15 @@ DECISION AUDIT LOG — 97-column per-decision dataset:
     # Raw decision inspection
     rows = audit_raw_decisions(DB, pair='BTC-USD', limit=10)
 
-    # Or query the table directly with SQL:
-    import sqlite3
-    conn = sqlite3.connect(f"file:data/renaissance_bot.db?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.execute(\"\"\"
+    # Or query via db_access.py for custom SQL:
+    from db_access import query
+    worst = query(\"\"\"
         SELECT product_id, final_action, final_confidence, effective_edge,
                outcome_6bar, regime_label, timestamp
         FROM decision_audit_log
         WHERE outcome_6bar IS NOT NULL AND final_action != 'HOLD'
         ORDER BY outcome_6bar ASC LIMIT 10
     \"\"\")
-    for row in cursor: print(dict(row))
 
 REGIME CONFIG REGISTRY — structured parameter proposals:
     from knowledge.regime_registry import REGIME_CONFIG, Regime, ParamType
