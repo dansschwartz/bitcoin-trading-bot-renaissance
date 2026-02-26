@@ -773,70 +773,93 @@ class StrategyAExecutor:
             ml_conf = ml_data.get("confidence", 50)
             ml_agree = ml_data.get("agreement", 0)
 
-            # Lead asset check (for altcoins)
+            # ════════════════════════════════════════════════════
+            # CHECKPOINT RECORDING — runs at ALL 3 time windows
+            # Must happen BEFORE lead asset gate and decision checks
+            # ════════════════════════════════════════════════════
+            checkpoint = None
+            if 13.0 <= minutes_left <= 16.5:
+                checkpoint = 0      # T=0: ~15 min remaining
+            elif 8.0 <= minutes_left <= 11.5:
+                checkpoint = 5      # T=5: ~10 min remaining
+            elif 3.0 <= minutes_left <= 6.5:
+                checkpoint = 10     # T=10: ~5 min remaining
+
+            if checkpoint is None:
+                continue
+
+            # Get or create tracker (recover from DB after restart)
+            if slug not in self.trackers:
+                recovered = self._load_tracker_from_db(slug, inst.asset, inst_key)
+                if recovered:
+                    self.trackers[slug] = recovered
+                    self.logger.info(
+                        f"RECOVERED tracker [{inst.asset}] {slug}: "
+                        f"{len(recovered.checkpoints)} checkpoints from DB"
+                    )
+                else:
+                    self.trackers[slug] = ConvictionTracker(
+                        slug=slug,
+                        asset=inst.asset,
+                        instrument_key=inst_key,
+                    )
+
+            tracker = self.trackers[slug]
+
+            # Record checkpoint if not already recorded (idempotent)
+            if checkpoint not in tracker.checkpoints:
+                tracker.record_checkpoint(
+                    checkpoint=checkpoint,
+                    asset_price=current_price,
+                    crowd_up=crowd_up,
+                    ml_prediction=ml_pred,
+                    ml_confidence=ml_conf,
+                    ml_agreement=ml_agree,
+                    regime=current_regime,
+                )
+
+                self.logger.info(
+                    f"CHECKPOINT [{inst.asset}] T={checkpoint}: "
+                    f"Price=${current_price:.2f} | "
+                    f"Crowd UP={crowd_up:.0%} | "
+                    f"ML={'UP' if ml_pred > 0 else 'DOWN'} conf={ml_conf:.0f} | "
+                    f"Regime={current_regime} | "
+                    f"Slug={slug}"
+                )
+
+                # Persist checkpoint to DB immediately (survives restarts)
+                self._save_checkpoint_to_db(tracker, checkpoint, market)
+
+            # ════════════════════════════════════════════════════
+            # DECISION GATE — only proceed to bet/skip at T=10
+            # ════════════════════════════════════════════════════
+            if checkpoint != 10:
+                continue
+
+            # Lead asset check — only at decision time, not during observation
             if inst.lead_asset and inst.lead_must_agree:
                 leader_data = ml_predictions.get(f"{inst.lead_asset}-USD", {})
                 leader_pred = leader_data.get("prediction", 0)
                 leader_dir = "UP" if leader_pred > 0 else "DOWN"
                 price_dir = "UP" if ml_pred > 0 else "DOWN"
                 if leader_dir != price_dir:
-                    self.logger.debug(f"[{inst.asset}] Lead {inst.lead_asset} disagrees")
+                    self.logger.info(
+                        f"[{inst.asset}] Lead {inst.lead_asset} disagrees — skipping bet"
+                    )
+                    self._save_lifecycle(
+                        tracker, market,
+                        ConvictionLevel.CONFLICTED, 0.05,
+                        f"Lead {inst.lead_asset} disagrees at T=10",
+                        {"enter": False, "direction": tracker.get_majority_direction(),
+                         "reason": f"Lead {inst.lead_asset} disagrees"},
+                        None,
+                    )
+                    self.trackers.pop(slug, None)
                     continue
 
-            # Determine which checkpoint this is
-            checkpoint = None
-            if 14.0 <= minutes_left <= 16.0:
-                checkpoint = 0
-            elif 9.0 <= minutes_left <= 11.0:
-                checkpoint = 5
-            elif 4.0 <= minutes_left <= 6.0:
-                checkpoint = 10
-
-            if checkpoint is None:
-                continue
-
-            # Get or create tracker
-            if slug not in self.trackers:
-                self.trackers[slug] = ConvictionTracker(
-                    slug=slug,
-                    asset=inst.asset,
-                    instrument_key=inst_key,
-                )
-
-            tracker = self.trackers[slug]
-
-            # Don't re-record the same checkpoint
-            if checkpoint in tracker.checkpoints:
-                if checkpoint != 10:
-                    continue
-                # At T=10 we may need to re-evaluate if already recorded
-                # but don't re-record data
-
-            # Record checkpoint
-            tracker.record_checkpoint(
-                checkpoint=checkpoint,
-                asset_price=current_price,
-                crowd_up=crowd_up,
-                ml_prediction=ml_pred,
-                ml_confidence=ml_conf,
-                ml_agreement=ml_agree,
-                regime=current_regime,
-            )
-
-            self.logger.info(
-                f"CHECKPOINT [{inst.asset}] T={checkpoint}: "
-                f"Price=${current_price:.2f} | "
-                f"Crowd UP={crowd_up:.0%} | "
-                f"ML={'UP' if ml_pred > 0 else 'DOWN'} conf={ml_conf:.0f} | "
-                f"Regime={current_regime} | "
-                f"Slug={slug}"
-            )
-
-            # DECISION AT T=10 ONLY
-            if checkpoint == 10:
-                self._make_decision(inst_key, inst, market, tracker, ml_predictions, current_prices, current_regime)
-                # Clean up tracker after decision
-                self.trackers.pop(slug, None)
+            self._make_decision(inst_key, inst, market, tracker, ml_predictions, current_prices, current_regime)
+            # Clean up tracker after decision
+            self.trackers.pop(slug, None)
 
         # Clean up stale trackers (older than 20 min)
         self._cleanup_stale_trackers()
@@ -1217,6 +1240,202 @@ class StrategyAExecutor:
         stale_cache = [k for k, (_, ts) in self._market_cache.items() if now_ts - ts > 1800]
         for k in stale_cache:
             del self._market_cache[k]
+
+    # ----------------------------------------------------------
+    # INCREMENTAL CHECKPOINT PERSISTENCE
+    # ----------------------------------------------------------
+
+    def _save_checkpoint_to_db(
+        self, tracker: ConvictionTracker, checkpoint: int, market: dict
+    ) -> None:
+        """Persist checkpoint data to DB incrementally (survives bot restarts)."""
+        cp = tracker.checkpoints.get(checkpoint)
+        if not cp:
+            return
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            if checkpoint == 0:
+                # INSERT new lifecycle row with T=0 data
+                conn.execute("""
+                    INSERT OR IGNORE INTO polymarket_lifecycle
+                    (slug, question, asset, instrument_key, market_open_time,
+                     market_close_time, duration_minutes,
+                     t0_timestamp, t0_asset_price, t0_crowd_up, t0_crowd_down,
+                     t0_ml_prediction, t0_ml_confidence, t0_ml_agreement,
+                     t0_ml_direction, t0_regime,
+                     direction_readings,
+                     conviction_label, conviction_score, conviction_detail,
+                     decision, decision_reason)
+                    VALUES (?, ?, ?, ?, ?,
+                            ?, 15,
+                            ?, ?, ?, ?,
+                            ?, ?, ?,
+                            ?, ?,
+                            ?,
+                            'TENTATIVE', 0.1, 'T=0 recorded, awaiting T=5 and T=10',
+                            'PENDING', 'Awaiting checkpoints')
+                """, (
+                    tracker.slug, market.get("question", ""), tracker.asset,
+                    tracker.instrument_key, cp["timestamp"],
+                    market.get("deadline", ""),
+                    cp["timestamp"], cp["asset_price"], cp["crowd_up"], cp["crowd_down"],
+                    cp["ml_prediction"], cp["ml_confidence"], cp["ml_agreement"],
+                    cp["ml_direction"], cp["regime"],
+                    json.dumps([cp["ml_direction"]]),
+                ))
+
+            elif checkpoint == 5:
+                # Find the market_open_time to UPDATE the correct row
+                t0_cp = tracker.checkpoints.get(0)
+                market_open = t0_cp["timestamp"] if t0_cp else None
+
+                if not market_open:
+                    row = conn.execute(
+                        "SELECT market_open_time FROM polymarket_lifecycle "
+                        "WHERE slug = ? AND decision = 'PENDING' ORDER BY id DESC LIMIT 1",
+                        (tracker.slug,)
+                    ).fetchone()
+                    market_open = row[0] if row else None
+
+                t5_crowd_change = None
+                if 0 in tracker.checkpoints:
+                    t5_crowd_change = cp["crowd_up"] - tracker.checkpoints[0]["crowd_up"]
+
+                directions = [
+                    tracker.checkpoints[t]["ml_direction"]
+                    for t in sorted(tracker.checkpoints.keys())
+                ]
+
+                if market_open:
+                    # UPDATE existing T=0 row with T=5 data
+                    conn.execute("""
+                        UPDATE polymarket_lifecycle SET
+                            t5_timestamp = ?,
+                            t5_asset_price = ?,
+                            t5_crowd_up = ?,
+                            t5_crowd_down = ?,
+                            t5_ml_prediction = ?,
+                            t5_ml_confidence = ?,
+                            t5_ml_agreement = ?,
+                            t5_ml_direction = ?,
+                            t5_regime = ?,
+                            t5_price_change_from_t0 = ?,
+                            t5_crowd_change_from_t0 = ?,
+                            t5_price_direction = ?,
+                            t5_ml_agrees_with_t0 = ?,
+                            direction_readings = ?,
+                            conviction_detail = 'T=0 and T=5 recorded, awaiting T=10'
+                        WHERE slug = ? AND market_open_time = ?
+                    """, (
+                        cp["timestamp"], cp["asset_price"],
+                        cp["crowd_up"], cp["crowd_down"],
+                        cp["ml_prediction"], cp["ml_confidence"], cp["ml_agreement"],
+                        cp["ml_direction"], cp["regime"],
+                        cp.get("price_change_from_t0", 0),
+                        t5_crowd_change,
+                        cp.get("price_direction", "SIDEWAYS"),
+                        1 if (0 in tracker.checkpoints and
+                              cp["ml_direction"] == tracker.checkpoints[0]["ml_direction"]) else 0,
+                        json.dumps(directions),
+                        tracker.slug, market_open,
+                    ))
+                else:
+                    # No T=0 row — INSERT with T=5 as first checkpoint
+                    conn.execute("""
+                        INSERT OR IGNORE INTO polymarket_lifecycle
+                        (slug, question, asset, instrument_key, market_open_time,
+                         market_close_time, duration_minutes,
+                         t5_timestamp, t5_asset_price, t5_crowd_up, t5_crowd_down,
+                         t5_ml_prediction, t5_ml_confidence, t5_ml_agreement,
+                         t5_ml_direction, t5_regime,
+                         direction_readings,
+                         conviction_label, conviction_score, conviction_detail,
+                         decision, decision_reason)
+                        VALUES (?, ?, ?, ?, ?,
+                                ?, 15,
+                                ?, ?, ?, ?,
+                                ?, ?, ?,
+                                ?, ?,
+                                ?,
+                                'TENTATIVE', 0.1, 'T=5 recorded (T=0 missed), awaiting T=10',
+                                'PENDING', 'Awaiting checkpoints')
+                    """, (
+                        tracker.slug, market.get("question", ""), tracker.asset,
+                        tracker.instrument_key, cp["timestamp"],
+                        market.get("deadline", ""),
+                        cp["timestamp"], cp["asset_price"], cp["crowd_up"], cp["crowd_down"],
+                        cp["ml_prediction"], cp["ml_confidence"], cp["ml_agreement"],
+                        cp["ml_direction"], cp["regime"],
+                        json.dumps(directions),
+                    ))
+
+            # T=10 is handled by the existing _save_lifecycle method
+            conn.commit()
+        except Exception as e:
+            self.logger.debug(f"Checkpoint T={checkpoint} DB save failed for {tracker.slug}: {e}")
+        finally:
+            conn.close()
+
+    def _load_tracker_from_db(
+        self, slug: str, asset: str, instrument_key: str
+    ) -> Optional[ConvictionTracker]:
+        """Load tracker state from DB after bot restart."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute("""
+                SELECT * FROM polymarket_lifecycle
+                WHERE slug = ? AND decision = 'PENDING'
+                ORDER BY id DESC LIMIT 1
+            """, (slug,)).fetchone()
+
+            if not row:
+                return None
+
+            tracker = ConvictionTracker(
+                slug=slug, asset=asset, instrument_key=instrument_key
+            )
+
+            # Restore T=0 if present
+            if row["t0_timestamp"] and row["t0_asset_price"] and row["t0_asset_price"] > 0:
+                tracker.checkpoints[0] = {
+                    "asset_price": row["t0_asset_price"],
+                    "crowd_up": row["t0_crowd_up"] or 0.5,
+                    "crowd_down": row["t0_crowd_down"] or 0.5,
+                    "ml_prediction": row["t0_ml_prediction"] or 0,
+                    "ml_confidence": row["t0_ml_confidence"] or 50,
+                    "ml_agreement": row["t0_ml_agreement"] or 0,
+                    "ml_direction": row["t0_ml_direction"] or "DOWN",
+                    "regime": row["t0_regime"] or "unknown",
+                    "price_change_from_t0": 0.0,
+                    "price_direction": "SIDEWAYS",
+                    "timestamp": row["t0_timestamp"],
+                }
+
+            # Restore T=5 if present
+            if row["t5_timestamp"] and row["t5_asset_price"] and row["t5_asset_price"] > 0:
+                tracker.checkpoints[5] = {
+                    "asset_price": row["t5_asset_price"],
+                    "crowd_up": row["t5_crowd_up"] or 0.5,
+                    "crowd_down": row["t5_crowd_down"] or 0.5,
+                    "ml_prediction": row["t5_ml_prediction"] or 0,
+                    "ml_confidence": row["t5_ml_confidence"] or 50,
+                    "ml_agreement": row["t5_ml_agreement"] or 0,
+                    "ml_direction": row["t5_ml_direction"] or "DOWN",
+                    "regime": row["t5_regime"] or "unknown",
+                    "price_change_from_t0": row["t5_price_change_from_t0"] or 0,
+                    "price_direction": row["t5_price_direction"] or "SIDEWAYS",
+                    "timestamp": row["t5_timestamp"],
+                }
+
+            if tracker.checkpoints:
+                return tracker
+            return None
+        except Exception:
+            return None
+        finally:
+            conn.close()
 
     # ----------------------------------------------------------
     # BET PLACEMENT
