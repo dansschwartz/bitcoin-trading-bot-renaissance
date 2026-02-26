@@ -12,9 +12,10 @@ echo "Creating research snapshot at $SNAPSHOT_DIR"
 mkdir -p "$SNAPSHOT_DIR"
 
 # 1. Frozen copy of trading database
-cp "$PROJ_DIR/data/renaissance_bot.db" "$SNAPSHOT_DIR/trading_snapshot.db"
-# Make read-only
-chmod 444 "$SNAPSHOT_DIR/trading_snapshot.db"
+cp "$PROJ_DIR/data/trading.db" "$SNAPSHOT_DIR/trading_snapshot.db" 2>/dev/null || \
+  cp "$PROJ_DIR/data/renaissance_bot.db" "$SNAPSHOT_DIR/trading_snapshot.db" 2>/dev/null || \
+  echo "Warning: no database found to snapshot"
+chmod 444 "$SNAPSHOT_DIR/trading_snapshot.db" 2>/dev/null || true
 
 # 2. Symlink historical training data (large files, don't copy)
 if [ -d "$PROJ_DIR/data/training" ]; then
@@ -68,7 +69,12 @@ with open('$SNAPSHOT_DIR/snapshot_summary.json', 'w') as f:
 print(json.dumps(summary, indent=2, default=str))
 "
 
-# 5. Update latest symlink
+# 5. Generate dynamic researcher briefs
+echo "Generating researcher knowledge briefs..."
+"$PROJ_DIR/.venv/bin/python3" "$PROJ_DIR/scripts/generate_researcher_briefs.py" 2>/dev/null || \
+  echo "Brief generation skipped (script may not exist yet)"
+
+# 6. Update latest symlink
 ln -sfn "$SNAPSHOT_DIR" "$LATEST_LINK"
 
 echo "Snapshot ready: $SNAPSHOT_DIR ($(du -sh "$SNAPSHOT_DIR" | cut -f1))"
