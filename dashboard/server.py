@@ -140,9 +140,21 @@ def create_app(
     async def health():
         return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
-    # Serve frontend static build (must be last — catches all remaining routes)
+    # Serve frontend static build
     if FRONTEND_BUILD.is_dir():
-        app.mount("/", StaticFiles(directory=str(FRONTEND_BUILD), html=True), name="frontend")
+        # Static assets (JS, CSS, images)
+        app.mount("/assets", StaticFiles(directory=str(FRONTEND_BUILD / "assets")), name="assets")
+
+        # SPA catch-all: serve index.html for any non-API route (React Router handles client-side routing)
+        from starlette.responses import FileResponse
+
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            # Serve actual static files if they exist (favicon.ico, etc.)
+            file_path = FRONTEND_BUILD / full_path
+            if full_path and file_path.is_file():
+                return FileResponse(str(file_path))
+            return FileResponse(str(FRONTEND_BUILD / "index.html"))
 
     return app
 
