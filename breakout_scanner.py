@@ -37,7 +37,7 @@ EXCLUDED_SUBSTRINGS = ['UP', 'DOWN', 'BULL', 'BEAR', '3L', '3S', '2L', '2S']
 # Always deep-scan these regardless of breakout score (Tier 1 majors)
 ALWAYS_SCAN = {
     'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT',
-    'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'MATICUSDT', 'UNIUSDT', 'ATOMUSDT',
+    'LINKUSDT', 'DOTUSDT', 'MATICUSDT', 'UNIUSDT', 'ATOMUSDT',
     'LTCUSDT', 'BCHUSDT', 'NEARUSDT',
 }
 

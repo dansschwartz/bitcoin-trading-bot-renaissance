@@ -89,7 +89,13 @@ class ConfidenceCalculator:
             'distribution': 0.80,
             'crisis': 0.70,
             'recovery': 1.05,
-            'unknown': 0.90
+            'unknown': 0.90,
+            # HMM regime labels (must match AdvancedRegimeDetector output)
+            'bear_trending': 0.85,
+            'bull_trending': 1.10,
+            'neutral_sideways': 1.00,
+            'bull_mean_reverting': 1.05,
+            'bear_mean_reverting': 0.90,
         }
 
         # Performance tracking

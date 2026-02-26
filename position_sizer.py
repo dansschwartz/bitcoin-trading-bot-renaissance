@@ -137,6 +137,12 @@ class RenaissancePositionSizer:
             "volatile": 0.60,
             "chaotic": 0.30,
             "normal": 0.80,
+            # HMM regime labels (must match AdvancedRegimeDetector output)
+            "bear_trending": 0.85,
+            "bull_trending": 1.15,
+            "neutral_sideways": 1.00,
+            "bull_mean_reverting": 1.10,
+            "bear_mean_reverting": 0.90,
         })
 
         # ── Position limits ──

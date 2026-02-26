@@ -49,6 +49,8 @@ EXCLUDED_BASES: Set[str] = {
     # Promotional / low-quality tokens with wash volume on Binance
     'KITE', 'WLFI', 'ENSO', 'ASTER', 'ZAMA', 'ESP', 'SAPIEN',
     'PUMP', 'ALLO', 'SOMI', 'XPL', 'AT', 'BEL',
+    # High-spread pairs where Devil > edge (council decision 2026-02-26)
+    'AVAX',  # 15.12 bps avg spread vs ~2.7 bps gross edge
 }
 
 
