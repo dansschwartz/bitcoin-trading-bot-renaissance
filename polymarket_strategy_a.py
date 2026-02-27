@@ -755,121 +755,164 @@ class StrategyAExecutor:
                 self.logger.debug(f"[{inst.asset}] Skipping: regime '{current_regime}' excluded")
                 continue
 
-            # Discover market via slug construction + Gamma API
-            market = self._discover_market(inst)
-            if not market:
+            # ═══════════════════════════════════════════════════════
+            # Build list of markets to process for this instrument:
+            # 1. Active trackers from previous cycles (may have old slugs)
+            # 2. Current market discovery (for new T=0 recording)
+            # This prevents slug advancement from orphaning trackers.
+            # ═══════════════════════════════════════════════════════
+            markets_to_process = []
+            seen_slugs = set()
+
+            # 1. Active trackers for this instrument (continue from prior cycles)
+            for _ts, _tr in list(self.trackers.items()):
+                if _tr.instrument_key == inst_key:
+                    _cached = self._market_cache.get(_ts)
+                    _now = int(time.time())
+                    if _cached and (_now - _cached[1] < MARKET_CACHE_TTL):
+                        markets_to_process.append(_cached[0])
+                        seen_slugs.add(_ts)
+                    else:
+                        _fetched = self._fetch_market_by_slug(_ts)
+                        if _fetched:
+                            self._market_cache[_ts] = (_fetched, _now)
+                            markets_to_process.append(_fetched)
+                            seen_slugs.add(_ts)
+
+            # 2. Current market discovery (for new T=0 recording)
+            _cur_market = self._discover_market(inst)
+            if _cur_market:
+                _cs = _cur_market.get("slug", "")
+                if _cs not in seen_slugs:
+                    markets_to_process.append(_cur_market)
+
+            if not markets_to_process:
                 continue
 
-            minutes_left = self._get_minutes_remaining(market)
-            if minutes_left is None:
-                continue
+            # Process each market (active trackers + current discovery)
+            for market in markets_to_process:
+                minutes_left = self._get_minutes_remaining(market)
+                if minutes_left is None or minutes_left < -2.0:
+                    continue  # Skip expired markets (closed >2 min ago)
 
-            slug = market.get("slug", "")
-            price_pair = inst.price_pair or inst.ml_pair
-            current_price = current_prices.get(price_pair, 0)
+                slug = market.get("slug", "")
+                price_pair = inst.price_pair or inst.ml_pair
+                current_price = current_prices.get(price_pair, 0)
 
-            # Parse crowd pricing from Gamma API response
-            crowd_up = self._parse_crowd_up(market)
+                # Parse crowd pricing from Gamma API response
+                crowd_up = self._parse_crowd_up(market)
 
-            # ML data
-            ml_data = ml_predictions.get(inst.ml_pair, {})
-            ml_pred = ml_data.get("prediction", 0)
-            ml_conf = ml_data.get("confidence", 50)
-            ml_agree = ml_data.get("agreement", 0)
+                # ML data
+                ml_data = ml_predictions.get(inst.ml_pair, {})
+                ml_pred = ml_data.get("prediction", 0)
+                ml_conf = ml_data.get("confidence", 50)
+                ml_agree = ml_data.get("agreement", 0)
 
-            # ════════════════════════════════════════════════════
-            # CHECKPOINT RECORDING — runs at ALL 3 time windows
-            # Must happen BEFORE lead asset gate and decision checks
-            # ════════════════════════════════════════════════════
-            # Contiguous windows — no gaps for slow cycles (up to 7+ min intervals)
-            checkpoint = None
-            if 10.0 <= minutes_left <= 16.5:
-                checkpoint = 0      # T=0: market just opened, ~10-16 min remaining
-            elif 5.0 <= minutes_left < 10.0:
-                checkpoint = 5      # T=5: ~5-10 min remaining
-            elif 0.5 <= minutes_left < 5.0:
-                checkpoint = 10     # T=10: ~0.5-5 min remaining, decision time
+                # ════════════════════════════════════════════════════
+                # CHECKPOINT RECORDING — runs at ALL 3 time windows
+                # Must happen BEFORE lead asset gate and decision checks
+                # ════════════════════════════════════════════════════
+                # Contiguous windows — no gaps for slow cycles (up to 7+ min intervals)
+                checkpoint = None
+                if 10.0 <= minutes_left <= 16.5:
+                    checkpoint = 0      # T=0: market just opened, ~10-16 min remaining
+                elif 5.0 <= minutes_left < 10.0:
+                    checkpoint = 5      # T=5: ~5-10 min remaining
+                elif 0.5 <= minutes_left < 5.0:
+                    checkpoint = 10     # T=10: ~0.5-5 min remaining, decision time
 
-            if checkpoint is None:
-                continue
+                # Force T=10 for active trackers on near-closed markets.
+                # With 7-min cycles, the 3rd cycle often arrives after market close.
+                # Allow decision if we have prior checkpoints and market just closed.
+                if checkpoint is None and slug in self.trackers:
+                    _existing = self.trackers[slug]
+                    if len(_existing.checkpoints) >= 1 and -2.0 <= minutes_left < 0.5:
+                        checkpoint = 10
+                        self.logger.info(
+                            f"[{inst.asset}] Force T=10: {minutes_left:.1f}min left, "
+                            f"{len(_existing.checkpoints)} prior checkpoints | Slug={slug}"
+                        )
 
-            # Skip T=0 if we don't have a price yet (e.g., bot just started, first cycle incomplete)
-            if checkpoint == 0 and current_price <= 0:
-                self.logger.debug(f"[{inst.asset}] Skipping T=0 — no price data yet")
-                continue
-
-            # Get or create tracker (recover from DB after restart)
-            if slug not in self.trackers:
-                recovered = self._load_tracker_from_db(slug, inst.asset, inst_key)
-                if recovered:
-                    self.trackers[slug] = recovered
-                    self.logger.info(
-                        f"RECOVERED tracker [{inst.asset}] {slug}: "
-                        f"{len(recovered.checkpoints)} checkpoints from DB"
-                    )
-                else:
-                    self.trackers[slug] = ConvictionTracker(
-                        slug=slug,
-                        asset=inst.asset,
-                        instrument_key=inst_key,
-                    )
-
-            tracker = self.trackers[slug]
-
-            # Record checkpoint if not already recorded (idempotent)
-            if checkpoint not in tracker.checkpoints:
-                tracker.record_checkpoint(
-                    checkpoint=checkpoint,
-                    asset_price=current_price,
-                    crowd_up=crowd_up,
-                    ml_prediction=ml_pred,
-                    ml_confidence=ml_conf,
-                    ml_agreement=ml_agree,
-                    regime=current_regime,
-                )
-
-                self.logger.info(
-                    f"CHECKPOINT [{inst.asset}] T={checkpoint}: "
-                    f"Price=${current_price:.2f} | "
-                    f"Crowd UP={crowd_up:.0%} | "
-                    f"ML={'UP' if ml_pred > 0 else 'DOWN'} conf={ml_conf:.0f} | "
-                    f"Regime={current_regime} | "
-                    f"Slug={slug}"
-                )
-
-                # Persist checkpoint to DB immediately (survives restarts)
-                self._save_checkpoint_to_db(tracker, checkpoint, market)
-
-            # ════════════════════════════════════════════════════
-            # DECISION GATE — only proceed to bet/skip at T=10
-            # ════════════════════════════════════════════════════
-            if checkpoint != 10:
-                continue
-
-            # Lead asset check — only at decision time, not during observation
-            if inst.lead_asset and inst.lead_must_agree:
-                leader_data = ml_predictions.get(f"{inst.lead_asset}-USD", {})
-                leader_pred = leader_data.get("prediction", 0)
-                leader_dir = "UP" if leader_pred > 0 else "DOWN"
-                price_dir = "UP" if ml_pred > 0 else "DOWN"
-                if leader_dir != price_dir:
-                    self.logger.info(
-                        f"[{inst.asset}] Lead {inst.lead_asset} disagrees — skipping bet"
-                    )
-                    self._save_lifecycle(
-                        tracker, market,
-                        ConvictionLevel.CONFLICTED, 0.05,
-                        f"Lead {inst.lead_asset} disagrees at T=10",
-                        {"enter": False, "direction": tracker.get_majority_direction(),
-                         "reason": f"Lead {inst.lead_asset} disagrees"},
-                        None,
-                    )
-                    self.trackers.pop(slug, None)
+                if checkpoint is None:
                     continue
 
-            self._make_decision(inst_key, inst, market, tracker, ml_predictions, current_prices, current_regime)
-            # Clean up tracker after decision
-            self.trackers.pop(slug, None)
+                # Skip T=0 if we don't have a price yet (e.g., bot just started, first cycle incomplete)
+                if checkpoint == 0 and current_price <= 0:
+                    self.logger.debug(f"[{inst.asset}] Skipping T=0 — no price data yet")
+                    continue
+
+                # Get or create tracker (recover from DB after restart)
+                if slug not in self.trackers:
+                    recovered = self._load_tracker_from_db(slug, inst.asset, inst_key)
+                    if recovered:
+                        self.trackers[slug] = recovered
+                        self.logger.info(
+                            f"RECOVERED tracker [{inst.asset}] {slug}: "
+                            f"{len(recovered.checkpoints)} checkpoints from DB"
+                        )
+                    else:
+                        self.trackers[slug] = ConvictionTracker(
+                            slug=slug,
+                            asset=inst.asset,
+                            instrument_key=inst_key,
+                        )
+
+                tracker = self.trackers[slug]
+
+                # Record checkpoint if not already recorded (idempotent)
+                if checkpoint not in tracker.checkpoints:
+                    tracker.record_checkpoint(
+                        checkpoint=checkpoint,
+                        asset_price=current_price,
+                        crowd_up=crowd_up,
+                        ml_prediction=ml_pred,
+                        ml_confidence=ml_conf,
+                        ml_agreement=ml_agree,
+                        regime=current_regime,
+                    )
+
+                    self.logger.info(
+                        f"CHECKPOINT [{inst.asset}] T={checkpoint}: "
+                        f"Price=${current_price:.2f} | "
+                        f"Crowd UP={crowd_up:.0%} | "
+                        f"ML={'UP' if ml_pred > 0 else 'DOWN'} conf={ml_conf:.0f} | "
+                        f"Regime={current_regime} | "
+                        f"Slug={slug}"
+                    )
+
+                    # Persist checkpoint to DB immediately (survives restarts)
+                    self._save_checkpoint_to_db(tracker, checkpoint, market)
+
+                # ════════════════════════════════════════════════════
+                # DECISION GATE — only proceed to bet/skip at T=10
+                # ════════════════════════════════════════════════════
+                if checkpoint != 10:
+                    continue
+
+                # Lead asset check — only at decision time, not during observation
+                if inst.lead_asset and inst.lead_must_agree:
+                    leader_data = ml_predictions.get(f"{inst.lead_asset}-USD", {})
+                    leader_pred = leader_data.get("prediction", 0)
+                    leader_dir = "UP" if leader_pred > 0 else "DOWN"
+                    price_dir = "UP" if ml_pred > 0 else "DOWN"
+                    if leader_dir != price_dir:
+                        self.logger.info(
+                            f"[{inst.asset}] Lead {inst.lead_asset} disagrees — skipping bet"
+                        )
+                        self._save_lifecycle(
+                            tracker, market,
+                            ConvictionLevel.CONFLICTED, 0.05,
+                            f"Lead {inst.lead_asset} disagrees at T=10",
+                            {"enter": False, "direction": tracker.get_majority_direction(),
+                             "reason": f"Lead {inst.lead_asset} disagrees"},
+                            None,
+                        )
+                        self.trackers.pop(slug, None)
+                        continue
+
+                self._make_decision(inst_key, inst, market, tracker, ml_predictions, current_prices, current_regime)
+                # Clean up tracker after decision
+                self.trackers.pop(slug, None)
 
         # Clean up stale trackers (older than 20 min)
         self._cleanup_stale_trackers()
@@ -1227,7 +1270,7 @@ class StrategyAExecutor:
             deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
             now_utc = datetime.now(timezone.utc)
             remaining = (deadline - now_utc).total_seconds() / 60.0
-            return max(0, remaining)
+            return remaining  # Can be negative for just-closed markets
         except (ValueError, TypeError):
             return None
 
