@@ -22,7 +22,7 @@
     },
     "universe": {
         "min_volume_usd": 2000000,
-        "max_pairs": 150,
+        "max_pairs": 6,
         "data_source": "binance",
         "refresh_interval_hours": 24
     },
@@ -572,6 +572,7 @@
         "max_positions": 10
     },
     "ml_signal_scale": 10.0,
+    "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],
     "model_retraining": {
         "enabled": true,
         "schedule_day": "saturday",

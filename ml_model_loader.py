@@ -24,6 +24,12 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
+# ── Disabled models ──────────────────────────────────────────────────────────
+# Models with live accuracy below 40% — disabled until retrained.
+# GRU: 32%, BiLSTM: 33%, DilatedCNN: 37% (as of 2026-02-27 dashboard audit)
+# These are not loaded, not run, and pass 0.0 to the meta-ensemble.
+DISABLED_MODELS: set = {'gru', 'bidirectional_lstm', 'dilated_cnn'}
+
 # ── Feature dimension constants ───────────────────────────────────────────────
 
 INPUT_DIM = 98          # Current feature dimension (padded to 98)
@@ -1240,20 +1246,26 @@ MODEL_REGISTRY = {
 }
 
 
-def load_trained_models(base_dir: str = '.', input_dim: int = INPUT_DIM) -> Dict[str, nn.Module]:
+def load_trained_models(base_dir: str = '.', input_dim: int = INPUT_DIM,
+                        disabled: Optional[set] = None) -> Dict[str, nn.Module]:
     """Load all trained models with strict validation.
 
     Args:
         base_dir: Base directory for model weight files
         input_dim: Feature dimension for model constructors (default INPUT_DIM=98).
                    Use INPUT_DIM_LEGACY=83 to load old pre-trained weights exactly.
+        disabled: Optional set of model names to skip. If None, uses DISABLED_MODELS.
 
     Returns dict of model_name → nn.Module (in eval mode).
     Only includes models that loaded with 100% weight match.
     """
+    skip = disabled if disabled is not None else DISABLED_MODELS
     loaded = {}
 
     for name, (rel_path, model_cls) in MODEL_REGISTRY.items():
+        if name in skip:
+            logger.info(f"Model {name}: DISABLED (below 40% live accuracy) — skipping")
+            continue
         full_path = os.path.join(base_dir, rel_path)
         if not os.path.exists(full_path):
             logger.warning(f"Model file not found: {full_path}")
@@ -1356,6 +1368,8 @@ def predict_with_models(
     for name, model in models.items():
         if name in ('meta_ensemble', 'lightgbm'):
             continue  # Handle separately
+        if name in DISABLED_MODELS:
+            continue  # Skip models disabled for poor accuracy
         try:
             with torch.no_grad():
                 # Match feature dim to model's expected input
