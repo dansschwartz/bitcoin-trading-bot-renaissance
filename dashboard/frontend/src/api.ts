@@ -171,4 +171,11 @@ export const api = {
   // Audit
   auditSummary: (hours = 24) => get<Record<string, unknown>>(`/api/audit/summary?hours=${hours}`),
   auditRecent: (limit = 50) => get<Record<string, unknown>[]>(`/api/audit/recent?limit=${limit}`),
+
+  // Breakout Strategy (separate $2K wallet)
+  bsOverview: () => get<Record<string, unknown>>('/api/breakout-strategy/overview'),
+  bsPositions: () => get<Record<string, unknown>>('/api/breakout-strategy/positions'),
+  bsHistory: (limit = 50) => get<Record<string, unknown>>(`/api/breakout-strategy/history?limit=${limit}`),
+  bsWallet: (limit = 50) => get<Record<string, unknown>>(`/api/breakout-strategy/wallet?limit=${limit}`),
+  bsStats: () => get<Record<string, unknown>>('/api/breakout-strategy/stats'),
 };

@@ -54,6 +54,12 @@ from genetic_optimizer import GeneticWeightOptimizer
 from cross_asset_engine import CrossAssetCorrelationEngine
 from whale_activity_monitor import WhaleActivityMonitor
 from breakout_scanner import BreakoutScanner, BreakoutSignal
+try:
+    from breakout_strategy import BreakoutStrategy
+    BREAKOUT_STRATEGY_AVAILABLE = True
+except ImportError as _bs_err:
+    BREAKOUT_STRATEGY_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"Breakout Strategy import failed: {_bs_err}")
 from polymarket_bridge import PolymarketBridge
 from polymarket_scanner import PolymarketScanner
 try:
@@ -823,6 +829,18 @@ class RenaissanceTradingBot:
         )
         self.scanner_enabled = scanner_cfg.get("enabled", True)
         self._breakout_scores: Dict[str, BreakoutSignal] = {}  # Current cycle's breakout signals
+
+        # Initialize Breakout Strategy — separate $2K wallet for parabolic bets
+        self.breakout_strategy = None
+        if BREAKOUT_STRATEGY_AVAILABLE:
+            try:
+                _bst_db = db_cfg.get("path", "data/renaissance_bot.db")
+                _bst_cfg = self.config.get("breakout_strategy", {})
+                self.breakout_strategy = BreakoutStrategy(
+                    db_path=_bst_db, config=_bst_cfg, logger=self.logger,
+                )
+            except Exception as _bst_err:
+                self.logger.warning(f"Breakout Strategy init failed: {_bst_err}")
 
         # Initialize Polymarket Bridge — converts ML signals to binary bet signals
         poly_cfg = self.config.get("polymarket_bridge", {})
@@ -3208,6 +3226,24 @@ class RenaissanceTradingBot:
                     _bo_conn.close()
                 except Exception as _be:
                     self.logger.debug(f"Breakout DB persist error: {_be}")
+
+                # ── Run Breakout Strategy on signals ──
+                if self.breakout_strategy and breakout_signals:
+                    try:
+                        _bst_prices = {s.product_id: s.price for s in breakout_signals}
+                        # Merge with any cached prices from the main pipeline
+                        if hasattr(self, '_last_prices') and self._last_prices:
+                            _bst_prices.update(self._last_prices)
+                        bst_result = self.breakout_strategy.execute_cycle(
+                            breakout_signals, _bst_prices,
+                        )
+                        if bst_result.get("entries") or bst_result.get("exits"):
+                            self.logger.info(
+                                f"BREAKOUT STRATEGY: {len(bst_result.get('entries', []))} entries, "
+                                f"{len(bst_result.get('exits', []))} exits"
+                            )
+                    except Exception as _bst_err:
+                        self.logger.warning(f"Breakout strategy cycle error: {_bst_err}")
 
             else:
                 # Fallback to tiered scanning if breakout scanner disabled
