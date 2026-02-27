@@ -169,47 +169,32 @@ async def improvements(request: Request, limit: int = Query(50, le=200)):
     db = request.app.state.dashboard_config.db_path
     try:
         conn = _conn(db)
-        # Ensure table exists
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS improvement_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT DEFAULT (datetime('now')),
-                category TEXT,
-                title TEXT,
-                description TEXT,
-                impact TEXT,
-                status TEXT DEFAULT 'deployed'
-            )
-        """)
         rows = conn.execute(
             "SELECT * FROM improvement_log ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         if not rows:
-            # Seed with actual changes made to the system
-            seed_improvements = [
-                ("2026-02-27", "risk", "Stop loss for Polymarket",
-                 "Added 40% stop loss + never-add-to-losers gate", "Prevents runaway losses", "deployed"),
-                ("2026-02-27", "model", "Disabled 3 worst ML models",
-                 "Removed BiLSTM, DilatedCNN, GRU from ensemble — kept QT, CNN, LightGBM, Meta",
-                 "Reduced noise, improved signal quality", "deployed"),
-                ("2026-02-26", "strategy", "Strategy A v3",
-                 "Confidence-gated entry with aggressive thresholds, active position management",
-                 "First real Polymarket trades", "deployed"),
-                ("2026-02-26", "strategy", "Breakout strategy",
-                 "$2K breakout scanner with separate wallet and dashboard tab",
-                 "New revenue stream", "deployed"),
-                ("2026-02-22", "infra", "Expanded universe v2",
-                 "Dynamic pair discovery from Binance, 70-90 pairs, 4-tier scanning",
-                 "10x more trading opportunities", "deployed"),
-                ("2026-02-25", "infra", "Cross-exchange realistic fills",
-                 "Withdrawal fees, taker penalty, adverse move modeling",
-                 "Eliminated phantom P&L", "deployed"),
+            # Seed with actual changes — use existing schema columns
+            # Schema: id, timestamp, proposal_id, change_type, description,
+            #         metric_before, metric_after, config_snapshot, reverted
+            seed = [
+                ("2026-02-27", None, "risk", "Stop loss (40%) + never-add-to-losers gate for Polymarket Strategy A",
+                 "no stop loss", "40% stop loss active", None, 0),
+                ("2026-02-27", None, "model", "Disabled BiLSTM, DilatedCNN, GRU — kept QT, CNN, LightGBM, Meta",
+                 "7 models (noisy)", "4 models (clean)", None, 0),
+                ("2026-02-26", None, "strategy", "Strategy A v3 — confidence-gated entry with active management",
+                 "no Polymarket trading", "live Polymarket trades", None, 0),
+                ("2026-02-26", None, "strategy", "$2K breakout scanner with separate wallet and dashboard",
+                 "no breakout strategy", "breakout strategy live", None, 0),
+                ("2026-02-22", None, "infra", "Expanded universe v2 — dynamic Binance pairs, 70-90 assets, 4-tier scan",
+                 "3 pairs", "70-90 pairs", None, 0),
+                ("2026-02-25", None, "infra", "Cross-exchange realistic fills — withdrawal fees, taker penalty, adverse moves",
+                 "phantom P&L", "realistic P&L", None, 0),
             ]
-            for ts, cat, title, desc, impact, status in seed_improvements:
+            for ts, pid, ct, desc, mb, ma, cs, rev in seed:
                 conn.execute(
-                    "INSERT INTO improvement_log (timestamp, category, title, description, impact, status) VALUES (?,?,?,?,?,?)",
-                    (ts, cat, title, desc, impact, status),
+                    "INSERT INTO improvement_log (timestamp, proposal_id, change_type, description, metric_before, metric_after, config_snapshot, reverted) VALUES (?,?,?,?,?,?,?,?)",
+                    (ts, pid, ct, desc, mb, ma, cs, rev),
                 )
             conn.commit()
             rows = conn.execute(
@@ -254,45 +239,33 @@ async def model_ledger(request: Request, limit: int = Query(20, le=100)):
     db = request.app.state.dashboard_config.db_path
     try:
         conn = _conn(db)
-        # Ensure table exists
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS model_ledger (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                version TEXT,
-                status TEXT DEFAULT 'active',
-                file_path TEXT,
-                created_at TEXT DEFAULT (datetime('now')),
-                accuracy REAL,
-                notes TEXT
-            )
-        """)
+        # Schema: id, timestamp, model_name, model_version, accuracy, sharpe,
+        #         max_drawdown, file_path, file_hash, status, replaced_by
         rows = conn.execute(
             "SELECT * FROM model_ledger ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         if not rows:
-            # Seed with current active models
-            seed_models = [
-                ("quantum_transformer", "v7-retrain", "active",
-                 "models/trained/quantum_transformer.pth", None, "Primary directional model"),
-                ("cnn", "v7-retrain", "active",
-                 "models/trained/cnn_model.pth", None, "Convolutional pattern detector"),
-                ("lightgbm", "v7-retrain", "active",
-                 "models/trained/lightgbm_model.pkl", None, "Gradient boosting on tabular features"),
-                ("meta_ensemble", "v7-retrain", "active",
-                 "models/trained/meta_ensemble.pth", None, "Stacking ensemble of base models"),
-                ("bilstm", "v7-retrain", "disabled",
-                 "models/trained/bilstm_model.pth", None, "Disabled — poor signal quality"),
-                ("dilated_cnn", "v7-retrain", "disabled",
-                 "models/trained/dilated_cnn_model.pth", None, "Disabled — poor signal quality"),
-                ("gru", "v7-retrain", "disabled",
-                 "models/trained/gru_model.pth", None, "Disabled — poor signal quality"),
+            seed = [
+                ("quantum_transformer", "v7-retrain", None, None, None,
+                 "models/trained/quantum_transformer.pth", None, "active", None),
+                ("cnn", "v7-retrain", None, None, None,
+                 "models/trained/cnn_model.pth", None, "active", None),
+                ("lightgbm", "v7-retrain", None, None, None,
+                 "models/trained/lightgbm_model.pkl", None, "active", None),
+                ("meta_ensemble", "v7-retrain", None, None, None,
+                 "models/trained/meta_ensemble.pth", None, "active", None),
+                ("bilstm", "v7-retrain", None, None, None,
+                 "models/trained/bilstm_model.pth", None, "disabled", None),
+                ("dilated_cnn", "v7-retrain", None, None, None,
+                 "models/trained/dilated_cnn_model.pth", None, "disabled", None),
+                ("gru", "v7-retrain", None, None, None,
+                 "models/trained/gru_model.pth", None, "disabled", None),
             ]
-            for name, ver, status, path, acc, notes in seed_models:
+            for mn, mv, acc, sh, md, fp, fh, st, rb in seed:
                 conn.execute(
-                    "INSERT INTO model_ledger (name, version, status, file_path, accuracy, notes) VALUES (?,?,?,?,?,?)",
-                    (name, ver, status, path, acc, notes),
+                    "INSERT INTO model_ledger (model_name, model_version, accuracy, sharpe, max_drawdown, file_path, file_hash, status, replaced_by) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (mn, mv, acc, sh, md, fp, fh, st, rb),
                 )
             conn.commit()
             rows = conn.execute(
