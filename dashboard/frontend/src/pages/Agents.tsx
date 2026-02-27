@@ -52,8 +52,8 @@ interface ImprovementEntry {
   timestamp: string;
   change_type: string;
   description: string;
-  metric_before?: number;
-  metric_after?: number;
+  metric_before?: string | number | null;
+  metric_after?: string | number | null;
   metric_name?: string;
   proposal_id?: number;
   [key: string]: unknown;
@@ -99,11 +99,11 @@ interface ResearcherInfo {
 
 interface AuditRow {
   timestamp?: string;
-  pair?: string;
-  action?: string;
-  blocked_by_gate?: string;
+  product_id?: string;
+  final_action?: string;
+  blocked_by?: string;
   regime_label?: string;
-  confidence?: number;
+  final_confidence?: number;
   weighted_signal?: number;
   [key: string]: unknown;
 }
@@ -127,12 +127,20 @@ const CHANGE_TYPE_COLORS: Record<string, string> = {
   parameter_tune: 'border-accent-green text-accent-green',
   modify_existing: 'border-accent-blue text-accent-blue',
   new_feature: 'border-purple-400 text-purple-400',
+  risk: 'border-accent-red text-accent-red',
+  model: 'border-cyan-400 text-cyan-400',
+  strategy: 'border-accent-yellow text-accent-yellow',
+  infra: 'border-accent-blue text-accent-blue',
 };
 
 const CHANGE_TYPE_BG: Record<string, string> = {
   parameter_tune: 'bg-accent-green/10',
   modify_existing: 'bg-accent-blue/10',
   new_feature: 'bg-purple-400/10',
+  risk: 'bg-accent-red/10',
+  model: 'bg-cyan-400/10',
+  strategy: 'bg-accent-yellow/10',
+  infra: 'bg-accent-blue/10',
 };
 
 const RESEARCHER_LABELS: Record<string, { color: string; short: string }> = {
@@ -546,12 +554,8 @@ export default function Agents() {
                     <div className="flex items-center gap-2 mb-0.5">
                       <span
                         className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                          imp.change_type === 'parameter_tune'
-                            ? 'bg-accent-green/20 text-accent-green'
-                            : imp.change_type === 'modify_existing'
-                            ? 'bg-accent-blue/20 text-accent-blue'
-                            : imp.change_type === 'new_feature'
-                            ? 'bg-purple-400/20 text-purple-400'
+                          CHANGE_TYPE_BG[imp.change_type]
+                            ? `${CHANGE_TYPE_BG[imp.change_type]} ${CHANGE_TYPE_COLORS[imp.change_type]?.split(' ')[1] || 'text-gray-400'}`
                             : 'bg-gray-600 text-gray-400'
                         }`}
                       >
@@ -561,25 +565,19 @@ export default function Agents() {
                     <div className="text-gray-300 mt-0.5">{imp.description}</div>
                   </div>
                   {(imp.metric_before != null || imp.metric_after != null) && (
-                    <div className="shrink-0 text-right">
+                    <div className="shrink-0 text-right max-w-[200px]">
                       <div className="text-gray-500">{imp.metric_name || 'metric'}</div>
-                      <div className="font-mono">
+                      <div className="font-mono text-[10px]">
                         <span className="text-gray-500">
-                          {imp.metric_before != null ? imp.metric_before.toFixed(3) : '?'}
+                          {imp.metric_before != null
+                            ? typeof imp.metric_before === 'number' ? imp.metric_before.toFixed(3) : String(imp.metric_before)
+                            : '?'}
                         </span>
                         <span className="text-gray-600 mx-1">&rarr;</span>
-                        <span
-                          className={
-                            imp.metric_after != null && imp.metric_before != null
-                              ? imp.metric_after > imp.metric_before
-                                ? 'text-accent-green'
-                                : imp.metric_after < imp.metric_before
-                                ? 'text-accent-red'
-                                : 'text-gray-400'
-                              : 'text-gray-400'
-                          }
-                        >
-                          {imp.metric_after != null ? imp.metric_after.toFixed(3) : '?'}
+                        <span className="text-accent-green">
+                          {imp.metric_after != null
+                            ? typeof imp.metric_after === 'number' ? imp.metric_after.toFixed(3) : String(imp.metric_after)
+                            : '?'}
                         </span>
                       </div>
                     </div>
@@ -978,23 +976,23 @@ export default function Agents() {
                               <td className="py-1.5 pr-2 text-gray-500 font-mono">
                                 {row.timestamp ? new Date(row.timestamp).toLocaleTimeString() : '--'}
                               </td>
-                              <td className="py-1.5 pr-2 text-gray-300">{row.pair ?? '--'}</td>
+                              <td className="py-1.5 pr-2 text-gray-300">{row.product_id ?? '--'}</td>
                               <td className={`py-1.5 pr-2 font-medium ${
-                                row.action === 'BUY' ? 'text-accent-green'
-                                  : row.action === 'SELL' ? 'text-accent-red'
+                                row.final_action === 'BUY' ? 'text-accent-green'
+                                  : row.final_action === 'SELL' ? 'text-accent-red'
                                   : 'text-gray-500'
                               }`}>
-                                {row.action ?? '--'}
+                                {row.final_action ?? '--'}
                               </td>
                               <td className="py-1.5 pr-2 text-gray-500">
-                                {row.blocked_by_gate
-                                  ? <span className="text-accent-red">{String(row.blocked_by_gate).replace('gate_', '')}</span>
+                                {row.blocked_by
+                                  ? <span className="text-accent-red">{String(row.blocked_by)}</span>
                                   : <span className="text-accent-green">--</span>
                                 }
                               </td>
                               <td className="py-1.5 pr-2 text-gray-400">{row.regime_label ?? '--'}</td>
                               <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
-                                {row.confidence != null ? (row.confidence as number).toFixed(2) : '--'}
+                                {row.final_confidence != null ? (row.final_confidence as number).toFixed(2) : '--'}
                               </td>
                               <td className="py-1.5 text-right font-mono text-gray-400">
                                 {row.weighted_signal != null ? (row.weighted_signal as number).toFixed(4) : '--'}
