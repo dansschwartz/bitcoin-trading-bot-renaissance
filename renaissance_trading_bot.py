@@ -3574,7 +3574,7 @@ class RenaissanceTradingBot:
 
                 # 2.0b Breakout Scanner signal injection
                 _bo_sig = self._breakout_scores.get(product_id)
-                if _bo_sig and _bo_sig.breakout_score >= 40:
+                if _bo_sig and _bo_sig.breakout_score >= 25:
                     # Normalize to -1 to +1 range
                     _bo_norm = _bo_sig.breakout_score / 100.0
                     if _bo_sig.direction == 'bearish':

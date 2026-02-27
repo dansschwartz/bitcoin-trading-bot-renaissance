@@ -79,7 +79,8 @@
         "garch_vol": 0.045,
         "multi_exchange": 0.028,
         "ml_ensemble": 0.20,
-        "ml_cnn": 0.0
+        "ml_cnn": 0.0,
+        "breakout": 0.08
     },
     "weight_lock": true,
     "mean_reversion": {
