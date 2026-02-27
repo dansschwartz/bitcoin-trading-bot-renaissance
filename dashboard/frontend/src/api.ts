@@ -113,7 +113,19 @@ export const api = {
     get<Record<string, unknown>>(`/api/breakout/history?hours=${hours}&limit=${limit}`),
   breakoutHeatmap: () => get<Record<string, unknown>>('/api/breakout/heatmap'),
 
-  // Polymarket
+  // Polymarket v2
+  pmOverview: () => get<Record<string, unknown>>('/api/polymarket/overview'),
+  pmPositions: (status?: string, limit = 100) => {
+    let path = `/api/polymarket/positions?limit=${limit}`;
+    if (status) path += `&status=${status}`;
+    return get<Record<string, unknown>>(path);
+  },
+  pmHistory: (limit = 100, asset?: string) =>
+    get<Record<string, unknown>>(`/api/polymarket/history?limit=${limit}${asset ? `&asset=${asset}` : ''}`),
+  pmInstruments: () => get<Record<string, unknown>>('/api/polymarket/instruments'),
+  pmStats: () => get<Record<string, unknown>>('/api/polymarket/stats'),
+
+  // Polymarket legacy (kept for backward compat)
   polymarketSummary: () => get<Record<string, unknown>>('/api/polymarket/summary'),
   polymarketEdges: (minEdge = 0, limit = 50) =>
     get<Record<string, unknown>>(`/api/polymarket/edges?min_edge=${minEdge}&limit=${limit}`),
@@ -124,9 +136,6 @@ export const api = {
     return get<Record<string, unknown>>(path);
   },
   polymarketSignal: () => get<Record<string, unknown>>('/api/polymarket/signal'),
-  polymarketHistory: (hours = 24, asset?: string) =>
-    get<Record<string, unknown>>(`/api/polymarket/history?hours=${hours}${asset ? `&asset=${asset}` : ''}`),
-  polymarketStats: () => get<Record<string, unknown>>('/api/polymarket/stats'),
   polymarketPositions: (status?: string, limit = 100) => {
     let path = `/api/polymarket/positions?limit=${limit}`;
     if (status) path += `&status=${status}`;
