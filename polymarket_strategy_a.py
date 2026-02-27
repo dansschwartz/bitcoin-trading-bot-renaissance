@@ -726,6 +726,7 @@ class StrategyAExecutor:
             current_regime: regime detector label
         """
         if not self.enabled:
+            self.logger.info("Strategy A: disabled, skipping cycle")
             return
 
         # Reset hourly counters
@@ -733,6 +734,12 @@ class StrategyAExecutor:
         if now - self.hourly_reset > 3600:
             self.hourly_bets = {}
             self.hourly_reset = now
+
+        self.logger.info(
+            f"Strategy A cycle: regime={current_regime}, "
+            f"prices={len(current_prices)}, ml={len(ml_predictions)}, "
+            f"trackers={len(self.trackers)}"
+        )
 
         # Check resolution of open positions
         self._check_resolutions(current_prices)
@@ -752,7 +759,7 @@ class StrategyAExecutor:
 
             # Skip if regime is excluded
             if current_regime in inst.skip_regimes:
-                self.logger.debug(f"[{inst.asset}] Skipping: regime '{current_regime}' excluded")
+                self.logger.info(f"[{inst.asset}] Skipping: regime '{current_regime}' excluded")
                 continue
 
             # ═══════════════════════════════════════════════════════
@@ -787,6 +794,7 @@ class StrategyAExecutor:
                     markets_to_process.append(_cur_market)
 
             if not markets_to_process:
+                self.logger.info(f"[{inst.asset}] No markets found (0 trackers, discovery failed)")
                 continue
 
             # Process each market (active trackers + current discovery)
