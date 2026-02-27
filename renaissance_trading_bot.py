@@ -4651,6 +4651,33 @@ class RenaissanceTradingBot:
             if self.polymarket_executor:
                 try:
                     _sa_prices = dict(self._last_prices) if hasattr(self, '_last_prices') else {}
+
+                    # Fetch fresh Binance prices for Strategy A instruments.
+                    # _last_prices is often empty on first cycles because the stale-data
+                    # gate (>60s) skips pairs when preloading takes 20+ min.
+                    _sa_needed = {"BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT",
+                                  "SOL-USD": "SOLUSDT", "XRP-USD": "XRPUSDT"}
+                    _sa_missing = [k for k in _sa_needed if k not in _sa_prices or _sa_prices[k] <= 0]
+                    if _sa_missing:
+                        try:
+                            import requests as _sa_req
+                            _sa_resp = _sa_req.get(
+                                "https://api.binance.com/api/v3/ticker/price",
+                                timeout=5,
+                            )
+                            if _sa_resp.status_code == 200:
+                                _sa_tickers = {t['symbol']: float(t['price'])
+                                               for t in _sa_resp.json()}
+                                for _pair, _sym in _sa_needed.items():
+                                    _px = _sa_tickers.get(_sym, 0)
+                                    if _px > 0:
+                                        _sa_prices[_pair] = _px
+                                self.logger.info(
+                                    f"Strategy A: fetched {len(_sa_missing)} fresh prices from Binance"
+                                )
+                        except Exception as _fp_err:
+                            self.logger.debug(f"Strategy A fresh price fetch failed: {_fp_err}")
+
                     _sa_regime = "unknown"
                     if self.regime_overlay and self.regime_overlay.enabled:
                         _sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
