@@ -113,7 +113,7 @@ export const api = {
     get<Record<string, unknown>>(`/api/breakout/history?hours=${hours}&limit=${limit}`),
   breakoutHeatmap: () => get<Record<string, unknown>>('/api/breakout/heatmap'),
 
-  // Polymarket v2
+  // Polymarket v3
   pmOverview: () => get<Record<string, unknown>>('/api/polymarket/overview'),
   pmPositions: (status?: string, limit = 100) => {
     let path = `/api/polymarket/positions?limit=${limit}`;
@@ -124,28 +124,9 @@ export const api = {
     get<Record<string, unknown>>(`/api/polymarket/history?limit=${limit}${asset ? `&asset=${asset}` : ''}`),
   pmInstruments: () => get<Record<string, unknown>>('/api/polymarket/instruments'),
   pmStats: () => get<Record<string, unknown>>('/api/polymarket/stats'),
-
-  // Polymarket legacy (kept for backward compat)
-  polymarketSummary: () => get<Record<string, unknown>>('/api/polymarket/summary'),
-  polymarketEdges: (minEdge = 0, limit = 50) =>
-    get<Record<string, unknown>>(`/api/polymarket/edges?min_edge=${minEdge}&limit=${limit}`),
-  polymarketMarkets: (marketType?: string, asset?: string, limit = 100) => {
-    let path = `/api/polymarket/markets?limit=${limit}`;
-    if (marketType) path += `&market_type=${marketType}`;
-    if (asset) path += `&asset=${asset}`;
-    return get<Record<string, unknown>>(path);
-  },
-  polymarketSignal: () => get<Record<string, unknown>>('/api/polymarket/signal'),
-  polymarketPositions: (status?: string, limit = 100) => {
-    let path = `/api/polymarket/positions?limit=${limit}`;
-    if (status) path += `&status=${status}`;
-    return get<Record<string, unknown>>(path);
-  },
-  polymarketPnl: () => get<Record<string, unknown>>('/api/polymarket/pnl'),
-  polymarketExecutor: () => get<Record<string, unknown>>('/api/polymarket/executor'),
-  polymarketInstruments: () => get<Record<string, unknown>>('/api/polymarket/instruments'),
-  polymarketLifecycle: (limit = 50) => get<Record<string, unknown>>(`/api/polymarket/lifecycle?limit=${limit}`),
-  polymarketLifecycleStats: () => get<Record<string, unknown>>('/api/polymarket/lifecycle/stats'),
+  pmLiveMarkets: () => get<Record<string, unknown>>('/api/polymarket/live-markets'),
+  pmCalibration: () => get<Record<string, unknown>>('/api/polymarket/calibration'),
+  pmSkipLog: (limit = 20) => get<Record<string, unknown>>(`/api/polymarket/skip-log?limit=${limit}`),
 
   // Devil Tracker
   devilSummary: (hours = 24) => get<Record<string, unknown>>(`/api/devil/summary?hours=${hours}`),

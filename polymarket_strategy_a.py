@@ -1,13 +1,15 @@
 """
-Polymarket Strategy A v2: Confidence-Gated Entry with Active Management
+Polymarket Strategy A v3: Confidence-Gated Entry with Active Management
 
 Simple rules:
-  1. ML confidence >= 90% AND token cost <= $0.40 → BUY
-  2. Every cycle, check open positions:
-     - ML flips direction with >= 85% confidence → SELL
-     - ML confidence drops below 60% → SELL
-     - Same direction, confidence >= 95%, < 2 positions on market → ADD $15
-     - Otherwise → HOLD
+  1. ML confidence >= 85% AND token cost <= $0.45 -> BUY $50
+  2. Every cycle, manage open bets:
+     - ML flips direction -> SELL immediately
+     - ML confidence drops below 70% -> SELL
+     - ML confidence >= 85% + token <= $0.45 + under $150 cap -> ADD $50
+     - Otherwise -> HOLD
+  3. Rate limit: max 6 bets per hour
+  4. Cooldown: 5 min after any loss
 
 Market Discovery:
   Rolling 15m direction markets via slug pattern: {asset}-updown-15m-{unix_timestamp}
@@ -32,7 +34,7 @@ GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 MARKET_CACHE_TTL = 120  # seconds
 
 
-# ─── Instrument Config ─────────────────────────────────────────────
+# --- Instrument Config ---
 
 @dataclass
 class InstrumentConfig:
@@ -41,15 +43,14 @@ class InstrumentConfig:
     price_pair: str
     slug_pattern: str
     enabled: bool = True
-    lead_asset: Optional[str] = None
 
 
 INSTRUMENTS: Dict[str, InstrumentConfig] = {
     "btc_15m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-15m-{ts}"),
-    "eth_15m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-15m-{ts}", lead_asset="BTC"),
-    "sol_15m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-15m-{ts}", lead_asset="BTC"),
+    "eth_15m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-15m-{ts}"),
+    "sol_15m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-15m-{ts}"),
     "doge_15m": InstrumentConfig("DOGE", "DOGE-USD", "DOGE-USD", "doge-updown-15m-{ts}", enabled=False),
-    "xrp_15m": InstrumentConfig("XRP", "BTC-USD", "XRP-USD", "xrp-updown-15m-{ts}", lead_asset="BTC"),
+    "xrp_15m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-15m-{ts}"),
 }
 
 
@@ -58,26 +59,27 @@ def build_instruments() -> Dict[str, InstrumentConfig]:
     return INSTRUMENTS
 
 
-# ─── Strategy A Executor ────────────────────────────────────────────
+# --- Strategy A Executor ---
 
 class StrategyAExecutor:
     """
-    v2: Simple confidence-gated entry with active position management.
+    v3: Confidence-gated entry with active position management.
 
-    Entry:  ML confidence >= 90% AND token cost <= $0.40
-    Sell:   ML flips (>=85% conf) OR confidence < 60%
-    Add:    Same direction, >=95% conf, <2 positions on same market
+    Entry:  ML confidence >= 85% AND token cost <= $0.45
+    Sell:   ML flips direction OR confidence < 70%
+    Add:    Same direction, >= 85% conf, token <= $0.45, < $150 total
+    Limits: 6 bets/hour, 5 min cooldown after loss
     """
 
-    # Configurable thresholds
-    ENTRY_CONFIDENCE = 90.0
-    MAX_TOKEN_COST = 0.40
-    BET_AMOUNT = 25.0
-    ADD_AMOUNT = 15.0
-    SELL_FLIP_CONFIDENCE = 85.0
-    SELL_LOW_CONFIDENCE = 60.0
-    ADD_CONFIDENCE = 95.0
-    MAX_POSITIONS_PER_MARKET = 2
+    # Thresholds
+    CONFIDENCE_THRESHOLD = 85.0
+    MAX_TOKEN_COST = 0.45
+    BET_AMOUNT = 50.0
+    EXIT_CONFIDENCE = 70.0
+    ADD_CONFIDENCE = 85.0
+    MAX_POSITION_PER_MARKET = 150.0  # dollar cap
+    MAX_BETS_PER_HOUR = 6
+    COOLDOWN_AFTER_LOSS = 300  # 5 min in seconds
 
     def __init__(self, config: dict, db_path: str, logger: Optional[logging.Logger] = None):
         self.config = config
@@ -90,37 +92,76 @@ class StrategyAExecutor:
 
         self.instruments = INSTRUMENTS
         enabled = [k for k, v in self.instruments.items() if v.enabled]
-        self.logger.info(f"Strategy A v2: {len(enabled)} instruments enabled: {enabled}")
+        self.logger.info(f"Strategy A v3: {len(enabled)} instruments enabled: {enabled}")
 
         self.bankroll = self.initial_bankroll
         self._market_cache: Dict[str, Tuple[dict, float]] = {}
 
+        # Rate limiting & cooldown state
+        self._bets_this_hour: List[float] = []
+        self._last_loss_time: float = 0.0
+
         self._ensure_tables()
         self._load_bankroll()
 
-    # ── Database Setup ──────────────────────────────────────────────
+    # -- Database Setup --
 
     def _ensure_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)
+
+        # Migrate old polymarket_bets (activity log with 'action' column) -> legacy
+        cols = []
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(polymarket_bets)").fetchall()]
+        except Exception:
+            pass
+
+        if cols and "action" in cols and "entry_side" not in cols:
+            self.logger.info("Migrating old polymarket_bets -> polymarket_bets_legacy")
+            conn.execute("ALTER TABLE polymarket_bets RENAME TO polymarket_bets_legacy")
+            conn.commit()
+
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS polymarket_bets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                entry_side TEXT NOT NULL,
+                entry_token_cost REAL NOT NULL,
+                entry_amount REAL NOT NULL,
+                entry_tokens REAL NOT NULL,
+                entry_confidence REAL NOT NULL,
+                adds TEXT DEFAULT '[]',
+                total_invested REAL NOT NULL,
+                total_tokens REAL NOT NULL,
+                avg_cost REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                exit_price REAL,
+                exit_reason TEXT,
+                exit_at TEXT,
+                pnl REAL,
+                return_pct REAL,
+                regime TEXT,
+                entry_asset_price REAL,
+                exit_asset_price REAL,
+                opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+                question TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_pb3_status ON polymarket_bets(status);
+            CREATE INDEX IF NOT EXISTS idx_pb3_asset ON polymarket_bets(asset);
+
+            CREATE TABLE IF NOT EXISTS polymarket_skip_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL DEFAULT (datetime('now')),
                 asset TEXT NOT NULL,
-                market_slug TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                action TEXT NOT NULL,
+                slug TEXT,
+                reason TEXT NOT NULL,
                 ml_confidence REAL,
                 token_cost REAL,
-                amount_usd REAL,
-                outcome TEXT,
-                pnl_usd REAL,
-                resolved_at TEXT,
-                position_id TEXT,
-                notes TEXT
+                ml_direction TEXT,
+                minutes_left REAL
             );
-            CREATE INDEX IF NOT EXISTS idx_pb_asset ON polymarket_bets(asset);
-            CREATE INDEX IF NOT EXISTS idx_pb_action ON polymarket_bets(action);
+            CREATE INDEX IF NOT EXISTS idx_psl_ts ON polymarket_skip_log(timestamp);
 
             CREATE TABLE IF NOT EXISTS polymarket_positions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,11 +206,15 @@ class StrategyAExecutor:
         """)
         conn.commit()
 
-        # Migrate: add 'strategy' column if missing
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(polymarket_positions)").fetchall()]
-        if "strategy" not in cols:
+        # Migrate: add 'strategy' column if missing on polymarket_positions
+        pos_cols = [r[1] for r in conn.execute("PRAGMA table_info(polymarket_positions)").fetchall()]
+        if "strategy" not in pos_cols:
             conn.execute("ALTER TABLE polymarket_positions ADD COLUMN strategy TEXT DEFAULT 'legacy'")
             conn.commit()
+
+        # Prune skip log entries older than 7 days
+        conn.execute("DELETE FROM polymarket_skip_log WHERE timestamp < datetime('now', '-7 days')")
+        conn.commit()
 
         conn.close()
 
@@ -192,20 +237,36 @@ class StrategyAExecutor:
         conn.commit()
         conn.close()
 
-    def _log_bet(self, asset: str, slug: str, direction: str, action: str,
-                 ml_confidence: float, token_cost: float, amount: float,
-                 position_id: Optional[str] = None, notes: str = "") -> None:
+    def _log_skip(self, asset: str, slug: Optional[str], reason: str,
+                  ml_confidence: float = 0, token_cost: float = 0,
+                  ml_direction: str = "", minutes_left: float = 0) -> None:
+        """Write to polymarket_skip_log table."""
         conn = sqlite3.connect(self.db_path)
         conn.execute(
-            "INSERT INTO polymarket_bets "
-            "(asset, market_slug, direction, action, ml_confidence, token_cost, amount_usd, position_id, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (asset, slug, direction, action, ml_confidence, token_cost, amount, position_id, notes),
+            "INSERT INTO polymarket_skip_log "
+            "(asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left),
         )
         conn.commit()
         conn.close()
 
-    # ── Main Cycle ──────────────────────────────────────────────────
+    # -- Rate Limiting & Cooldown --
+
+    def _check_rate_limit(self) -> bool:
+        """Return True if under rate limit (can bet)."""
+        now = time.time()
+        cutoff = now - 3600
+        self._bets_this_hour = [t for t in self._bets_this_hour if t > cutoff]
+        return len(self._bets_this_hour) < self.MAX_BETS_PER_HOUR
+
+    def _check_cooldown(self) -> bool:
+        """Return True if cooldown has passed (can bet)."""
+        if self._last_loss_time == 0:
+            return True
+        return (time.time() - self._last_loss_time) >= self.COOLDOWN_AFTER_LOSS
+
+    # -- Main Cycle --
 
     async def execute_cycle(
         self,
@@ -218,16 +279,18 @@ class StrategyAExecutor:
             return
 
         self.logger.info(
-            f"Strategy A v2 cycle: regime={current_regime}, "
+            f"Strategy A v3 cycle: regime={current_regime}, "
             f"prices={len(current_prices)}, ml={len(ml_predictions)}, "
             f"bankroll=${self.bankroll:.2f}"
         )
 
-        # 1. Check resolution + manage open positions
+        # 1. Check resolutions on old and new tables
         self._check_resolutions(current_prices)
+
+        # 2. Manage open bets (from new polymarket_bets table)
         self._manage_positions(ml_predictions, current_prices)
 
-        # 2. Look for new entry opportunities
+        # 3. Look for new entry opportunities
         for inst_key, inst in self.instruments.items():
             if not inst.enabled:
                 continue
@@ -246,234 +309,374 @@ class StrategyAExecutor:
             ml_conf = ml_data.get("confidence", 50.0)
             ml_pred = ml_data.get("prediction", 0)
             ml_direction = "UP" if ml_pred > 0 else "DOWN"
+            entry_side = "YES" if ml_direction == "UP" else "NO"
 
             # Token cost (crowd pricing)
             crowd_up = self._parse_crowd_up(market)
             token_cost = crowd_up if ml_direction == "UP" else (1.0 - crowd_up)
 
-            # Entry gate
-            if ml_conf < self.ENTRY_CONFIDENCE:
-                self._log_bet(inst.asset, slug, ml_direction, "SKIP",
-                              ml_conf, token_cost, 0,
-                              notes=f"conf {ml_conf:.0f}% < {self.ENTRY_CONFIDENCE}%")
+            # Gate: confidence
+            if ml_conf < self.CONFIDENCE_THRESHOLD:
+                self._log_skip(inst.asset, slug,
+                               f"conf {ml_conf:.0f}% < {self.CONFIDENCE_THRESHOLD}%",
+                               ml_conf, token_cost, ml_direction, minutes_left)
                 continue
 
+            # Gate: token cost
             if token_cost > self.MAX_TOKEN_COST:
-                self._log_bet(inst.asset, slug, ml_direction, "SKIP",
-                              ml_conf, token_cost, 0,
-                              notes=f"token ${token_cost:.2f} > ${self.MAX_TOKEN_COST}")
+                self._log_skip(inst.asset, slug,
+                               f"token ${token_cost:.2f} > ${self.MAX_TOKEN_COST}",
+                               ml_conf, token_cost, ml_direction, minutes_left)
                 continue
 
-            # Check existing positions on this slug
+            # Gate: rate limit
+            if not self._check_rate_limit():
+                self._log_skip(inst.asset, slug, "rate_limit",
+                               ml_conf, token_cost, ml_direction, minutes_left)
+                continue
+
+            # Gate: cooldown
+            if not self._check_cooldown():
+                remaining = self.COOLDOWN_AFTER_LOSS - (time.time() - self._last_loss_time)
+                self._log_skip(inst.asset, slug,
+                               f"cooldown {remaining:.0f}s remaining",
+                               ml_conf, token_cost, ml_direction, minutes_left)
+                continue
+
+            # Gate: not already positioned on this slug
             conn = sqlite3.connect(self.db_path)
             existing = conn.execute(
-                "SELECT COUNT(*) FROM polymarket_positions WHERE slug = ? AND status = 'open'",
+                "SELECT COUNT(*) FROM polymarket_bets WHERE slug = ? AND status = 'OPEN'",
                 (slug,)
             ).fetchone()[0]
             conn.close()
 
             if existing > 0:
-                continue  # Already have a position, management handles adds
+                continue  # Already have a bet, management handles adds
 
-            # Bankroll check
-            if self.bankroll < self.BET_AMOUNT:
-                self.logger.info(f"[{inst.asset}] Bankroll ${self.bankroll:.2f} < ${self.BET_AMOUNT}")
+            # Gate: max exposure check
+            conn = sqlite3.connect(self.db_path)
+            total_open = conn.execute(
+                "SELECT COALESCE(SUM(total_invested), 0) FROM polymarket_bets WHERE status = 'OPEN'"
+            ).fetchone()[0]
+            conn.close()
+            if total_open + self.BET_AMOUNT > self.bankroll * 0.8:
+                self._log_skip(inst.asset, slug, "max_exposure",
+                               ml_conf, token_cost, ml_direction, minutes_left)
                 continue
 
-            # Place bet
-            self._place_bet(inst_key, inst, market, ml_direction, token_cost, ml_conf)
+            # Gate: bankroll
+            if self.bankroll < self.BET_AMOUNT:
+                self._log_skip(inst.asset, slug,
+                               f"bankroll ${self.bankroll:.2f} < ${self.BET_AMOUNT}",
+                               ml_conf, token_cost, ml_direction, minutes_left)
+                continue
 
-    # ── Active Position Management ──────────────────────────────────
+            # Get asset price for recording
+            asset_price = current_prices.get(inst.price_pair, 0)
+
+            # Place bet
+            self._place_bet(inst, market, ml_direction, entry_side, token_cost,
+                            ml_conf, current_regime, asset_price)
+
+    # -- Active Position Management --
 
     def _manage_positions(self, ml_predictions: dict, current_prices: dict) -> None:
-        """Check open positions and apply sell/add/hold rules."""
+        """Check open bets and apply sell/add/hold rules."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        open_positions = conn.execute(
-            "SELECT * FROM polymarket_positions WHERE status = 'open' AND strategy = 'strategy_a'"
+        open_bets = conn.execute(
+            "SELECT * FROM polymarket_bets WHERE status = 'OPEN'"
         ).fetchall()
         conn.close()
 
-        for pos in open_positions:
-            asset = pos["asset"]
-            slug = pos["slug"]
-            direction = pos["direction"]
+        for bet in open_bets:
+            asset = bet["asset"]
+            slug = bet["slug"]
+            entry_side = bet["entry_side"]
+            direction = "UP" if entry_side == "YES" else "DOWN"
 
-            # Find instrument for this asset
+            # Find instrument
             inst = self._find_instrument(asset)
             if not inst:
                 continue
 
-            # Get current ML data
+            # Current ML data
             ml_data = ml_predictions.get(inst.ml_pair, {})
             ml_conf = ml_data.get("confidence", 50.0)
             ml_pred = ml_data.get("prediction", 0)
             ml_direction = "UP" if ml_pred > 0 else "DOWN"
 
-            # Rule 1: Sell on flip
-            if ml_direction != direction and ml_conf >= self.SELL_FLIP_CONFIDENCE:
+            # Rule 1: Direction flipped -> SELL immediately
+            if ml_direction != direction:
                 self.logger.info(
                     f"SELL FLIP [{asset}]: ML flipped to {ml_direction} "
                     f"({ml_conf:.0f}% conf) | Was {direction}"
                 )
-                self._close_position(pos, "sell_flip", current_prices)
-                self._log_bet(asset, slug, direction, "SELL", ml_conf, 0, pos["bet_amount"],
-                              pos["position_id"], f"flip to {ml_direction}")
+                self._close_bet(bet, "direction_flip", current_prices)
                 continue
 
-            # Rule 2: Sell on low confidence
-            if ml_conf < self.SELL_LOW_CONFIDENCE:
+            # Rule 2: Confidence below exit threshold -> SELL
+            if ml_conf < self.EXIT_CONFIDENCE:
                 self.logger.info(
                     f"SELL LOW CONF [{asset}]: ML confidence {ml_conf:.0f}% "
-                    f"< {self.SELL_LOW_CONFIDENCE}%"
+                    f"< {self.EXIT_CONFIDENCE}%"
                 )
-                self._close_position(pos, "sell_low_conf", current_prices)
-                self._log_bet(asset, slug, direction, "SELL", ml_conf, 0, pos["bet_amount"],
-                              pos["position_id"], f"low conf {ml_conf:.0f}%")
+                self._close_bet(bet, "low_confidence", current_prices)
                 continue
 
-            # Rule 3: Add to winner
-            if (ml_direction == direction
-                    and ml_conf >= self.ADD_CONFIDENCE
-                    and self.bankroll >= self.ADD_AMOUNT):
-                # Count positions on this slug
-                conn2 = sqlite3.connect(self.db_path)
-                count = conn2.execute(
-                    "SELECT COUNT(*) FROM polymarket_positions WHERE slug = ? AND status = 'open'",
-                    (slug,)
-                ).fetchone()[0]
-                conn2.close()
+            # Rule 3: Add to position if confident and under cap
+            if (ml_conf >= self.ADD_CONFIDENCE
+                    and bet["total_invested"] < self.MAX_POSITION_PER_MARKET
+                    and self.bankroll >= self.BET_AMOUNT):
+                # Fetch current market for token cost
+                market = self._fetch_market_by_slug(slug)
+                if market:
+                    crowd_up = self._parse_crowd_up(market)
+                    token_cost = crowd_up if direction == "UP" else (1.0 - crowd_up)
+                    if token_cost <= self.MAX_TOKEN_COST and self._check_rate_limit():
+                        self._add_to_bet(bet, token_cost, ml_conf)
 
-                if count < self.MAX_POSITIONS_PER_MARKET:
-                    # Fetch market for token cost
-                    market = self._fetch_market_by_slug(slug)
-                    if market:
-                        crowd_up = self._parse_crowd_up(market)
-                        token_cost = crowd_up if direction == "UP" else (1.0 - crowd_up)
-                        if token_cost <= self.MAX_TOKEN_COST:
-                            inst_key = self._find_instrument_key(asset)
-                            self._place_add(inst_key or "", inst, market, direction,
-                                            token_cost, ml_conf, pos["position_id"])
-                            self._log_bet(asset, slug, direction, "ADD", ml_conf,
-                                          token_cost, self.ADD_AMOUNT,
-                                          pos["position_id"], f"adding to winner")
+            # Rule 4: Hold (implicit - do nothing)
 
-            # Rule 4: Hold (do nothing, just log)
-
-    def _close_position(self, pos, reason: str, current_prices: dict) -> None:
-        """Close a position early (sell on flip or low confidence)."""
-        # Estimate current value from market
-        market = self._fetch_market_by_slug(pos["slug"])
-        exit_price = pos["entry_price"]  # Default to break-even
+    def _close_bet(self, bet, reason: str, current_prices: dict) -> None:
+        """Close an open bet (active sell)."""
+        market = self._fetch_market_by_slug(bet["slug"])
+        exit_price = bet["avg_cost"]  # default to break-even
         if market:
             crowd_up = self._parse_crowd_up(market)
-            exit_price = crowd_up if pos["direction"] == "UP" else (1.0 - crowd_up)
+            direction = "UP" if bet["entry_side"] == "YES" else "DOWN"
+            exit_price = crowd_up if direction == "UP" else (1.0 - crowd_up)
 
-        pnl = round((exit_price - pos["entry_price"]) * pos["shares"], 2)
-        status = "sold"
+        pnl = round((exit_price - bet["avg_cost"]) * bet["total_tokens"], 2)
+        return_pct = round(pnl / bet["total_invested"] * 100, 2) if bet["total_invested"] > 0 else 0
 
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
-            UPDATE polymarket_positions
-            SET status = ?, exit_price = ?, pnl = ?, closed_at = datetime('now'),
-                notes = COALESCE(notes, '') || ' | ' || ?
-            WHERE position_id = ?
-        """, (status, exit_price, pnl, f"reason={reason}", pos["position_id"]))
+            UPDATE polymarket_bets
+            SET status = 'CLOSED', exit_price = ?, exit_reason = ?,
+                exit_at = datetime('now'), pnl = ?, return_pct = ?
+            WHERE id = ?
+        """, (exit_price, reason, pnl, return_pct, bet["id"]))
         conn.commit()
         conn.close()
 
-        self.bankroll += pos["bet_amount"] + pnl
-        self._log_bankroll(reason, pos["position_id"], pnl)
+        self.bankroll += bet["total_invested"] + pnl
+        self._log_bankroll(f"closed_{reason}", str(bet["id"]), pnl)
+
+        if pnl < 0:
+            self._last_loss_time = time.time()
 
         self.logger.info(
-            f"CLOSED [{pos['asset']}]: {reason} | P&L: ${pnl:+.2f} | "
+            f"CLOSED [{bet['asset']}]: {reason} | P&L: ${pnl:+.2f} ({return_pct:+.1f}%) | "
             f"Bankroll: ${self.bankroll:.2f}"
         )
 
-    # ── Bet Placement ───────────────────────────────────────────────
+    # -- Bet Placement --
 
-    def _place_bet(self, inst_key: str, inst: InstrumentConfig, market: dict,
-                   direction: str, token_cost: float, ml_confidence: float) -> None:
-        """Place a new $25 bet."""
-        position_id = f"sa2_{uuid.uuid4().hex[:12]}"
-        shares = self.BET_AMOUNT / token_cost if token_cost > 0 else 0
+    def _place_bet(self, inst: InstrumentConfig, market: dict,
+                   direction: str, entry_side: str, token_cost: float,
+                   ml_confidence: float, regime: str, asset_price: float) -> None:
+        """Place a new $50 bet."""
+        tokens = self.BET_AMOUNT / token_cost if token_cost > 0 else 0
         slug = market.get("slug", "")
 
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
-            INSERT INTO polymarket_positions
-            (position_id, slug, question, market_type, asset,
-             direction, entry_price, shares, bet_amount, edge_at_entry,
-             our_prob_at_entry, crowd_prob_at_entry, deadline,
-             status, opened_at, registry_key, strategy, notes)
-            VALUES (?, ?, ?, 'DIRECTION', ?, ?, ?, ?, ?, 0, 0, ?, ?,
-                    'open', datetime('now'), ?, 'strategy_a', ?)
+            INSERT INTO polymarket_bets
+            (slug, asset, entry_side, entry_token_cost, entry_amount, entry_tokens,
+             entry_confidence, adds, total_invested, total_tokens, avg_cost,
+             status, regime, entry_asset_price, question)
+            VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'OPEN', ?, ?, ?)
         """, (
-            position_id, slug, market.get("question", ""),
-            inst.asset, direction, token_cost, shares, self.BET_AMOUNT,
-            token_cost, market.get("deadline", ""),
-            inst_key,
-            f"v2|conf={ml_confidence:.0f}%|cost=${token_cost:.2f}",
+            slug, inst.asset, entry_side, token_cost, self.BET_AMOUNT, tokens,
+            ml_confidence, self.BET_AMOUNT, tokens, token_cost,
+            regime, asset_price, market.get("question", ""),
         ))
+        bet_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
         conn.close()
 
         self.bankroll -= self.BET_AMOUNT
-        self._log_bankroll("bet_placed", position_id, -self.BET_AMOUNT)
-        self._log_bet(inst.asset, slug, direction, "BUY", ml_confidence,
-                      token_cost, self.BET_AMOUNT, position_id)
+        self._bets_this_hour.append(time.time())
+        self._log_bankroll("bet_placed", str(bet_id), -self.BET_AMOUNT)
 
         self.logger.info(
-            f"BET [{inst.asset}]: {direction} | "
+            f"BET [{inst.asset}]: {direction} ({entry_side}) | "
             f"Conf: {ml_confidence:.0f}% | Token: ${token_cost:.2f} | "
             f"Bet: ${self.BET_AMOUNT} | Bankroll: ${self.bankroll:.2f}"
         )
 
-    def _place_add(self, inst_key: str, inst: InstrumentConfig, market: dict,
-                   direction: str, token_cost: float, ml_confidence: float,
-                   parent_id: str) -> None:
-        """Add $15 to a winning position."""
-        position_id = f"sa2_{uuid.uuid4().hex[:12]}"
-        shares = self.ADD_AMOUNT / token_cost if token_cost > 0 else 0
-        slug = market.get("slug", "")
+    def _add_to_bet(self, bet, token_cost: float, ml_confidence: float) -> None:
+        """Add $50 to an existing open bet."""
+        new_tokens = self.BET_AMOUNT / token_cost if token_cost > 0 else 0
+
+        # Parse existing adds
+        adds_raw = bet["adds"] or "[]"
+        try:
+            adds = json.loads(adds_raw)
+        except (json.JSONDecodeError, TypeError):
+            adds = []
+
+        adds.append({
+            "amount": self.BET_AMOUNT,
+            "token_cost": token_cost,
+            "tokens": new_tokens,
+            "confidence": ml_confidence,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        new_total_invested = bet["total_invested"] + self.BET_AMOUNT
+        new_total_tokens = bet["total_tokens"] + new_tokens
+        new_avg_cost = new_total_invested / new_total_tokens if new_total_tokens > 0 else token_cost
 
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
-            INSERT INTO polymarket_positions
-            (position_id, slug, question, market_type, asset,
-             direction, entry_price, shares, bet_amount, edge_at_entry,
-             our_prob_at_entry, crowd_prob_at_entry, deadline,
-             status, opened_at, registry_key, strategy, notes)
-            VALUES (?, ?, ?, 'DIRECTION', ?, ?, ?, ?, ?, 0, 0, ?, ?,
-                    'open', datetime('now'), ?, 'strategy_a', ?)
-        """, (
-            position_id, slug, market.get("question", ""),
-            inst.asset, direction, token_cost, shares, self.ADD_AMOUNT,
-            token_cost, market.get("deadline", ""),
-            inst_key,
-            f"v2_add|conf={ml_confidence:.0f}%|parent={parent_id}",
-        ))
+            UPDATE polymarket_bets
+            SET adds = ?, total_invested = ?, total_tokens = ?, avg_cost = ?
+            WHERE id = ?
+        """, (json.dumps(adds), new_total_invested, new_total_tokens, new_avg_cost, bet["id"]))
         conn.commit()
         conn.close()
 
-        self.bankroll -= self.ADD_AMOUNT
-        self._log_bankroll("add_to_winner", position_id, -self.ADD_AMOUNT)
+        self.bankroll -= self.BET_AMOUNT
+        self._bets_this_hour.append(time.time())
+        self._log_bankroll("add_to_bet", str(bet["id"]), -self.BET_AMOUNT)
 
         self.logger.info(
-            f"ADD [{inst.asset}]: {direction} +${self.ADD_AMOUNT} | "
-            f"Conf: {ml_confidence:.0f}% | Token: ${token_cost:.2f} | "
-            f"Bankroll: ${self.bankroll:.2f}"
+            f"ADD [{bet['asset']}]: +${self.BET_AMOUNT} | "
+            f"Total: ${new_total_invested:.0f}/${self.MAX_POSITION_PER_MARKET:.0f} | "
+            f"Avg Cost: ${new_avg_cost:.3f} | Bankroll: ${self.bankroll:.2f}"
         )
 
-    # ── Resolution ──────────────────────────────────────────────────
+    # -- Resolution --
 
     def _check_resolutions(self, current_prices: Optional[dict] = None) -> None:
-        """Check if open positions have resolved via Gamma API or price fallback."""
+        """Check if open bets have resolved via Gamma API or price fallback."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        open_positions = conn.execute(
-            "SELECT * FROM polymarket_positions WHERE status = 'open' AND strategy = 'strategy_a'"
+        open_bets = conn.execute(
+            "SELECT * FROM polymarket_bets WHERE status = 'OPEN'"
         ).fetchall()
+
+        for bet in open_bets:
+            slug = bet["slug"]
+            if not slug:
+                continue
+
+            try:
+                market = self._fetch_market_by_slug(slug)
+                if market and market.get("gamma_raw"):
+                    raw = market["gamma_raw"]
+                    is_resolved = raw.get("resolved", False)
+                    prices = raw.get("outcomePrices", "[]")
+                    if isinstance(prices, str):
+                        try:
+                            prices = json.loads(prices)
+                        except (json.JSONDecodeError, TypeError):
+                            prices = []
+
+                    if isinstance(prices, list) and len(prices) >= 2:
+                        yes_price = float(prices[0])
+                        no_price = float(prices[1])
+                        is_definitive = (yes_price >= 0.95 and no_price <= 0.05) or \
+                                        (yes_price <= 0.05 and no_price >= 0.95)
+
+                        if is_resolved or is_definitive:
+                            self._resolve_bet(conn, bet, yes_price, no_price, "gamma_api", current_prices)
+                            continue
+
+                # Deadline-based resolution
+                deadline_str = market.get("deadline", "") if market else ""
+                seconds_past = 0
+                if deadline_str:
+                    try:
+                        deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+                        seconds_past = (datetime.now(timezone.utc) - deadline).total_seconds()
+                    except (ValueError, TypeError):
+                        pass
+
+                # Price-based fallback (>2 min past deadline)
+                if seconds_past > 120 and current_prices:
+                    inst = self._find_instrument(bet["asset"])
+                    if inst:
+                        current_asset_price = current_prices.get(inst.price_pair, 0)
+                        entry_asset_price = bet["entry_asset_price"] or 0
+                        if current_asset_price > 0 and entry_asset_price > 0:
+                            went_up = current_asset_price > entry_asset_price
+                            yes_price = 1.0 if went_up else 0.0
+                            no_price = 1.0 - yes_price
+                            self._resolve_bet(conn, bet, yes_price, no_price, "price_fallback", current_prices)
+                            continue
+
+                # Force-expire after 30 min
+                if seconds_past > 1800:
+                    self.logger.info(f"FORCE-EXPIRE [{bet['asset']}]: {slug}")
+                    conn.execute("""
+                        UPDATE polymarket_bets
+                        SET status = 'CLOSED', exit_reason = 'force_expired',
+                            exit_at = datetime('now'), pnl = 0, return_pct = 0
+                        WHERE id = ?
+                    """, (bet["id"],))
+                    self.bankroll += bet["total_invested"]
+                    self._log_bankroll("force_expired", str(bet["id"]), bet["total_invested"])
+
+            except Exception as e:
+                self.logger.debug(f"Resolution check failed for bet {bet['id']}: {e}")
+
+        conn.commit()
+        conn.close()
+
+        # Also check old polymarket_positions table for legacy positions
+        self._check_legacy_resolutions(current_prices)
+
+    def _resolve_bet(self, conn, bet, yes_price: float, no_price: float,
+                     source: str, current_prices: Optional[dict] = None) -> None:
+        """Resolve a bet as WON or LOST."""
+        side = bet["entry_side"]
+        won = (yes_price >= 0.95) if side == "YES" else (no_price >= 0.95)
+        exit_price = 1.0 if won else 0.0
+        pnl = round((exit_price * bet["total_tokens"]) - bet["total_invested"], 2)
+        return_pct = round(pnl / bet["total_invested"] * 100, 2) if bet["total_invested"] > 0 else 0
+        status = "WON" if won else "LOST"
+
+        exit_asset_price = 0
+        if current_prices:
+            inst = self._find_instrument(bet["asset"])
+            if inst:
+                exit_asset_price = current_prices.get(inst.price_pair, 0)
+
+        conn.execute("""
+            UPDATE polymarket_bets
+            SET status = ?, exit_price = ?, exit_reason = ?,
+                exit_at = datetime('now'), pnl = ?, return_pct = ?,
+                exit_asset_price = ?
+            WHERE id = ?
+        """, (status, exit_price, source, pnl, return_pct, exit_asset_price, bet["id"]))
+
+        if won:
+            self.bankroll += bet["total_invested"] + pnl
+        if not won:
+            self._last_loss_time = time.time()
+
+        self.logger.info(
+            f"{'WON' if won else 'LOST'} [{bet['asset']}]: "
+            f"{side} | P&L: ${pnl:+.2f} ({return_pct:+.1f}%) | "
+            f"Bankroll: ${self.bankroll:.2f} | via {source}"
+        )
+        self._log_bankroll(f"resolved_{status.lower()}", str(bet["id"]), pnl)
+
+    def _check_legacy_resolutions(self, current_prices: Optional[dict] = None) -> None:
+        """Check for any still-open legacy positions in polymarket_positions."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            open_positions = conn.execute(
+                "SELECT * FROM polymarket_positions WHERE status = 'open' AND strategy = 'strategy_a'"
+            ).fetchall()
+        except Exception:
+            conn.close()
+            return
 
         for pos in open_positions:
             slug = pos["slug"]
@@ -508,36 +711,26 @@ class StrategyAExecutor:
                                         (yes_price <= 0.05 and no_price >= 0.95)
 
                         if is_resolved or is_definitive:
-                            self._resolve_position(conn, pos, yes_price, no_price, "gamma_api")
+                            direction = pos["direction"]
+                            won = (yes_price >= 0.95) if direction == "UP" else (no_price >= 0.95)
+                            exit_price = 1.0 if won else 0.0
+                            pnl = round((exit_price * pos["shares"]) - pos["bet_amount"], 2)
+                            status = "won" if won else "lost"
+
+                            conn.execute("""
+                                UPDATE polymarket_positions
+                                SET status = ?, exit_price = ?, pnl = ?, closed_at = datetime('now'),
+                                    notes = COALESCE(notes, '') || ' | resolved_via=gamma_api'
+                                WHERE position_id = ?
+                            """, (status, exit_price, pnl, pos["position_id"]))
+
+                            if won:
+                                self.bankroll += pos["bet_amount"] + pnl
+                            self._log_bankroll(f"legacy_resolved_{status}", pos["position_id"], pnl)
                             continue
 
-                        # Update unrealized P&L while still open
-                        if seconds_past <= 0:
-                            cur_price = yes_price if pos["direction"] == "UP" else no_price
-                            unrealized = (cur_price - pos["entry_price"]) * pos["shares"]
-                            conn.execute(
-                                "UPDATE polymarket_positions SET notes = ? WHERE position_id = ?",
-                                (f"unrealized={unrealized:.2f},price={cur_price:.3f}", pos["position_id"]),
-                            )
-                            continue
-
-                # Price-based fallback (>2 min past deadline)
-                if seconds_past > 120 and current_prices:
-                    inst = self._find_instrument(pos["asset"])
-                    if inst:
-                        price_pair = inst.price_pair
-                        current_asset_price = current_prices.get(price_pair, 0)
-                        if current_asset_price > 0:
-                            # Simple: if price went in our direction, we won
-                            actual_direction = pos["direction"]  # Fallback: assume we won (conservative)
-                            yes_price = 1.0 if actual_direction == "UP" else 0.0
-                            no_price = 1.0 - yes_price
-                            self._resolve_position(conn, pos, yes_price, no_price, "price_fallback")
-                            continue
-
-                # Force-expire after 30 min
+                # Force-expire legacy positions 30 min past deadline
                 if seconds_past > 1800:
-                    self.logger.info(f"FORCE-EXPIRE [{pos['asset']}]: {slug}")
                     conn.execute("""
                         UPDATE polymarket_positions
                         SET status = 'expired', pnl = 0, closed_at = datetime('now'),
@@ -545,56 +738,15 @@ class StrategyAExecutor:
                         WHERE position_id = ?
                     """, (pos["position_id"],))
                     self.bankroll += pos["bet_amount"]
-                    self._log_bankroll("force_expired", pos["position_id"], pos["bet_amount"])
+                    self._log_bankroll("legacy_force_expired", pos["position_id"], pos["bet_amount"])
 
             except Exception as e:
-                self.logger.debug(f"Resolution check failed for {pos['position_id']}: {e}")
+                self.logger.debug(f"Legacy resolution check failed for {pos['position_id']}: {e}")
 
         conn.commit()
         conn.close()
 
-    def _resolve_position(self, conn, pos, yes_price: float, no_price: float, source: str) -> None:
-        direction = pos["direction"]
-        won = (yes_price >= 0.95) if direction == "UP" else (no_price >= 0.95)
-        exit_price = 1.0 if won else 0.0
-        pnl = round((exit_price * pos["shares"]) - pos["bet_amount"], 2)
-        status = "won" if won else "lost"
-
-        conn.execute("""
-            UPDATE polymarket_positions
-            SET status = ?, exit_price = ?, pnl = ?, closed_at = datetime('now'),
-                notes = COALESCE(notes, '') || ' | resolved_via=' || ?
-            WHERE position_id = ?
-        """, (status, exit_price, pnl, source, pos["position_id"]))
-
-        if won:
-            self.bankroll += pos["bet_amount"] + pnl
-
-        self.logger.info(
-            f"{'WON' if won else 'LOST'} [{pos['asset']}]: "
-            f"{direction} | P&L: ${pnl:+.2f} | Bankroll: ${self.bankroll:.2f} | via {source}"
-        )
-
-        # Log to bets table
-        self._log_bet(
-            pos["asset"], pos["slug"], direction,
-            "WON" if won else "LOST",
-            0, pos["entry_price"], pos["bet_amount"],
-            pos["position_id"], f"pnl={pnl:+.2f}|via={source}",
-        )
-        # Update outcome in bets table
-        bet_conn = sqlite3.connect(self.db_path)
-        bet_conn.execute(
-            "UPDATE polymarket_bets SET outcome = ?, pnl_usd = ?, resolved_at = datetime('now') "
-            "WHERE position_id = ? AND action = 'BUY'",
-            (status, pnl, pos["position_id"]),
-        )
-        bet_conn.commit()
-        bet_conn.close()
-
-        self._log_bankroll(f"resolved_{status}", pos["position_id"], pnl)
-
-    # ── Market Discovery ────────────────────────────────────────────
+    # -- Market Discovery --
 
     def _discover_market(self, inst: InstrumentConfig) -> Optional[dict]:
         now_ts = int(time.time())
@@ -710,7 +862,7 @@ class StrategyAExecutor:
         except (ValueError, TypeError):
             return None
 
-    # ── Helpers ──────────────────────────────────────────────────────
+    # -- Helpers --
 
     def _find_instrument(self, asset: str) -> Optional[InstrumentConfig]:
         for inst in self.instruments.values():
@@ -725,19 +877,19 @@ class StrategyAExecutor:
         return None
 
     def get_stats(self) -> dict:
-        """Return stats for dashboard."""
+        """Return stats for dashboard (reads from new polymarket_bets table)."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             open_count = conn.execute(
-                "SELECT COUNT(*) as c FROM polymarket_positions WHERE status = 'open' AND strategy = 'strategy_a'"
+                "SELECT COUNT(*) as c FROM polymarket_bets WHERE status = 'OPEN'"
             ).fetchone()["c"]
             total = conn.execute(
                 "SELECT COUNT(*) as c, "
-                "SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins, "
-                "SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as losses, "
+                "SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins, "
+                "SUM(CASE WHEN status='LOST' THEN 1 ELSE 0 END) as losses, "
                 "COALESCE(SUM(pnl), 0) as pnl "
-                "FROM polymarket_positions WHERE strategy = 'strategy_a' AND status IN ('won','lost','sold')"
+                "FROM polymarket_bets WHERE status IN ('WON','LOST','CLOSED')"
             ).fetchone()
             return {
                 "bankroll": round(self.bankroll, 2),

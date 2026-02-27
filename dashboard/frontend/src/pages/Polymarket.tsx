@@ -4,7 +4,7 @@ import MetricCard from '../components/cards/MetricCard';
 import { api } from '../api';
 import { formatCurrency, formatTimestamp, pnlColor } from '../utils/formatters';
 
-/* ── Types ─────────────────────────────────────────────────────── */
+/* -- Types ---------------------------------------------------------- */
 
 interface Overview {
   bankroll: number;
@@ -22,43 +22,59 @@ interface Overview {
   total_wagered: number;
 }
 
-interface Position {
-  position_id: string;
+interface Bet {
+  id: number;
   slug: string;
   asset: string;
-  direction: string;
-  entry_price: number;
-  shares: number;
-  bet_amount: number;
+  entry_side: string;
+  entry_token_cost: number;
+  entry_amount: number;
+  entry_tokens: number;
+  entry_confidence: number;
+  adds_count: number;
+  total_invested: number;
+  total_tokens: number;
+  avg_cost: number;
   status: string;
-  pnl: number | null;
   exit_price: number | null;
+  exit_reason: string | null;
+  exit_at: string | null;
+  pnl: number | null;
+  return_pct: number | null;
+  regime: string | null;
   opened_at: string;
-  closed_at: string | null;
-  unrealized_pnl: number | null;
-  notes: string | null;
+  question: string | null;
 }
 
-interface ClosedBet {
-  position_id: string;
+interface LiveMarket {
+  asset: string;
   slug: string;
-  asset: string;
-  direction: string;
-  entry_price: number;
-  exit_price: number | null;
-  bet_amount: number;
-  pnl: number | null;
-  status: string;
-  opened_at: string;
-  closed_at: string | null;
+  question: string;
+  yes_price: number;
+  no_price: number;
+  minutes_left: number | null;
+  deadline: string;
+  resolved: boolean;
+  volume_24h: number;
+  our_bet: { entry_side: string; total_invested: number; avg_cost: number; status: string } | null;
 }
 
-interface Instrument {
-  key: string;
+interface CalibrationBucket {
+  label: string;
+  total: number;
+  wins: number;
+  accuracy: number;
+}
+
+interface SkipEntry {
+  timestamp: string;
   asset: string;
-  ml_pair: string;
-  enabled: boolean;
-  lead_asset: string | null;
+  slug: string | null;
+  reason: string;
+  ml_confidence: number;
+  token_cost: number;
+  ml_direction: string;
+  minutes_left: number;
 }
 
 interface Stats {
@@ -71,40 +87,36 @@ interface Stats {
   best_trade: number;
   worst_trade: number;
   per_asset: { asset: string; bets: number; wins: number; pnl: number; avg_pnl: number }[];
-  recent_activity: ActivityEntry[];
 }
 
-interface ActivityEntry {
-  timestamp: string;
-  asset: string;
-  direction: string;
-  action: string;
-  ml_confidence: number;
-  token_cost: number;
-  amount_usd: number;
-  notes: string | null;
-}
-
-/* ── Main Page ─────────────────────────────────────────────────── */
+/* -- Main Page ------------------------------------------------------ */
 
 export default function Polymarket() {
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [history, setHistory] = useState<ClosedBet[]>([]);
-  const [instruments, setInstruments] = useState<Instrument[]>([]);
+  const [openBets, setOpenBets] = useState<Bet[]>([]);
+  const [history, setHistory] = useState<Bet[]>([]);
+  const [liveMarkets, setLiveMarkets] = useState<LiveMarket[]>([]);
+  const [calibration, setCalibration] = useState<CalibrationBucket[]>([]);
+  const [skips, setSkips] = useState<SkipEntry[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
 
   useEffect(() => {
     const load = () => {
       api.pmOverview().then((d) => setOverview(d as unknown as Overview)).catch(() => {});
       api.pmPositions('open').then((d) =>
-        setPositions(((d as Record<string, unknown>).positions ?? []) as Position[])
+        setOpenBets(((d as Record<string, unknown>).positions ?? []) as Bet[])
       ).catch(() => {});
       api.pmHistory(20).then((d) =>
-        setHistory(((d as Record<string, unknown>).bets ?? []) as ClosedBet[])
+        setHistory(((d as Record<string, unknown>).bets ?? []) as Bet[])
       ).catch(() => {});
-      api.pmInstruments().then((d) =>
-        setInstruments(((d as Record<string, unknown>).instruments ?? []) as Instrument[])
+      api.pmLiveMarkets().then((d) =>
+        setLiveMarkets(((d as Record<string, unknown>).markets ?? []) as LiveMarket[])
+      ).catch(() => {});
+      api.pmCalibration().then((d) =>
+        setCalibration(((d as Record<string, unknown>).buckets ?? []) as CalibrationBucket[])
+      ).catch(() => {});
+      api.pmSkipLog(20).then((d) =>
+        setSkips(((d as Record<string, unknown>).skips ?? []) as SkipEntry[])
       ).catch(() => {});
       api.pmStats().then((d) => setStats(d as unknown as Stats)).catch(() => {});
     };
@@ -113,13 +125,12 @@ export default function Polymarket() {
     return () => clearInterval(id);
   }, []);
 
-  const openCount = positions.length;
   const bankrollChange = overview ? overview.bankroll - overview.initial_bankroll : 0;
 
   return (
     <PageShell
       title="Polymarket"
-      subtitle="Strategy A v2 — Confidence-gated entry"
+      subtitle="Strategy A v3 — Confidence-gated entry"
       actions={
         <span className="px-2 py-1 rounded text-xs font-medium bg-accent-yellow/20 text-accent-yellow">
           PAPER
@@ -127,7 +138,7 @@ export default function Polymarket() {
       }
     >
       {/* 1. Bankroll Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <MetricCard
           title="Bankroll"
           value={overview ? formatCurrency(overview.bankroll) : '$500'}
@@ -147,9 +158,7 @@ export default function Polymarket() {
         />
         <MetricCard
           title="Win Rate"
-          value={overview && overview.total_bets > 0
-            ? `${overview.win_rate}%`
-            : '--'}
+          value={overview && overview.total_bets > 0 ? `${overview.win_rate}%` : '--'}
           subtitle={overview && overview.total_bets > 0
             ? `${overview.wins}W / ${overview.losses}L`
             : undefined}
@@ -161,7 +170,7 @@ export default function Polymarket() {
         />
         <MetricCard
           title="Open Bets"
-          value={`${openCount}`}
+          value={`${openBets.length}`}
           subtitle={overview ? `$${overview.open_exposure.toFixed(0)} exposed` : undefined}
         />
         <MetricCard
@@ -170,16 +179,19 @@ export default function Polymarket() {
         />
       </div>
 
-      {/* 2. Open Positions */}
-      <OpenPositions positions={positions} />
+      {/* 2. Live Markets */}
+      <LiveMarketsTable markets={liveMarkets} />
 
-      {/* 3. Recent Bets */}
+      {/* 3. Open Positions */}
+      <OpenPositions bets={openBets} />
+
+      {/* 4. Recent Bets */}
       <RecentBets bets={history} />
 
-      {/* 4. Instrument Cards */}
-      <InstrumentCards instruments={instruments} stats={stats} />
+      {/* 5. Model Calibration */}
+      <ModelCalibration buckets={calibration} />
 
-      {/* 5. P&L by Asset */}
+      {/* 6. P&L by Asset */}
       {stats && stats.per_asset.length > 0 && (
         <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
           <h3 className="text-sm font-medium text-gray-300 mb-3">P&L by Asset</h3>
@@ -215,23 +227,23 @@ export default function Polymarket() {
         </div>
       )}
 
-      {/* 6. Activity Log */}
-      <ActivityLog activity={stats?.recent_activity ?? []} />
+      {/* 7. Skip Log */}
+      <SkipLog skips={skips} />
     </PageShell>
   );
 }
 
-/* ── Open Positions ────────────────────────────────────────────── */
+/* -- Live Markets --------------------------------------------------- */
 
-function OpenPositions({ positions }: { positions: Position[] }) {
+function LiveMarketsTable({ markets }: { markets: LiveMarket[] }) {
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
       <h3 className="text-sm font-medium text-gray-300 mb-3">
-        Open Positions ({positions.length})
+        Live Markets ({markets.length})
       </h3>
-      {positions.length === 0 ? (
+      {markets.length === 0 ? (
         <div className="text-center text-gray-500 text-xs py-4">
-          No open bets. Waiting for ML confidence &ge; 90%.
+          No live 15m markets found.
         </div>
       ) : (
         <div className="overflow-x-auto">
@@ -239,30 +251,34 @@ function OpenPositions({ positions }: { positions: Position[] }) {
             <thead>
               <tr className="text-gray-500 border-b border-surface-3">
                 <th className="text-left py-2 px-2">Asset</th>
-                <th className="text-left py-2 px-2">Dir</th>
-                <th className="text-right py-2 px-2">Entry</th>
-                <th className="text-right py-2 px-2">Shares</th>
-                <th className="text-right py-2 px-2">Bet</th>
-                <th className="text-right py-2 px-2">Unreal. P&L</th>
-                <th className="text-left py-2 px-2">Age</th>
+                <th className="text-right py-2 px-2">YES</th>
+                <th className="text-right py-2 px-2">NO</th>
+                <th className="text-right py-2 px-2">Mins Left</th>
+                <th className="text-right py-2 px-2">Volume</th>
+                <th className="text-left py-2 px-2">Our Bet</th>
               </tr>
             </thead>
             <tbody>
-              {positions.map((p) => (
-                <tr key={p.position_id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
-                  <td className="py-2 px-2 text-gray-200 font-medium">{p.asset}</td>
+              {markets.map((m) => (
+                <tr key={m.slug} className="border-b border-surface-3/50 hover:bg-surface-2/50">
+                  <td className="py-2 px-2 text-gray-200 font-medium">{m.asset}</td>
+                  <td className="py-2 px-2 text-right text-accent-green">${m.yes_price.toFixed(3)}</td>
+                  <td className="py-2 px-2 text-right text-accent-red">${m.no_price.toFixed(3)}</td>
+                  <td className="py-2 px-2 text-right text-gray-300">
+                    {m.minutes_left != null ? `${m.minutes_left.toFixed(1)}m` : '--'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-400">
+                    ${m.volume_24h.toFixed(0)}
+                  </td>
                   <td className="py-2 px-2">
-                    <span className={p.direction === 'UP' ? 'text-accent-green' : 'text-accent-red'}>
-                      {p.direction}
-                    </span>
+                    {m.our_bet ? (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-accent-blue/20 text-accent-blue">
+                        {m.our_bet.entry_side} ${m.our_bet.total_invested.toFixed(0)}
+                      </span>
+                    ) : (
+                      <span className="text-gray-600">--</span>
+                    )}
                   </td>
-                  <td className="py-2 px-2 text-right text-gray-300">${p.entry_price.toFixed(3)}</td>
-                  <td className="py-2 px-2 text-right text-gray-400">{p.shares.toFixed(1)}</td>
-                  <td className="py-2 px-2 text-right text-gray-300">${p.bet_amount.toFixed(2)}</td>
-                  <td className={`py-2 px-2 text-right ${p.unrealized_pnl != null ? pnlColor(p.unrealized_pnl) : 'text-gray-500'}`}>
-                    {p.unrealized_pnl != null ? `$${p.unrealized_pnl.toFixed(2)}` : '--'}
-                  </td>
-                  <td className="py-2 px-2 text-gray-500">{formatTimestamp(p.opened_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -273,9 +289,61 @@ function OpenPositions({ positions }: { positions: Position[] }) {
   );
 }
 
-/* ── Recent Bets ───────────────────────────────────────────────── */
+/* -- Open Positions ------------------------------------------------- */
 
-function RecentBets({ bets }: { bets: ClosedBet[] }) {
+function OpenPositions({ bets }: { bets: Bet[] }) {
+  return (
+    <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+      <h3 className="text-sm font-medium text-gray-300 mb-3">
+        Open Positions ({bets.length})
+      </h3>
+      {bets.length === 0 ? (
+        <div className="text-center text-gray-500 text-xs py-4">
+          No open bets. Waiting for ML confidence &ge; 85%.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs font-mono">
+            <thead>
+              <tr className="text-gray-500 border-b border-surface-3">
+                <th className="text-left py-2 px-2">Asset</th>
+                <th className="text-left py-2 px-2">Side</th>
+                <th className="text-right py-2 px-2">Avg Cost</th>
+                <th className="text-right py-2 px-2">Invested</th>
+                <th className="text-right py-2 px-2">Tokens</th>
+                <th className="text-center py-2 px-2">Adds</th>
+                <th className="text-right py-2 px-2">Conf</th>
+                <th className="text-left py-2 px-2">Age</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bets.map((b) => (
+                <tr key={b.id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
+                  <td className="py-2 px-2 text-gray-200 font-medium">{b.asset}</td>
+                  <td className="py-2 px-2">
+                    <span className={b.entry_side === 'YES' ? 'text-accent-green' : 'text-accent-red'}>
+                      {b.entry_side}
+                    </span>
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-300">${b.avg_cost.toFixed(3)}</td>
+                  <td className="py-2 px-2 text-right text-gray-300">${b.total_invested.toFixed(0)}</td>
+                  <td className="py-2 px-2 text-right text-gray-400">{b.total_tokens.toFixed(1)}</td>
+                  <td className="py-2 px-2 text-center text-gray-400">{b.adds_count}</td>
+                  <td className="py-2 px-2 text-right text-gray-300">{b.entry_confidence.toFixed(0)}%</td>
+                  <td className="py-2 px-2 text-gray-500">{formatTimestamp(b.opened_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* -- Recent Bets ---------------------------------------------------- */
+
+function RecentBets({ bets }: { bets: Bet[] }) {
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
       <h3 className="text-sm font-medium text-gray-300 mb-3">
@@ -291,44 +359,44 @@ function RecentBets({ bets }: { bets: ClosedBet[] }) {
             <thead>
               <tr className="text-gray-500 border-b border-surface-3">
                 <th className="text-left py-2 px-2">Asset</th>
-                <th className="text-left py-2 px-2">Dir</th>
-                <th className="text-right py-2 px-2">Entry</th>
-                <th className="text-right py-2 px-2">Exit</th>
-                <th className="text-right py-2 px-2">Bet</th>
+                <th className="text-left py-2 px-2">Side</th>
+                <th className="text-right py-2 px-2">Avg Cost</th>
+                <th className="text-right py-2 px-2">Invested</th>
                 <th className="text-right py-2 px-2">P&L</th>
+                <th className="text-right py-2 px-2">Return</th>
                 <th className="text-left py-2 px-2">Result</th>
-                <th className="text-left py-2 px-2">Closed</th>
+                <th className="text-left py-2 px-2">Reason</th>
               </tr>
             </thead>
             <tbody>
               {bets.map((b) => (
-                <tr key={b.position_id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
+                <tr key={b.id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
                   <td className="py-2 px-2 text-gray-200 font-medium">{b.asset}</td>
                   <td className="py-2 px-2">
-                    <span className={b.direction === 'UP' ? 'text-accent-green' : 'text-accent-red'}>
-                      {b.direction}
+                    <span className={b.entry_side === 'YES' ? 'text-accent-green' : 'text-accent-red'}>
+                      {b.entry_side}
                     </span>
                   </td>
-                  <td className="py-2 px-2 text-right text-gray-300">${b.entry_price.toFixed(3)}</td>
-                  <td className="py-2 px-2 text-right text-gray-300">
-                    {b.exit_price != null ? `$${b.exit_price.toFixed(3)}` : '--'}
-                  </td>
-                  <td className="py-2 px-2 text-right text-gray-300">${b.bet_amount.toFixed(2)}</td>
+                  <td className="py-2 px-2 text-right text-gray-300">${b.avg_cost.toFixed(3)}</td>
+                  <td className="py-2 px-2 text-right text-gray-300">${b.total_invested.toFixed(0)}</td>
                   <td className={`py-2 px-2 text-right font-medium ${pnlColor(b.pnl ?? 0)}`}>
                     {b.pnl != null ? `$${b.pnl.toFixed(2)}` : '--'}
                   </td>
+                  <td className={`py-2 px-2 text-right ${pnlColor(b.return_pct ?? 0)}`}>
+                    {b.return_pct != null ? `${b.return_pct.toFixed(1)}%` : '--'}
+                  </td>
                   <td className="py-2 px-2">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] ${
-                      b.status === 'won' ? 'bg-accent-green/20 text-accent-green' :
-                      b.status === 'lost' ? 'bg-accent-red/20 text-accent-red' :
-                      b.status === 'sold' ? 'bg-accent-blue/20 text-accent-blue' :
+                      b.status === 'WON' ? 'bg-accent-green/20 text-accent-green' :
+                      b.status === 'LOST' ? 'bg-accent-red/20 text-accent-red' :
+                      b.status === 'CLOSED' ? 'bg-accent-blue/20 text-accent-blue' :
                       'bg-surface-3 text-gray-400'
                     }`}>
-                      {b.status.toUpperCase()}
+                      {b.status}
                     </span>
                   </td>
-                  <td className="py-2 px-2 text-gray-500">
-                    {b.closed_at ? formatTimestamp(b.closed_at) : '--'}
+                  <td className="py-2 px-2 text-gray-500 truncate max-w-[120px]" title={b.exit_reason ?? ''}>
+                    {b.exit_reason ?? '--'}
                   </td>
                 </tr>
               ))}
@@ -340,114 +408,77 @@ function RecentBets({ bets }: { bets: ClosedBet[] }) {
   );
 }
 
-/* ── Instrument Cards ──────────────────────────────────────────── */
+/* -- Model Calibration ---------------------------------------------- */
 
-function InstrumentCards({ instruments, stats }: { instruments: Instrument[]; stats: Stats | null }) {
-  if (instruments.length === 0) return null;
-
-  const assetStats = new Map(
-    (stats?.per_asset ?? []).map((a) => [a.asset, a])
-  );
+function ModelCalibration({ buckets }: { buckets: CalibrationBucket[] }) {
+  if (buckets.length === 0) return null;
+  const hasData = buckets.some((b) => b.total > 0);
 
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
-      <h3 className="text-sm font-medium text-gray-300 mb-3">Instruments</h3>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {instruments.map((inst) => {
-          const s = assetStats.get(inst.asset);
-          return (
-            <div
-              key={inst.key}
-              className={`bg-surface-2 rounded-lg p-3 border ${
-                inst.enabled ? 'border-accent-green/30' : 'border-surface-3 opacity-50'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-gray-200">{inst.asset}</span>
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                  inst.enabled ? 'bg-accent-green/20 text-accent-green' : 'bg-gray-600 text-gray-400'
-                }`}>
-                  {inst.enabled ? 'ON' : 'OFF'}
-                </span>
+      <h3 className="text-sm font-medium text-gray-300 mb-3">Model Calibration</h3>
+      {!hasData ? (
+        <div className="text-center text-gray-500 text-xs py-4">
+          No resolved bets yet for calibration.
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-3">
+          {buckets.map((b) => (
+            <div key={b.label} className="bg-surface-2 rounded-lg p-3 text-center">
+              <div className="text-xs text-gray-500 mb-1">{b.label}</div>
+              <div className={`text-xl font-mono font-bold ${
+                b.accuracy >= 60 ? 'text-accent-green' :
+                b.accuracy >= 50 ? 'text-gray-300' :
+                'text-accent-red'
+              }`}>
+                {b.total > 0 ? `${b.accuracy}%` : '--'}
               </div>
-              <div className="space-y-1 text-xs font-mono text-gray-400">
-                <div className="flex justify-between">
-                  <span>ML Pair</span><span>{inst.ml_pair}</span>
-                </div>
-                {inst.lead_asset && (
-                  <div className="flex justify-between">
-                    <span>Lead</span><span>{inst.lead_asset}</span>
-                  </div>
-                )}
-                {s && (
-                  <>
-                    <div className="flex justify-between">
-                      <span>Bets</span><span>{s.bets}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Win Rate</span>
-                      <span className={pnlColor(s.wins / Math.max(s.bets, 1) - 0.5)}>
-                        {s.bets > 0 ? `${(s.wins / s.bets * 100).toFixed(0)}%` : '--'}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>P&L</span>
-                      <span className={pnlColor(s.pnl)}>${s.pnl.toFixed(2)}</span>
-                    </div>
-                  </>
-                )}
+              <div className="text-[10px] text-gray-500 mt-1">
+                {b.wins}W / {b.total - b.wins}L ({b.total} bets)
               </div>
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-/* ── Activity Log ──────────────────────────────────────────────── */
+/* -- Skip Log ------------------------------------------------------- */
 
-function ActivityLog({ activity }: { activity: ActivityEntry[] }) {
+function SkipLog({ skips }: { skips: SkipEntry[] }) {
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
       <h3 className="text-sm font-medium text-gray-300 mb-3">
-        Activity Log ({activity.length})
+        Skip Log ({skips.length})
       </h3>
-      {activity.length === 0 ? (
+      {skips.length === 0 ? (
         <div className="text-center text-gray-500 text-xs py-4">
-          No activity yet. Strategy A hasn't run.
+          No skipped opportunities yet.
         </div>
       ) : (
-        <div className="space-y-1">
-          {activity.map((a, i) => (
+        <div className="space-y-1 max-h-[300px] overflow-y-auto">
+          {skips.map((s, i) => (
             <div key={i} className="flex items-center gap-2 text-xs font-mono py-1 border-b border-surface-3/30">
-              <span className="text-gray-500 w-16 shrink-0">{formatTimestamp(a.timestamp)}</span>
-              <span className="text-gray-200 font-medium w-10">{a.asset}</span>
-              <span className={`px-1.5 py-0.5 rounded text-[10px] w-12 text-center ${
-                a.action === 'BUY' ? 'bg-accent-green/20 text-accent-green' :
-                a.action === 'SELL' ? 'bg-accent-red/20 text-accent-red' :
-                a.action === 'ADD' ? 'bg-accent-blue/20 text-accent-blue' :
-                'bg-surface-3 text-gray-400'
-              }`}>
-                {a.action}
+              <span className="text-gray-500 w-16 shrink-0">{formatTimestamp(s.timestamp)}</span>
+              <span className="text-gray-200 font-medium w-10">{s.asset}</span>
+              <span className={s.ml_direction === 'UP' ? 'text-accent-green w-8' : 'text-accent-red w-8'}>
+                {s.ml_direction}
               </span>
-              <span className={a.direction === 'UP' ? 'text-accent-green' : 'text-accent-red'}>
-                {a.direction}
+              <span className="px-1.5 py-0.5 rounded text-[10px] bg-accent-yellow/15 text-accent-yellow truncate max-w-[200px]">
+                {s.reason}
               </span>
               <span className="text-gray-400">
-                conf={a.ml_confidence.toFixed(0)}%
+                conf={s.ml_confidence?.toFixed(0) ?? '?'}%
               </span>
-              {a.token_cost > 0 && (
+              {s.token_cost > 0 && (
                 <span className="text-gray-500">
-                  token=${a.token_cost.toFixed(2)}
+                  token=${s.token_cost.toFixed(2)}
                 </span>
               )}
-              {a.amount_usd > 0 && (
-                <span className="text-gray-300">${a.amount_usd.toFixed(2)}</span>
-              )}
-              {a.notes && (
-                <span className="text-gray-600 truncate max-w-[200px]" title={a.notes}>
-                  {a.notes}
+              {s.minutes_left > 0 && (
+                <span className="text-gray-600">
+                  {s.minutes_left.toFixed(0)}m left
                 </span>
               )}
             </div>
