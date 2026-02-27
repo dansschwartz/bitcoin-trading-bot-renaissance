@@ -230,7 +230,7 @@ class TrainedQuantumTransformer(nn.Module):
             _TrainedTransformerBlock(d_model, n_heads, qkv_dim, d_ff)
             for _ in range(n_blocks)
         ])
-        # output_head: BN(288) → Linear(288,144) → ... → Linear(72,1)
+        # output_head: BN(288) → Linear(288,144) → ... → Linear(72,1) → Tanh
         self.output_head = nn.Sequential(
             nn.BatchNorm1d(d_model),        # 0
             nn.GELU(),                      # 1
@@ -240,6 +240,7 @@ class TrainedQuantumTransformer(nn.Module):
             nn.Linear(144, 72),             # 5
             nn.GELU(),                      # 6
             nn.Linear(72, 1),               # 7
+            nn.Tanh(),                      # 8  v7: bound output to [-1, 1]
         )
         self.uncertainty_head = nn.Sequential(
             nn.Linear(d_model, 72),         # 0
@@ -311,7 +312,7 @@ class TrainedBidirectionalLSTM(nn.Module):
 
         self.lstm = _TrainedLSTMCore(input_size=input_dim, hidden_size=292, num_layers=2)
 
-        # prediction_head: indices 0=BN, 2=Linear(584,292), 4=BN, 6=Linear(292,146), 8=Linear(146,1)
+        # prediction_head: indices 0=BN, 2=Linear(584,292), 4=BN, 6=Linear(292,146), 8=Linear(146,1), 9=Tanh
         self.prediction_head = nn.Sequential(
             nn.BatchNorm1d(bidir_dim),      # 0
             nn.GELU(),                      # 1
@@ -322,6 +323,7 @@ class TrainedBidirectionalLSTM(nn.Module):
             nn.Linear(292, 146),            # 6
             nn.GELU(),                      # 7
             nn.Linear(146, 1),              # 8
+            nn.Tanh(),                      # 9  v7: bound output to [-1, 1]
         )
 
         # confidence_head: Linear(584,73) → ReLU → Linear(73,1) → Sigmoid
@@ -435,7 +437,7 @@ class TrainedDilatedCNN(nn.Module):
 
         self.dilated_cnn = _TrainedDilatedCNNCore(channels=input_dim, hidden=hidden, n_blocks=5)
 
-        # classifier: BN(332)→Linear→BN→...→Linear(input_dim, 1)
+        # classifier: BN(332)→Linear→BN→...→Linear(input_dim, 1)→Tanh
         self.classifier = nn.Sequential(
             nn.BatchNorm1d(hidden),         # 0
             nn.GELU(),                      # 1
@@ -447,6 +449,7 @@ class TrainedDilatedCNN(nn.Module):
             nn.BatchNorm1d(input_dim),      # 7
             nn.GELU(),                      # 8
             nn.Linear(input_dim, 1),        # 9
+            nn.Tanh(),                      # 10 v7: bound output to [-1, 1]
         )
 
         # pattern_strength: Linear(332→41) → ReLU → Linear(41→1)
@@ -499,6 +502,7 @@ class TrainedCNN(nn.Module):
             nn.GELU(),
             nn.Dropout(0.2),
             nn.Linear(32, 1),
+            nn.Tanh(),                      # v7: bound output to [-1, 1]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -538,6 +542,7 @@ class TrainedGRU(nn.Module):
             nn.Linear(134, 64),
             nn.GELU(),
             nn.Linear(64, 1),
+            nn.Tanh(),                      # v7: bound output to [-1, 1]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -600,6 +605,7 @@ class TrainedMetaEnsemble(nn.Module):
             nn.GELU(),                     # 1
             nn.Dropout(0.1),               # 2
             nn.Linear(32, 1),              # 3
+            nn.Tanh(),                     # 4  v7: bound output to [-1, 1]
         )
 
         # Confidence estimator — how sure is the ensemble
@@ -1379,7 +1385,7 @@ def predict_with_models(
                     pred = output[0]  # (prediction, uncertainty/confidence)
                 else:
                     pred = output
-                pred_val = float(torch.tanh(pred[0, 0]))
+                pred_val = float(pred[0, 0])  # Already tanh-bounded by model output layer
                 predictions[name] = pred_val
                 confidences[name] = min(abs(pred_val) + 0.5, 0.95)
         except Exception as e:
@@ -1425,7 +1431,7 @@ def predict_with_models(
                 base_preds = torch.FloatTensor([base_pred_list])  # (1, n_models)
                 meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, meta_dim + n_models)
                 pred, conf = meta_model(meta_input)
-                predictions['meta_ensemble'] = float(torch.tanh(pred[0, 0]))
+                predictions['meta_ensemble'] = float(pred[0, 0])  # Already tanh-bounded
                 confidences['meta_ensemble'] = float(conf[0, 0])
         except Exception as e:
             logger.warning(f"Inference failed for meta_ensemble: {e}")

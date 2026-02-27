@@ -185,27 +185,26 @@ def walk_forward_split(
 # ══════════════════════════════════════════════════════════════════════════════
 
 class DirectionalLoss(nn.Module):
-    """v6: BCE + separation margin + magnitude floor (strengthened for full-data).
+    """v7: BCE + separation margin + magnitude floor — recalibrated for tanh-bounded outputs.
 
     Three components prevent the "predict zero" collapse:
 
-    1. BCE on sign with 20x logit scaling: converts small regression outputs
-       into meaningful logits. A prediction of 0.05 → logit 1.0 → 73% prob.
+    1. BCE on sign with 3x logit scaling: model outputs are now tanh-bounded [-1, 1].
+       pred=0.5 → logit=1.5 → 82% prob. (v6 used 20x, which made all predictions
+       99.99% confident and destroyed gradients for tanh-bounded outputs.)
 
-    2. Separation margin: measures mean(pred|target>0) - mean(pred|target<0).
-       If separation < margin, adds strong loss. At pred=0 for all samples,
-       separation=0 → loss += sep_weight * margin per batch.
+    2. Separation margin (0.25): measures mean(pred|target>0) - mean(pred|target<0).
+       With tanh outputs spanning [-1, 1], 0.25 requires meaningful directional
+       commitment. (v6 used 0.10, trivially satisfied by near-zero predictions.)
 
-    3. Magnitude floor: pushes |pred| above 0.01 minimum. Directly opposes
-       weight decay shrinking all outputs toward zero.
+    3. Magnitude floor (0.10): pushes |pred| above 0.10. Prevents collapse to zero
+       while leaving room for low-confidence predictions. (v6 used 0.01.)
 
-    v6 vs v5: Doubled margin (0.05→0.10), doubled sep_weight (5→10),
-    increased mag_weight (2→5). At collapse, v6 penalty = 1.05 vs v5's 0.27.
-    Combined with per-model weight_decay (1e-5 for QT), prevents transformer
-    attention collapse on full 680K+ sample datasets.
+    v7 at collapse (all pred=0): BCE=0.693 + 10*0.25 + 3*0.10 = 3.49 penalty
+    (v6 was 0.693 + 10*0.10 + 5*0.01 = 1.74 — insufficient for tanh outputs)
     """
 
-    def __init__(self, logit_scale: float = 20.0, margin: float = 0.10):
+    def __init__(self, logit_scale: float = 3.0, margin: float = 0.25):
         super().__init__()
         self.logit_scale = logit_scale
         self.margin = margin
@@ -214,12 +213,12 @@ class DirectionalLoss(nn.Module):
         pred = pred.squeeze(-1) if pred.dim() > 1 else pred
         target = target.squeeze(-1) if target.dim() > 1 else target
 
-        # 1. Direction: BCE on sign with strong logit scaling
+        # 1. Direction: BCE on sign with moderate logit scaling (3x for tanh outputs)
         target_is_positive = (target > 0).float()
         bce = F.binary_cross_entropy_with_logits(
             pred * self.logit_scale, target_is_positive)
 
-        # 2. Separation margin: force pred|up > pred|down by at least margin
+        # 2. Separation margin: force pred|up > pred|down by at least 0.25
         pos_mask = target > 0
         neg_mask = target <= 0
         if pos_mask.any() and neg_mask.any():
@@ -228,10 +227,10 @@ class DirectionalLoss(nn.Module):
         else:
             sep_loss = torch.tensor(0.0, device=pred.device)
 
-        # 3. Magnitude floor: push |pred| above minimum threshold
-        mag_loss = F.relu(0.01 - pred.abs()).mean()
+        # 3. Magnitude floor: push |pred| above 0.10 threshold
+        mag_loss = F.relu(0.10 - pred.abs()).mean()
 
-        return bce + 10.0 * sep_loss + 5.0 * mag_loss
+        return bce + 10.0 * sep_loss + 3.0 * mag_loss
 
 
 # ══════════════════════════════════════════════════════════════════════════════
