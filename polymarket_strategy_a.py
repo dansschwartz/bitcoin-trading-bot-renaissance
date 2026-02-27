@@ -788,6 +788,11 @@ class StrategyAExecutor:
             if checkpoint is None:
                 continue
 
+            # Skip T=0 if we don't have a price yet (e.g., bot just started, first cycle incomplete)
+            if checkpoint == 0 and current_price <= 0:
+                self.logger.debug(f"[{inst.asset}] Skipping T=0 — no price data yet")
+                continue
+
             # Get or create tracker (recover from DB after restart)
             if slug not in self.trackers:
                 recovered = self._load_tracker_from_db(slug, inst.asset, inst_key)
@@ -898,7 +903,10 @@ class StrategyAExecutor:
             current_price = current_prices.get(price_pair, 0)
 
             if ref_price <= 0:
-                ref_price = current_price  # Fallback if T=0 missing
+                # T=0 price missing (e.g., bot restarted mid-market) — use T=5 as reference
+                ref_price = tracker.checkpoints.get(5, {}).get("asset_price", 0)
+            if ref_price <= 0:
+                ref_price = current_price  # Last resort — will produce 0% move, caught by min_price_move gate
 
             decision = self._evaluate(
                 inst_key, inst, market,
