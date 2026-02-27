@@ -777,13 +777,14 @@ class StrategyAExecutor:
             # CHECKPOINT RECORDING — runs at ALL 3 time windows
             # Must happen BEFORE lead asset gate and decision checks
             # ════════════════════════════════════════════════════
+            # Contiguous windows — no gaps for slow cycles (up to 7+ min intervals)
             checkpoint = None
-            if 13.0 <= minutes_left <= 16.5:
-                checkpoint = 0      # T=0: ~15 min remaining
-            elif 8.0 <= minutes_left <= 11.5:
-                checkpoint = 5      # T=5: ~10 min remaining
-            elif 3.0 <= minutes_left <= 6.5:
-                checkpoint = 10     # T=10: ~5 min remaining
+            if 10.0 <= minutes_left <= 16.5:
+                checkpoint = 0      # T=0: market just opened, ~10-16 min remaining
+            elif 5.0 <= minutes_left < 10.0:
+                checkpoint = 5      # T=5: ~5-10 min remaining
+            elif 0.5 <= minutes_left < 5.0:
+                checkpoint = 10     # T=10: ~0.5-5 min remaining, decision time
 
             if checkpoint is None:
                 continue
