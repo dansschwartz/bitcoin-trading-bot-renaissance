@@ -7,8 +7,6 @@ export default function StatusStrip() {
   const { connected } = useWS();
   const { status, pnl } = state;
 
-  const prices = status?.latest_prices ?? {};
-
   return (
     <header className="h-10 bg-surface-1 border-b border-surface-3 flex items-center px-4 gap-6 text-xs font-mono shrink-0 overflow-x-auto">
       {/* Connection status */}
@@ -30,20 +28,6 @@ export default function StatusStrip() {
           Cycles: <span className="text-gray-300">{status.cycle_count}</span>
         </div>
       )}
-
-      {/* Asset Prices — show all tracked assets with % change */}
-      {Object.entries(prices).map(([asset, snap]) => snap.price > 0 && (
-        <div key={asset} className="flex items-center gap-1">
-          <span className="text-gray-300 font-semibold">
-            {asset.replace('-USD', '')} ${snap.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-          </span>
-          {snap.change_pct != null && snap.change_pct !== 0 && (
-            <span className={`text-[10px] ${snap.change_pct > 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-              {snap.change_pct > 0 ? '+' : ''}{snap.change_pct.toFixed(2)}%
-            </span>
-          )}
-        </div>
-      ))}
 
       {/* Spacer */}
       <div className="flex-1" />

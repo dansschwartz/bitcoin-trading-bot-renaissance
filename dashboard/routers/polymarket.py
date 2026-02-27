@@ -487,6 +487,9 @@ async def polymarket_live_markets(request: Request):
                 except Exception:
                     continue
 
+        # Filter out expired/resolved markets
+        markets = [m for m in markets if (m.get("minutes_left") or 0) > 0 and not m.get("resolved")]
+
         result = {"markets": markets, "fetched_at": datetime.now(timezone.utc).isoformat()}
         _live_markets_cache = {"data": result, "ts": now}
         return result

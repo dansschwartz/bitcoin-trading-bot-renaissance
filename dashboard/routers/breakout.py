@@ -34,6 +34,21 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def _scan_duration(conn: sqlite3.Connection) -> float:
+    """Compute seconds between last two distinct scan_time values."""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT scan_time FROM breakout_scans ORDER BY scan_time DESC LIMIT 2"
+        ).fetchall()
+        if len(rows) == 2:
+            t1 = datetime.fromisoformat(rows[0][0])
+            t2 = datetime.fromisoformat(rows[1][0])
+            return round(abs((t1 - t2).total_seconds()), 1)
+    except Exception:
+        pass
+    return 0
+
+
 @router.get("/summary")
 async def breakout_summary(request: Request):
     """Breakout scanner overview stats from DB."""
@@ -75,7 +90,7 @@ async def breakout_summary(request: Request):
                 "total_scans": scan_count,
                 "total_flagged": flagged,
                 "avg_flagged_per_scan": round(avg_flagged, 1),
-                "last_scan_seconds": 0,
+                "last_scan_seconds": _scan_duration(c),
                 "pairs_tracked": total_scanned,
                 "last_scan_time": latest,
             }
@@ -126,7 +141,8 @@ async def breakout_signals(request: Request, limit: int = 30):
             # Add computed alias fields expected by frontend
             for sig in signals:
                 sig["signal_strength"] = sig.get("score", 0) / 100.0
-                sig["volume_surge"] = sig.get("volume_score", 0) / 10.0
+                vs = sig.get("volume_score", 0)
+                sig["volume_surge"] = (vs / 10.0) if vs else None
                 sig["momentum"] = sig.get("momentum_score", 0) / 100.0
                 sig["timestamp"] = latest
 

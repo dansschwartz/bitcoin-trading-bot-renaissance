@@ -78,6 +78,7 @@ class StrategyAExecutor:
     EXIT_CONFIDENCE = 70.0
     ADD_CONFIDENCE = 85.0
     MAX_POSITION_PER_MARKET = 150.0  # dollar cap
+    STOP_LOSS_PCT = 0.40  # close if share price drops 40% from avg cost
     MAX_BETS_PER_HOUR = 6
     COOLDOWN_AFTER_LOSS = 300  # 5 min in seconds
 
@@ -401,6 +402,24 @@ class StrategyAExecutor:
             if not inst:
                 continue
 
+            # Fetch current market price ONCE (reused by stop-loss and add logic)
+            market = self._fetch_market_by_slug(slug)
+            current_share = bet["avg_cost"]  # fallback
+            if market:
+                crowd_up = self._parse_crowd_up(market)
+                current_share = crowd_up if direction == "UP" else (1.0 - crowd_up)
+
+            share_change = (current_share / bet["avg_cost"] - 1) if bet["avg_cost"] > 0 else 0
+
+            # Rule 0: STOP LOSS — close if share price dropped too far
+            if share_change <= -self.STOP_LOSS_PCT:
+                self.logger.warning(
+                    f"STOP LOSS [{asset}]: share {current_share:.3f} vs avg {bet['avg_cost']:.3f} "
+                    f"({share_change*100:+.1f}%) | Limit: -{self.STOP_LOSS_PCT*100:.0f}%"
+                )
+                self._close_bet(bet, "stop_loss", current_prices)
+                continue
+
             # Current ML data
             ml_data = ml_predictions.get(inst.ml_pair, {})
             ml_conf = ml_data.get("confidence", 50.0)
@@ -425,15 +444,13 @@ class StrategyAExecutor:
                 self._close_bet(bet, "low_confidence", current_prices)
                 continue
 
-            # Rule 3: Add to position if confident and under cap
+            # Rule 3: Add to position — only if WINNING (current > avg cost)
             if (ml_conf >= self.ADD_CONFIDENCE
                     and bet["total_invested"] < self.MAX_POSITION_PER_MARKET
-                    and self.bankroll >= self.BET_AMOUNT):
-                # Fetch current market for token cost
-                market = self._fetch_market_by_slug(slug)
+                    and self.bankroll >= self.BET_AMOUNT
+                    and current_share > bet["avg_cost"]):
                 if market:
-                    crowd_up = self._parse_crowd_up(market)
-                    token_cost = crowd_up if direction == "UP" else (1.0 - crowd_up)
+                    token_cost = current_share
                     if token_cost <= self.MAX_TOKEN_COST and self._check_rate_limit():
                         self._add_to_bet(bet, token_cost, ml_conf)
 

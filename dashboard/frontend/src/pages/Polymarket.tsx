@@ -236,12 +236,13 @@ export default function Polymarket() {
 /* -- Live Markets --------------------------------------------------- */
 
 function LiveMarketsTable({ markets }: { markets: LiveMarket[] }) {
+  const active = markets.filter(m => (m.minutes_left ?? 0) > 0 && !m.resolved);
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
       <h3 className="text-sm font-medium text-gray-300 mb-3">
-        Live Markets ({markets.length})
+        Live Markets ({active.length})
       </h3>
-      {markets.length === 0 ? (
+      {active.length === 0 ? (
         <div className="text-center text-gray-500 text-xs py-4">
           No live 15m markets found.
         </div>
@@ -259,7 +260,7 @@ function LiveMarketsTable({ markets }: { markets: LiveMarket[] }) {
               </tr>
             </thead>
             <tbody>
-              {markets.map((m) => (
+              {active.map((m) => (
                 <tr key={m.slug} className="border-b border-surface-3/50 hover:bg-surface-2/50">
                   <td className="py-2 px-2 text-gray-200 font-medium">{m.asset}</td>
                   <td className="py-2 px-2 text-right text-accent-green">${m.yes_price.toFixed(3)}</td>
