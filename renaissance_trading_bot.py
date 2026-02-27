@@ -3982,37 +3982,17 @@ class RenaissanceTradingBot:
                     except Exception as _ps_err:
                         self.logger.debug(f"Polymarket scanner error: {_ps_err}")
 
-                    # 3.17 Strategy A — Confirmed Momentum executor (runs every cycle)
+                    # 3.17 Strategy A — accumulate ML predictions per pair
+                    # (execute_cycle runs AFTER the per-pair loop so all prices are available)
                     if self.polymarket_executor:
-                        try:
-                            # Accumulate ML predictions per pair across iterations
-                            if not hasattr(self, '_sa_ml_cache'):
-                                self._sa_ml_cache = {}
-
-                            if ml_package and hasattr(ml_package, 'ensemble_score'):
-                                self._sa_ml_cache[product_id] = {
-                                    "prediction": float(ml_package.ensemble_score),
-                                    "agreement": float(ml_package.confidence_score),
-                                    "confidence": float(ml_package.confidence_score * 100),
-                                }
-
-                            # Current prices
-                            _sa_prices = {}
-                            if hasattr(self, '_last_prices'):
-                                _sa_prices = dict(self._last_prices)
-
-                            # Regime
-                            _sa_regime = "unknown"
-                            if self.regime_overlay and self.regime_overlay.enabled:
-                                _sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
-
-                            await self.polymarket_executor.execute_cycle(
-                                ml_predictions=self._sa_ml_cache,
-                                current_prices=_sa_prices,
-                                current_regime=_sa_regime,
-                            )
-                        except Exception as _pex_err:
-                            self.logger.warning(f"Strategy A cycle error: {_pex_err}")
+                        if not hasattr(self, '_sa_ml_cache'):
+                            self._sa_ml_cache = {}
+                        if ml_package and hasattr(ml_package, 'ensemble_score'):
+                            self._sa_ml_cache[product_id] = {
+                                "prediction": float(ml_package.ensemble_score),
+                                "agreement": float(ml_package.confidence_score),
+                                "confidence": float(ml_package.confidence_score * 100),
+                            }
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
                 self._update_dynamic_thresholds(product_id, market_data)
@@ -4666,6 +4646,23 @@ class RenaissanceTradingBot:
 
             # Increment cycle counter ONCE per cycle (not per pair)
             self.scan_cycle_count += 1
+
+            # ── Strategy A: Confirmed Momentum (runs ONCE per cycle, after all prices collected) ──
+            if self.polymarket_executor:
+                try:
+                    _sa_prices = dict(self._last_prices) if hasattr(self, '_last_prices') else {}
+                    _sa_regime = "unknown"
+                    if self.regime_overlay and self.regime_overlay.enabled:
+                        _sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
+                    if not hasattr(self, '_sa_ml_cache'):
+                        self._sa_ml_cache = {}
+                    await self.polymarket_executor.execute_cycle(
+                        ml_predictions=self._sa_ml_cache,
+                        current_prices=_sa_prices,
+                        current_regime=_sa_regime,
+                    )
+                except Exception as _pex_err:
+                    self.logger.warning(f"Strategy A cycle error: {_pex_err}")
 
             cycle_time = time.time() - cycle_start
             self.logger.info(
