@@ -60,10 +60,14 @@ export default function StatusStrip() {
         </div>
       )}
 
-      {/* WS clients */}
-      <div className="text-gray-600">
-        WS: {status?.ws_clients ?? 0}
-      </div>
+      {/* Win/Loss record */}
+      {pnl && (pnl.total_round_trips ?? 0) > 0 && (
+        <div className="text-gray-500">
+          <span className="text-accent-green">{pnl.winning_round_trips ?? 0}W</span>
+          {' / '}
+          <span className="text-accent-red">{(pnl.total_round_trips ?? 0) - (pnl.winning_round_trips ?? 0)}L</span>
+        </div>
+      )}
     </header>
   );
 }

@@ -78,14 +78,14 @@ function computeDataHealth(prices: Record<string, { timestamp?: string }> | unde
     if (!snap.timestamp) { staleCount++; continue; }
     const lag = now - new Date(snap.timestamp).getTime();
     if (lag > maxLagMs) maxLagMs = lag;
-    if (lag > 360_000) staleCount++;  // 6 min — bot runs 5-min cycles
+    if (lag > 600_000) staleCount++;  // 10 min — bot runs 5-min cycles
   }
 
   const lagSec = (maxLagMs / 1000).toFixed(1);
   if (staleCount > 0) {
     return { label: 'Data', value: `${staleCount} stale (${lagSec}s)`, health: 'red' };
   }
-  if (maxLagMs > 120_000) {
+  if (maxLagMs > 300_000) {
     return { label: 'Data', value: `Live (${lagSec}s lag)`, health: 'yellow' };
   }
   return { label: 'Data', value: `Live (${lagSec}s)`, health: 'green' };

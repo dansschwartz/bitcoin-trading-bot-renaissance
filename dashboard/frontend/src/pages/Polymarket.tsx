@@ -89,6 +89,13 @@ interface Stats {
   per_asset: { asset: string; bets: number; wins: number; pnl: number; avg_pnl: number }[];
 }
 
+interface Instrument {
+  key: string;
+  asset: string;
+  ml_pair: string;
+  enabled: boolean;
+}
+
 /* -- Main Page ------------------------------------------------------ */
 
 export default function Polymarket() {
@@ -99,6 +106,7 @@ export default function Polymarket() {
   const [calibration, setCalibration] = useState<CalibrationBucket[]>([]);
   const [skips, setSkips] = useState<SkipEntry[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [instruments, setInstruments] = useState<Instrument[]>([]);
 
   useEffect(() => {
     const load = () => {
@@ -119,6 +127,9 @@ export default function Polymarket() {
         setSkips(((d as Record<string, unknown>).skips ?? []) as SkipEntry[])
       ).catch(() => {});
       api.pmStats().then((d) => setStats(d as unknown as Stats)).catch(() => {});
+      api.pmInstruments().then((d) =>
+        setInstruments(((d as Record<string, unknown>).instruments ?? []) as Instrument[])
+      ).catch(() => {});
     };
     load();
     const id = setInterval(load, 15_000);
@@ -130,7 +141,7 @@ export default function Polymarket() {
   return (
     <PageShell
       title="Polymarket"
-      subtitle="Strategy A v3 — Confidence-gated entry"
+      subtitle="Strategy A — Confirmed Momentum + Half-Kelly"
       actions={
         <span className="px-2 py-1 rounded text-xs font-medium bg-accent-yellow/20 text-accent-yellow">
           PAPER
@@ -178,6 +189,29 @@ export default function Polymarket() {
           value={overview ? formatCurrency(overview.total_wagered) : '$0'}
         />
       </div>
+
+      {/* 1b. Strategy A Instruments */}
+      {instruments.length > 0 && (
+        <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+          <h3 className="text-sm font-medium text-gray-300 mb-3">Strategy A Instruments</h3>
+          <div className="flex flex-wrap gap-2">
+            {instruments.map((inst) => (
+              <div
+                key={inst.key}
+                className={`px-3 py-2 rounded-lg border text-xs font-mono ${
+                  inst.enabled
+                    ? 'bg-accent-green/10 border-accent-green/20 text-accent-green'
+                    : 'bg-surface-2 border-surface-3 text-gray-500'
+                }`}
+              >
+                <div className="font-semibold text-sm">{inst.asset}</div>
+                <div className="text-[10px] opacity-75">{inst.ml_pair}</div>
+                <div className="mt-1 text-[10px]">{inst.enabled ? 'ENABLED' : 'DISABLED'}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 2. Live Markets */}
       <LiveMarketsTable markets={liveMarkets} />
@@ -300,7 +334,7 @@ function OpenPositions({ bets }: { bets: Bet[] }) {
       </h3>
       {bets.length === 0 ? (
         <div className="text-center text-gray-500 text-xs py-4">
-          No open bets. Waiting for ML confidence &ge; 85%.
+          No open bets. Waiting for ML confidence &ge; 53%.
         </div>
       ) : (
         <div className="overflow-x-auto">

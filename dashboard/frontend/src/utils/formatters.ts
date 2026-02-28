@@ -21,20 +21,24 @@ export function formatNumber(value: number, decimals = 4): string {
 }
 
 export function formatTimestamp(iso: string): string {
+  if (!iso) return '--';
   try {
     const d = new Date(iso);
+    if (isNaN(d.getTime())) return '--';
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   } catch {
-    return iso;
+    return '--';
   }
 }
 
 export function formatDate(iso: string): string {
+  if (!iso) return '--';
   try {
     const d = new Date(iso);
+    if (isNaN(d.getTime())) return '--';
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   } catch {
-    return iso;
+    return '--';
   }
 }
 
