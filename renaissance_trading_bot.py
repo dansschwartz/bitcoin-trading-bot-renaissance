@@ -4109,11 +4109,27 @@ class RenaissanceTradingBot:
                     if self.polymarket_executor:
                         if not hasattr(self, '_sa_ml_cache'):
                             self._sa_ml_cache = {}
-                        if ml_package and hasattr(ml_package, 'ensemble_score'):
+
+                        # Crash model as primary signal for BTC (calibrated for current regime)
+                        _rt_preds = market_data.get('real_time_predictions', {})
+                        _crash_raw = _rt_preds.get('CrashRegime')
+                        if _crash_raw is not None and 'BTC' in product_id.upper():
+                            # CrashRegime is in [-1, 1] (mapped from P(UP))
+                            # Convert back to probability: prob = (pred + 1) / 2
+                            _crash_prob = (float(_crash_raw) + 1.0) / 2.0
+                            _crash_conf = abs(_crash_prob - 0.5) * 2.0  # 0-1 scale
+                            self._sa_ml_cache[product_id] = {
+                                "prediction": float(_crash_raw),
+                                "agreement": _crash_conf,
+                                "confidence": _crash_prob * 100.0,  # 50-100% scale
+                                "source": "crash_lightgbm",
+                            }
+                        elif ml_package and hasattr(ml_package, 'ensemble_score'):
                             self._sa_ml_cache[product_id] = {
                                 "prediction": float(ml_package.ensemble_score),
                                 "agreement": float(ml_package.confidence_score),
                                 "confidence": float(ml_package.confidence_score * 100),
+                                "source": "ensemble",
                             }
 
                 # 3.2 Update Dynamic Thresholds (Step 8)

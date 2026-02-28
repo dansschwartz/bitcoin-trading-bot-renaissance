@@ -111,6 +111,7 @@ async def polymarket_overview(request: Request):
                     "losses": overall["losses"] or 0,
                     "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
                     "total_wagered": round(overall["total_wagered"] or 0, 2),
+                    "model_info": _model_info(),
                 }
 
             # Fallback to old polymarket_positions table
@@ -499,22 +500,31 @@ async def polymarket_live_markets(request: Request):
 
 @router.get("/calibration")
 async def polymarket_calibration(request: Request):
-    """Accuracy by confidence bucket (85-90%, 90-95%, 95-100%) from resolved bets."""
+    """Accuracy by confidence bucket from resolved bets.
+
+    Buckets calibrated for crash-regime LightGBM (55-60% range).
+    """
     cfg = request.app.state.dashboard_config
     try:
         with _conn(cfg.db_path) as c:
             if not _table_exists(c, "polymarket_bets") or not _has_column(c, "polymarket_bets", "entry_side"):
-                return {"buckets": []}
+                return {"buckets": [], "model_info": _model_info()}
 
             buckets = []
-            for low, high, label in [(85, 90, "85-90%"), (90, 95, "90-95%"), (95, 100, "95-100%")]:
+            for low, high, label in [
+                (50, 52, "50-52%"),
+                (52, 55, "52-55%"),
+                (55, 58, "55-58%"),
+                (58, 65, "58-65%"),
+                (65, 101, "65%+"),
+            ]:
                 row = c.execute("""
                     SELECT COUNT(*) as total,
                            SUM(CASE WHEN status = 'WON' THEN 1 ELSE 0 END) as wins
                     FROM polymarket_bets
                     WHERE status IN ('WON', 'LOST')
                       AND entry_confidence >= ? AND entry_confidence < ?
-                """, (low, high if high < 100 else 101)).fetchone()
+                """, (low, high)).fetchone()
 
                 total = row["total"] or 0
                 wins = row["wins"] or 0
@@ -525,9 +535,21 @@ async def polymarket_calibration(request: Request):
                     "accuracy": round(wins / total * 100, 1) if total > 0 else 0,
                 })
 
-            return {"buckets": buckets}
+            return {"buckets": buckets, "model_info": _model_info()}
     except Exception as e:
-        return {"error": str(e), "buckets": []}
+        return {"error": str(e), "buckets": [], "model_info": _model_info()}
+
+
+def _model_info() -> dict:
+    """Return crash model metadata for dashboard display."""
+    return {
+        "source": "crash_lightgbm",
+        "test_accuracy": 52.9,
+        "test_auc": 0.5432,
+        "confidence_threshold": 55.0,
+        "kelly_mode": "half-kelly",
+        "stop_loss": "40% share price drop",
+    }
 
 
 @router.get("/skip-log")

@@ -2,14 +2,19 @@
 Polymarket Strategy A v3: Confidence-Gated Entry with Active Management
 
 Simple rules:
-  1. ML confidence >= 85% AND token cost <= $0.45 -> BUY $50
+  1. ML confidence >= 55% AND token cost <= $0.45 -> BUY (half-Kelly sized)
   2. Every cycle, manage open bets:
      - ML flips direction -> SELL immediately
-     - ML confidence drops below 70% -> SELL
-     - ML confidence >= 85% + token <= $0.45 + under $150 cap -> ADD $50
+     - ML confidence drops below 50% -> SELL
+     - ML confidence >= 55% + token <= $0.45 + under $150 cap -> ADD
      - Otherwise -> HOLD
   3. Rate limit: max 6 bets per hour
   4. Cooldown: 5 min after any loss
+
+ML Source:
+  Crash-regime LightGBM (52.9% acc, 0.543 AUC) as primary signal for BTC.
+  Calibrated for crash regime: 55-60% confident = 58.3% accurate.
+  Half-Kelly sizing: 3-8% of bankroll per bet.
 
 Market Discovery:
   Rolling 15m direction markets via slug pattern: {asset}-updown-15m-{unix_timestamp}
@@ -65,22 +70,26 @@ class StrategyAExecutor:
     """
     v3: Confidence-gated entry with active position management.
 
-    Entry:  ML confidence >= 85% AND token cost <= $0.45
-    Sell:   ML flips direction OR confidence < 70%
-    Add:    Same direction, >= 85% conf, token <= $0.45, < $150 total
+    Entry:  ML confidence >= 55% AND token cost <= $0.45
+    Sell:   ML flips direction OR confidence < 50%
+    Add:    Same direction, >= 55% conf, token <= $0.45, < $150 total
     Limits: 6 bets/hour, 5 min cooldown after loss
+
+    Sizing: Half-Kelly based on model probability and token price.
     """
 
-    # Thresholds
-    CONFIDENCE_THRESHOLD = 85.0
+    # Thresholds — calibrated for crash-regime LightGBM (max conf ~56%)
+    CONFIDENCE_THRESHOLD = 55.0       # Was 85.0. Model prob >= 0.55 (or <= 0.45)
     MAX_TOKEN_COST = 0.45
-    BET_AMOUNT = 50.0
-    EXIT_CONFIDENCE = 70.0
-    ADD_CONFIDENCE = 85.0
-    MAX_POSITION_PER_MARKET = 150.0  # dollar cap
-    STOP_LOSS_PCT = 0.40  # close if share price drops 40% from avg cost
+    BET_AMOUNT = 50.0                 # Fallback; overridden by Kelly sizing
+    EXIT_CONFIDENCE = 50.0            # Was 70.0. Exit when model is pure coin-flip
+    ADD_CONFIDENCE = 55.0             # Was 85.0. Same as entry threshold
+    MAX_POSITION_PER_MARKET = 150.0   # dollar cap
+    STOP_LOSS_PCT = 0.40              # close if share price drops 40% from avg cost
     MAX_BETS_PER_HOUR = 6
-    COOLDOWN_AFTER_LOSS = 300  # 5 min in seconds
+    COOLDOWN_AFTER_LOSS = 300         # 5 min in seconds
+    MIN_BET = 5.0                     # Floor for Kelly sizing
+    MAX_BET_PCT = 0.15                # Ceiling: 15% of bankroll per bet
 
     def __init__(self, config: dict, db_path: str, logger: Optional[logging.Logger] = None):
         self.config = config
@@ -361,15 +370,15 @@ class StrategyAExecutor:
                 "SELECT COALESCE(SUM(total_invested), 0) FROM polymarket_bets WHERE status = 'OPEN'"
             ).fetchone()[0]
             conn.close()
-            if total_open + self.BET_AMOUNT > self.bankroll * 0.8:
+            if total_open + self.MIN_BET > self.bankroll * 0.8:
                 self._log_skip(inst.asset, slug, "max_exposure",
                                ml_conf, token_cost, ml_direction, minutes_left)
                 continue
 
             # Gate: bankroll
-            if self.bankroll < self.BET_AMOUNT:
+            if self.bankroll < self.MIN_BET:
                 self._log_skip(inst.asset, slug,
-                               f"bankroll ${self.bankroll:.2f} < ${self.BET_AMOUNT}",
+                               f"bankroll ${self.bankroll:.2f} < ${self.MIN_BET}",
                                ml_conf, token_cost, ml_direction, minutes_left)
                 continue
 
@@ -447,7 +456,7 @@ class StrategyAExecutor:
             # Rule 3: Add to position — only if WINNING (current > avg cost)
             if (ml_conf >= self.ADD_CONFIDENCE
                     and bet["total_invested"] < self.MAX_POSITION_PER_MARKET
-                    and self.bankroll >= self.BET_AMOUNT
+                    and self.bankroll >= self.MIN_BET
                     and current_share > bet["avg_cost"]):
                 if market:
                     token_cost = current_share
@@ -489,13 +498,49 @@ class StrategyAExecutor:
             f"Bankroll: ${self.bankroll:.2f}"
         )
 
+    # -- Kelly Sizing --
+
+    def _compute_kelly_bet(self, probability: float, token_cost: float) -> float:
+        """Half-Kelly optimal bet size for Polymarket.
+
+        Args:
+            probability: Model's P(correct outcome) — e.g. 0.55 means 55% chance we're right.
+            token_cost: Price of the token we're buying (0.0 to 1.0).
+
+        Returns:
+            Dollar amount to bet (floored at MIN_BET, capped at MAX_BET_PCT of bankroll).
+        """
+        # Payout ratio: if we buy at token_cost and win, we get $1 per token
+        b = (1.0 - token_cost) / (token_cost + 1e-10)
+
+        # Win probability from model (already directional — prob of the side we're betting)
+        p = max(0.5, min(0.99, probability))
+        q = 1.0 - p
+
+        # Full Kelly fraction
+        kelly = (p * b - q) / (b + 1e-10)
+        kelly = max(0.0, kelly)
+
+        # Half-Kelly for safety
+        half_kelly = kelly * 0.5
+
+        # Dollar bet
+        bet = self.bankroll * half_kelly
+
+        # Floor and ceiling
+        bet = max(self.MIN_BET, min(bet, self.bankroll * self.MAX_BET_PCT))
+        return round(bet, 2)
+
     # -- Bet Placement --
 
     def _place_bet(self, inst: InstrumentConfig, market: dict,
                    direction: str, entry_side: str, token_cost: float,
                    ml_confidence: float, regime: str, asset_price: float) -> None:
-        """Place a new $50 bet."""
-        tokens = self.BET_AMOUNT / token_cost if token_cost > 0 else 0
+        """Place a Kelly-sized bet."""
+        # Convert confidence (50-100% scale) to probability (0.5-1.0)
+        prob = ml_confidence / 100.0
+        bet_amount = self._compute_kelly_bet(prob, token_cost)
+        tokens = bet_amount / token_cost if token_cost > 0 else 0
         slug = market.get("slug", "")
 
         conn = sqlite3.connect(self.db_path)
@@ -506,27 +551,29 @@ class StrategyAExecutor:
              status, regime, entry_asset_price, question)
             VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'OPEN', ?, ?, ?)
         """, (
-            slug, inst.asset, entry_side, token_cost, self.BET_AMOUNT, tokens,
-            ml_confidence, self.BET_AMOUNT, tokens, token_cost,
+            slug, inst.asset, entry_side, token_cost, bet_amount, tokens,
+            ml_confidence, bet_amount, tokens, token_cost,
             regime, asset_price, market.get("question", ""),
         ))
         bet_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
         conn.close()
 
-        self.bankroll -= self.BET_AMOUNT
+        self.bankroll -= bet_amount
         self._bets_this_hour.append(time.time())
-        self._log_bankroll("bet_placed", str(bet_id), -self.BET_AMOUNT)
+        self._log_bankroll("bet_placed", str(bet_id), -bet_amount)
 
         self.logger.info(
             f"BET [{inst.asset}]: {direction} ({entry_side}) | "
-            f"Conf: {ml_confidence:.0f}% | Token: ${token_cost:.2f} | "
-            f"Bet: ${self.BET_AMOUNT} | Bankroll: ${self.bankroll:.2f}"
+            f"Conf: {ml_confidence:.1f}% | Token: ${token_cost:.2f} | "
+            f"Kelly: ${bet_amount:.2f} | Bankroll: ${self.bankroll:.2f}"
         )
 
     def _add_to_bet(self, bet, token_cost: float, ml_confidence: float) -> None:
-        """Add $50 to an existing open bet."""
-        new_tokens = self.BET_AMOUNT / token_cost if token_cost > 0 else 0
+        """Add a Kelly-sized increment to an existing open bet."""
+        prob = ml_confidence / 100.0
+        add_amount = self._compute_kelly_bet(prob, token_cost)
+        new_tokens = add_amount / token_cost if token_cost > 0 else 0
 
         # Parse existing adds
         adds_raw = bet["adds"] or "[]"
@@ -536,14 +583,14 @@ class StrategyAExecutor:
             adds = []
 
         adds.append({
-            "amount": self.BET_AMOUNT,
+            "amount": add_amount,
             "token_cost": token_cost,
             "tokens": new_tokens,
             "confidence": ml_confidence,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
-        new_total_invested = bet["total_invested"] + self.BET_AMOUNT
+        new_total_invested = bet["total_invested"] + add_amount
         new_total_tokens = bet["total_tokens"] + new_tokens
         new_avg_cost = new_total_invested / new_total_tokens if new_total_tokens > 0 else token_cost
 
@@ -556,12 +603,12 @@ class StrategyAExecutor:
         conn.commit()
         conn.close()
 
-        self.bankroll -= self.BET_AMOUNT
+        self.bankroll -= add_amount
         self._bets_this_hour.append(time.time())
-        self._log_bankroll("add_to_bet", str(bet["id"]), -self.BET_AMOUNT)
+        self._log_bankroll("add_to_bet", str(bet["id"]), -add_amount)
 
         self.logger.info(
-            f"ADD [{bet['asset']}]: +${self.BET_AMOUNT} | "
+            f"ADD [{bet['asset']}]: +${add_amount:.2f} | "
             f"Total: ${new_total_invested:.0f}/${self.MAX_POSITION_PER_MARKET:.0f} | "
             f"Avg Cost: ${new_avg_cost:.3f} | Bankroll: ${self.bankroll:.2f}"
         )
