@@ -1612,3 +1612,295 @@ def predict_lightgbm(
     except Exception as e:
         logger.warning(f"LightGBM inference failed: {e}")
         return 0.0, 0.0
+
+
+# ── Crash-Regime LightGBM (v2) ──────────────────────────────────────────────
+# Separate model trained on BTC crash periods (2018, 2021-22, 2025-26).
+# 51 features, 2-bar (10min) horizon, binary (UP/DOWN).
+# Runs ONLY for BTC pairs alongside the main ensemble.
+
+CRASH_LGBM_PKL = os.path.join('models', 'trained', 'crash_lightgbm_model.pkl')
+CRASH_LGBM_META = os.path.join('models', 'trained', 'crash_lightgbm_meta.json')
+
+# Ordered feature list (must match training exactly)
+CRASH_FEATURE_NAMES = [
+    'return_1bar', 'return_6bar', 'return_12bar', 'return_48bar', 'return_288bar',
+    'vol_12bar', 'vol_48bar', 'vol_ratio',
+    'volume_surge', 'volume_trend',
+    'consecutive_red', 'drawdown_24h',
+    'rsi_14_norm', 'bb_pct_b', 'vwap_distance',
+    # Daily macro (10)
+    'spx_return_1d', 'spx_vs_sma', 'vix_norm', 'vix_change', 'vix_extreme',
+    'dxy_return_1d', 'dxy_trend', 'yield_level', 'yield_change', 'fng_norm',
+    # Intraday macro (11) — all zero importance, always zero-filled
+    'spx_return_5m', 'spx_return_30m', 'spx_return_1h',
+    'vix_return_5m', 'vix_return_30m', 'vix_level_5m',
+    'ndx_return_5m', 'ndx_return_30m',
+    'spx_vix_diverge', 'macro_momentum_5m', 'macro_momentum_30m',
+    # Derivatives (9)
+    'funding_z', 'funding_extreme_long', 'funding_extreme_short',
+    'oi_change_1h', 'oi_change_4h', 'oi_spike',
+    'ls_ratio_norm', 'ls_extreme_long', 'taker_imbalance',
+    # Cross-asset (6)
+    'eth_return_1bar', 'eth_return_6bar', 'eth_btc_ratio_change',
+    'btc_lead_1', 'btc_lead_2', 'btc_lead_3',
+]
+
+
+def load_crash_lgbm(base_dir: str = '.') -> Tuple[object, Optional[dict]]:
+    """Load the crash-regime LightGBM model and metadata.
+
+    Returns:
+        (model, meta_dict) on success, (None, None) on failure.
+    """
+    import json
+    import pickle
+
+    pkl_path = os.path.join(base_dir, CRASH_LGBM_PKL)
+    meta_path = os.path.join(base_dir, CRASH_LGBM_META)
+
+    if not os.path.exists(pkl_path):
+        logger.warning(f"Crash LightGBM model not found: {pkl_path}")
+        return None, None
+
+    try:
+        with open(pkl_path, 'rb') as f:
+            model = pickle.load(f)
+
+        meta = None
+        if os.path.exists(meta_path):
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+
+        n_feat = model.num_feature() if hasattr(model, 'num_feature') else '?'
+        logger.info(f"Crash-regime LightGBM loaded: {n_feat} features")
+        return model, meta
+
+    except Exception as e:
+        logger.error(f"Failed to load crash LightGBM: {e}")
+        return None, None
+
+
+def build_crash_features(
+    price_df,
+    derivatives_data: Optional[dict] = None,
+    macro_data: Optional[dict] = None,
+    cross_data: Optional[dict] = None,
+) -> Optional[np.ndarray]:
+    """Build the 51-feature vector for crash-regime LightGBM inference.
+
+    Args:
+        price_df: DataFrame with columns [open, high, low, close, volume, quote_volume].
+                  Needs >= 300 rows for rolling windows (vol_288bar).
+        derivatives_data: Dict with keys like 'funding_rate', 'open_interest', etc.
+        macro_data: Dict with daily macro keys (spx_return_1d, vix_norm, etc.).
+        cross_data: Dict of pair_name → DataFrame with [close, volume] columns.
+
+    Returns:
+        numpy array shape (1, 51) or None if insufficient data.
+    """
+    if price_df is None or len(price_df) < 50:
+        return None
+
+    try:
+        close = price_df['close'].values.astype(float)
+        open_ = price_df['open'].values.astype(float) if 'open' in price_df.columns else close
+        high = price_df['high'].values.astype(float) if 'high' in price_df.columns else close
+        low = price_df['low'].values.astype(float) if 'low' in price_df.columns else close
+        volume = price_df['volume'].values.astype(float) if 'volume' in price_df.columns else np.ones(len(close))
+        quote_vol = price_df['quote_volume'].values.astype(float) if 'quote_volume' in price_df.columns else volume * close
+
+        n = len(close)
+        features = np.zeros(51, dtype=np.float64)
+
+        # ── BTC Technical (15 features, indices 0-14) ─────────────────────
+        # Returns
+        features[0] = (close[-1] / close[-2] - 1.0) if n >= 2 else 0.0           # return_1bar
+        features[1] = (close[-1] / close[-7] - 1.0) if n >= 7 else 0.0           # return_6bar
+        features[2] = (close[-1] / close[-13] - 1.0) if n >= 13 else 0.0         # return_12bar
+        features[3] = (close[-1] / close[-49] - 1.0) if n >= 49 else 0.0         # return_48bar
+        features[4] = (close[-1] / close[-min(289, n)] - 1.0) if n >= 50 else 0.0  # return_288bar
+
+        # Volatility (log returns std)
+        log_ret = np.diff(np.log(np.maximum(close, 1e-10)))
+        features[5] = np.std(log_ret[-12:]) if len(log_ret) >= 12 else 0.0       # vol_12bar
+        features[6] = np.std(log_ret[-48:]) if len(log_ret) >= 48 else 0.0       # vol_48bar
+        features[7] = (features[5] / features[6]) if features[6] > 1e-10 else 1.0  # vol_ratio
+
+        # Volume features
+        vol_mean_20 = np.mean(volume[-20:]) if n >= 20 else np.mean(volume)
+        features[8] = (volume[-1] / vol_mean_20) - 1.0 if vol_mean_20 > 0 else 0.0  # volume_surge
+        vol_mean_early = np.mean(volume[-20:-10]) if n >= 20 else vol_mean_20
+        vol_mean_late = np.mean(volume[-10:]) if n >= 10 else vol_mean_20
+        features[9] = (vol_mean_late / vol_mean_early - 1.0) if vol_mean_early > 0 else 0.0  # volume_trend
+
+        # Consecutive red candles
+        red_count = 0
+        for i in range(n - 1, max(n - 20, 0) - 1, -1):
+            if close[i] < open_[i]:
+                red_count += 1
+            else:
+                break
+        features[10] = float(red_count)  # consecutive_red
+
+        # Drawdown from 24h high
+        high_24h = np.max(high[-288:]) if n >= 288 else np.max(high)
+        features[11] = (close[-1] / high_24h - 1.0) if high_24h > 0 else 0.0  # drawdown_24h
+
+        # RSI (14-period, normalized to [-1, 1])
+        if len(log_ret) >= 14:
+            gains = np.where(log_ret[-14:] > 0, log_ret[-14:], 0)
+            losses = np.where(log_ret[-14:] < 0, -log_ret[-14:], 0)
+            avg_gain = np.mean(gains)
+            avg_loss = np.mean(losses)
+            rs = avg_gain / avg_loss if avg_loss > 1e-10 else 100.0
+            rsi = 100.0 - (100.0 / (1.0 + rs))
+            features[12] = (rsi - 50.0) / 50.0  # rsi_14_norm → [-1, 1]
+        # else stays 0.0
+
+        # Bollinger Band %B
+        if n >= 20:
+            sma20 = np.mean(close[-20:])
+            std20 = np.std(close[-20:])
+            if std20 > 1e-10:
+                upper = sma20 + 2.0 * std20
+                lower = sma20 - 2.0 * std20
+                features[13] = (close[-1] - lower) / (upper - lower)  # bb_pct_b
+            else:
+                features[13] = 0.5
+
+        # VWAP distance
+        if n >= 20 and np.sum(volume[-20:]) > 0:
+            vwap = np.sum(close[-20:] * volume[-20:]) / np.sum(volume[-20:])
+            features[14] = (close[-1] / vwap - 1.0) if vwap > 0 else 0.0  # vwap_distance
+
+        # ── Daily Macro (10 features, indices 15-24) ──────────────────────
+        if macro_data:
+            features[15] = float(macro_data.get('spx_return_1d', 0.0))
+            features[16] = float(macro_data.get('spx_vs_sma', 0.0))
+            features[17] = float(macro_data.get('vix_norm', 0.0))
+            features[18] = float(macro_data.get('vix_change', 0.0))
+            features[19] = float(macro_data.get('vix_extreme', 0.0))
+            features[20] = float(macro_data.get('dxy_return_1d', 0.0))
+            features[21] = float(macro_data.get('dxy_trend', 0.0))
+            features[22] = float(macro_data.get('yield_level', 0.0))
+            features[23] = float(macro_data.get('yield_change', 0.0))
+            features[24] = float(macro_data.get('fng_norm', 0.0))
+
+        # ── Intraday Macro (11 features, indices 25-35) — always zero ─────
+        # All 11 have zero importance in the trained model.
+        # features[25:36] already zero from initialization.
+
+        # ── Derivatives (9 features, indices 36-44) ───────────────────────
+        if derivatives_data:
+            # Funding rate z-score
+            fr = derivatives_data.get('funding_rate')
+            if fr is not None:
+                fr_val = float(fr.iloc[-1]) if hasattr(fr, 'iloc') else float(fr)
+                features[36] = fr_val / 0.0003 if abs(fr_val) > 1e-10 else 0.0  # funding_z
+                features[37] = 1.0 if fr_val > 0.0005 else 0.0   # funding_extreme_long
+                features[38] = 1.0 if fr_val < -0.0005 else 0.0  # funding_extreme_short
+
+            # Open interest changes
+            oi = derivatives_data.get('open_interest')
+            if oi is not None and hasattr(oi, 'iloc') and len(oi) >= 12:
+                oi_arr = oi.values.astype(float)
+                oi_now = oi_arr[-1]
+                if oi_now > 0:
+                    features[39] = (oi_now / oi_arr[-12] - 1.0) if len(oi_arr) >= 12 else 0.0  # oi_change_1h
+                    features[40] = (oi_now / oi_arr[-min(48, len(oi_arr))] - 1.0)  # oi_change_4h
+                    oi_mean = np.mean(oi_arr[-48:]) if len(oi_arr) >= 48 else np.mean(oi_arr)
+                    oi_std = np.std(oi_arr[-48:]) if len(oi_arr) >= 48 else np.std(oi_arr)
+                    features[41] = (oi_now - oi_mean) / oi_std if oi_std > 1e-10 else 0.0  # oi_spike
+
+            # Long/short ratio
+            ls = derivatives_data.get('long_short_ratio')
+            if ls is not None:
+                ls_val = float(ls.iloc[-1]) if hasattr(ls, 'iloc') else float(ls)
+                features[42] = (ls_val - 1.0)  # ls_ratio_norm (centered at 1.0)
+                features[43] = 1.0 if ls_val > 2.0 else 0.0  # ls_extreme_long
+
+            # Taker buy/sell imbalance
+            tbv = derivatives_data.get('taker_buy_volume')
+            tsv = derivatives_data.get('taker_sell_volume')
+            if tbv is not None and tsv is not None:
+                tb = float(tbv.iloc[-1]) if hasattr(tbv, 'iloc') else float(tbv)
+                ts = float(tsv.iloc[-1]) if hasattr(tsv, 'iloc') else float(tsv)
+                total = tb + ts
+                features[44] = (tb - ts) / total if total > 0 else 0.0  # taker_imbalance
+
+        # ── Cross-Asset / ETH (6 features, indices 45-50) ────────────────
+        if cross_data:
+            # Look for ETH data in cross_data dict
+            eth_df = None
+            for key in cross_data:
+                if 'ETH' in str(key).upper():
+                    eth_df = cross_data[key]
+                    break
+
+            if eth_df is not None and hasattr(eth_df, 'empty') and not eth_df.empty and 'close' in eth_df.columns:
+                eth_close = eth_df['close'].values.astype(float)
+                en = len(eth_close)
+                if en >= 2:
+                    features[45] = eth_close[-1] / eth_close[-2] - 1.0  # eth_return_1bar
+                if en >= 7:
+                    features[46] = eth_close[-1] / eth_close[-7] - 1.0  # eth_return_6bar
+                # BTC/ETH ratio change
+                if en >= 7 and eth_close[-1] > 0 and eth_close[-7] > 0:
+                    btc_eth_now = close[-1] / eth_close[-1]
+                    btc_eth_prev = close[-7] / eth_close[-7]
+                    features[47] = btc_eth_now / btc_eth_prev - 1.0  # eth_btc_ratio_change
+                # Lead signals: lagged BTC returns
+                if n >= 4:
+                    features[48] = close[-2] / close[-3] - 1.0 if n >= 3 else 0.0  # btc_lead_1
+                    features[49] = close[-3] / close[-4] - 1.0 if n >= 4 else 0.0  # btc_lead_2
+                    features[50] = close[-4] / close[-5] - 1.0 if n >= 5 else 0.0  # btc_lead_3
+            else:
+                # Still compute lead signals from BTC even without ETH
+                if n >= 5:
+                    features[48] = close[-2] / close[-3] - 1.0  # btc_lead_1
+                    features[49] = close[-3] / close[-4] - 1.0  # btc_lead_2
+                    features[50] = close[-4] / close[-5] - 1.0  # btc_lead_3
+
+        else:
+            # No cross data at all — still compute BTC leads
+            if n >= 5:
+                features[48] = close[-2] / close[-3] - 1.0  # btc_lead_1
+                features[49] = close[-3] / close[-4] - 1.0  # btc_lead_2
+                features[50] = close[-4] / close[-5] - 1.0  # btc_lead_3
+
+        # Clean NaN/Inf
+        features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+        return features.reshape(1, 51)
+
+    except Exception as e:
+        logger.warning(f"build_crash_features failed: {e}")
+        return None
+
+
+def predict_crash_lgbm(
+    model: object,
+    features: Optional[np.ndarray],
+) -> Tuple[float, float]:
+    """Run inference on crash-regime LightGBM.
+
+    Args:
+        model: LightGBM Booster from load_crash_lgbm().
+        features: (1, 51) array from build_crash_features().
+
+    Returns:
+        (prediction, confidence) where:
+          prediction: float in [-1, 1] (mapped from P(UP))
+          confidence: float in [0, 1] (distance from 0.5, doubled)
+    """
+    if features is None or model is None:
+        return 0.0, 0.0
+
+    try:
+        prob = float(model.predict(features)[0])  # P(UP) in [0, 1]
+        prediction = float(np.clip((prob - 0.5) * 2.0, -1.0, 1.0))
+        confidence = abs(prob - 0.5) * 2.0
+        return prediction, confidence
+    except Exception as e:
+        logger.warning(f"Crash LightGBM inference failed: {e}")
+        return 0.0, 0.0

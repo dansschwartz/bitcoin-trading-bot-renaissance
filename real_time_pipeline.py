@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 try:
     from ml_model_loader import load_trained_models, predict_with_models, build_feature_sequence
+    from ml_model_loader import load_crash_lgbm, build_crash_features, predict_crash_lgbm
     HAS_TRAINED_MODELS = True
 except ImportError:
     HAS_TRAINED_MODELS = False
@@ -144,6 +145,17 @@ class FeatureFanOutProcessor:
         except Exception as e:
             self.logger.error(f"Error initializing trained models: {e}")
 
+        # Load crash-regime LightGBM (BTC-only, separate feature path)
+        self._crash_lgbm = None
+        self._crash_meta = None
+        try:
+            self._crash_lgbm, self._crash_meta = load_crash_lgbm()
+            if self._crash_lgbm:
+                n_feat = self._crash_meta.get('n_features', '?') if self._crash_meta else '?'
+                self.logger.info(f"Crash-regime LightGBM loaded ({n_feat} features)")
+        except Exception as e:
+            self.logger.warning(f"Crash LightGBM load skipped: {e}")
+
     def set_cross_data(self, cross_data: Optional[Dict[str, Any]], pair_name: Optional[str] = None) -> None:
         """Set cross-asset data for the next inference call.
 
@@ -158,7 +170,8 @@ class FeatureFanOutProcessor:
                                 price_df=None,
                                 cross_data: Optional[Dict[str, Any]] = None,
                                 pair_name: Optional[str] = None,
-                                derivatives_data: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+                                derivatives_data: Optional[Dict[str, Any]] = None,
+                                macro_data: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
         """Process features through trained models and collect predictions.
 
         Args:
@@ -169,6 +182,7 @@ class FeatureFanOutProcessor:
             pair_name: Current pair name for cross-asset feature computation.
             derivatives_data: Optional dict of feature_name → pd.Series for derivatives
                 features (funding_rate, open_interest, etc.).
+            macro_data: Optional dict with daily macro features for crash model.
         """
         start_time = datetime.now(timezone.utc)
         predictions = {}
@@ -216,6 +230,22 @@ class FeatureFanOutProcessor:
 
         except Exception as e:
             self.logger.error(f"Inference error: {e}", exc_info=True)
+
+        # Crash-regime LightGBM (BTC-only, separate feature path)
+        if self._crash_lgbm is not None and _pair and 'BTC' in str(_pair).upper():
+            try:
+                crash_feats = build_crash_features(
+                    price_df, derivatives_data=derivatives_data,
+                    macro_data=macro_data, cross_data=_cross,
+                )
+                if crash_feats is not None:
+                    crash_pred, crash_conf = predict_crash_lgbm(self._crash_lgbm, crash_feats)
+                    predictions['CrashRegime'] = float(crash_pred)
+                    self.logger.info(
+                        f"CrashRegime pred={crash_pred:.4f} conf={crash_conf:.4f} (BTC)"
+                    )
+            except Exception as e:
+                self.logger.warning(f"Crash LightGBM inference skipped: {e}")
 
         processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
         self.logger.info(f"Processed {len(predictions)} trained models in {processing_time:.4f}s")

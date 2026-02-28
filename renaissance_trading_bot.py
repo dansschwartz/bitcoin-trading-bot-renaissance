@@ -495,6 +495,80 @@ def validate_config(config: Dict[str, Any], logger_inst: logging.Logger) -> bool
     return True
 
 
+class MacroDataCache:
+    """Cache daily macro data (SPX, VIX, DXY, 10Y yield) for crash-regime model.
+
+    Refreshes every 3600 seconds via yfinance. Returns zeros on failure.
+    """
+
+    REFRESH_INTERVAL = 3600  # 1 hour
+
+    def __init__(self, logger: Optional[logging.Logger] = None):
+        self.logger = logger or logging.getLogger(__name__)
+        self._cache: Dict[str, float] = {}
+        self._last_refresh: float = 0.0
+
+    def get(self) -> Dict[str, float]:
+        """Return cached macro data, refreshing if stale."""
+        now = time.time()
+        if now - self._last_refresh > self.REFRESH_INTERVAL:
+            self._refresh()
+        return self._cache
+
+    def _refresh(self) -> None:
+        """Fetch daily macro data via yfinance."""
+        self._last_refresh = time.time()
+        try:
+            import yfinance as yf
+            tickers = {
+                'spx': '^GSPC',
+                'vix': '^VIX',
+                'dxy': 'DX-Y.NYB',
+                'us10y': '^TNX',
+            }
+            result: Dict[str, float] = {}
+            for name, symbol in tickers.items():
+                try:
+                    tk = yf.Ticker(symbol)
+                    hist = tk.history(period='5d')
+                    if hist.empty or len(hist) < 2:
+                        continue
+                    close = hist['Close'].values
+                    current = float(close[-1])
+                    prev = float(close[-2])
+
+                    if name == 'spx':
+                        result['spx_return_1d'] = (current / prev - 1.0) if prev > 0 else 0.0
+                        sma = float(np.mean(close)) if len(close) >= 3 else current
+                        result['spx_vs_sma'] = (current / sma - 1.0) if sma > 0 else 0.0
+                    elif name == 'vix':
+                        result['vix_norm'] = (current - 20.0) / 20.0  # Centered on VIX=20
+                        result['vix_change'] = (current / prev - 1.0) if prev > 0 else 0.0
+                        result['vix_extreme'] = 1.0 if current > 30.0 else 0.0
+                    elif name == 'dxy':
+                        result['dxy_return_1d'] = (current / prev - 1.0) if prev > 0 else 0.0
+                        sma = float(np.mean(close)) if len(close) >= 3 else current
+                        result['dxy_trend'] = (current / sma - 1.0) if sma > 0 else 0.0
+                    elif name == 'us10y':
+                        result['yield_level'] = (current - 4.0) / 2.0  # Centered on 4%
+                        result['yield_change'] = (current - prev) if prev > 0 else 0.0
+                except Exception as e:
+                    self.logger.debug(f"Macro fetch failed for {symbol}: {e}")
+
+            # FNG (Fear & Greed) — reuse from derivatives provider if available
+            result.setdefault('fng_norm', 0.0)
+
+            self._cache = result
+            self.logger.info(f"Macro cache refreshed: {len(result)} features")
+
+        except ImportError:
+            self.logger.warning("yfinance not installed — macro features will be zeros")
+            self._cache = {}
+        except Exception as e:
+            self.logger.warning(f"Macro cache refresh failed: {e}")
+            self._cache = {}
+
+
 class RenaissanceTradingBot:
     """
     Main Renaissance Technologies-style Bitcoin trading bot
@@ -1142,15 +1216,19 @@ class RenaissanceTradingBot:
             'ml_ensemble': 0.20,              # ML 7-model ensemble prediction (Council #5: boosted from 0.05)
             'ml_cnn': 0.0,                    # ML CNN model prediction (decommissioned, Council #1)
             'breakout': 0.08,                 # Breakout scanner signal (Binance-wide)
+            'crash_regime': 0.15,             # Crash-regime LightGBM (BTC-only, 51 features)
         })
         self.signal_weights = {str(k): float(self._force_float(v)) for k, v in raw_weights.items()}
 
         # Ensure ML weights always present (genetic optimizer may drop them)
-        _ml_required = {'ml_ensemble': 0.20, 'ml_cnn': 0.0}
+        _ml_required = {'ml_ensemble': 0.20, 'ml_cnn': 0.0, 'crash_regime': 0.15}
         for k, v in _ml_required.items():
             if k not in self.signal_weights:
                 self.signal_weights[k] = v
                 self.logger.info(f"Injected missing ML weight: {k}={v}")
+
+        # Macro data cache for crash-regime model (SPX, VIX, DXY, yields)
+        self._macro_cache = MacroDataCache(logger=self.logger)
 
         # Trading state
         self.current_position = 0.0
@@ -1770,6 +1848,7 @@ class RenaissanceTradingBot:
                         {'price_df': df},
                         cross_data=_cross, pair_name=_pair,
                         derivatives_data=_deriv,
+                        macro_data=self._macro_cache.get(),
                     )
                     market_data['real_time_predictions'] = rt_result
                     _ml_scale = self.config.get("ml_signal_scale", 10.0)
@@ -1779,6 +1858,13 @@ class RenaissanceTradingBot:
                         signals['ml_ensemble'] = float(np.clip(_ens_val * _ml_scale, -1.0, 1.0))
                     if 'CNN' in rt_result:
                         signals['ml_cnn'] = float(np.clip(rt_result['CNN'] * _ml_scale, -1.0, 1.0))
+                    # Crash-regime LightGBM signal (BTC-only)
+                    if 'CrashRegime' in rt_result:
+                        signals['crash_regime'] = float(np.clip(rt_result['CrashRegime'] * _ml_scale, -1.0, 1.0))
+                        self.logger.info(
+                            f"CRASH MODEL: raw={rt_result['CrashRegime']:.4f}, "
+                            f"signal={signals['crash_regime']:.4f}"
+                        )
                     self.logger.info(
                         f"ML SIGNALS: ensemble={signals.get('ml_ensemble', 0):.4f}, "
                         f"cnn={signals.get('ml_cnn', 0):.4f} (raw: E={_ens_val:.4f}, "
