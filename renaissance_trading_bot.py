@@ -4117,11 +4117,13 @@ class RenaissanceTradingBot:
                             # CrashRegime is in [-1, 1] (mapped from P(UP))
                             # Convert back to probability: prob = (pred + 1) / 2
                             _crash_prob = (float(_crash_raw) + 1.0) / 2.0
-                            _crash_conf = abs(_crash_prob - 0.5) * 2.0  # 0-1 scale
+                            # Directional confidence: how sure the model is in its chosen direction
+                            # UP: conf = P(UP), DOWN: conf = 1 - P(UP)
+                            _dir_conf = max(_crash_prob, 1.0 - _crash_prob)
                             self._sa_ml_cache[product_id] = {
                                 "prediction": float(_crash_raw),
-                                "agreement": _crash_conf,
-                                "confidence": _crash_prob * 100.0,  # 50-100% scale
+                                "agreement": abs(_crash_prob - 0.5) * 2.0,
+                                "confidence": _dir_conf * 100.0,  # 50-100% scale, direction-agnostic
                                 "source": "crash_lightgbm",
                             }
                         elif ml_package and hasattr(ml_package, 'ensemble_score'):
