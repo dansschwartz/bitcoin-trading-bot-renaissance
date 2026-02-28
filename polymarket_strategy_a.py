@@ -79,11 +79,11 @@ class StrategyAExecutor:
     """
 
     # Thresholds — calibrated for crash-regime LightGBM (max conf ~56%)
-    CONFIDENCE_THRESHOLD = 55.0       # Was 85.0. Model prob >= 0.55 (or <= 0.45)
+    CONFIDENCE_THRESHOLD = 53.0       # Model prob >= 0.53 (or <= 0.47)
     MAX_TOKEN_COST = 0.45
     BET_AMOUNT = 50.0                 # Fallback; overridden by Kelly sizing
-    EXIT_CONFIDENCE = 50.0            # Was 70.0. Exit when model is pure coin-flip
-    ADD_CONFIDENCE = 55.0             # Was 85.0. Same as entry threshold
+    EXIT_CONFIDENCE = 50.0            # Exit when model is pure coin-flip
+    ADD_CONFIDENCE = 53.0             # Same as entry threshold
     MAX_POSITION_PER_MARKET = 150.0   # dollar cap
     STOP_LOSS_PCT = 0.40              # close if share price drops 40% from avg cost
     MAX_BETS_PER_HOUR = 6
