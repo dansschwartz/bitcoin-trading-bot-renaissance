@@ -2050,7 +2050,7 @@ class RenaissanceTradingBot:
                     )
                     market_data['real_time_predictions'] = rt_result
                     _ml_scale = self.config.get("ml_signal_scale", 10.0)
-                    _pair_key = product_id or 'unknown'
+                    _pair_key = p_id or 'unknown'
                     # MetaEnsemble is the key from real_time_pipeline name_map
                     _ens_val = rt_result.get('MetaEnsemble') or rt_result.get('Ensemble') or 0.0
                     if _ens_val:
@@ -2066,7 +2066,7 @@ class RenaissanceTradingBot:
                         _crash_rescaled = self._ml_zscore_rescale(_pair_key + '_crash', float(_crash_val))
                         signals['crash_regime'] = float(np.clip(_crash_rescaled, -1.0, 1.0))
                         self.logger.info(
-                            f"CRASH MODEL [{product_id}]: raw={float(_crash_val):.4f}, "
+                            f"CRASH MODEL [{p_id}]: raw={float(_crash_val):.4f}, "
                             f"rescaled={_crash_rescaled:.4f}, signal={signals['crash_regime']:.4f}"
                         )
                     self.logger.info(
