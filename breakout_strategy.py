@@ -1,7 +1,7 @@
 """
 Breakout Strategy — Separate $2,000 wallet that catches parabolic moves.
 
-Entry: breakout_score >= 75, volume surge >= 5x, price_change >= 10%, near 24h high.
+Entry: breakout_score >= 60, volume surge >= 5x, price_change >= 10%, near 24h high.
 Exit: -10% stop loss, 48h sideways, 25% trailing stop from peak.
 Bet size: max($100, bankroll / 20). Max 10 open positions. 24h cooldown per symbol.
 """
@@ -23,7 +23,7 @@ STOP_LOSS_PCT = -10.0
 SIDEWAYS_HOURS = 48
 SIDEWAYS_THRESHOLD_PCT = 5.0
 TRAILING_STOP_PCT = 25.0
-MIN_BREAKOUT_SCORE = 75.0
+MIN_BREAKOUT_SCORE = 60.0
 MIN_VOLUME_SURGE = 5.0
 MIN_PRICE_CHANGE_PCT = 10.0
 EXCLUDED_BASES = {"BTC", "ETH"}  # Whole-market movers
@@ -149,7 +149,8 @@ class BreakoutStrategy:
 
         self.logger.info(
             f"BREAKOUT STRATEGY loaded: bankroll=${self.bankroll:.2f}, "
-            f"{len(self.open_positions)} open positions"
+            f"{len(self.open_positions)} open positions, "
+            f"min_score={MIN_BREAKOUT_SCORE}"
         )
 
     # ══════════════════════════════════════════════════════════════

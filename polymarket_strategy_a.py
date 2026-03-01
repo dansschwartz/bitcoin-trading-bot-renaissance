@@ -17,9 +17,11 @@ ML Source:
   Half-Kelly sizing: 3-8% of bankroll per bet.
 
 Market Discovery:
-  Rolling 15m direction markets via slug pattern: {asset}-updown-15m-{unix_timestamp}
+  Rolling 15m and 5m direction markets via slug pattern:
+    {asset}-updown-15m-{unix_timestamp} (900s alignment)
+    {asset}-updown-5m-{unix_timestamp}  (300s alignment)
   Discovered via Gamma API (no scanner dependency).
-  Instruments: BTC, ETH, SOL, XRP.
+  Instruments: BTC, ETH, SOL, XRP (both timeframes).
 """
 
 import json
@@ -48,14 +50,21 @@ class InstrumentConfig:
     price_pair: str
     slug_pattern: str
     enabled: bool = True
+    timeframe: int = 15  # minutes (15 or 5)
 
 
 INSTRUMENTS: Dict[str, InstrumentConfig] = {
+    # 15-minute direction markets (2-bar / 10-min ML horizon, 53.3% acc)
     "btc_15m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-15m-{ts}"),
     "eth_15m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-15m-{ts}"),
     "sol_15m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-15m-{ts}"),
     "doge_15m": InstrumentConfig("DOGE", "DOGE-USD", "DOGE-USD", "doge-updown-15m-{ts}", enabled=False),
     "xrp_15m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-15m-{ts}"),
+    # 5-minute direction markets (1-bar / 5-min ML horizon, 52.4% acc)
+    "btc_5m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-5m-{ts}", timeframe=5),
+    "eth_5m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-5m-{ts}", timeframe=5),
+    "sol_5m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-5m-{ts}", timeframe=5),
+    "xrp_5m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-5m-{ts}", timeframe=5),
 }
 
 
@@ -311,8 +320,20 @@ class StrategyAExecutor:
 
             slug = market.get("slug", "")
             minutes_left = self._get_minutes_remaining(market)
-            if minutes_left is None or minutes_left < 1.0 or minutes_left > 14.0:
+            if minutes_left is None:
                 continue
+            # Timeframe-aware window: 15m -> [1.0, 14.0], 5m -> [0.5, 4.5]
+            if inst.timeframe == 5:
+                if minutes_left < 0.5 or minutes_left > 4.5:
+                    continue
+            else:
+                if minutes_left < 1.0 or minutes_left > 14.0:
+                    continue
+
+            # TODO: When crash model supports per-horizon inference, route:
+            #   5-min markets  -> crash_model.predict(horizon='1bar')
+            #   15-min markets -> crash_model.predict(horizon='2bar')
+            # For now, both use the same ensemble signal.
 
             # ML data
             ml_data = ml_predictions.get(inst.ml_pair, {})
@@ -814,7 +835,8 @@ class StrategyAExecutor:
 
     def _discover_market(self, inst: InstrumentConfig) -> Optional[dict]:
         now_ts = int(time.time())
-        window_ts = (now_ts // 900) * 900
+        window_sec = inst.timeframe * 60  # 900 for 15m, 300 for 5m
+        window_ts = (now_ts // window_sec) * window_sec
         slug = inst.slug_pattern.format(ts=window_ts)
 
         cached = self._market_cache.get(slug)
@@ -827,7 +849,7 @@ class StrategyAExecutor:
             return market
 
         # Try previous window
-        prev_slug = inst.slug_pattern.format(ts=window_ts - 900)
+        prev_slug = inst.slug_pattern.format(ts=window_ts - window_sec)
         cached_prev = self._market_cache.get(prev_slug)
         if cached_prev and (now_ts - cached_prev[1] < MARKET_CACHE_TTL):
             return cached_prev[0]

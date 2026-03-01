@@ -180,7 +180,7 @@ async def breakout_history(request: Request, hours: int = 24, limit: int = 100):
                 SELECT scan_time, product_id, score, direction, price,
                        volume_24h_usd, price_change_pct
                 FROM breakout_scans
-                WHERE scan_time > ? AND score >= 50
+                WHERE scan_time > ? AND score >= 35
                 ORDER BY scan_time DESC, score DESC
                 LIMIT ?
             """, (cutoff, limit)).fetchall()
@@ -219,7 +219,7 @@ async def breakout_heatmap(request: Request):
             """, (latest,)).fetchall()
             pairs = [dict(r) for r in rows]
             for p in pairs:
-                p["tier"] = "T1" if p["score"] >= 70 else "T2" if p["score"] >= 50 else "T3" if p["score"] >= 30 else "T4"
+                p["tier"] = "T1" if p["score"] >= 60 else "T2" if p["score"] >= 45 else "T3" if p["score"] >= 30 else "T4"
             return {"pairs": pairs}
     except Exception:
         return {"pairs": []}
