@@ -103,6 +103,23 @@ class CrashModelLoader:
                 accuracy = meta.get('test_acc', meta.get('test_accuracy', 0.0))
                 auc = meta.get('test_auc', 0.0)
 
+                # BTC v3 meta has nested format — extract from winner comparison
+                if accuracy == 0.0 and 'comparison' in meta:
+                    winner_key = meta.get('winner_key', 'B')
+                    for comp_name, comp_data in meta['comparison'].items():
+                        if winner_key in comp_name or comp_name == meta.get('winner', ''):
+                            accuracy = comp_data.get('test_acc', 0.0)
+                            auc = comp_data.get('test_auc', 0.0)
+                            break
+                    # Fallback: use primary horizon from horizon_comparison
+                    if accuracy == 0.0 and 'horizon_comparison' in meta:
+                        primary = meta.get('primary_horizon', '2-bar')
+                        for h_name, h_data in meta['horizon_comparison'].items():
+                            if primary.split(' ')[0] in h_name:
+                                accuracy = h_data.get('test_acc', 0.0)
+                                auc = h_data.get('test_auc', 0.0)
+                                break
+
                 entry = CrashModelEntry(
                     asset=asset,
                     horizon=horizon,
