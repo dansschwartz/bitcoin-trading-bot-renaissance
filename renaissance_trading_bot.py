@@ -293,6 +293,16 @@ try:
 except ImportError:
     AGENT_COORDINATOR_AVAILABLE = False
 
+# Hierarchical Regime Detection (Dalio-inspired)
+try:
+    from macro_regime_detector import MacroRegimeDetector, MacroRegime
+    from crypto_regime_detector import CryptoRegimeDetector, CryptoRegime
+    from model_router import ModelRouter
+    HIERARCHICAL_REGIME_AVAILABLE = True
+except ImportError as _hr_err:
+    HIERARCHICAL_REGIME_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"Hierarchical regime import failed: {_hr_err}")
+
 # Types moved to renaissance_types.py
 
 def _signed_strength(signal: IndicatorOutput) -> float:
@@ -1229,6 +1239,19 @@ class RenaissanceTradingBot:
 
         # Macro data cache for crash-regime model (SPX, VIX, DXY, yields)
         self._macro_cache = MacroDataCache(logger=self.logger)
+
+        # ── Hierarchical Regime Detection (observation mode) ──
+        self._macro_regime_detector = None
+        self._crypto_regime_detector = None
+        self._model_router = None
+        if HIERARCHICAL_REGIME_AVAILABLE:
+            self._macro_regime_detector = MacroRegimeDetector(logger=self.logger)
+            self._crypto_regime_detector = CryptoRegimeDetector(logger=self.logger)
+            self._model_router = ModelRouter(observation_mode=True, logger=self.logger)
+            self.logger.info(
+                "Hierarchical Regime Detection initialized (OBSERVATION MODE): "
+                "Macro(4-state) + Crypto(4-state) + ModelRouter(12-entry matrix)"
+            )
 
         # Trading state
         self.current_position = 0.0
@@ -3442,6 +3465,67 @@ class RenaissanceTradingBot:
                         cross_data[_pid] = _cdf
                 except Exception:
                     pass
+
+            # ── Hierarchical Regime Classification (once per cycle) ──
+            _cycle_regime_state = {}
+            if self._macro_regime_detector and self._crypto_regime_detector and self._model_router:
+                try:
+                    # 1. Macro regime (uses cached yfinance data)
+                    _macro_data = self._macro_cache.get()
+                    _macro_snap = self._macro_regime_detector.classify(_macro_data)
+                    _macro_snap.confidence = max(_macro_snap.confidence, self._macro_regime_detector.current_confidence)
+
+                    # 2. Crypto regime (uses BTC price data + derivatives)
+                    _btc_df = None
+                    _btc_deriv = None
+                    for _btc_key in ['BTCUSDT', 'BTC-USDT', 'BTC/USDT']:
+                        if _btc_key in cross_data and len(cross_data[_btc_key]) >= 50:
+                            _btc_df = cross_data[_btc_key]
+                            break
+                    if _btc_df is None:
+                        # Fallback: load from DB
+                        _btc_df = self._load_price_df_from_db('BTCUSDT', limit=300)
+
+                    # Get BTC derivatives if available
+                    _btc_market = market_data_all.get('BTCUSDT') or market_data_all.get('BTC-USDT', {})
+                    _btc_deriv = _btc_market.get('_derivatives_data') if _btc_market else None
+
+                    _crypto_snap = self._crypto_regime_detector.classify(_btc_df, _btc_deriv)
+
+                    # 3. Get micro regime from existing HMM
+                    _micro_label = "*"
+                    if self.regime_overlay and self.regime_overlay.current_regime:
+                        _micro_label = str(self.regime_overlay.current_regime)
+
+                    # 4. Model router (observation mode — logs only)
+                    _route_config = self._model_router.route(
+                        self._macro_regime_detector.current_regime,
+                        self._crypto_regime_detector.current_regime,
+                        _micro_label,
+                    )
+
+                    _cycle_regime_state = {
+                        'macro': self._macro_regime_detector.get_state(),
+                        'crypto': self._crypto_regime_detector.get_state(),
+                        'router': self._model_router.get_state(),
+                    }
+
+                    self.logger.info(
+                        f"REGIME HIERARCHY: "
+                        f"Macro={self._macro_regime_detector.current_regime.value} "
+                        f"Crypto={self._crypto_regime_detector.current_regime.value} "
+                        f"Micro={_micro_label} "
+                        f"-> {_route_config.model_name} "
+                        f"(kelly={_route_config.kelly_multiplier:.1f}, "
+                        f"obs_mode=True)"
+                    )
+
+                    # Emit to dashboard via event emitter
+                    if hasattr(self, 'event_emitter') and self.event_emitter:
+                        self.event_emitter.emit('regime_hierarchy', _cycle_regime_state)
+
+                except Exception as _regime_err:
+                    self.logger.debug(f"Hierarchical regime classification error: {_regime_err}")
 
             for product_id in cycle_pairs:
                 pair_start_time = time.time()

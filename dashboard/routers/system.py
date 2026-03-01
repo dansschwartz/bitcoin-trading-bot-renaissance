@@ -36,6 +36,12 @@ async def system_status(request: Request):
 
     ws_clients = request.app.state.ws_manager.active_count
 
+    # Hierarchical regime (from emitter cache if available)
+    regime_hierarchy = None
+    emitter = getattr(request.app.state, "emitter", None)
+    if emitter:
+        regime_hierarchy = emitter.get_cached("regime_hierarchy")
+
     return {
         "status": "OPERATIONAL",
         "uptime_seconds": round(uptime_seconds),
@@ -46,6 +52,7 @@ async def system_status(request: Request):
         "product_ids": product_ids,
         "latest_prices": latest_prices,
         "ws_clients": ws_clients,
+        "regime_hierarchy": regime_hierarchy,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

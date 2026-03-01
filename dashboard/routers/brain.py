@@ -117,6 +117,22 @@ async def confluence_status(request: Request):
     return {"status": "no_live_data", "message": "Waiting for bot cycle"}
 
 
+@router.get("/regime/hierarchy")
+async def regime_hierarchy(request: Request):
+    """Hierarchical regime state — macro, crypto, micro, and model route."""
+    emitter = getattr(request.app.state, "emitter", None)
+    if emitter:
+        cached = emitter.get_cached("regime_hierarchy")
+        if cached:
+            return {"status": "live", **cached}
+    return {
+        "status": "waiting",
+        "macro": {"regime": "UNKNOWN", "confidence": 0.0},
+        "crypto": {"regime": "UNKNOWN", "confidence": 0.0},
+        "router": None,
+    }
+
+
 @router.get("/vae")
 async def vae_history(request: Request):
     db = request.app.state.dashboard_config.db_path
