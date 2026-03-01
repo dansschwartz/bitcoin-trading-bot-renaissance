@@ -1359,8 +1359,9 @@ class RenaissanceTradingBot:
         if not self.bar_aggregator or not self._universe_built:
             return
 
-        db_path = getattr(self.bar_aggregator, 'db_path', None)
+        db_path = getattr(self.bar_aggregator, '_db_path', None) or getattr(self.bar_aggregator, 'db_path', None)
         if not db_path:
+            self.logger.warning("GAP-FILL: No db_path found on bar_aggregator, skipping")
             return
 
         import sqlite3 as _sqlite3
