@@ -5652,10 +5652,10 @@ class RenaissanceTradingBot:
             self.logger.info("Launching liquidation cascade detector...")
             self._track_task(self._run_liquidation_detector())
 
-        # ── Cascade Data Collector (Polymarket crowd pricing for lead-lag) ──
-        if self.cascade_collector:
-            self.cascade_collector.start()
-            self.logger.info("Cascade data collector started (30s poll)")
+        # ── Cascade Data Collector — DISABLED (backtest showed no lead-lag edge) ──
+        # if self.cascade_collector:
+        #     self.cascade_collector.start()
+        #     self.logger.info("Cascade data collector started (30s poll)")
 
         # ── Fast Mean Reversion Scanner (1s eval) ──
         if self.fast_reversion_scanner:
