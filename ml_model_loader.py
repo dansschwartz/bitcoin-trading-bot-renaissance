@@ -1622,7 +1622,7 @@ def predict_lightgbm(
 CRASH_LGBM_PKL = os.path.join('models', 'trained', 'crash_lightgbm_model.pkl')
 CRASH_LGBM_META = os.path.join('models', 'trained', 'crash_lightgbm_meta.json')
 
-# Ordered feature list (must match training exactly)
+# Ordered feature list (must match training exactly — v3 order)
 CRASH_FEATURE_NAMES = [
     'return_1bar', 'return_6bar', 'return_12bar', 'return_48bar', 'return_288bar',
     'vol_12bar', 'vol_48bar', 'vol_ratio',
@@ -1632,15 +1632,15 @@ CRASH_FEATURE_NAMES = [
     # Daily macro (10)
     'spx_return_1d', 'spx_vs_sma', 'vix_norm', 'vix_change', 'vix_extreme',
     'dxy_return_1d', 'dxy_trend', 'yield_level', 'yield_change', 'fng_norm',
-    # Intraday macro (11) — all zero importance, always zero-filled
-    'spx_return_5m', 'spx_return_30m', 'spx_return_1h',
-    'vix_return_5m', 'vix_return_30m', 'vix_level_5m',
-    'ndx_return_5m', 'ndx_return_30m',
-    'spx_vix_diverge', 'macro_momentum_5m', 'macro_momentum_30m',
-    # Derivatives (9)
+    # Derivatives (9) — indices 25-33 in v3
     'funding_z', 'funding_extreme_long', 'funding_extreme_short',
     'oi_change_1h', 'oi_change_4h', 'oi_spike',
     'ls_ratio_norm', 'ls_extreme_long', 'taker_imbalance',
+    # Intraday macro (11) — indices 34-44, all zero importance, always zero-filled
+    'spx_return_5m', 'spx_return_15m', 'spx_return_1h',
+    'spx_momentum_5m', 'spx_direction_5m',
+    'vix_return_5m', 'vix_return_1h', 'vix_spike_5m',
+    'ndx_return_5m', 'ndx_return_1h', 'has_intraday_macro',
     # Cross-asset (6)
     'eth_return_1bar', 'eth_return_6bar', 'eth_btc_ratio_change',
     'btc_lead_1', 'btc_lead_2', 'btc_lead_3',
@@ -1787,19 +1787,15 @@ def build_crash_features(
             features[23] = float(macro_data.get('yield_change', 0.0))
             features[24] = float(macro_data.get('fng_norm', 0.0))
 
-        # ── Intraday Macro (11 features, indices 25-35) — always zero ─────
-        # All 11 have zero importance in the trained model.
-        # features[25:36] already zero from initialization.
-
-        # ── Derivatives (9 features, indices 36-44) ───────────────────────
+        # ── Derivatives (9 features, indices 25-33) — v3 order ──────────
         if derivatives_data:
             # Funding rate z-score
             fr = derivatives_data.get('funding_rate')
             if fr is not None:
                 fr_val = float(fr.iloc[-1]) if hasattr(fr, 'iloc') else float(fr)
-                features[36] = fr_val / 0.0003 if abs(fr_val) > 1e-10 else 0.0  # funding_z
-                features[37] = 1.0 if fr_val > 0.0005 else 0.0   # funding_extreme_long
-                features[38] = 1.0 if fr_val < -0.0005 else 0.0  # funding_extreme_short
+                features[25] = fr_val / 0.0003 if abs(fr_val) > 1e-10 else 0.0  # funding_z
+                features[26] = 1.0 if fr_val > 0.0005 else 0.0   # funding_extreme_long
+                features[27] = 1.0 if fr_val < -0.0005 else 0.0  # funding_extreme_short
 
             # Open interest changes
             oi = derivatives_data.get('open_interest')
@@ -1807,18 +1803,18 @@ def build_crash_features(
                 oi_arr = oi.values.astype(float)
                 oi_now = oi_arr[-1]
                 if oi_now > 0:
-                    features[39] = (oi_now / oi_arr[-12] - 1.0) if len(oi_arr) >= 12 else 0.0  # oi_change_1h
-                    features[40] = (oi_now / oi_arr[-min(48, len(oi_arr))] - 1.0)  # oi_change_4h
+                    features[28] = (oi_now / oi_arr[-12] - 1.0) if len(oi_arr) >= 12 else 0.0  # oi_change_1h
+                    features[29] = (oi_now / oi_arr[-min(48, len(oi_arr))] - 1.0)  # oi_change_4h
                     oi_mean = np.mean(oi_arr[-48:]) if len(oi_arr) >= 48 else np.mean(oi_arr)
                     oi_std = np.std(oi_arr[-48:]) if len(oi_arr) >= 48 else np.std(oi_arr)
-                    features[41] = (oi_now - oi_mean) / oi_std if oi_std > 1e-10 else 0.0  # oi_spike
+                    features[30] = (oi_now - oi_mean) / oi_std if oi_std > 1e-10 else 0.0  # oi_spike
 
             # Long/short ratio
             ls = derivatives_data.get('long_short_ratio')
             if ls is not None:
                 ls_val = float(ls.iloc[-1]) if hasattr(ls, 'iloc') else float(ls)
-                features[42] = (ls_val - 1.0)  # ls_ratio_norm (centered at 1.0)
-                features[43] = 1.0 if ls_val > 2.0 else 0.0  # ls_extreme_long
+                features[31] = (ls_val - 1.0)  # ls_ratio_norm (centered at 1.0)
+                features[32] = 1.0 if ls_val > 2.0 else 0.0  # ls_extreme_long
 
             # Taker buy/sell imbalance
             tbv = derivatives_data.get('taker_buy_volume')
@@ -1827,7 +1823,11 @@ def build_crash_features(
                 tb = float(tbv.iloc[-1]) if hasattr(tbv, 'iloc') else float(tbv)
                 ts = float(tsv.iloc[-1]) if hasattr(tsv, 'iloc') else float(tsv)
                 total = tb + ts
-                features[44] = (tb - ts) / total if total > 0 else 0.0  # taker_imbalance
+                features[33] = (tb - ts) / total if total > 0 else 0.0  # taker_imbalance
+
+        # ── Intraday Macro (11 features, indices 34-44) — always zero ────
+        # All 11 have zero importance in the trained model.
+        # features[34:45] already zero from initialization.
 
         # ── Cross-Asset / ETH (6 features, indices 45-50) ────────────────
         if cross_data:
