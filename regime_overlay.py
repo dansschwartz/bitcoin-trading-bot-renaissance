@@ -253,6 +253,8 @@ class RegimeOverlay:
             self._bar_count = len(bars_df)
 
             # --- Bar gap detection: suppress regime if data has significant gaps ---
+            # Use trailing window (last 500 bars) for gap ratio, not full history.
+            # Old bars from weeks ago inflate time_span but don't affect HMM quality.
             self._bar_gap_ratio = 1.0
             _gap_poisoned = False
             if len(bars_df) >= BOOTSTRAP_MIN_BARS and 'bar_start' in bars_df.columns:
@@ -263,13 +265,16 @@ class RegimeOverlay:
                         timestamps = pd.to_datetime(raw, unit='s').sort_values()
                     else:
                         timestamps = pd.to_datetime(raw).sort_values()
-                    time_span_s = (timestamps.iloc[-1] - timestamps.iloc[0]).total_seconds()
+                    # Use trailing window for gap check (HMM only needs ~200 bars)
+                    _gap_window = min(len(timestamps), 500)
+                    ts_window = timestamps.iloc[-_gap_window:]
+                    time_span_s = (ts_window.iloc[-1] - ts_window.iloc[0]).total_seconds()
                     expected_bars = int(time_span_s / BAR_DURATION_S) + 1
                     if expected_bars > 0:
-                        self._bar_gap_ratio = len(bars_df) / expected_bars
+                        self._bar_gap_ratio = len(ts_window) / expected_bars
 
-                    # Log significant gaps (> 10 min)
-                    diffs = timestamps.diff().dt.total_seconds().dropna()
+                    # Log significant gaps (> 10 min) in the trailing window
+                    diffs = ts_window.diff().dt.total_seconds().dropna()
                     big_gaps = diffs[diffs > GAP_THRESHOLD_S]
                     if len(big_gaps) > 0:
                         max_gap_min = big_gaps.max() / 60
