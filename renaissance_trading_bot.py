@@ -1207,6 +1207,11 @@ class RenaissanceTradingBot:
         self._universe_built = False
         self._universe_last_refresh: float = 0.0
 
+        # Council #8: Per-pair rolling spread tracker for universe filtering
+        self._pair_spread_history: Dict[str, list] = {}   # {pair: [spread_bps, ...]}
+        self._spread_lookback = 100                        # rolling window size
+        self._max_spread_bps = float(self.config.get('universe', {}).get('max_spread_bps', 3.0))
+
         # Step 8: Dynamic Thresholds (calibrated to actual signal distribution)
         # Backtest proof: |prediction| < 0.06 is noise (51% accuracy).
         # Only trade strong ML signals — configurable via config.json.
@@ -1344,6 +1349,93 @@ class RenaissanceTradingBot:
             self.logger.info(f"UNIVERSE BUILT: {len(self.product_ids)} pairs")
         except Exception as e:
             self.logger.error(f"UNIVERSE BUILD FAILED: {e} — keeping existing product_ids")
+
+    async def _gap_fill_bars_on_startup(self) -> None:
+        """Council proposal #1: Fill missing 5-min bars from Binance on startup.
+
+        For each pair, find the latest bar in DB and fetch any missing bars
+        up to now from Binance API (max 1000 bars per pair).
+        """
+        if not self.bar_aggregator or not self._universe_built:
+            return
+
+        db_path = getattr(self.bar_aggregator, 'db_path', None)
+        if not db_path:
+            return
+
+        import sqlite3 as _sqlite3
+        self.logger.info("GAP-FILL: Checking for missing bars across universe...")
+        total_filled = 0
+        sem = asyncio.Semaphore(10)
+
+        async def _fill_pair(pid: str) -> int:
+            async with sem:
+                try:
+                    bsym = self._pair_binance_symbols.get(pid, to_binance_symbol(pid))
+
+                    # Find latest bar in DB for this pair
+                    conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                    row = conn.execute(
+                        "SELECT MAX(bar_start) FROM five_minute_bars WHERE pair = ?",
+                        (pid,),
+                    ).fetchone()
+                    conn.close()
+
+                    latest_bar_ts = row[0] if row and row[0] else None
+                    now_ts = time.time()
+
+                    if latest_bar_ts is not None:
+                        # Calculate how many bars are missing
+                        if isinstance(latest_bar_ts, str):
+                            from datetime import datetime as _dt
+                            latest_bar_ts = _dt.fromisoformat(latest_bar_ts).timestamp()
+                        gap_bars = int((now_ts - latest_bar_ts) / 300)
+                        if gap_bars <= 1:
+                            return 0  # No gap
+                        fetch_count = min(gap_bars + 5, 1000)
+                    else:
+                        fetch_count = 1000  # No bars at all — fetch max
+
+                    candles = await self.binance_spot.fetch_candles(bsym, '5m', fetch_count)
+                    if not candles:
+                        return 0
+
+                    # Insert into five_minute_bars (deduplicate via INSERT OR IGNORE)
+                    conn = _sqlite3.connect(db_path)
+                    inserted = 0
+                    for c in candles:
+                        try:
+                            bar_start = c['timestamp']
+                            conn.execute(
+                                """INSERT OR IGNORE INTO five_minute_bars
+                                   (pair, exchange, bar_start, bar_end, open, high, low, close, volume,
+                                    num_trades, vwap, log_return, avg_spread_bps, buy_sell_ratio, funding_rate)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (pid, 'binance', bar_start, bar_start + 300,
+                                 c['open'], c['high'], c['low'], c['close'], c['volume'],
+                                 0, c['close'], 0.0, 0.0, 0.5, 0.0),
+                            )
+                            if conn.total_changes > inserted:
+                                inserted += 1
+                        except Exception:
+                            pass
+                    conn.commit()
+                    conn.close()
+
+                    if inserted > 0:
+                        self.logger.info(f"GAP-FILL: {pid} — inserted {inserted} bars from Binance")
+                    return inserted
+                except Exception as e:
+                    self.logger.debug(f"GAP-FILL failed for {pid}: {e}")
+                    return 0
+
+        # Run gap-fill for all pairs in parallel
+        results = await asyncio.gather(
+            *[_fill_pair(pid) for pid in self.product_ids],
+            return_exceptions=True,
+        )
+        total_filled = sum(r for r in results if isinstance(r, int))
+        self.logger.info(f"GAP-FILL COMPLETE: {total_filled} bars inserted across {len(self.product_ids)} pairs")
 
     async def _collect_from_binance(self, product_id: str) -> Dict[str, Any]:
         """Collect market data from Binance for a single pair.
@@ -1824,7 +1916,16 @@ class RenaissanceTradingBot:
             else:
                 signals['alternative'] = 0.0
 
-            self.logger.info(f"Generated signals: {signals}")
+            # Council #2 diagnostic: track zero-signal rate
+            _nonzero = sum(1 for v in signals.values() if abs(float(v)) > 1e-6)
+            _total = len(signals)
+            if _nonzero == 0:
+                self.logger.debug(
+                    f"ZERO-SIGNAL: {_pid} all {_total} signals zero "
+                    f"(ob_snap={'yes' if order_book_snapshot else 'NO'}, "
+                    f"tech={'yes' if technical_signal else 'NO'})"
+                )
+            self.logger.info(f"Generated signals: {_nonzero}/{_total} active for {_pid}")
 
             # 4. Institutional & High-Dimensional Intelligence (Step 16+)
             # Each signal group is isolated so one failure doesn't kill the rest
@@ -2824,6 +2925,27 @@ class RenaissanceTradingBot:
             slippage_risk = self.slippage_protection.analyze_slippage_risk(order_details, market_data)
             self.logger.info(f"Slippage risk for {product_id}: {slippage_risk.get('risk_level', 'UNKNOWN')}")
 
+            # Council #4: Apply spread-based slippage in paper mode
+            # half-spread + 1bps adverse selection, floor 0.5bps
+            fill_price = current_price
+            _slippage_bps = 0.0
+            if self.paper_trading and current_price > 0:
+                ticker = market_data.get('ticker', {})
+                _bid = self._force_float(ticker.get('bid', 0))
+                _ask = self._force_float(ticker.get('ask', 0))
+                if _bid > 0 and _ask > 0:
+                    half_spread_bps = ((_ask - _bid) / ((_ask + _bid) / 2)) * 10000 / 2.0
+                else:
+                    half_spread_bps = 0.5  # floor
+                adverse_bps = float(self.config.get('paper_trading', {}).get('adverse_selection_bps', 1.0))
+                floor_bps = float(self.config.get('paper_trading', {}).get('slippage_floor_bps', 0.5))
+                _slippage_bps = max(half_spread_bps + adverse_bps, floor_bps)
+                slippage_frac = _slippage_bps / 10000.0
+                if decision.action == 'BUY':
+                    fill_price = current_price * (1 + slippage_frac)  # worse fill for buyer
+                else:
+                    fill_price = current_price * (1 - slippage_frac)  # worse fill for seller
+
             # 2. Map action to position side
             side = "LONG" if decision.action == "BUY" else "SHORT"
 
@@ -2832,14 +2954,16 @@ class RenaissanceTradingBot:
                 product_id=product_id,
                 side=side,
                 size=decision.position_size,
-                entry_price=current_price,
+                entry_price=fill_price,
             )
 
             exec_result = {
                 'status': 'EXECUTED' if success else 'REJECTED',
                 'message': message,
                 'position_id': position.position_id if position else None,
-                'execution_price': current_price,
+                'execution_price': fill_price,
+                'signal_price': current_price,
+                'slippage_bps': _slippage_bps,
                 'slippage': slippage_risk.get('predicted_slippage', 0.0),
                 'exchange': execution_exchange,
                 'order_type': order_type,
@@ -2848,11 +2972,16 @@ class RenaissanceTradingBot:
             # Record trade cycle for anti-churn cooldown
             if success:
                 self._last_trade_cycle[product_id] = getattr(self, 'scan_cycle_count', 0)
+                if _slippage_bps > 0:
+                    self.logger.info(
+                        f"PAPER FILL: {decision.action} {product_id} signal=${current_price:.2f} "
+                        f"fill=${fill_price:.2f} slippage={_slippage_bps:.1f}bps"
+                    )
                 # Log MEXC maker order
                 if is_mexc_execution:
                     self.logger.info(
                         f"MEXC LIMIT ORDER: {decision.action} {decision.position_size:.8f} "
-                        f"{product_id} @ ${current_price:.2f} (maker, 0% fee)"
+                        f"{product_id} @ ${fill_price:.2f} (maker, 0% fee)"
                     )
 
             # Devil Tracker — record fill with spread-calibrated slippage
@@ -4362,12 +4491,29 @@ class RenaissanceTradingBot:
                     self._last_prices = {}
                 self._last_prices[product_id] = current_price
 
-                # 3. Abnormal spread detection
+                # 3. Abnormal spread detection + per-pair spread filter (Council #8)
                 ticker_data = market_data.get('ticker', {})
                 bid = self._force_float(ticker_data.get('bid', 0))
                 ask = self._force_float(ticker_data.get('ask', 0))
                 if bid > 0 and ask > 0:
                     spread_bps = ((ask - bid) / ((ask + bid) / 2)) * 10000
+
+                    # Track rolling spread per pair
+                    if product_id not in self._pair_spread_history:
+                        self._pair_spread_history[product_id] = []
+                    self._pair_spread_history[product_id].append(spread_bps)
+                    if len(self._pair_spread_history[product_id]) > self._spread_lookback:
+                        self._pair_spread_history[product_id] = self._pair_spread_history[product_id][-self._spread_lookback:]
+
+                    # Council #8: Skip pairs whose rolling avg spread exceeds threshold
+                    if len(self._pair_spread_history[product_id]) >= 10:
+                        avg_spread = sum(self._pair_spread_history[product_id]) / len(self._pair_spread_history[product_id])
+                        if avg_spread > self._max_spread_bps:
+                            self.logger.debug(
+                                f"SPREAD FILTER: {product_id} avg_spread={avg_spread:.1f}bps > {self._max_spread_bps}bps — skipping"
+                            )
+                            continue
+
                     if spread_bps > 50:  # >50bps spread = illiquid
                         self.logger.warning(
                             f"SANITY: Wide spread {spread_bps:.0f}bps on {product_id} — reducing confidence"
@@ -5630,6 +5776,9 @@ class RenaissanceTradingBot:
                     )
                 except Exception:
                     pass
+
+            # ── Council #1: Gap-fill missing bars from Binance on startup ──
+            await self._gap_fill_bars_on_startup()
 
         # Start real-time pipeline if enabled
         if self.real_time_pipeline.enabled:

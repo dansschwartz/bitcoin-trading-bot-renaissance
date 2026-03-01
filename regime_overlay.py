@@ -32,6 +32,12 @@ MIN_BAR_COMPLETENESS = 0.70   # suppress regime if <70% bars present (Council #7
 BAR_DURATION_S = 300          # 5-minute bars
 GAP_THRESHOLD_S = 600         # gaps > 10 minutes are logged
 
+# Hysteresis: minimum dwell time before regime transition (Council proposal #5)
+MIN_DWELL_DECISIONS = 12      # ~2 minutes at 10s cycle — filters noise oscillations
+
+# CUSUM anomaly detection on HMM log-likelihood (Council proposal #6)
+CUSUM_THRESHOLD_SIGMA = 5.0   # trigger regime_uncertain flag at 5-sigma
+
 
 class BootstrapRegimeClassifier:
     """
@@ -187,6 +193,20 @@ class RegimeOverlay:
         self._decision_count: int = 0
         self._last_transition_diag_cycle: int = 0
         self._transition_diagnostics: Optional[Dict[str, Any]] = None
+
+        # Hysteresis state (Council proposal #5)
+        self._confirmed_regime: Optional[str] = None  # regime after hysteresis filter
+        self._pending_regime: Optional[str] = None     # candidate regime during dwell
+        self._pending_count: int = 0                   # consecutive decisions in pending regime
+        self._dwell_count: int = 0                     # decisions in current confirmed regime
+
+        # CUSUM state (Council proposal #6)
+        self._cusum_pos: float = 0.0
+        self._cusum_neg: float = 0.0
+        self._cusum_mean: float = 0.0   # running mean of log-likelihood
+        self._cusum_std: float = 1.0    # running std of log-likelihood
+        self._cusum_n: int = 0          # number of observations
+        self._regime_uncertain: bool = False
         self.logger.info(
             f"RegimeOverlay initialized (Enabled: {self.enabled}, "
             f"Advanced HMM: {ADVANCED_HMM_AVAILABLE}, Bootstrap: ready)"
@@ -339,6 +359,48 @@ class RegimeOverlay:
                     self.current_regime['classifier'] = "hmm"
                     hmm_classified = True
 
+                    # --- CUSUM anomaly detector on HMM log-likelihood (Council #6) ---
+                    try:
+                        hmm_model = self._advanced_detector._model
+                        if hmm_model is not None:
+                            features = self._advanced_detector._build_features(bars_df)
+                            if features is not None and len(features) > 0:
+                                log_ll = float(hmm_model.score(features[-1:]))
+                                self._cusum_n += 1
+                                # Welford online mean/std update
+                                old_mean = self._cusum_mean
+                                self._cusum_mean += (log_ll - old_mean) / self._cusum_n
+                                if self._cusum_n > 1:
+                                    self._cusum_std = np.sqrt(
+                                        ((self._cusum_n - 2) * self._cusum_std ** 2
+                                         + (log_ll - old_mean) * (log_ll - self._cusum_mean))
+                                        / (self._cusum_n - 1)
+                                    )
+                                # CUSUM update
+                                if self._cusum_std > 1e-10:
+                                    z = (log_ll - self._cusum_mean) / self._cusum_std
+                                    self._cusum_pos = max(0, self._cusum_pos + z - 0.5)
+                                    self._cusum_neg = max(0, self._cusum_neg - z - 0.5)
+                                    self._regime_uncertain = (
+                                        self._cusum_pos > CUSUM_THRESHOLD_SIGMA
+                                        or self._cusum_neg > CUSUM_THRESHOLD_SIGMA
+                                    )
+                                    if self._regime_uncertain:
+                                        self.logger.warning(
+                                            f"CUSUM ALERT: regime_uncertain=True "
+                                            f"(pos={self._cusum_pos:.2f}, neg={self._cusum_neg:.2f}, "
+                                            f"threshold={CUSUM_THRESHOLD_SIGMA}σ)"
+                                        )
+                                        # Reset CUSUM after alert
+                                        self._cusum_pos = 0.0
+                                        self._cusum_neg = 0.0
+                                self.current_regime['hmm_log_likelihood'] = log_ll
+                                self.current_regime['cusum_pos'] = self._cusum_pos
+                                self.current_regime['cusum_neg'] = self._cusum_neg
+                                self.current_regime['regime_uncertain'] = self._regime_uncertain
+                    except Exception as cusum_err:
+                        self.logger.debug(f"CUSUM computation error: {cusum_err}")
+
             # --- Path B: Bootstrap ATR/SMA rules (20-199 bars) ---
             if not hmm_classified and len(bars_df) >= BOOTSTRAP_MIN_BARS:
                 bootstrap_result = self._bootstrap.classify(bars_df)
@@ -380,8 +442,46 @@ class RegimeOverlay:
             else:
                 self.current_regime['volatility_acceleration'] = 1.0
 
-            regime_label = self.current_regime.get('hmm_regime', 'unknown')
+            raw_regime_label = self.current_regime.get('hmm_regime', 'unknown')
             conf = self.current_regime.get('hmm_confidence', 0.0)
+
+            # --- Hysteresis filter: minimum dwell time (Council proposal #5) ---
+            # Require MIN_DWELL_DECISIONS consecutive observations of new regime before switching
+            if self._confirmed_regime is None:
+                self._confirmed_regime = raw_regime_label
+                self._dwell_count = 1
+
+            if raw_regime_label == self._confirmed_regime:
+                # Same as confirmed — reset pending, increment dwell
+                self._pending_regime = None
+                self._pending_count = 0
+                self._dwell_count += 1
+            elif raw_regime_label == self._pending_regime:
+                # Same as pending — increment pending count
+                self._pending_count += 1
+                if self._pending_count >= MIN_DWELL_DECISIONS:
+                    # Dwell time met — accept transition
+                    old_regime = self._confirmed_regime
+                    self._confirmed_regime = raw_regime_label
+                    self._dwell_count = self._pending_count
+                    self._pending_regime = None
+                    self._pending_count = 0
+                    self.logger.info(
+                        f"HYSTERESIS: regime transition accepted {old_regime} → {self._confirmed_regime} "
+                        f"(after {MIN_DWELL_DECISIONS} consecutive observations)"
+                    )
+            else:
+                # New candidate — start counting
+                self._pending_regime = raw_regime_label
+                self._pending_count = 1
+
+            # Apply hysteresis: use confirmed regime, not raw
+            regime_label = self._confirmed_regime
+            self.current_regime['hmm_regime'] = regime_label
+            self.current_regime['hysteresis_raw'] = raw_regime_label
+            self.current_regime['hysteresis_dwell'] = self._dwell_count
+            self.current_regime['hysteresis_pending'] = self._pending_regime
+            self.current_regime['hysteresis_pending_count'] = self._pending_count
 
             # Store bar quality metadata
             self.current_regime['bar_gap_ratio'] = self._bar_gap_ratio

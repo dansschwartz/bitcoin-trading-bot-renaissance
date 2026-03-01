@@ -1438,6 +1438,26 @@ def predict_with_models(
             predictions['meta_ensemble'] = 0.0
             confidences['meta_ensemble'] = 0.0
 
+    # --- Ensemble agreement modifier (Council proposal #10) ---
+    # Compute fraction of base models agreeing on sign with meta-ensemble prediction
+    meta_pred = predictions.get('meta_ensemble', 0.0)
+    if meta_pred != 0.0 and len(predictions) > 1:
+        meta_sign = 1 if meta_pred > 0 else -1
+        base_names = [n for n in BASE_MODEL_NAMES if n in predictions]
+        if base_names:
+            agree_count = sum(
+                1 for n in base_names
+                if (predictions[n] > 0 and meta_sign > 0) or (predictions[n] < 0 and meta_sign < 0)
+            )
+            agreement = agree_count / len(base_names)
+            predictions['_ensemble_agreement'] = agreement
+
+            # Apply confidence bonus/penalty to meta-ensemble confidence
+            if agreement >= 0.83:  # >= 5/6 agree
+                confidences['meta_ensemble'] = min(confidences.get('meta_ensemble', 0.5) + 0.05, 0.99)
+            elif agreement <= 0.33:  # <= 2/6 agree
+                confidences['meta_ensemble'] = max(confidences.get('meta_ensemble', 0.5) - 0.05, 0.0)
+
     return predictions, confidences
 
 
@@ -1604,8 +1624,8 @@ def predict_lightgbm(
         # Map probability [0, 1] → prediction [-1, 1]
         prediction = float(np.clip((prob - 0.5) * 2.0, -1.0, 1.0))
 
-        # Confidence: how far from uncertain (0.5)
-        confidence = abs(prob - 0.5) * 2.0  # 0.5→0, 0.7→0.4, 1.0→1.0
+        # Confidence: aligned with DL model range [0.5, 0.95] (Council proposal #7)
+        confidence = min(abs(prob - 0.5) * 2.0 + 0.5, 0.95)
 
         return prediction, confidence
 
@@ -1899,7 +1919,7 @@ def predict_crash_lgbm(
     try:
         prob = float(model.predict(features)[0])  # P(UP) in [0, 1]
         prediction = float(np.clip((prob - 0.5) * 2.0, -1.0, 1.0))
-        confidence = abs(prob - 0.5) * 2.0
+        confidence = min(abs(prob - 0.5) * 2.0 + 0.5, 0.95)  # Aligned with DL range
         return prediction, confidence
     except Exception as e:
         logger.warning(f"Crash LightGBM inference failed: {e}")

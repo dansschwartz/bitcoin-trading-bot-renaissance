@@ -86,12 +86,12 @@ class ConfidenceCalculator:
             'bear_market': 0.85,
             'sideways': 0.95,
             'accumulation': 1.10,
-            'distribution': 0.80,
+            'distribution': 0.90,           # Council: raised from 0.80
             'crisis': 0.70,
             'recovery': 1.05,
             'unknown': 0.90,
             # HMM regime labels (must match AdvancedRegimeDetector output)
-            'bear_trending': 0.85,
+            'bear_trending': 0.95,          # Council: raised from 0.85 (54% of decisions, was over-suppressing)
             'bull_trending': 1.10,
             'neutral_sideways': 1.00,
             'bull_mean_reverting': 1.05,
