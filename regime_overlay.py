@@ -512,7 +512,9 @@ class RegimeOverlay:
                 f"Market Regime: {regime_label} [{self._active_classifier}] "
                 f"(conf={conf:.2f}, bars={self._bar_count}, "
                 f"gap_ratio={self._bar_gap_ratio:.2f}, "
-                f"Persist={self.current_regime['trend_persistence']:.2f})"
+                f"Persist={self.current_regime['trend_persistence']:.2f}, "
+                f"dwell={self._dwell_count}, "
+                f"cusum={self._cusum_pos:.1f}/{self._cusum_neg:.1f}n={self._cusum_n})"
             )
 
             return self.current_regime
