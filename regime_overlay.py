@@ -241,12 +241,12 @@ class RegimeOverlay:
             }
 
             # Load OHLCV bars from DB for regime classification
-            # Try BTC-USD first, fall back to BTC/USDT (arbitrage module)
+            # Prefer BTC/USDT (Binance, dense coverage) over BTC-USD (bot-collected, gappy)
             bars_df = pd.DataFrame()
             if self._db_path:
-                bars_df = _load_bars_from_db(self._db_path, pair="BTC-USD", limit=500)
+                bars_df = _load_bars_from_db(self._db_path, pair="BTC/USDT", limit=500)
                 if len(bars_df) < BOOTSTRAP_MIN_BARS:
-                    alt = _load_bars_from_db(self._db_path, pair="BTC/USDT", limit=500)
+                    alt = _load_bars_from_db(self._db_path, pair="BTC-USD", limit=500)
                     if len(alt) > len(bars_df):
                         bars_df = alt
 
