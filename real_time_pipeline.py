@@ -19,6 +19,13 @@ try:
 except ImportError:
     HAS_TRAINED_MODELS = False
 
+try:
+    from crash_model_loader import CrashModelLoader
+    from crash_feature_builder import CrashFeatureBuilder
+    HAS_CRASH_MULTI = True
+except ImportError:
+    HAS_CRASH_MULTI = False
+
 class MultiExchangeFeed:
     """
     Multiplexer for live market data from multiple exchanges.
@@ -145,7 +152,7 @@ class FeatureFanOutProcessor:
         except Exception as e:
             self.logger.error(f"Error initializing trained models: {e}")
 
-        # Load crash-regime LightGBM (BTC-only, separate feature path)
+        # Load crash-regime LightGBM (legacy BTC-only, kept for backward compat)
         self._crash_lgbm = None
         self._crash_meta = None
         try:
@@ -155,6 +162,23 @@ class FeatureFanOutProcessor:
                 self.logger.info(f"Crash-regime LightGBM loaded ({n_feat} features)")
         except Exception as e:
             self.logger.warning(f"Crash LightGBM load skipped: {e}")
+
+        # Load multi-asset crash models (v2 — replaces BTC-only when available)
+        self._crash_loader: Optional['CrashModelLoader'] = None
+        self._crash_builder: Optional['CrashFeatureBuilder'] = None
+        if HAS_CRASH_MULTI:
+            try:
+                self._crash_loader = CrashModelLoader(logger_=self.logger)
+                self._crash_builder = CrashFeatureBuilder()
+                if self._crash_loader.model_count > 0:
+                    self.logger.info(
+                        f"Multi-asset crash models: {self._crash_loader.available_models}"
+                    )
+                    # Disable legacy single-model loader when multi is available
+                    self._crash_lgbm = None
+                    self._crash_meta = None
+            except Exception as e:
+                self.logger.warning(f"Multi-asset crash loader failed: {e}")
 
     def set_cross_data(self, cross_data: Optional[Dict[str, Any]], pair_name: Optional[str] = None) -> None:
         """Set cross-asset data for the next inference call.
@@ -231,8 +255,55 @@ class FeatureFanOutProcessor:
         except Exception as e:
             self.logger.error(f"Inference error: {e}", exc_info=True)
 
-        # Crash-regime LightGBM (BTC-only, separate feature path)
-        if self._crash_lgbm is not None and _pair and 'BTC' in str(_pair).upper():
+        # Crash-regime LightGBM — multi-asset (preferred) or BTC-only legacy
+        _pair_str = str(_pair).upper() if _pair else ''
+        _asset = None
+        for _a in ('BTC', 'ETH', 'SOL', 'XRP', 'DOGE'):
+            if _a in _pair_str:
+                _asset = _a
+                break
+
+        if self._crash_loader and self._crash_builder and _asset:
+            # Multi-asset crash models (run both horizons if available)
+            for _horizon in ('2bar', '1bar'):
+                model, meta = self._crash_loader.get_model(_asset, _horizon)
+                if model is None:
+                    continue
+                try:
+                    # Resolve cross-asset DataFrame from cross_data dict
+                    _cross_df = None
+                    _lead = self._crash_loader.get_cross_asset(_asset)
+                    if _cross:
+                        for _ck in _cross:
+                            if _lead in str(_ck).upper():
+                                _cross_df = _cross[_ck]
+                                break
+
+                    crash_feats = self._crash_builder.build(
+                        asset=_asset,
+                        price_df=price_df,
+                        cross_price_df=_cross_df,
+                        derivatives_data=derivatives_data,
+                        macro_data=macro_data,
+                    )
+                    if crash_feats is not None:
+                        crash_pred, crash_conf, crash_src = self._crash_loader.predict_for_asset(
+                            _asset, _horizon, crash_feats
+                        )
+                        _key = f"CrashRegime_{_horizon}"
+                        predictions[_key] = float(crash_pred)
+                        # Also set legacy key for backward compat (2bar is primary)
+                        if _horizon == '2bar':
+                            predictions['CrashRegime'] = float(crash_pred)
+                        self.logger.info(
+                            f"Crash {_asset}_{_horizon}: pred={crash_pred:.4f} "
+                            f"conf={crash_conf:.4f} src={crash_src}"
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Crash {_asset}_{_horizon} inference skipped: {e}")
+
+        elif self._crash_lgbm is not None and 'BTC' in _pair_str:
+            # Legacy BTC-only fallback
             try:
                 crash_feats = build_crash_features(
                     price_df, derivatives_data=derivatives_data,
@@ -242,7 +313,7 @@ class FeatureFanOutProcessor:
                     crash_pred, crash_conf = predict_crash_lgbm(self._crash_lgbm, crash_feats)
                     predictions['CrashRegime'] = float(crash_pred)
                     self.logger.info(
-                        f"CrashRegime pred={crash_pred:.4f} conf={crash_conf:.4f} (BTC)"
+                        f"CrashRegime pred={crash_pred:.4f} conf={crash_conf:.4f} (BTC legacy)"
                     )
             except Exception as e:
                 self.logger.warning(f"Crash LightGBM inference skipped: {e}")

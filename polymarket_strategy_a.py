@@ -1,20 +1,20 @@
 """
-Polymarket Strategy A v3: Confidence-Gated Entry with Active Management
+Polymarket Strategy A v4: Multi-Asset Crash Models with Per-Horizon Routing
 
 Simple rules:
-  1. ML confidence >= 55% AND token cost <= $0.45 -> BUY (half-Kelly sized)
+  1. ML confidence >= 52% AND token cost <= $0.45 -> BUY (half-Kelly sized)
   2. Every cycle, manage open bets:
      - ML flips direction -> SELL immediately
      - ML confidence drops below 50% -> SELL
-     - ML confidence >= 55% + token <= $0.45 + under $150 cap -> ADD
+     - ML confidence >= 52% + token <= $0.45 + under $150 cap -> ADD
      - Otherwise -> HOLD
   3. Rate limit: max 6 bets per hour
   4. Cooldown: 5 min after any loss
 
 ML Source:
-  Crash-regime LightGBM (52.9% acc, 0.543 AUC) as primary signal for BTC.
-  Calibrated for crash regime: 55-60% confident = 58.3% accurate.
-  Half-Kelly sizing: 3-8% of bankroll per bet.
+  Multi-asset crash-regime LightGBMs (52-53% acc, 0.53-0.55 AUC).
+  Per-horizon routing: 15-min markets use 2bar model, 5-min markets use 1bar model.
+  Half-Kelly sizing: 8-15% of bankroll per bet.
 
 Market Discovery:
   Rolling 15m and 5m direction markets via slug pattern:
@@ -87,12 +87,12 @@ class StrategyAExecutor:
     Sizing: Half-Kelly based on model probability and token price.
     """
 
-    # Thresholds — calibrated for crash-regime LightGBM (max conf ~56%)
-    CONFIDENCE_THRESHOLD = 53.0       # Model prob >= 0.53 (or <= 0.47)
+    # Thresholds — calibrated for multi-asset crash LightGBM (52-55% sweet spot)
+    CONFIDENCE_THRESHOLD = 52.0       # Model prob >= 0.52 (or <= 0.48)
     MAX_TOKEN_COST = 0.45
     BET_AMOUNT = 50.0                 # Fallback; overridden by Kelly sizing
     EXIT_CONFIDENCE = 50.0            # Exit when model is pure coin-flip
-    ADD_CONFIDENCE = 53.0             # Same as entry threshold
+    ADD_CONFIDENCE = 52.0             # Same as entry threshold
     MAX_POSITION_PER_MARKET = 150.0   # dollar cap
     STOP_LOSS_PCT = 0.40              # close if share price drops 40% from avg cost
     MAX_BETS_PER_HOUR = 6
@@ -330,15 +330,14 @@ class StrategyAExecutor:
                 if minutes_left < 1.0 or minutes_left > 14.0:
                     continue
 
-            # TODO: When crash model supports per-horizon inference, route:
-            #   5-min markets  -> crash_model.predict(horizon='1bar')
-            #   15-min markets -> crash_model.predict(horizon='2bar')
-            # For now, both use the same ensemble signal.
-
-            # ML data
+            # Per-horizon routing: 5-min markets use 1bar, 15-min markets use 2bar
             ml_data = ml_predictions.get(inst.ml_pair, {})
-            ml_conf = ml_data.get("confidence", 50.0)
-            ml_pred = ml_data.get("prediction", 0)
+            if inst.timeframe == 5 and "prediction_1bar" in ml_data:
+                ml_conf = ml_data.get("confidence_1bar", ml_data.get("confidence", 50.0))
+                ml_pred = ml_data.get("prediction_1bar", 0)
+            else:
+                ml_conf = ml_data.get("confidence", 50.0)
+                ml_pred = ml_data.get("prediction", 0)
             ml_direction = "UP" if ml_pred > 0 else "DOWN"
             entry_side = "YES" if ml_direction == "UP" else "NO"
 
@@ -450,10 +449,14 @@ class StrategyAExecutor:
                 self._close_bet(bet, "stop_loss", current_prices)
                 continue
 
-            # Current ML data
+            # Current ML data (per-horizon routing for position management)
             ml_data = ml_predictions.get(inst.ml_pair, {})
-            ml_conf = ml_data.get("confidence", 50.0)
-            ml_pred = ml_data.get("prediction", 0)
+            if inst.timeframe == 5 and "prediction_1bar" in ml_data:
+                ml_conf = ml_data.get("confidence_1bar", ml_data.get("confidence", 50.0))
+                ml_pred = ml_data.get("prediction_1bar", 0)
+            else:
+                ml_conf = ml_data.get("confidence", 50.0)
+                ml_pred = ml_data.get("prediction", 0)
             ml_direction = "UP" if ml_pred > 0 else "DOWN"
 
             # Rule 1: Direction flipped -> SELL immediately

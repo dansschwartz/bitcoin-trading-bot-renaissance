@@ -1881,11 +1881,12 @@ class RenaissanceTradingBot:
                         signals['ml_ensemble'] = float(np.clip(_ens_val * _ml_scale, -1.0, 1.0))
                     if 'CNN' in rt_result:
                         signals['ml_cnn'] = float(np.clip(rt_result['CNN'] * _ml_scale, -1.0, 1.0))
-                    # Crash-regime LightGBM signal (BTC-only)
-                    if 'CrashRegime' in rt_result:
-                        signals['crash_regime'] = float(np.clip(rt_result['CrashRegime'] * _ml_scale, -1.0, 1.0))
+                    # Crash-regime LightGBM signal (multi-asset: uses 2bar as primary)
+                    _crash_val = rt_result.get('CrashRegime_2bar') or rt_result.get('CrashRegime')
+                    if _crash_val is not None:
+                        signals['crash_regime'] = float(np.clip(float(_crash_val) * _ml_scale, -1.0, 1.0))
                         self.logger.info(
-                            f"CRASH MODEL: raw={rt_result['CrashRegime']:.4f}, "
+                            f"CRASH MODEL [{product_id}]: raw={float(_crash_val):.4f}, "
                             f"signal={signals['crash_regime']:.4f}"
                         )
                     self.logger.info(
@@ -4190,28 +4191,36 @@ class RenaissanceTradingBot:
                     except Exception as _ps_err:
                         self.logger.debug(f"Polymarket scanner error: {_ps_err}")
 
-                    # 3.17 Strategy A — accumulate ML predictions per pair
+                    # 3.17 Strategy A — accumulate ML predictions per pair (multi-asset crash)
                     # (execute_cycle runs AFTER the per-pair loop so all prices are available)
                     if self.polymarket_executor:
                         if not hasattr(self, '_sa_ml_cache'):
                             self._sa_ml_cache = {}
 
-                        # Crash model as primary signal for BTC (calibrated for current regime)
                         _rt_preds = market_data.get('real_time_predictions', {})
-                        _crash_raw = _rt_preds.get('CrashRegime')
-                        if _crash_raw is not None and 'BTC' in product_id.upper():
-                            # CrashRegime is in [-1, 1] (mapped from P(UP))
-                            # Convert back to probability: prob = (pred + 1) / 2
-                            _crash_prob = (float(_crash_raw) + 1.0) / 2.0
-                            # Directional confidence: how sure the model is in its chosen direction
-                            # UP: conf = P(UP), DOWN: conf = 1 - P(UP)
-                            _dir_conf = max(_crash_prob, 1.0 - _crash_prob)
-                            self._sa_ml_cache[product_id] = {
-                                "prediction": float(_crash_raw),
-                                "agreement": abs(_crash_prob - 0.5) * 2.0,
-                                "confidence": _dir_conf * 100.0,  # 50-100% scale, direction-agnostic
-                                "source": "crash_lightgbm",
+
+                        # Multi-asset crash model — check for per-horizon predictions
+                        _crash_2bar = _rt_preds.get('CrashRegime_2bar') or _rt_preds.get('CrashRegime')
+                        _crash_1bar = _rt_preds.get('CrashRegime_1bar')
+
+                        if _crash_2bar is not None:
+                            # Build per-horizon entries for Strategy A routing
+                            _crash_prob_2 = (float(_crash_2bar) + 1.0) / 2.0
+                            _dir_conf_2 = max(_crash_prob_2, 1.0 - _crash_prob_2)
+                            _entry = {
+                                "prediction": float(_crash_2bar),
+                                "agreement": abs(_crash_prob_2 - 0.5) * 2.0,
+                                "confidence": _dir_conf_2 * 100.0,
+                                "source": "crash_lgbm_2bar",
                             }
+                            # Add 1bar prediction if available
+                            if _crash_1bar is not None:
+                                _crash_prob_1 = (float(_crash_1bar) + 1.0) / 2.0
+                                _dir_conf_1 = max(_crash_prob_1, 1.0 - _crash_prob_1)
+                                _entry["prediction_1bar"] = float(_crash_1bar)
+                                _entry["confidence_1bar"] = _dir_conf_1 * 100.0
+
+                            self._sa_ml_cache[product_id] = _entry
                         elif ml_package and hasattr(ml_package, 'ensemble_score'):
                             self._sa_ml_cache[product_id] = {
                                 "prediction": float(ml_package.ensemble_score),

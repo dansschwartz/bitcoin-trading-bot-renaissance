@@ -137,3 +137,26 @@ async def regime_hierarchy(request: Request):
 async def vae_history(request: Request):
     db = request.app.state.dashboard_config.db_path
     return db_queries.get_vae_history(db, limit=200)
+
+
+@router.get("/crash")
+async def crash_model_status(request: Request):
+    """Multi-asset crash-regime LightGBM model status and latest predictions."""
+    # Try emitter cache first (live data from bot)
+    emitter = getattr(request.app.state, "emitter", None)
+    if emitter:
+        cached = emitter.get_cached("crash_models")
+        if cached:
+            return {"status": "live", **cached}
+
+    # Fallback: load model metadata directly
+    try:
+        from crash_model_loader import CrashModelLoader
+        loader = CrashModelLoader()
+        return {
+            "status": "static",
+            **loader.get_state(),
+        }
+    except Exception as e:
+        logger.debug(f"Crash model status fallback failed: {e}")
+        return {"status": "unavailable", "model_count": 0, "models": {}}
