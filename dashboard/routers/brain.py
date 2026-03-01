@@ -1,4 +1,4 @@
-"""Brain endpoints — ML ensemble, regime, VAE, confluence."""
+"""Brain endpoints — ML ensemble, regime, VAE, confluence, cascade."""
 
 import json
 import logging
@@ -160,3 +160,43 @@ async def crash_model_status(request: Request):
     except Exception as e:
         logger.debug(f"Crash model status fallback failed: {e}")
         return {"status": "unavailable", "model_count": 0, "models": {}}
+
+
+@router.get("/cascade/collection")
+async def cascade_collection_stats(request: Request):
+    """Stats on Cascade data collection progress (Polymarket crowd pricing)."""
+    db = request.app.state.dashboard_config.db_path
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+
+        total_snapshots = conn.execute(
+            "SELECT COUNT(*) as n FROM cascade_crowd_data"
+        ).fetchone()['n']
+
+        total_market_records = conn.execute(
+            "SELECT COUNT(*) as n FROM cascade_market_snapshots"
+        ).fetchone()['n']
+
+        unique_markets = conn.execute(
+            "SELECT COUNT(DISTINCT market_slug) as n FROM cascade_market_snapshots"
+        ).fetchone()['n']
+
+        first_ts = conn.execute(
+            "SELECT MIN(timestamp) as ts FROM cascade_crowd_data"
+        ).fetchone()['ts']
+
+        last_ts = conn.execute(
+            "SELECT MAX(timestamp) as ts FROM cascade_crowd_data"
+        ).fetchone()['ts']
+
+        conn.close()
+        return {
+            'total_snapshots': total_snapshots,
+            'total_market_records': total_market_records,
+            'unique_markets': unique_markets,
+            'first_record': first_ts,
+            'last_record': last_ts,
+        }
+    except Exception:
+        return {'total_snapshots': 0, 'message': 'no data yet (tables not created)'}

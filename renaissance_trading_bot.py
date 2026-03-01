@@ -63,6 +63,11 @@ except ImportError as _bs_err:
 from polymarket_bridge import PolymarketBridge
 from polymarket_scanner import PolymarketScanner
 try:
+    from cascade_data_collector import CascadeDataCollector
+    CASCADE_COLLECTOR_AVAILABLE = True
+except ImportError:
+    CASCADE_COLLECTOR_AVAILABLE = False
+try:
     from polymarket_strategy_a import StrategyAExecutor
     STRATEGY_A_AVAILABLE = True
 except ImportError as _sa_err:
@@ -964,6 +969,19 @@ class RenaissanceTradingBot:
                 self.logger.warning(f"Strategy A init failed: {_pe_err}")
                 self.polymarket_executor = None
 
+        # Initialize Cascade data collector (Polymarket crowd pricing for lead-lag validation)
+        self.cascade_collector = None
+        if CASCADE_COLLECTOR_AVAILABLE:
+            try:
+                self.cascade_collector = CascadeDataCollector(
+                    bot=self,
+                    db_path=scanner_db,
+                    poll_interval=30,
+                )
+                self.logger.info("Cascade data collector initialized (30s poll interval)")
+            except Exception as _cc_err:
+                self.logger.warning(f"Cascade collector init failed: {_cc_err}")
+
         self.volume_profile_engine = VolumeProfileEngine()
         self.fractal_intelligence = FractalIntelligenceEngine(logger=self.logger)
         self.market_entropy = MarketEntropyEngine(logger=self.logger)
@@ -1599,6 +1617,12 @@ class RenaissanceTradingBot:
     async def _shutdown(self):
         """Cancel background tasks and cleanup resources."""
         self.logger.info("Shutting down - cancelling background tasks...")
+        # Stop cascade collector (thread-based, not asyncio)
+        if self.cascade_collector:
+            try:
+                self.cascade_collector.stop()
+            except Exception:
+                pass
         for task in self._background_tasks:
             if not task.done():
                 task.cancel()
@@ -5627,6 +5651,11 @@ class RenaissanceTradingBot:
         if self.liquidation_detector:
             self.logger.info("Launching liquidation cascade detector...")
             self._track_task(self._run_liquidation_detector())
+
+        # ── Cascade Data Collector (Polymarket crowd pricing for lead-lag) ──
+        if self.cascade_collector:
+            self.cascade_collector.start()
+            self.logger.info("Cascade data collector started (30s poll)")
 
         # ── Fast Mean Reversion Scanner (1s eval) ──
         if self.fast_reversion_scanner:
