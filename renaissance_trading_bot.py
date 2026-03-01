@@ -3494,8 +3494,10 @@ class RenaissanceTradingBot:
 
                     # 3. Get micro regime from existing HMM
                     _micro_label = "*"
-                    if self.regime_overlay and self.regime_overlay.current_regime:
-                        _micro_label = str(self.regime_overlay.current_regime)
+                    if self.regime_overlay and self.regime_overlay.enabled:
+                        _hmm_lbl = self.regime_overlay.get_hmm_regime_label()
+                        if _hmm_lbl and _hmm_lbl != "unknown":
+                            _micro_label = _hmm_lbl
 
                     # 4. Model router (observation mode — logs only)
                     _route_config = self._model_router.route(
