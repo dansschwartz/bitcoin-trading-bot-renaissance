@@ -38,7 +38,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": True,
     "evaluation_interval_seconds": 1.0,
     "min_edge_bps": 0.1,              # Loose exit: trust selective signals (was 0.5)
-    "confidence_floor": 0.48,
+    "confidence_floor": 0.35,
     "trim_threshold": 0.8,
     "close_threshold": 0.3,
     "add_threshold": 1.5,

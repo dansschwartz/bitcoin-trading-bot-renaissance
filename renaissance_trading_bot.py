@@ -1212,6 +1212,11 @@ class RenaissanceTradingBot:
         self._spread_lookback = 100                        # rolling window size
         self._max_spread_bps = float(self.config.get('universe', {}).get('max_spread_bps', 3.0))
 
+        # Council #12: Per-pair ML prediction Z-score rescaling
+        self._ml_pred_stats: Dict[str, Dict[str, float]] = {}  # {pair: {mean, var, n}}
+        self._ml_zscore_lookback = int(self.config.get('ml_ensemble', {}).get('rescale_lookback', 200))
+        self._ml_zscore_tanh_scale = float(self.config.get('ml_ensemble', {}).get('rescale_tanh_scale', 0.5))
+
         # Step 8: Dynamic Thresholds (calibrated to actual signal distribution)
         # Backtest proof: |prediction| < 0.06 is noise (51% accuracy).
         # Only trade strong ML signals — configurable via config.json.
@@ -1238,12 +1243,12 @@ class RenaissanceTradingBot:
             'rsi': 0.05,                      # Mean Reversion (technical)
             'bollinger': 0.05,                # Volatility Bands
             'alternative': 0.01,              # Sentiment/Whales (reduced — often zero)
-            'stat_arb': 0.12,                 # Multi-pair Mean Reversion
+            'stat_arb': 0.084,                # Multi-pair Mean Reversion (Council #14: was 0.12)
             'volume_profile': 0.04,           # Volume Profile
             'fractal': 0.05,                  # Fractal Intelligence
-            'entropy': 0.04,                  # Market Entropy
-            'quantum': 0.02,                  # Quantum Oscillator (reduced — heuristic)
-            'lead_lag': 0.03,                 # Cross-Asset Lead-Lag
+            'entropy': 0.05,                  # Market Entropy (Council #14: was 0.04)
+            'quantum': 0.07,                  # Quantum Oscillator (Council #14: was 0.02)
+            'lead_lag': 0.10,                 # Cross-Asset Lead-Lag (Council #14: was 0.03)
             'correlation_divergence': 0.06,   # Correlation Network Divergence
             'garch_vol': 0.06,                # GARCH Volatility Signal
             'ml_ensemble': 0.20,              # ML 7-model ensemble prediction (Council #5: boosted from 0.05)
@@ -1349,6 +1354,50 @@ class RenaissanceTradingBot:
             self.logger.info(f"UNIVERSE BUILT: {len(self.product_ids)} pairs")
         except Exception as e:
             self.logger.error(f"UNIVERSE BUILD FAILED: {e} — keeping existing product_ids")
+
+    def _ml_zscore_rescale(self, pair: str, raw_pred: float) -> float:
+        """Council #12: Per-pair Z-score normalization of ML predictions.
+
+        Uses Welford online algorithm with exponential decay (lookback window).
+        Maps z-score via tanh to [-1, 1] range matching traditional signals.
+        """
+        import math
+        stats = self._ml_pred_stats.get(pair)
+        if stats is None:
+            stats = {'mean': 0.0, 'var': 0.0, 'n': 0}
+            self._ml_pred_stats[pair] = stats
+
+        n = stats['n']
+        old_mean = stats['mean']
+
+        if n < self._ml_zscore_lookback:
+            # Growing phase: standard Welford
+            n += 1
+            delta = raw_pred - old_mean
+            new_mean = old_mean + delta / n
+            delta2 = raw_pred - new_mean
+            new_var = stats['var'] + delta * delta2
+            stats['n'] = n
+            stats['mean'] = new_mean
+            stats['var'] = new_var
+        else:
+            # Steady-state: exponentially weighted update
+            alpha = 1.0 / self._ml_zscore_lookback
+            delta = raw_pred - old_mean
+            stats['mean'] = old_mean + alpha * delta
+            stats['var'] = (1 - alpha) * (stats['var'] + alpha * delta * delta * self._ml_zscore_lookback)
+            stats['n'] = n + 1  # track total observations
+
+        # Need at least 20 observations for stable stats
+        if n < 20:
+            return raw_pred  # pass through during warmup
+
+        std = math.sqrt(stats['var'] / min(n, self._ml_zscore_lookback))
+        if std < 1e-10:
+            return raw_pred  # avoid division by zero
+
+        z = (raw_pred - stats['mean']) / std
+        return float(math.tanh(z * self._ml_zscore_tanh_scale))
 
     async def _gap_fill_bars_on_startup(self) -> None:
         """Council proposal #1: Fill missing 5-min bars from Binance on startup.
@@ -2001,24 +2050,29 @@ class RenaissanceTradingBot:
                     )
                     market_data['real_time_predictions'] = rt_result
                     _ml_scale = self.config.get("ml_signal_scale", 10.0)
+                    _pair_key = product_id or 'unknown'
                     # MetaEnsemble is the key from real_time_pipeline name_map
                     _ens_val = rt_result.get('MetaEnsemble') or rt_result.get('Ensemble') or 0.0
                     if _ens_val:
-                        signals['ml_ensemble'] = float(np.clip(_ens_val * _ml_scale, -1.0, 1.0))
+                        # Council #12: Z-score rescaling before fusion
+                        _ens_rescaled = self._ml_zscore_rescale(_pair_key + '_ens', float(_ens_val))
+                        signals['ml_ensemble'] = float(np.clip(_ens_rescaled, -1.0, 1.0))
                     if 'CNN' in rt_result:
-                        signals['ml_cnn'] = float(np.clip(rt_result['CNN'] * _ml_scale, -1.0, 1.0))
+                        _cnn_rescaled = self._ml_zscore_rescale(_pair_key + '_cnn', float(rt_result['CNN']))
+                        signals['ml_cnn'] = float(np.clip(_cnn_rescaled, -1.0, 1.0))
                     # Crash-regime LightGBM signal (multi-asset: uses 2bar as primary)
                     _crash_val = rt_result.get('CrashRegime_2bar') or rt_result.get('CrashRegime')
                     if _crash_val is not None:
-                        signals['crash_regime'] = float(np.clip(float(_crash_val) * _ml_scale, -1.0, 1.0))
+                        _crash_rescaled = self._ml_zscore_rescale(_pair_key + '_crash', float(_crash_val))
+                        signals['crash_regime'] = float(np.clip(_crash_rescaled, -1.0, 1.0))
                         self.logger.info(
                             f"CRASH MODEL [{product_id}]: raw={float(_crash_val):.4f}, "
-                            f"signal={signals['crash_regime']:.4f}"
+                            f"rescaled={_crash_rescaled:.4f}, signal={signals['crash_regime']:.4f}"
                         )
                     self.logger.info(
                         f"ML SIGNALS: ensemble={signals.get('ml_ensemble', 0):.4f}, "
                         f"cnn={signals.get('ml_cnn', 0):.4f} (raw: E={_ens_val:.4f}, "
-                        f"C={rt_result.get('CNN', 0):.4f}, scale={_ml_scale})"
+                        f"C={rt_result.get('CNN', 0):.4f}, zscore_rescale=on)"
                     )
             except Exception as e:
                 self.logger.warning(f"ML RT pipeline failed: {e}")
@@ -2140,8 +2194,8 @@ class RenaissanceTradingBot:
         # The full cost pre-screen runs later in live mode but should not block paper signals.
         try:
             if self.paper_trading:
-                # Paper mode: use minimal cost threshold to avoid blocking valid signals
-                min_viable_signal = 0.001
+                # Paper mode: lowered to let ML signals reach confidence stage (Council #11)
+                min_viable_signal = 0.0001
             else:
                 round_trip_cost = self.position_sizer.estimate_round_trip_cost()
                 min_viable_signal = round_trip_cost * 1.0
