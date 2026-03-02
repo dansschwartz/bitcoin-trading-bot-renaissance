@@ -35,7 +35,7 @@ export default function ArbDailyPnlChart() {
         <BarChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <XAxis
             dataKey="label"
-            tick={{ fill: '#6b7280', fontSize: 11 }}
+            tick={{ fill: '#9ca3af', fontSize: 11 }}
             axisLine={{ stroke: '#374151' }}
             tickLine={false}
           />
@@ -49,6 +49,7 @@ export default function ArbDailyPnlChart() {
           <Tooltip
             contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: 8 }}
             labelStyle={{ color: '#9ca3af', fontSize: 12 }}
+            itemStyle={{ color: '#e5e7eb', fontSize: 12 }}
             formatter={(value: number, _name: string, props: { payload?: ArbDailyPnl }) => {
               const trades = props.payload?.trades ?? 0;
               const wins = props.payload?.wins ?? 0;
