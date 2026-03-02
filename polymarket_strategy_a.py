@@ -2,11 +2,11 @@
 Polymarket Strategy A v4: Multi-Asset Crash Models with Per-Horizon Routing
 
 Simple rules:
-  1. ML confidence >= 52% AND token cost <= $0.45 -> BUY (half-Kelly sized)
+  1. ML confidence >= 52% -> BUY (half-Kelly sized)
   2. Every cycle, manage open bets:
      - ML flips direction -> SELL immediately
      - ML confidence drops below 50% -> SELL
-     - ML confidence >= 52% + token <= $0.45 + under $150 cap -> ADD
+     - ML confidence >= 52% + under $150 cap -> ADD
      - Otherwise -> HOLD
   3. Rate limit: max 6 bets per hour
   4. Cooldown: 5 min after any loss
@@ -79,9 +79,9 @@ class StrategyAExecutor:
     """
     v3: Confidence-gated entry with active position management.
 
-    Entry:  ML confidence >= 55% AND token cost <= $0.45
+    Entry:  ML confidence >= 52%
     Sell:   ML flips direction OR confidence < 50%
-    Add:    Same direction, >= 55% conf, token <= $0.45, < $150 total
+    Add:    Same direction, >= 52% conf, < $150 total
     Limits: 6 bets/hour, 5 min cooldown after loss
 
     Sizing: Half-Kelly based on model probability and token price.
@@ -89,7 +89,6 @@ class StrategyAExecutor:
 
     # Thresholds — calibrated for multi-asset crash LightGBM (52-55% sweet spot)
     CONFIDENCE_THRESHOLD = 52.0       # Model prob >= 0.52 (or <= 0.48)
-    MAX_TOKEN_COST = 0.45
     BET_AMOUNT = 50.0                 # Fallback; overridden by Kelly sizing
     EXIT_CONFIDENCE = 50.0            # Exit when model is pure coin-flip
     ADD_CONFIDENCE = 52.0             # Same as entry threshold
@@ -491,13 +490,6 @@ class StrategyAExecutor:
                                ml_conf, token_cost, ml_direction, minutes_left)
                 continue
 
-            # Gate: token cost
-            if token_cost > self.MAX_TOKEN_COST:
-                self._log_skip(inst.asset, slug,
-                               f"token ${token_cost:.2f} > ${self.MAX_TOKEN_COST}",
-                               ml_conf, token_cost, ml_direction, minutes_left)
-                continue
-
             # Gate: rate limit
             if not self._check_rate_limit():
                 self._log_skip(inst.asset, slug, "rate_limit",
@@ -637,7 +629,7 @@ class StrategyAExecutor:
                     and current_share > bet["avg_cost"]):
                 if market:
                     token_cost = current_share
-                    if token_cost <= self.MAX_TOKEN_COST and self._check_rate_limit():
+                    if self._check_rate_limit():
                         self._add_to_bet(bet, token_cost, ml_conf)
 
             # Rule 4: Hold (implicit - do nothing)

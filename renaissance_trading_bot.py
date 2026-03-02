@@ -1494,7 +1494,7 @@ class RenaissanceTradingBot:
                     self.logger.debug(f"GAP-FILL failed for {pid}: {e}")
                     return 0
 
-        # Run gap-fill for all pairs in parallel
+        # Run tail gap-fill for all pairs in parallel
         results = await asyncio.gather(
             *[_fill_pair(pid) for pid in self.product_ids],
             return_exceptions=True,
@@ -1502,9 +1502,145 @@ class RenaissanceTradingBot:
         total_filled = sum(r for r in results if isinstance(r, int))
         pairs_with_gaps = sum(1 for r in results if isinstance(r, int) and r > 0)
         self.logger.info(
-            f"GAP-FILL COMPLETE: {total_filled} bars inserted across "
+            f"GAP-FILL (tail): {total_filled} bars inserted across "
             f"{pairs_with_gaps}/{len(self.product_ids)} pairs with gaps"
         )
+
+        # ── Interior gap detection and backfill ──────────────────────
+        # Scan the last 7 days of bars for each pair, find gaps where
+        # consecutive bar_start delta > 600s (at least one 5-min bar missing),
+        # and fetch the missing bars from Binance.
+        self.logger.info("GAP-FILL: Scanning for interior gaps (last 7 days)...")
+        interior_sem = asyncio.Semaphore(10)
+        seven_days_ago = time.time() - (7 * 24 * 3600)
+
+        async def _fill_interior_gaps(pid: str) -> tuple:
+            """Returns (gaps_found, bars_inserted) for one pair."""
+            async with interior_sem:
+                try:
+                    bsym = self._pair_binance_symbols.get(pid, to_binance_symbol(pid))
+
+                    # Query all bar_start timestamps in the last 7 days
+                    conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                    rows = conn.execute(
+                        "SELECT bar_start FROM five_minute_bars "
+                        "WHERE pair = ? AND exchange = 'binance' AND bar_start > ? "
+                        "ORDER BY bar_start",
+                        (pid, seven_days_ago),
+                    ).fetchall()
+                    conn.close()
+
+                    if len(rows) < 2:
+                        return (0, 0)
+
+                    # Parse bar_start values to float seconds
+                    timestamps = []
+                    for r in rows:
+                        ts = r[0]
+                        if isinstance(ts, str):
+                            from datetime import datetime as _dt
+                            ts = _dt.fromisoformat(ts).timestamp()
+                        timestamps.append(float(ts))
+                    timestamps.sort()
+
+                    # Find interior gaps: consecutive bar_start delta > 600s
+                    gaps = []
+                    for i in range(len(timestamps) - 1):
+                        delta = timestamps[i + 1] - timestamps[i]
+                        if delta > 600:  # More than 2 bar-widths apart → missing bars
+                            gap_start = timestamps[i] + 300  # First missing bar
+                            gap_end = timestamps[i + 1]
+                            gap_bars = int((gap_end - gap_start) / 300)
+                            if gap_bars > 0:
+                                gaps.append((gap_start, gap_end, gap_bars))
+
+                    if not gaps:
+                        return (0, 0)
+
+                    # Fetch and insert missing bars for each gap
+                    pair_inserted = 0
+                    for gap_start, gap_end, gap_bars in gaps:
+                        try:
+                            fetch_limit = min(gap_bars + 2, 1000)
+                            candles = await self.binance_spot.fetch_candles(
+                                bsym, '5m', limit=fetch_limit,
+                                start_time=int(gap_start * 1000),
+                                end_time=int(gap_end * 1000),
+                            )
+                            if not candles:
+                                continue
+
+                            conn = _sqlite3.connect(db_path)
+                            for c in candles:
+                                try:
+                                    bar_start = c['timestamp']
+                                    conn.execute(
+                                        """INSERT OR IGNORE INTO five_minute_bars
+                                           (pair, exchange, bar_start, bar_end, open, high, low, close, volume,
+                                            num_trades, vwap, log_return, avg_spread_bps, buy_sell_ratio, funding_rate)
+                                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        (pid, 'binance', bar_start, bar_start + 300,
+                                         c['open'], c['high'], c['low'], c['close'], c['volume'],
+                                         0, c['close'], 0.0, 0.0, 0.5, 0.0),
+                                    )
+                                    pair_inserted += 1
+                                except Exception:
+                                    pass
+                            conn.commit()
+                            conn.close()
+                        except Exception as e:
+                            self.logger.debug(f"GAP-FILL interior fetch failed for {pid} gap {gap_start}-{gap_end}: {e}")
+                            continue
+
+                    if pair_inserted > 0:
+                        self.logger.info(
+                            f"GAP-FILL interior: {pid} — {len(gaps)} gaps found, "
+                            f"{pair_inserted} bars inserted"
+                        )
+                    return (len(gaps), pair_inserted)
+                except Exception as e:
+                    self.logger.debug(f"GAP-FILL interior failed for {pid}: {e}")
+                    return (0, 0)
+
+        interior_results = await asyncio.gather(
+            *[_fill_interior_gaps(pid) for pid in self.product_ids],
+            return_exceptions=True,
+        )
+        total_interior_gaps = sum(r[0] for r in interior_results if isinstance(r, tuple))
+        total_interior_bars = sum(r[1] for r in interior_results if isinstance(r, tuple))
+        pairs_with_interior = sum(1 for r in interior_results if isinstance(r, tuple) and r[0] > 0)
+
+        # Log completeness improvement
+        try:
+            conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            completeness_rows = conn.execute(
+                "SELECT pair, COUNT(*) as cnt FROM five_minute_bars "
+                "WHERE exchange = 'binance' AND bar_start > ? GROUP BY pair",
+                (seven_days_ago,),
+            ).fetchall()
+            conn.close()
+            if completeness_rows:
+                expected_bars = int((time.time() - seven_days_ago) / 300)
+                avg_pct = sum(min(r[1] / expected_bars * 100, 100) for r in completeness_rows) / len(completeness_rows)
+                self.logger.info(
+                    f"GAP-FILL interior COMPLETE: {total_interior_gaps} gaps found across "
+                    f"{pairs_with_interior}/{len(self.product_ids)} pairs, "
+                    f"{total_interior_bars} bars inserted. "
+                    f"Avg completeness (7d): {avg_pct:.1f}%"
+                )
+            else:
+                self.logger.info(
+                    f"GAP-FILL interior COMPLETE: {total_interior_gaps} gaps, "
+                    f"{total_interior_bars} bars inserted"
+                )
+        except Exception:
+            self.logger.info(
+                f"GAP-FILL interior COMPLETE: {total_interior_gaps} gaps, "
+                f"{total_interior_bars} bars inserted"
+            )
+
+        grand_total = total_filled + total_interior_bars
+        self.logger.info(f"GAP-FILL TOTAL: {grand_total} bars inserted (tail: {total_filled}, interior: {total_interior_bars})")
 
     async def _collect_from_binance(self, product_id: str) -> Dict[str, Any]:
         """Collect market data from Binance for a single pair.

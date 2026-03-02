@@ -156,9 +156,22 @@ class BinanceSpotProvider:
     # ── Per-Symbol Data Fetching ───────────────────────────────
 
     async def fetch_candles(self, symbol: str, interval: str = '5m',
-                            limit: int = 200) -> List[Dict[str, Any]]:
-        """Fetch OHLCV candles. Returns list of dicts with timestamp/OHLCV."""
+                            limit: int = 200, start_time: Optional[int] = None,
+                            end_time: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Fetch OHLCV candles. Returns list of dicts with timestamp/OHLCV.
+
+        Args:
+            symbol: Binance symbol (e.g. 'BTCUSDT').
+            interval: Candle interval (default '5m').
+            limit: Max candles to return (max 1000).
+            start_time: Optional start time in milliseconds (Binance epoch ms).
+            end_time: Optional end time in milliseconds (Binance epoch ms).
+        """
         params = {'symbol': symbol, 'interval': interval, 'limit': limit}
+        if start_time is not None:
+            params['startTime'] = start_time
+        if end_time is not None:
+            params['endTime'] = end_time
         raw = await self._rate_limited_get(f"{self.BASE_URL}/klines", params=params)
         if not raw:
             return []
