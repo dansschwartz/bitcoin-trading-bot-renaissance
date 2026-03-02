@@ -18,7 +18,7 @@ export default function Gauge({ value, label, color = '#3b82f6', size = 80 }: Pr
   const rad = (angle * Math.PI) / 180;
   const px = cx - radius * Math.cos(rad);
   const py = cy - radius * Math.sin(rad);
-  const largeArc = angle > 90 ? 1 : 0;
+  const largeArc = 0;  // Always small arc — gauge value arc is always ≤180°
 
   return (
     <div className="flex flex-col items-center">
