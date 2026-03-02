@@ -771,11 +771,12 @@ class DatabaseManager:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 # Fetch unevaluated predictions (with OR without price_at_prediction)
+                # Note: use string compare, not datetime(), because ISO8601 with TZ offset
                 rows = cursor.execute('''
                     SELECT id, product_id, prediction, price_at_prediction, timestamp
                     FROM ml_predictions
                     WHERE is_correct IS NULL
-                      AND datetime(timestamp) < datetime('now', ? || ' minutes')
+                      AND timestamp < datetime('now', ? || ' minutes')
                     ORDER BY id
                     LIMIT 1000
                 ''', (f"-{lookback_minutes}",)).fetchall()
