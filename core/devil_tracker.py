@@ -60,6 +60,8 @@ class TradeExecution:
     actual_pnl: Optional[float] = None
     devil: Optional[float] = None
 
+    fee_bps: Optional[float] = None
+    devil_bps: Optional[float] = None
     slippage_bps: Optional[float] = None
     latency_signal_to_fill_ms: Optional[float] = None
     latency_signal_to_order_ms: Optional[float] = None
@@ -105,6 +107,8 @@ class DevilTracker:
         theoretical_pnl        REAL,
         actual_pnl             REAL,
         devil                  REAL,
+        fee_bps                REAL,
+        devil_bps              REAL,
         slippage_bps           REAL,
         latency_signal_to_fill_ms  REAL,
         latency_signal_to_order_ms REAL
@@ -153,6 +157,12 @@ class DevilTracker:
                 conn.execute(self._CREATE_TABLE)
                 conn.execute(self._CREATE_IDX_PAIR)
                 conn.execute(self._CREATE_IDX_SIGNAL)
+                # Council S6: migrate existing tables — add fee_bps, devil_bps columns
+                for col, typ in [('fee_bps', 'REAL'), ('devil_bps', 'REAL')]:
+                    try:
+                        conn.execute(f"ALTER TABLE {self.TABLE} ADD COLUMN {col} {typ}")
+                    except Exception:
+                        pass  # Column already exists
                 conn.commit()
         except Exception as exc:
             logger.error("DevilTracker: failed to create table: %s", exc)
@@ -328,6 +338,13 @@ class DevilTracker:
 
                 devil = theoretical_pnl - actual_pnl
 
+                # Council S6: compute fee_bps and total devil_bps
+                fee_bps = 0.0
+                if fill_quantity > 0 and fill_price > 0:
+                    notional = fill_quantity * fill_price
+                    fee_bps = (fill_fee / notional) * 10_000 if notional > 0 else 0.0
+                devil_bps = slippage_bps + fee_bps
+
                 conn.execute(
                     f"""
                     UPDATE {self.TABLE}
@@ -336,6 +353,8 @@ class DevilTracker:
                         fill_quantity = ?,
                         fill_fee = ?,
                         slippage_bps = ?,
+                        fee_bps = ?,
+                        devil_bps = ?,
                         latency_signal_to_fill_ms = ?,
                         theoretical_pnl = ?,
                         actual_pnl = ?,
@@ -344,7 +363,7 @@ class DevilTracker:
                     """,
                     (
                         now_iso, fill_price, fill_quantity, fill_fee,
-                        slippage_bps, latency_ms,
+                        slippage_bps, fee_bps, devil_bps, latency_ms,
                         theoretical_pnl, actual_pnl, devil,
                         trade_id,
                     ),

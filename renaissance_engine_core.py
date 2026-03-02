@@ -94,10 +94,15 @@ class SignalFusion:
 
         # Weighted combination
         final_strength = (traditional_strength * trad_weight) + (ml_strength * ml_weight)
-        
+
         # Combined confidence with consciousness weighting
         consciousness_factor = ml_package.confidence_score
         final_confidence = (traditional_confidence * trad_weight) + (ml_confidence * ml_weight * consciousness_factor)
+
+        # Council S6: Wire ML into signal_contributions dict so it shows on dashboard
+        if 'contributions' in traditional_metadata:
+            traditional_metadata['contributions']['ml_ensemble'] = float(ml_strength * ml_weight)
+            traditional_metadata['contributions']['ml_confidence'] = float(ml_confidence)
 
         # Enhanced metadata
         enhanced_metadata = {

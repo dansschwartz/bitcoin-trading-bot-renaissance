@@ -1495,7 +1495,11 @@ class RenaissanceTradingBot:
             return_exceptions=True,
         )
         total_filled = sum(r for r in results if isinstance(r, int))
-        self.logger.info(f"GAP-FILL COMPLETE: {total_filled} bars inserted across {len(self.product_ids)} pairs")
+        pairs_with_gaps = sum(1 for r in results if isinstance(r, int) and r > 0)
+        self.logger.info(
+            f"GAP-FILL COMPLETE: {total_filled} bars inserted across "
+            f"{pairs_with_gaps}/{len(self.product_ids)} pairs with gaps"
+        )
 
     async def _collect_from_binance(self, product_id: str) -> Dict[str, Any]:
         """Collect market data from Binance for a single pair.
@@ -3344,12 +3348,39 @@ class RenaissanceTradingBot:
         # Return cached or default (INITIAL_CAPITAL, not phantom 50K)
         return self._cached_balance_usd if self._cached_balance_usd > 0 else INITIAL_CAPITAL
 
+    def _check_bar_liveness(self) -> None:
+        """Council S6: Check if bar pipeline is alive. Log CRITICAL if newest bar > 15min old."""
+        if not self.db_enabled:
+            return
+        try:
+            db_path = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            row = conn.execute("SELECT MAX(bar_end) FROM five_minute_bars").fetchone()
+            conn.close()
+            if row and row[0]:
+                max_bar_end = float(row[0])
+                age_seconds = time.time() - max_bar_end
+                if age_seconds > 900:  # 15 minutes = 3x expected 5-min interval
+                    self.logger.critical(
+                        f"BAR PIPELINE STALE: newest bar is {age_seconds/60:.0f}min old "
+                        f"(threshold: 15min). Data pipeline may be dead!"
+                    )
+                elif age_seconds > 600:  # 10 minutes = soft warning
+                    self.logger.warning(
+                        f"Bar pipeline lagging: newest bar is {age_seconds/60:.1f}min old"
+                    )
+        except Exception as e:
+            self.logger.debug(f"Bar liveness check failed: {e}")
+
     async def execute_trading_cycle(self) -> TradingDecision:
         """Execute one complete trading cycle across all products"""
         cycle_start = time.time()
         decisions = []
 
         try:
+            # Council S6: Check bar pipeline liveness at start of each cycle
+            self._check_bar_liveness()
+
             # Fetch live account balance for dynamic position sizing
             account_balance = self._fetch_account_balance()
             self.logger.info(f"Account balance: ${account_balance:,.2f}")
@@ -5849,6 +5880,15 @@ class RenaissanceTradingBot:
 
             # ── Council #1: Gap-fill missing bars from Binance on startup ──
             await self._gap_fill_bars_on_startup()
+
+        # ── Council S6: Batch-evaluate unevaluated ML predictions on startup ──
+        if self.db_enabled:
+            try:
+                batch_count = await self.db_manager.batch_evaluate_ml_outcomes()
+                if batch_count > 0:
+                    self.logger.info(f"Startup ML batch eval: {batch_count} predictions evaluated")
+            except Exception as e:
+                self.logger.warning(f"Startup ML batch eval failed: {e}")
 
         # Start real-time pipeline if enabled
         if self.real_time_pipeline.enabled:

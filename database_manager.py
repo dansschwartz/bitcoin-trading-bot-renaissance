@@ -282,6 +282,9 @@ class DatabaseManager:
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
 
+        # Council S6: ensure audit log columns match _AUDIT_COLUMNS list
+        self._ensure_audit_columns()
+
     async def store_market_data(self, data: MarketData):
         """Store market data"""
         try:
@@ -690,6 +693,31 @@ class DatabaseManager:
         'scan_tier',
     ]
 
+    def _ensure_audit_columns(self) -> None:
+        """Council S6: Ensure decision_audit_log schema matches _AUDIT_COLUMNS.
+
+        Adds any missing columns via ALTER TABLE so INSERT won't fail silently.
+        """
+        try:
+            with self._get_connection() as conn:
+                existing = {
+                    r[1] for r in conn.execute(
+                        "PRAGMA table_info(decision_audit_log)"
+                    ).fetchall()
+                }
+                for col in self._AUDIT_COLUMNS:
+                    if col not in existing:
+                        try:
+                            conn.execute(
+                                f"ALTER TABLE decision_audit_log ADD COLUMN {col} TEXT"
+                            )
+                            self.logger.info(f"Audit log migration: added column '{col}'")
+                        except Exception:
+                            pass  # Column already exists or other benign error
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error ensuring audit columns: {e}")
+
     async def store_audit_log(self, audit_data: Dict[str, Any]) -> None:
         """Insert one row into decision_audit_log from a flat dict."""
         try:
@@ -702,8 +730,14 @@ class DatabaseManager:
                     values,
                 )
                 conn.commit()
+            self.logger.debug("Audit log stored: %s cycle=%s",
+                             audit_data.get('product_id'), audit_data.get('cycle_number'))
         except Exception as e:
             self.logger.error(f"Error storing audit log: {e}")
+            self.logger.error(
+                f"Audit columns count: {len(self._AUDIT_COLUMNS)}, "
+                f"data keys: {list(audit_data.keys())[:10]}..."
+            )
 
     async def evaluate_audit_outcomes(self, lookback_minutes: int = 60) -> int:
         """Fill outcome columns for audit rows where enough time has elapsed.
@@ -794,6 +828,15 @@ class DatabaseManager:
                     ''', (pid,)).fetchone()
                     if px_row:
                         latest_prices[pid] = float(px_row[0])
+                    else:
+                        # Council S6: fallback to five_minute_bars close price
+                        bar_row = cursor.execute('''
+                            SELECT close FROM five_minute_bars
+                            WHERE pair = ?
+                            ORDER BY bar_end DESC LIMIT 1
+                        ''', (pid,)).fetchone()
+                        if bar_row:
+                            latest_prices[pid] = float(bar_row[0])
 
                 now_ts = datetime.now(timezone.utc).isoformat()
                 for row_id, pid, prediction, entry_px, ts in rows:
@@ -844,3 +887,106 @@ class DatabaseManager:
         except Exception as e:
             self.logger.error(f"Error evaluating ML outcomes: {e}")
         return updated
+
+    async def batch_evaluate_ml_outcomes(self, batch_size: int = 5000) -> int:
+        """Council S6: One-time batch evaluation for all historical predictions.
+
+        Same logic as evaluate_ml_outcomes but without time filter and larger batch.
+        Called once on startup to catch up on unevaluated predictions.
+        """
+        total_updated = 0
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # Count unevaluated
+                count_row = cursor.execute(
+                    "SELECT COUNT(*) FROM ml_predictions WHERE is_correct IS NULL"
+                ).fetchone()
+                total_pending = count_row[0] if count_row else 0
+                if total_pending == 0:
+                    return 0
+                self.logger.info(
+                    f"Batch ML eval: {total_pending} unevaluated predictions, "
+                    f"processing in batches of {batch_size}"
+                )
+
+                # Process in batches
+                offset = 0
+                while offset < total_pending:
+                    rows = cursor.execute('''
+                        SELECT id, product_id, prediction, price_at_prediction, timestamp
+                        FROM ml_predictions
+                        WHERE is_correct IS NULL
+                        ORDER BY id
+                        LIMIT ? OFFSET ?
+                    ''', (batch_size, offset)).fetchall()
+                    if not rows:
+                        break
+
+                    products = list({r[1] for r in rows})
+                    latest_prices: Dict[str, float] = {}
+                    for pid in products:
+                        px_row = cursor.execute('''
+                            SELECT price FROM market_data
+                            WHERE product_id = ?
+                            ORDER BY timestamp DESC LIMIT 1
+                        ''', (pid,)).fetchone()
+                        if px_row:
+                            latest_prices[pid] = float(px_row[0])
+                        else:
+                            bar_row = cursor.execute('''
+                                SELECT close FROM five_minute_bars
+                                WHERE pair = ?
+                                ORDER BY bar_end DESC LIMIT 1
+                            ''', (pid,)).fetchone()
+                            if bar_row:
+                                latest_prices[pid] = float(bar_row[0])
+
+                    now_ts = datetime.now(timezone.utc).isoformat()
+                    batch_updated = 0
+                    for row_id, pid, prediction, entry_px, ts in rows:
+                        current_px = latest_prices.get(pid)
+                        if not current_px:
+                            continue
+                        if not entry_px or entry_px <= 0:
+                            try:
+                                from datetime import datetime as _dt
+                                _pred_dt = _dt.fromisoformat(ts.replace('Z', '+00:00'))
+                                _pred_epoch = _pred_dt.timestamp()
+                            except Exception:
+                                _pred_epoch = None
+                            bar_row = None
+                            if _pred_epoch:
+                                bar_row = cursor.execute('''
+                                    SELECT close FROM five_minute_bars
+                                    WHERE pair = ? AND bar_end <= ?
+                                    ORDER BY bar_end DESC LIMIT 1
+                                ''', (pid, _pred_epoch)).fetchone()
+                            if bar_row:
+                                entry_px = float(bar_row[0])
+                                cursor.execute(
+                                    'UPDATE ml_predictions SET price_at_prediction = ? WHERE id = ?',
+                                    (entry_px, row_id))
+                        if not entry_px or entry_px <= 0:
+                            continue
+                        actual_return = (current_px - entry_px) / entry_px
+                        actual_dir = 1 if actual_return > 0.001 else (-1 if actual_return < -0.001 else 0)
+                        pred_dir = 1 if prediction > 0 else (-1 if prediction < 0 else 0)
+                        is_correct = 1 if (pred_dir != 0 and pred_dir == actual_dir) else 0
+                        cursor.execute('''
+                            UPDATE ml_predictions
+                            SET actual_return_1bar = ?, actual_direction = ?,
+                                is_correct = ?, evaluated_at = ?,
+                                price_at_evaluation = ?
+                            WHERE id = ?
+                        ''', (round(actual_return, 6), actual_dir, is_correct, now_ts, current_px, row_id))
+                        batch_updated += 1
+
+                    conn.commit()
+                    total_updated += batch_updated
+                    offset += batch_size
+                    self.logger.info(f"Batch ML eval: {batch_updated} updated in this batch, {total_updated} total")
+
+        except Exception as e:
+            self.logger.error(f"Error in batch ML outcome evaluation: {e}")
+        return total_updated
