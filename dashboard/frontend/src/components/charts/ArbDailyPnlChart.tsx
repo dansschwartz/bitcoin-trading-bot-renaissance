@@ -8,15 +8,15 @@ export default function ArbDailyPnlChart() {
   const [data, setData] = useState<ArbDailyPnl[]>([]);
 
   useEffect(() => {
-    api.arbDailyPnl(10).then(setData).catch(() => {});
-    const id = setInterval(() => api.arbDailyPnl(10).then(setData).catch(() => {}), 30_000);
+    api.arbDailyPnl(21).then(setData).catch(() => {});
+    const id = setInterval(() => api.arbDailyPnl(21).then(setData).catch(() => {}), 30_000);
     return () => clearInterval(id);
   }, []);
 
   if (!data.length) {
     return (
       <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
-        <h3 className="text-sm font-medium text-gray-300 mb-3">Daily P&L (10 days)</h3>
+        <h3 className="text-sm font-medium text-gray-300 mb-3">Daily P&L (21 days)</h3>
         <div className="text-sm text-gray-600 py-8 text-center">No daily data yet</div>
       </div>
     );
@@ -30,7 +30,7 @@ export default function ArbDailyPnlChart() {
 
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
-      <h3 className="text-sm font-medium text-gray-300 mb-3">Daily P&L (10 days)</h3>
+      <h3 className="text-sm font-medium text-gray-300 mb-3">Daily P&L (21 days)</h3>
       <ResponsiveContainer width="100%" height={220}>
         <BarChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <XAxis
