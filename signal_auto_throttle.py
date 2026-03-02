@@ -31,6 +31,11 @@ class SignalAutoThrottle:
         throttle.update(product_id, previous_signals, price_move_direction)
     """
 
+    # Signals that can never be killed — expensive ML models that need to stay active
+    DEFAULT_PROTECTED = frozenset({
+        'ml_ensemble', 'ml_cnn', 'crash_regime',
+    })
+
     def __init__(self, config: Dict[str, Any] = None, logger: Optional[logging.Logger] = None):
         config = config or {}
         self.logger = logger or logging.getLogger(__name__)
@@ -46,6 +51,10 @@ class SignalAutoThrottle:
         # Re-entry threshold
         self._reentry_accuracy = float(config.get("reentry_accuracy", 0.52))  # Must prove >52%
 
+        # Protected signals that can never be killed
+        extra_protected = config.get("protected_signals", [])
+        self._protected: frozenset = self.DEFAULT_PROTECTED | frozenset(extra_protected)
+
         # Per-signal rolling performance: {signal_name: deque of (correct: bool, timestamp)}
         self._performance: Dict[str, deque] = defaultdict(lambda: deque(maxlen=self._long_window))
 
@@ -58,7 +67,8 @@ class SignalAutoThrottle:
         self._cycle_count = 0
         self.logger.info(
             f"SignalAutoThrottle initialized: kill<{self._kill_accuracy:.0%} "
-            f"(min {self._min_samples_to_kill} samples), reentry>{self._reentry_accuracy:.0%}"
+            f"(min {self._min_samples_to_kill} samples), reentry>{self._reentry_accuracy:.0%}, "
+            f"protected={sorted(self._protected)}"
         )
 
     def filter(self, signals: Dict[str, float], product_id: str = "") -> Dict[str, float]:
@@ -70,7 +80,7 @@ class SignalAutoThrottle:
         killed_this_cycle = []
 
         for sig_name in list(filtered.keys()):
-            if sig_name in self._killed_signals:
+            if sig_name in self._killed_signals and sig_name not in self._protected:
                 if abs(filtered[sig_name]) > 1e-8:
                     killed_this_cycle.append(sig_name)
                 filtered[sig_name] = 0.0
@@ -113,6 +123,14 @@ class SignalAutoThrottle:
         now = time.time()
 
         for sig_name, history in self._performance.items():
+            # Never kill protected signals
+            if sig_name in self._protected:
+                # If somehow already killed (e.g. before protection was added), revive immediately
+                if sig_name in self._killed_signals:
+                    del self._killed_signals[sig_name]
+                    self.logger.info(f"SIGNAL PROTECTED: {sig_name} — auto-revived (protected list)")
+                continue
+
             if len(history) < self._min_samples_to_kill:
                 continue
 
