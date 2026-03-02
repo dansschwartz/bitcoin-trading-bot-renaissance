@@ -596,7 +596,8 @@ def get_ml_predictions_history(
         rows = c.execute(
             """SELECT * FROM ml_predictions
                WHERE datetime(timestamp) > datetime('now', ? || ' hours')
-               ORDER BY timestamp DESC""",
+               ORDER BY timestamp DESC
+               LIMIT 3000""",
             (f"-{hours}",),
         ).fetchall()
         return _rows_to_dicts(rows)

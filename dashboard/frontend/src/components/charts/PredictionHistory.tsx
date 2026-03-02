@@ -1,32 +1,53 @@
 import { useEffect, useState } from 'react';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from 'recharts';
 import { api } from '../../api';
 import type { MLPrediction } from '../../types';
 import { CHART_COLORS } from '../../utils/colors';
 import { formatTimestamp } from '../../utils/formatters';
+
+/** Round an ISO timestamp string to the nearest minute for cross-model grouping. */
+function roundToMinute(ts: string): string {
+  const d = new Date(ts);
+  d.setSeconds(0, 0);
+  return d.toISOString();
+}
+
+/** Downsample an array to at most `maxPoints` evenly-spaced entries. */
+function downsample<T>(arr: T[], maxPoints: number): T[] {
+  if (arr.length <= maxPoints) return arr;
+  const step = arr.length / maxPoints;
+  const result: T[] = [];
+  for (let i = 0; i < maxPoints; i++) {
+    result.push(arr[Math.floor(i * step)]);
+  }
+  return result;
+}
 
 export default function PredictionHistory() {
   const [data, setData] = useState<Record<string, number | string>[]>([]);
   const [models, setModels] = useState<string[]>([]);
 
   useEffect(() => {
-    const fetch = () => api.predictionHistory(24).then((preds) => {
-      // Group by timestamp, pivot model names into columns
+    const load = () => api.predictionHistory(24).then((preds) => {
+      // Group by rounded timestamp so models with slightly different ms align
       const modelSet = new Set<string>();
       const byTime = new Map<string, Record<string, number | string>>();
 
       for (const p of preds) {
         modelSet.add(p.model_name);
-        const ts = p.timestamp;
+        const ts = roundToMinute(p.timestamp);
         if (!byTime.has(ts)) byTime.set(ts, { timestamp: ts });
+        // Use latest prediction for this model at this rounded timestamp
         byTime.get(ts)![p.model_name] = p.prediction;
       }
 
       setModels(Array.from(modelSet));
-      setData(Array.from(byTime.values()).reverse());
+      // Reverse for chronological order, then downsample for Recharts performance
+      const chronological = Array.from(byTime.values()).reverse();
+      setData(downsample(chronological, 200));
     }).catch(() => {});
-    fetch();
-    const id = setInterval(fetch, 30_000);
+    load();
+    const id = setInterval(load, 30_000);
     return () => clearInterval(id);
   }, []);
 
@@ -49,18 +70,20 @@ export default function PredictionHistory() {
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
             <XAxis dataKey="timestamp" tickFormatter={formatTimestamp} tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} domain={[-1, 1]} />
+            <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} domain={['auto', 'auto']} />
             <Tooltip
               contentStyle={{ backgroundColor: '#1a2235', border: '1px solid #243049', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
               labelFormatter={formatTimestamp}
             />
+            <ReferenceLine y={0} stroke="#374151" strokeDasharray="3 3" />
             <Legend wrapperStyle={{ fontSize: 10 }} />
             {models.map((m, i) => (
-              <Line key={m} type="monotone" dataKey={m} stroke={CHART_COLORS[i % CHART_COLORS.length]} dot={false} strokeWidth={1.5} />
+              <Line key={m} type="monotone" dataKey={m} stroke={CHART_COLORS[i % CHART_COLORS.length]} dot={false} strokeWidth={1.5} connectNulls />
             ))}
           </LineChart>
         </ResponsiveContainer>
       </div>
+      <p className="text-[10px] text-gray-600 mt-1">{data.length} data points (downsampled from 24h)</p>
     </div>
   );
 }
