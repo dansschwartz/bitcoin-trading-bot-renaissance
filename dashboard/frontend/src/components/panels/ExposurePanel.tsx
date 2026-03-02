@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import type { Exposure } from '../../types';
 import { formatCurrency } from '../../utils/formatters';
@@ -29,7 +29,7 @@ export default function ExposurePanel() {
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
       <h3 className="text-sm font-medium text-gray-300 mb-3">Exposure</h3>
-      <div className="flex items-start gap-6">
+      <div className="flex items-center gap-6">
         <Gauge
           value={utilization}
           label="Utilization"
@@ -66,15 +66,15 @@ export default function ExposurePanel() {
       {assets.length > 0 && (
         <div className="mt-3 border-t border-surface-3 pt-2">
           <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">By Asset (Netted)</p>
-          <div className="space-y-1">
+          <div className="grid grid-cols-[1fr_auto_auto] gap-x-3 gap-y-1 text-xs font-mono">
             {assets.map(([asset, info]) => (
-              <div key={asset} className="flex justify-between text-xs font-mono">
+              <React.Fragment key={asset}>
                 <span className="text-gray-400">{asset}</span>
-                <span className="text-gray-500">{info.count} pos</span>
-                <span className={info.net_value >= 0 ? 'text-accent-green' : 'text-accent-red'}>
+                <span className="text-gray-500 text-right">{info.count} pos</span>
+                <span className={'text-right ' + (info.net_value >= 0 ? 'text-accent-green' : 'text-accent-red')}>
                   {formatCurrency(info.net_value)}
                 </span>
-              </div>
+              </React.Fragment>
             ))}
           </div>
         </div>
