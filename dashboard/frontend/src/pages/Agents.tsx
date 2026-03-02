@@ -204,15 +204,49 @@ export default function Agents() {
   const [auditSummary, setAuditSummary] = useState<Record<string, unknown> | null>(null);
   const [auditRecent, setAuditRecent] = useState<AuditRow[]>([]);
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
   // Load agent data
   useEffect(() => {
     const load = () => {
-      api.agentStatuses().then((d) => setStatuses(d as AgentStatus[])).catch(() => {});
-      api.agentEvents(50).then((d) => setEvents(d as unknown as AgentEvent[])).catch(() => {});
-      api.agentProposals(undefined, 20).then((d) => setProposals(d as unknown as Proposal[])).catch(() => {});
-      api.agentLatestReport().then(setLatestReport).catch(() => {});
-      api.agentModels().then((d) => setModels(d as unknown as ModelLedgerEntry[])).catch(() => {});
-      api.agentImprovements(30).then((d) => setImprovements(d as unknown as ImprovementEntry[])).catch(() => {});
+      const errors: string[] = [];
+      Promise.allSettled([
+        api.agentStatuses().then((d) => {
+          if (Array.isArray(d)) setStatuses(d as AgentStatus[]);
+          else errors.push(`statuses: expected array, got ${typeof d}`);
+        }),
+        api.agentEvents(50).then((d) => {
+          if (Array.isArray(d)) setEvents(d as unknown as AgentEvent[]);
+          else errors.push(`events: expected array, got ${typeof d}`);
+        }),
+        api.agentProposals(undefined, 20).then((d) => {
+          if (Array.isArray(d)) setProposals(d as unknown as Proposal[]);
+          else errors.push(`proposals: expected array, got ${typeof d}`);
+        }),
+        api.agentLatestReport().then(setLatestReport),
+        api.agentModels().then((d) => {
+          if (Array.isArray(d)) setModels(d as unknown as ModelLedgerEntry[]);
+          else errors.push(`models: expected array, got ${typeof d}`);
+        }),
+        api.agentImprovements(30).then((d) => {
+          if (Array.isArray(d)) setImprovements(d as unknown as ImprovementEntry[]);
+          else errors.push(`improvements: expected array, got ${typeof d}`);
+        }),
+      ]).then((results) => {
+        setLoaded(true);
+        const rejected = results.filter(r => r.status === 'rejected');
+        if (rejected.length > 0) {
+          const msgs = rejected.map((r) => (r as PromiseRejectedResult).reason?.message || 'unknown');
+          setLoadError(`Failed: ${msgs.join(', ')}`);
+          console.error('[Intelligence] fetch errors:', msgs);
+        } else if (errors.length > 0) {
+          setLoadError(errors.join('; '));
+          console.error('[Intelligence] data errors:', errors);
+        } else {
+          setLoadError(null);
+        }
+      });
     };
     load();
     const id = setInterval(load, 30_000);
@@ -222,8 +256,8 @@ export default function Agents() {
   // Load council data
   useEffect(() => {
     const loadCouncil = () => {
-      api.councilSessions().then((d) => setCouncilSessions(d as unknown as CouncilSession[])).catch(() => {});
-      api.councilLatest().then((d) => setCouncilLatest(d as unknown as CouncilLatest)).catch(() => {});
+      api.councilSessions().then((d) => setCouncilSessions(d as unknown as CouncilSession[])).catch((e) => console.error('[Council] sessions error:', e));
+      api.councilLatest().then((d) => setCouncilLatest(d as unknown as CouncilLatest)).catch((e) => console.error('[Council] latest error:', e));
     };
     loadCouncil();
     const id = setInterval(loadCouncil, 60_000);
@@ -234,8 +268,8 @@ export default function Agents() {
   useEffect(() => {
     if (!auditOpen) return;
     const loadAudit = () => {
-      api.auditSummary(24).then(setAuditSummary).catch(() => {});
-      api.auditRecent(20).then((d) => setAuditRecent(d as unknown as AuditRow[])).catch(() => {});
+      api.auditSummary(24).then(setAuditSummary).catch((e) => console.error('[Audit] summary error:', e));
+      api.auditRecent(20).then((d) => setAuditRecent(d as unknown as AuditRow[])).catch((e) => console.error('[Audit] recent error:', e));
     };
     loadAudit();
     const id = setInterval(loadAudit, 60_000);
@@ -321,6 +355,15 @@ export default function Agents() {
 
   return (
     <PageShell title="Intelligence Hub">
+      {/* Error / loading indicators */}
+      {loadError && (
+        <div className="bg-red-900/20 border border-red-700/30 rounded-lg p-3 text-xs text-red-400">
+          API Error: {loadError}
+        </div>
+      )}
+      {!loaded && (
+        <div className="text-xs text-gray-500 py-2">Loading agent data...</div>
+      )}
       {/* ═══════════════ EXISTING: Agent Status Grid ═══════════════ */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
         {statuses.map((agent) => {
