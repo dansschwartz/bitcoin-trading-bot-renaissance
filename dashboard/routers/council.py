@@ -17,7 +17,7 @@ RESEARCHERS = ["mathematician", "cryptographer", "physicist", "linguist", "syste
 
 # Simple TTL cache for session list
 _cache: dict[str, Any] = {"sessions": None, "ts": 0.0}
-CACHE_TTL = 60  # seconds
+CACHE_TTL = 30  # seconds (reduced for faster refresh after new sessions)
 
 
 def _scan_sessions() -> list[dict[str, Any]]:
@@ -154,21 +154,30 @@ async def researcher_detail(session_id: str, name: str):
 
 @router.get("/latest")
 async def latest_session():
-    """Convenience: return the most recent session's data."""
+    """Return the most recent session that has proposals (skip empty sessions)."""
     sessions = _scan_sessions()
     if not sessions:
         return {"session_id": None, "proposals": [], "stats": {"total": 0, "consensus_passed": 0, "avg_score": 0}}
 
-    latest_id = sessions[0]["session_id"]
-    proposals = _load_ranked(latest_id)
-    scores = [p.get("consensus_score", 0) for p in proposals if p.get("consensus_score")]
+    # Find the newest session that actually has proposals
+    for session in sessions:
+        if session.get("proposal_count", 0) > 0:
+            proposals = _load_ranked(session["session_id"])
+            scores = [p.get("consensus_score", 0) for p in proposals if p.get("consensus_score")]
+            return {
+                **session,
+                "proposals": proposals,
+                "stats": {
+                    "total": len(proposals),
+                    "consensus_passed": sum(1 for p in proposals if p.get("passes_consensus")),
+                    "avg_score": round(sum(scores) / len(scores), 2) if scores else 0,
+                },
+            }
 
+    # All sessions empty — fall back to the newest
+    latest_id = sessions[0]["session_id"]
     return {
         **sessions[0],
-        "proposals": proposals,
-        "stats": {
-            "total": len(proposals),
-            "consensus_passed": sum(1 for p in proposals if p.get("passes_consensus")),
-            "avg_score": round(sum(scores) / len(scores), 2) if scores else 0,
-        },
+        "proposals": [],
+        "stats": {"total": 0, "consensus_passed": 0, "avg_score": 0},
     }
