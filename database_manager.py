@@ -721,7 +721,7 @@ class DatabaseManager:
                     FROM decision_audit_log
                     WHERE outcome_1bar IS NULL
                       AND price IS NOT NULL
-                      AND datetime(timestamp) < datetime('now', ? || ' minutes')
+                      AND timestamp < datetime('now', ? || ' minutes')
                     ORDER BY id
                     LIMIT 500
                 ''', (f"-{lookback_minutes}",)).fetchall()
