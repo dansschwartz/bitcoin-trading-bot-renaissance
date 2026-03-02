@@ -802,12 +802,21 @@ class DatabaseManager:
                         continue
                     # If price_at_prediction is NULL, look up from five_minute_bars
                     if not entry_px or entry_px <= 0:
-                        bar_row = cursor.execute('''
-                            SELECT close FROM five_minute_bars
-                            WHERE pair = ?
-                              AND datetime(bar_end) <= datetime(?)
-                            ORDER BY bar_end DESC LIMIT 1
-                        ''', (pid, ts)).fetchone()
+                        # Convert ISO8601 timestamp to epoch for bar_end comparison
+                        try:
+                            from datetime import datetime as _dt
+                            _pred_dt = _dt.fromisoformat(ts.replace('Z', '+00:00'))
+                            _pred_epoch = _pred_dt.timestamp()
+                        except Exception:
+                            _pred_epoch = None
+                        bar_row = None
+                        if _pred_epoch:
+                            bar_row = cursor.execute('''
+                                SELECT close FROM five_minute_bars
+                                WHERE pair = ?
+                                  AND bar_end <= ?
+                                ORDER BY bar_end DESC LIMIT 1
+                            ''', (pid, _pred_epoch)).fetchone()
                         if bar_row:
                             entry_px = float(bar_row[0])
                             # Backfill the price_at_prediction column
