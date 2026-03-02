@@ -506,14 +506,15 @@ class DatabaseManager:
                     ts = ts.isoformat()
 
                 cursor.execute('''
-                    INSERT INTO ml_predictions (timestamp, product_id, model_name, prediction, confidence)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO ml_predictions (timestamp, product_id, model_name, prediction, confidence, price_at_prediction)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
                     ts,
                     prediction_data.get('product_id'),
                     prediction_data.get('model_name'),
                     prediction_data.get('prediction'),
                     prediction_data.get('confidence'),
+                    prediction_data.get('price_at_prediction'),
                 ))
 
                 conn.commit()
@@ -761,20 +762,22 @@ class DatabaseManager:
     async def evaluate_ml_outcomes(self, lookback_minutes: int = 60) -> int:
         """Fill outcome columns for ml_predictions that lack evaluation.
 
+        Council S3 fix: Also handles rows where price_at_prediction is NULL
+        by looking up the closest bar price from five_minute_bars.
         Returns number of rows updated.
         """
         updated = 0
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                # Fetch unevaluated predictions (with OR without price_at_prediction)
                 rows = cursor.execute('''
                     SELECT id, product_id, prediction, price_at_prediction, timestamp
                     FROM ml_predictions
                     WHERE is_correct IS NULL
-                      AND price_at_prediction IS NOT NULL
                       AND datetime(timestamp) < datetime('now', ? || ' minutes')
                     ORDER BY id
-                    LIMIT 500
+                    LIMIT 1000
                 ''', (f"-{lookback_minutes}",)).fetchall()
 
                 if not rows:
@@ -794,7 +797,23 @@ class DatabaseManager:
                 now_ts = datetime.now(timezone.utc).isoformat()
                 for row_id, pid, prediction, entry_px, ts in rows:
                     current_px = latest_prices.get(pid)
-                    if not current_px or not entry_px or entry_px <= 0:
+                    if not current_px:
+                        continue
+                    # If price_at_prediction is NULL, look up from five_minute_bars
+                    if not entry_px or entry_px <= 0:
+                        bar_row = cursor.execute('''
+                            SELECT close FROM five_minute_bars
+                            WHERE pair = ?
+                              AND datetime(bar_end) <= datetime(?)
+                            ORDER BY bar_end DESC LIMIT 1
+                        ''', (pid, ts)).fetchone()
+                        if bar_row:
+                            entry_px = float(bar_row[0])
+                            # Backfill the price_at_prediction column
+                            cursor.execute(
+                                'UPDATE ml_predictions SET price_at_prediction = ? WHERE id = ?',
+                                (entry_px, row_id))
+                    if not entry_px or entry_px <= 0:
                         continue
                     actual_return = (current_px - entry_px) / entry_px
                     actual_dir = 1 if actual_return > 0.001 else (-1 if actual_return < -0.001 else 0)
@@ -810,6 +829,8 @@ class DatabaseManager:
                     updated += 1
 
                 conn.commit()
+                if updated > 0:
+                    self.logger.info(f"ML outcome evaluation: {updated}/{len(rows)} predictions evaluated")
         except Exception as e:
             self.logger.error(f"Error evaluating ML outcomes: {e}")
         return updated
