@@ -87,6 +87,7 @@ from meta_strategy_selector import MetaStrategySelector
 from institutional_dashboard import InstitutionalDashboard
 from dashboard.event_emitter import DashboardEventEmitter
 from position_sizer import RenaissancePositionSizer
+from random_baseline import RandomEntryBaseline
 
 from renaissance_types import SignalType, OrderType, MLSignalPackage, TradingDecision
 from ml_integration_bridge import MLIntegrationBridge
@@ -938,6 +939,10 @@ class RenaissanceTradingBot:
                 )
             except Exception as _bst_err:
                 self.logger.warning(f"Breakout Strategy init failed: {_bst_err}")
+
+        # Initialize Random Entry Baseline — shadow system measuring ML value-add
+        _rb_db = db_cfg.get("path", "data/renaissance_bot.db")
+        self.random_baseline = RandomEntryBaseline(db_path=_rb_db)
 
         # Initialize Polymarket Bridge — converts ML signals to binary bet signals
         poly_cfg = self.config.get("polymarket_bridge", {})
@@ -4378,6 +4383,10 @@ class RenaissanceTradingBot:
                 market_data['garch_position_multiplier'] = garch_pos_mult
                 market_data['regime_adjusted_weights'] = cycle_weights
 
+                # Random baseline shadow entries
+                if hasattr(self, 'random_baseline') and current_price > 0:
+                    self.random_baseline.maybe_enter(product_id, current_price)
+
                 # 3.15 Polymarket Bridge — emit BTC signal for binary bet markets
                 if product_id == 'BTC-USD':
                     try:
@@ -4470,43 +4479,94 @@ class RenaissanceTradingBot:
                     except Exception as _ps_err:
                         self.logger.debug(f"Polymarket scanner error: {_ps_err}")
 
-                    # 3.17 Strategy A — accumulate ML predictions per pair (multi-asset crash)
-                    # (execute_cycle runs AFTER the per-pair loop so all prices are available)
-                    if self.polymarket_executor:
-                        if not hasattr(self, '_sa_ml_cache'):
-                            self._sa_ml_cache = {}
+                # 3.17 Strategy A — accumulate ML predictions per pair (multi-asset crash)
+                # Fix 15: Moved OUTSIDE `if product_id == 'BTC-USD'` so all assets get cached.
+                # (execute_cycle runs AFTER the per-pair loop so all prices are available)
+                if self.polymarket_executor:
+                    if not hasattr(self, '_sa_ml_cache'):
+                        self._sa_ml_cache = {}
 
-                        _rt_preds = market_data.get('real_time_predictions', {})
+                    _rt_preds = market_data.get('real_time_predictions', {})
 
-                        # Multi-asset crash model — check for per-horizon predictions
-                        _crash_2bar = _rt_preds.get('CrashRegime_2bar') or _rt_preds.get('CrashRegime')
-                        _crash_1bar = _rt_preds.get('CrashRegime_1bar')
+                    # Multi-asset crash model — check for per-horizon predictions
+                    _crash_2bar = _rt_preds.get('CrashRegime_2bar') or _rt_preds.get('CrashRegime')
+                    _crash_1bar = _rt_preds.get('CrashRegime_1bar')
 
-                        if _crash_2bar is not None:
-                            # Build per-horizon entries for Strategy A routing
-                            _crash_prob_2 = (float(_crash_2bar) + 1.0) / 2.0
-                            _dir_conf_2 = max(_crash_prob_2, 1.0 - _crash_prob_2)
-                            _entry = {
-                                "prediction": float(_crash_2bar),
-                                "agreement": abs(_crash_prob_2 - 0.5) * 2.0,
-                                "confidence": _dir_conf_2 * 100.0,
-                                "source": "crash_lgbm_2bar",
-                            }
-                            # Add 1bar prediction if available
-                            if _crash_1bar is not None:
-                                _crash_prob_1 = (float(_crash_1bar) + 1.0) / 2.0
-                                _dir_conf_1 = max(_crash_prob_1, 1.0 - _crash_prob_1)
-                                _entry["prediction_1bar"] = float(_crash_1bar)
-                                _entry["confidence_1bar"] = _dir_conf_1 * 100.0
+                    # Fix 15: For Binance pairs, crash model didn't run during
+                    # collect_all_data (returns early). Run crash inference here.
+                    if _crash_2bar is None:
+                        try:
+                            _rtp = self.real_time_pipeline.processor
+                            if (hasattr(_rtp, '_crash_loader') and _rtp._crash_loader
+                                    and hasattr(_rtp, '_crash_builder') and _rtp._crash_builder):
+                                _pm_asset = product_id.split('-')[0] if '-' in product_id else None
+                                if _pm_asset in ('BTC', 'ETH', 'SOL', 'XRP', 'DOGE'):
+                                    _pm_cross = market_data.get('_cross_data')
+                                    _pm_deriv = market_data.get('_derivatives_data')
+                                    _pm_macro = self._macro_cache.get() if hasattr(self, '_macro_cache') else None
+                                    for _hz in ('2bar', '1bar'):
+                                        _cm, _cmeta = _rtp._crash_loader.get_model(_pm_asset, _hz)
+                                        if _cm is None:
+                                            continue
+                                        try:
+                                            _pm_cross_df = None
+                                            _pm_lead = _rtp._crash_loader.get_cross_asset(_pm_asset)
+                                            if _pm_cross and _pm_lead:
+                                                for _ck in _pm_cross:
+                                                    if _pm_lead in str(_ck).upper():
+                                                        _pm_cross_df = _pm_cross[_ck]
+                                                        break
+                                            _pm_feats = _rtp._crash_builder.build(
+                                                asset=_pm_asset,
+                                                price_df=price_df,
+                                                cross_price_df=_pm_cross_df,
+                                                derivatives_data=_pm_deriv,
+                                                macro_data=_pm_macro,
+                                            )
+                                            if _pm_feats is not None:
+                                                _pm_pred, _pm_conf, _pm_src = _rtp._crash_loader.predict_for_asset(
+                                                    _pm_asset, _hz, _pm_feats
+                                                )
+                                                if _hz == '2bar':
+                                                    _crash_2bar = _pm_pred
+                                                else:
+                                                    _crash_1bar = _pm_pred
+                                                self.logger.info(
+                                                    f"Crash {_pm_asset}_{_hz} (Polymarket direct): "
+                                                    f"pred={_pm_pred:.4f} conf={_pm_conf:.4f} src={_pm_src}"
+                                                )
+                                        except Exception as _pm_err:
+                                            self.logger.debug(
+                                                f"Crash {_pm_asset}_{_hz} Polymarket failed: {_pm_err}"
+                                            )
+                        except Exception as _crash_infer_err:
+                            self.logger.debug(f"Crash direct inference failed: {_crash_infer_err}")
 
-                            self._sa_ml_cache[product_id] = _entry
-                        elif ml_package and hasattr(ml_package, 'ensemble_score'):
-                            self._sa_ml_cache[product_id] = {
-                                "prediction": float(ml_package.ensemble_score),
-                                "agreement": float(ml_package.confidence_score),
-                                "confidence": float(ml_package.confidence_score * 100),
-                                "source": "ensemble",
-                            }
+                    if _crash_2bar is not None:
+                        # Build per-horizon entries for Strategy A routing
+                        _crash_prob_2 = (float(_crash_2bar) + 1.0) / 2.0
+                        _dir_conf_2 = max(_crash_prob_2, 1.0 - _crash_prob_2)
+                        _entry = {
+                            "prediction": float(_crash_2bar),
+                            "agreement": abs(_crash_prob_2 - 0.5) * 2.0,
+                            "confidence": _dir_conf_2 * 100.0,
+                            "source": "crash_lgbm_2bar",
+                        }
+                        # Add 1bar prediction if available
+                        if _crash_1bar is not None:
+                            _crash_prob_1 = (float(_crash_1bar) + 1.0) / 2.0
+                            _dir_conf_1 = max(_crash_prob_1, 1.0 - _crash_prob_1)
+                            _entry["prediction_1bar"] = float(_crash_1bar)
+                            _entry["confidence_1bar"] = _dir_conf_1 * 100.0
+
+                        self._sa_ml_cache[product_id] = _entry
+                    elif ml_package and hasattr(ml_package, 'ensemble_score'):
+                        self._sa_ml_cache[product_id] = {
+                            "prediction": float(ml_package.ensemble_score),
+                            "agreement": float(ml_package.confidence_score),
+                            "confidence": float(ml_package.confidence_score * 100),
+                            "source": "ensemble",
+                        }
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
                 self._update_dynamic_thresholds(product_id, market_data)
@@ -5201,6 +5261,24 @@ class RenaissanceTradingBot:
             # Increment cycle counter ONCE per cycle (not per pair)
             self.scan_cycle_count += 1
 
+            # ── Periodic DB pruning (every 100 cycles) ──
+            if self.scan_cycle_count % 100 == 0:
+                self._prune_old_data()
+
+            # Random baseline position management
+            if hasattr(self, 'random_baseline'):
+                _rb_prices = {}
+                for _pid in cycle_pairs:
+                    _md = market_data_all.get(_pid, {})
+                    _tk = _md.get('ticker', {})
+                    _px = float(_tk.get('price', 0)) if _tk else 0
+                    if _px > 0:
+                        _rb_prices[_pid] = _px
+                if _rb_prices:
+                    _rb_exits = self.random_baseline.update_positions(_rb_prices)
+                    if _rb_exits:
+                        self.logger.info(f"RANDOM BASELINE: {len(_rb_exits)} shadow exits")
+
             # ── Strategy A: Confirmed Momentum (runs ONCE per cycle, after all prices collected) ──
             if self.polymarket_executor:
                 try:
@@ -5756,6 +5834,60 @@ class RenaissanceTradingBot:
         except Exception as e:
             self.logger.warning(f"State recovery skipped: {e}")
 
+    def _prune_old_data(self) -> None:
+        """Prune old database rows and bound in-memory collections."""
+        try:
+            import sqlite3
+            db_path = self.db_manager.db_path if hasattr(self.db_manager, 'db_path') else "data/renaissance_bot.db"
+            conn = sqlite3.connect(db_path)
+
+            # Prune tables older than retention period
+            pruned = {}
+            prune_rules = [
+                ("polymarket_skip_log", "timestamp", "7 days"),
+                ("ml_predictions", "timestamp", "7 days"),
+                ("breakout_scans", "scan_time", "3 days"),
+                ("market_data", "timestamp", "3 days"),
+                ("five_minute_bars", "bar_end", None),  # Keep last 7 days by epoch
+            ]
+
+            for table, col, retention in prune_rules:
+                try:
+                    if retention:
+                        cur = conn.execute(
+                            f"DELETE FROM [{table}] WHERE [{col}] < datetime('now', '-{retention}')"
+                        )
+                    else:
+                        # Epoch-based: bar_end is Unix timestamp
+                        import time
+                        cutoff = time.time() - 7 * 86400
+                        cur = conn.execute(
+                            f"DELETE FROM [{table}] WHERE [{col}] < ?", (cutoff,)
+                        )
+                    if cur.rowcount > 0:
+                        pruned[table] = cur.rowcount
+                except Exception as e:
+                    self.logger.debug(f"Prune {table} skipped: {e}")
+
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.commit()
+            conn.close()
+
+            if pruned:
+                self.logger.info(f"DB PRUNE: {pruned}")
+
+            # Bound in-memory collections
+            if hasattr(self, '_tech_indicators') and len(self._tech_indicators) > 200:
+                # Keep only pairs we've seen recently
+                active = set(self.product_ids) if hasattr(self, 'product_ids') else set()
+                stale = [k for k in self._tech_indicators if k not in active]
+                for k in stale[:50]:  # Remove 50 at a time
+                    del self._tech_indicators[k]
+                self.logger.debug(f"Evicted {len(stale[:50])} stale tech indicator instances")
+
+        except Exception as e:
+            self.logger.warning(f"Prune error: {e}")
+
     async def _deduplicate_positions_on_startup(self) -> None:
         """Close duplicate and opposing positions found after DB restore.
 
@@ -5893,6 +6025,9 @@ class RenaissanceTradingBot:
 
         # ── Startup deduplication: close duplicate/opposing positions from DB ──
         await self._deduplicate_positions_on_startup()
+
+        # ── Prune old data to reduce DB size and memory pressure ──
+        self._prune_old_data()
 
         # ── Module A: Set RUNNING state ──
         if self.state_manager:

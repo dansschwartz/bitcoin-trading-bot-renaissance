@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 
 # ── Disabled models ──────────────────────────────────────────────────────────
 # Models with live accuracy below 40% — disabled until retrained.
-# GRU: 32%, BiLSTM: 33%, DilatedCNN: 37% (as of 2026-02-27 dashboard audit)
+# GRU: 32% (as of 2026-02-27 dashboard audit)
+# Re-enabled: DilatedCNN (47.66% acc, best model), BiLSTM
 # These are not loaded, not run, and pass 0.0 to the meta-ensemble.
-DISABLED_MODELS: set = {'gru', 'bidirectional_lstm', 'dilated_cnn'}
+DISABLED_MODELS: set = {'gru'}
 
 # ── Per-pair model exclusions (live accuracy audit 2026-03-02) ────────────────
 # Models that are actively anti-predictive (<35% accuracy) on specific pairs.
@@ -131,6 +132,61 @@ def _resolve_lead_signals(pair_name: str) -> Dict[str, str]:
 
 # Backward-compatible alias
 LEAD_SIGNALS = _LEAD_SIGNALS_STATIC
+
+
+# ── Prediction Debiaser ──────────────────────────────────────────────────────
+
+class PredictionDebiaser:
+    """EMA-based centering to remove persistent directional bias from ML predictions.
+
+    Tracks a running EMA of each model's predictions and subtracts it,
+    so a model that's consistently -0.01 gets shifted up by ~0.01.
+    Alpha=0.01 -> ~100 sample half-life (conservative).
+    """
+
+    def __init__(self, alpha: float = 0.01):
+        self.alpha = alpha
+        self._ema: Dict[str, float] = {}  # model_name -> running EMA
+        self._count: Dict[str, int] = {}  # model_name -> sample count
+        self._warmup = 50  # Don't debias until we have this many samples
+
+    def debias(self, model_name: str, raw_prediction: float) -> float:
+        """Apply debiasing to a raw prediction. Returns debiased value."""
+        if model_name not in self._ema:
+            self._ema[model_name] = 0.0
+            self._count[model_name] = 0
+
+        # Update EMA
+        self._ema[model_name] = (
+            self.alpha * raw_prediction + (1.0 - self.alpha) * self._ema[model_name]
+        )
+        self._count[model_name] = self._count.get(model_name, 0) + 1
+
+        # Only debias after warmup period
+        if self._count[model_name] < self._warmup:
+            return raw_prediction
+
+        return raw_prediction - self._ema[model_name]
+
+    def get_bias(self, model_name: str) -> float:
+        """Get current estimated bias for a model."""
+        return self._ema.get(model_name, 0.0)
+
+    def get_stats(self) -> Dict[str, Dict[str, float]]:
+        """Return all model biases for dashboard."""
+        return {
+            name: {
+                'bias': round(self._ema.get(name, 0.0), 6),
+                'samples': self._count.get(name, 0),
+                'warmed_up': self._count.get(name, 0) >= self._warmup,
+            }
+            for name in self._ema
+        }
+
+
+# Module-level singleton — shared across all predict_with_models calls
+_debiaser = PredictionDebiaser(alpha=0.01)
+
 
 # ── Attention (matching trained weights) ──────────────────────────────────────
 
@@ -1416,6 +1472,7 @@ def predict_with_models(
                 else:
                     pred = output
                 pred_val = float(pred[0, 0])  # Already tanh-bounded by model output layer
+                pred_val = _debiaser.debias(name, pred_val)  # Remove systematic bias
                 predictions[name] = pred_val
                 confidences[name] = min(abs(pred_val) + 0.5, 0.95)
         except Exception as e:
@@ -1432,6 +1489,7 @@ def predict_with_models(
         lgbm_pred, lgbm_conf = predict_lightgbm(
             models['lightgbm'], features, price_series
         )
+        lgbm_pred = _debiaser.debias('lightgbm', lgbm_pred)  # Remove systematic bias
         predictions['lightgbm'] = lgbm_pred
         confidences['lightgbm'] = lgbm_conf
 
@@ -1465,7 +1523,8 @@ def predict_with_models(
                 base_preds = torch.FloatTensor([base_pred_list])  # (1, n_models)
                 meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, meta_dim + n_models)
                 pred, conf = meta_model(meta_input)
-                predictions['meta_ensemble'] = float(pred[0, 0])  # Already tanh-bounded
+                meta_pred_val = _debiaser.debias('meta_ensemble', float(pred[0, 0]))
+                predictions['meta_ensemble'] = meta_pred_val  # Debiased
                 confidences['meta_ensemble'] = float(conf[0, 0])
         except Exception as e:
             logger.warning(f"Inference failed for meta_ensemble: {e}")

@@ -1,7 +1,7 @@
 """
 Breakout Strategy — Separate $2,000 wallet that catches parabolic moves.
 
-Entry: breakout_score >= 60, volume surge >= 5x, price_change >= 10%, near 24h high.
+Entry: breakout_score >= 45, volume surge >= 3x, price_change >= 5%, near 24h high.
 Exit: -10% stop loss, 48h sideways, 25% trailing stop from peak.
 Bet size: max($100, bankroll / 20). Max 10 open positions. 24h cooldown per symbol.
 """
@@ -23,9 +23,9 @@ STOP_LOSS_PCT = -10.0
 SIDEWAYS_HOURS = 48
 SIDEWAYS_THRESHOLD_PCT = 5.0
 TRAILING_STOP_PCT = 25.0
-MIN_BREAKOUT_SCORE = 60.0
-MIN_VOLUME_SURGE = 5.0
-MIN_PRICE_CHANGE_PCT = 10.0
+MIN_BREAKOUT_SCORE = 45.0
+MIN_VOLUME_SURGE = 3.0
+MIN_PRICE_CHANGE_PCT = 5.0
 EXCLUDED_BASES = {"BTC", "ETH"}  # Whole-market movers
 
 
@@ -291,25 +291,35 @@ class BreakoutStrategy:
         direction = getattr(signal, "direction", "")
         price = getattr(signal, "price", 0)
         details = getattr(signal, "details", {})
+        volume_surge = details.get("volume_surge", 0)
+        volume_score = getattr(signal, "volume_score", 0)
 
-        # ── Filter 1: Score >= 75 ──
+        # Log signal details for debugging
+        self.logger.debug(
+            f"BREAKOUT EVAL: {symbol} score={score:.0f} dir={direction} "
+            f"change={price_change_pct:+.1f}% vol_surge={volume_surge:.1f} vol_score={volume_score:.0f}"
+        )
+
+        # ── Filter 1: Score >= MIN_BREAKOUT_SCORE ──
         if score < MIN_BREAKOUT_SCORE:
+            self.logger.debug(f"BREAKOUT REJECT {symbol}: score {score:.0f} < {MIN_BREAKOUT_SCORE}")
             return None
 
         # ── Filter 2: Bullish only ──
         if direction != "bullish":
+            self.logger.debug(f"BREAKOUT REJECT {symbol}: direction={direction} not bullish")
             return None
 
-        # ── Filter 3: Price change >= 10% ──
+        # ── Filter 3: Price change >= MIN_PRICE_CHANGE_PCT ──
         if abs(price_change_pct) < MIN_PRICE_CHANGE_PCT:
+            self.logger.debug(f"BREAKOUT REJECT {symbol}: change {price_change_pct:.1f}% < {MIN_PRICE_CHANGE_PCT}%")
             return None
 
-        # ── Filter 4: Volume surge >= 5x ──
-        volume_surge = details.get("volume_surge", 0)
-        volume_score = getattr(signal, "volume_score", 0)
+        # ── Filter 4: Volume surge >= 3x ──
         # If volume_surge not in details, infer from volume_score
         # volume_score 30 = 5x, 22 = 3x, 15 = 2x
-        if volume_surge < MIN_VOLUME_SURGE and volume_score < 30:
+        if volume_surge < MIN_VOLUME_SURGE and volume_score < 22:
+            self.logger.debug(f"BREAKOUT REJECT {symbol}: vol_surge={volume_surge:.1f} vol_score={volume_score:.0f} too low")
             return None
 
         # ── Filter 5: Near 24h high (not a dump recovery) ──
@@ -317,25 +327,30 @@ class BreakoutStrategy:
         if high_24h > 0 and price > 0:
             dist_from_high_pct = (high_24h - price) / high_24h * 100
             if dist_from_high_pct > 5:  # More than 5% below 24h high = dump recovery
+                self.logger.debug(f"BREAKOUT REJECT {symbol}: {dist_from_high_pct:.1f}% below 24h high")
                 return None
 
         # ── Filter 6: Exclude BTC/ETH ──
         base = symbol.replace("USDT", "")
         if base in EXCLUDED_BASES:
+            self.logger.debug(f"BREAKOUT REJECT {symbol}: {base} excluded")
             return None
 
         # ── Filter 7: Not already holding this symbol ──
         for pos in self.open_positions:
             if pos["symbol"] == symbol:
+                self.logger.debug(f"BREAKOUT REJECT {symbol}: already holding {symbol}")
                 return None
 
         # ── Filter 8: 24h cooldown per symbol ──
         if self._in_cooldown(symbol):
+            self.logger.debug(f"BREAKOUT REJECT {symbol}: {symbol} in cooldown")
             return None
 
         # ── Filter 9: Enough bankroll ──
         bet_size = self._calculate_bet_size()
         if bet_size > self.bankroll:
+            self.logger.debug(f"BREAKOUT REJECT {symbol}: bankroll ${self.bankroll:.0f} < bet ${bet_size:.0f}")
             return None
 
         return self._enter_position(
