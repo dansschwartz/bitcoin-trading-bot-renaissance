@@ -6090,7 +6090,7 @@ class RenaissanceTradingBot:
                 FROM ml_predictions
                 WHERE is_correct IS NOT NULL
                   AND is_correct >= 0
-                  AND model_name = 'MetaEnsemble'
+                  AND model_name IN ('meta_ensemble', 'MetaEnsemble')
                   AND timestamp > datetime('now', '-7 days')
                 GROUP BY product_id
             ''').fetchall()
