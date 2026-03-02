@@ -210,6 +210,37 @@ async def arb_summary(request: Request):
         return {"error": str(e)}
 
 
+@router.get("/daily-pnl")
+async def arb_daily_pnl(request: Request):
+    """Daily P&L for the last N days (default 10)."""
+    days = int(request.query_params.get("days", 10))
+    try:
+        with _arb_conn() as c:
+            rows = c.execute(
+                """SELECT date(timestamp) as date,
+                          COALESCE(SUM(actual_profit_usd), 0) as pnl,
+                          COUNT(*) as trades,
+                          SUM(CASE WHEN actual_profit_usd > 0 THEN 1 ELSE 0 END) as wins
+                   FROM arb_trades
+                   WHERE status = 'filled'
+                     AND date(timestamp) >= date('now', ?)
+                   GROUP BY date(timestamp)
+                   ORDER BY date(timestamp)""",
+                (f"-{days} days",),
+            ).fetchall()
+            return [
+                {
+                    "date": r["date"],
+                    "pnl": round(float(r["pnl"]), 4),
+                    "trades": r["trades"],
+                    "wins": r["wins"],
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.get("/wallet")
 async def arb_wallet(request: Request):
     """Arbitrage wallet balance and allocation."""

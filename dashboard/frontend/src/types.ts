@@ -390,3 +390,10 @@ export interface ArbWallet {
   total_realized_pnl: number;
   return_pct: number;
 }
+
+export interface ArbDailyPnl {
+  date: string;
+  pnl: number;
+  trades: number;
+  wins: number;
+}

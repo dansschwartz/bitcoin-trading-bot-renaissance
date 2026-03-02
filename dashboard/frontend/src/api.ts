@@ -30,7 +30,7 @@ import type {
   EnsembleStatus, RegimeStatus, VAEPoint, RiskMetrics, Exposure,
   RiskGatewayEntry, TimeRange, BacktestRun, BacktestComparison,
   ClosedPosition, PositionSummary, ArbStatus, ArbTrade, ArbSignal, ArbSummary,
-  ArbWallet, BacktestConfig, BacktestProgress,
+  ArbWallet, ArbDailyPnl, BacktestConfig, BacktestProgress,
 } from './types';
 
 export const api = {
@@ -105,6 +105,7 @@ export const api = {
     get<ArbSignal[]>(`/api/arbitrage/signals?limit=${limit}${strategy ? `&strategy=${strategy}` : ''}`),
   arbSummary: () => get<ArbSummary>('/api/arbitrage/summary'),
   arbWallet: () => get<ArbWallet>('/api/arbitrage/wallet'),
+  arbDailyPnl: (days = 10) => get<ArbDailyPnl[]>(`/api/arbitrage/daily-pnl?days=${days}`),
 
   // Breakout Scanner
   breakoutSummary: () => get<Record<string, unknown>>('/api/breakout/summary'),
