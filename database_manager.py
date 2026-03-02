@@ -264,6 +264,17 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_blocked ON decision_audit_log(blocked_by)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_cycle ON decision_audit_log(cycle_number)')
 
+            # ── Pipeline Heartbeat table (Council S2 P1) ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS pipeline_heartbeat (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                component TEXT NOT NULL,
+                last_beat_utc TEXT NOT NULL,
+                items_processed INTEGER DEFAULT 0,
+                error_count INTEGER DEFAULT 0,
+                details TEXT,
+                UNIQUE(component)
+            )''')
+
             # Add outcome columns to ml_predictions (backward-compatible migration)
             for col_def in [
                 "price_at_prediction REAL",
@@ -717,6 +728,41 @@ class DatabaseManager:
                 conn.commit()
         except Exception as e:
             self.logger.error(f"Error ensuring audit columns: {e}")
+
+    # ── Pipeline Heartbeat Methods (Council S2 P1) ──
+
+    async def record_heartbeat(self, component: str, items_processed: int = 0,
+                                error_count: int = 0, details: Optional[Dict] = None) -> None:
+        """Upsert a heartbeat row for a pipeline component."""
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            details_json = json.dumps(details) if details else None
+            with self._get_connection() as conn:
+                conn.execute('''
+                    INSERT INTO pipeline_heartbeat (component, last_beat_utc, items_processed, error_count, details)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(component) DO UPDATE SET
+                        last_beat_utc = excluded.last_beat_utc,
+                        items_processed = excluded.items_processed,
+                        error_count = excluded.error_count,
+                        details = excluded.details
+                ''', (component, now, items_processed, error_count, details_json))
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error recording heartbeat for {component}: {e}")
+
+    async def get_pipeline_health(self) -> List[Dict[str, Any]]:
+        """Return all pipeline heartbeat rows for health monitoring."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM pipeline_heartbeat ORDER BY component")
+                rows = cursor.fetchall()
+                columns = [d[0] for d in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            self.logger.error(f"Error reading pipeline health: {e}")
+            return []
 
     async def store_audit_log(self, audit_data: Dict[str, Any]) -> None:
         """Insert one row into decision_audit_log from a flat dict."""

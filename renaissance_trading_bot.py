@@ -1946,6 +1946,91 @@ class RenaissanceTradingBot:
         except Exception:
             pass
 
+    async def _log_ml_accuracy_summary(self) -> None:
+        """Council S2 P3: Log per-model accuracy summary from ml_predictions table.
+
+        Called every 100 cycles (~100 min). Queries the last 24h of evaluated predictions.
+        """
+        try:
+            with self.db_manager._get_connection() as conn:
+                cursor = conn.cursor()
+                # Per-model accuracy over last 24h
+                cursor.execute('''
+                    SELECT model_name,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct
+                    FROM ml_predictions
+                    WHERE is_correct IS NOT NULL
+                      AND evaluated_at > datetime('now', '-24 hours')
+                    GROUP BY model_name
+                    ORDER BY total DESC
+                ''')
+                rows = cursor.fetchall()
+                if not rows:
+                    self.logger.info("ML ACCURACY (24h): No evaluated predictions yet")
+                    return
+
+                parts = []
+                total_all = 0
+                correct_all = 0
+                for model_name, total, correct in rows:
+                    acc = round(correct / max(total, 1) * 100, 1)
+                    parts.append(f"{model_name}={acc}% (n={total})")
+                    total_all += total
+                    correct_all += correct
+
+                overall_acc = round(correct_all / max(total_all, 1) * 100, 1)
+                self.logger.info(
+                    f"ML ACCURACY (24h): {', '.join(parts)} | "
+                    f"Overall={overall_acc}% (n={total_all})"
+                )
+        except Exception as e:
+            self.logger.error(f"ML accuracy summary failed: {e}")
+
+    async def _check_pipeline_health(self) -> None:
+        """Council S2 P1: Watchdog — check pipeline_heartbeat for stale components.
+
+        Fires a warning if any component hasn't reported in >15 minutes.
+        Called every 30 cycles (~30 min at 60s interval).
+        """
+        STALENESS_THRESHOLD_MINUTES = 15
+        try:
+            rows = await self.db_manager.get_pipeline_health()
+            if not rows:
+                self.logger.warning("PIPELINE WATCHDOG: No heartbeat rows yet — first cycle?")
+                return
+            now = datetime.now(timezone.utc)
+            for row in rows:
+                component = row.get('component', '?')
+                last_beat_str = row.get('last_beat_utc', '')
+                if not last_beat_str:
+                    continue
+                try:
+                    last_beat = datetime.fromisoformat(last_beat_str.replace('Z', '+00:00'))
+                    if last_beat.tzinfo is None:
+                        last_beat = last_beat.replace(tzinfo=timezone.utc)
+                    age_minutes = (now - last_beat).total_seconds() / 60.0
+                    if age_minutes > STALENESS_THRESHOLD_MINUTES:
+                        msg = (
+                            f"PIPELINE WATCHDOG ALERT: '{component}' stale for "
+                            f"{age_minutes:.0f}min (threshold={STALENESS_THRESHOLD_MINUTES}min)"
+                        )
+                        self.logger.error(msg)
+                        if self.monitoring_alert_manager:
+                            self._track_task(
+                                self.monitoring_alert_manager.send_system_event(
+                                    "pipeline_stale", msg
+                                )
+                            )
+                except (ValueError, TypeError) as _parse_err:
+                    self.logger.debug(f"Watchdog parse error for {component}: {_parse_err}")
+
+            self.logger.info(
+                f"PIPELINE WATCHDOG: {len(rows)} components checked, all within threshold"
+            )
+        except Exception as e:
+            self.logger.error(f"Pipeline watchdog check failed: {e}")
+
     async def collect_all_data(self, product_id: str = "BTC-USD") -> Dict[str, Any]:
         """Collect data from all sources for a specific product.
 
@@ -3870,6 +3955,12 @@ class RenaissanceTradingBot:
                 f"in {fetch_elapsed:.1f}s"
             )
 
+            # Council S2 P1: Record bar_aggregator heartbeat after data fetch
+            self._track_task(self.db_manager.record_heartbeat(
+                'bar_aggregator', items_processed=len(market_data_all),
+                details={'fetch_secs': round(fetch_elapsed, 1), 'pairs_requested': len(cycle_pairs)}
+            ))
+
             # ══════════════════════════════════════════════════════
             # PHASE 2: SEQUENTIAL PROCESSING (signals + decisions)
             # ══════════════════════════════════════════════════════
@@ -3949,6 +4040,8 @@ class RenaissanceTradingBot:
 
                 except Exception as _regime_err:
                     self.logger.debug(f"Hierarchical regime classification error: {_regime_err}")
+
+            _ml_inference_count = 0  # Council S2 P1: track ML inferences for heartbeat
 
             for product_id in cycle_pairs:
                 pair_start_time = time.time()
@@ -5040,6 +5133,7 @@ class RenaissanceTradingBot:
                             'confidence': conf,
                             'price_at_prediction': current_price,
                         }))
+                    _ml_inference_count += len(_ml_preds)
 
                     # Periodic outcome evaluation (every 10 cycles)
                     if self.scan_cycle_count % 10 == 0:
@@ -5397,9 +5491,31 @@ class RenaissanceTradingBot:
             # Increment cycle counter ONCE per cycle (not per pair)
             self.scan_cycle_count += 1
 
+            # Council S2 P1: Record ml_inference + decision_engine heartbeats after per-pair loop
+            self._track_task(self.db_manager.record_heartbeat(
+                'ml_inference', items_processed=_ml_inference_count,
+                details={'cycle': self.scan_cycle_count, 'pairs': len(cycle_pairs)}
+            ))
+            _n_decisions = len(decisions) if decisions else 0
+            _n_trades = sum(1 for d in (decisions or []) if getattr(d, 'action', 'HOLD') != 'HOLD')
+            self._track_task(self.db_manager.record_heartbeat(
+                'decision_engine', items_processed=_n_decisions,
+                details={'cycle': self.scan_cycle_count, 'pairs': len(cycle_pairs), 'trades': _n_trades}
+            ))
+            self._track_task(self.db_manager.record_heartbeat(
+                'trade_executor', items_processed=_n_trades,
+                details={'cycle': self.scan_cycle_count}
+            ))
+
+            # Council S2 P1: Pipeline watchdog check every 30 cycles (~30 min)
+            if self.scan_cycle_count % 30 == 0:
+                self._track_task(self._check_pipeline_health())
+
             # ── Periodic DB pruning (every 100 cycles) ──
             if self.scan_cycle_count % 100 == 0:
                 self._prune_old_data()
+                # Council S2 P3: Log ML accuracy summary every 100 cycles
+                self._track_task(self._log_ml_accuracy_summary())
 
             # Random baseline position management
             if hasattr(self, 'random_baseline'):

@@ -74,3 +74,9 @@ async def signal_attribution(request: Request, hours: int = 24):
 async def model_accuracy(request: Request, hours: int = 24):
     db = request.app.state.dashboard_config.db_path
     return db_queries.get_model_accuracy(db, hours=hours)
+
+
+@router.get("/pipeline-health")
+async def pipeline_health(request: Request):
+    db = request.app.state.dashboard_config.db_path
+    return db_queries.get_pipeline_health(db)

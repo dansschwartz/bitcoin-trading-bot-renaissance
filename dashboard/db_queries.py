@@ -1354,6 +1354,37 @@ def get_audit_summary(db_path: str, hours: int = 24) -> Dict[str, Any]:
         })
 
 
+def get_pipeline_health(db_path: str) -> Dict[str, Any]:
+    """Return pipeline heartbeat status for all components."""
+    with _conn(db_path) as c:
+        try:
+            rows = c.execute("SELECT * FROM pipeline_heartbeat ORDER BY component").fetchall()
+        except sqlite3.OperationalError:
+            return {"components": [], "error": "pipeline_heartbeat table not created yet"}
+        components = []
+        now_utc = datetime.now(timezone.utc)
+        for r in _rows_to_dicts(rows):
+            last_beat_str = r.get("last_beat_utc", "")
+            age_seconds = None
+            if last_beat_str:
+                try:
+                    lb = datetime.fromisoformat(last_beat_str.replace("Z", "+00:00"))
+                    if lb.tzinfo is None:
+                        lb = lb.replace(tzinfo=timezone.utc)
+                    age_seconds = round((now_utc - lb).total_seconds())
+                except (ValueError, TypeError):
+                    pass
+            r["age_seconds"] = age_seconds
+            r["stale"] = age_seconds is not None and age_seconds > 900  # >15 min
+            if r.get("details"):
+                try:
+                    r["details"] = json.loads(r["details"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            components.append(r)
+        return _sanitize_floats({"components": components})
+
+
 def get_audit_recent(db_path: str, limit: int = 50) -> List[Dict[str, Any]]:
     """Return most recent audit rows as flat dicts."""
     with _conn(db_path) as c:
