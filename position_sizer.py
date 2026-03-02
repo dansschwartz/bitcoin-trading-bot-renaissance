@@ -143,6 +143,16 @@ class RenaissancePositionSizer:
             "neutral_sideways": 1.00,
             "bull_mean_reverting": 1.10,
             "bear_mean_reverting": 0.90,
+            # Council S3 #3: Expanded universe macro/crypto regime labels
+            "EXPANSION": 1.10,
+            "LATE_CYCLE": 0.80,
+            "CRISIS": 0.40,
+            "RECOVERY": 1.00,
+            "BULL_TREND": 1.15,
+            "DISTRIBUTION": 0.70,
+            "CRASH": 0.30,
+            "ACCUMULATION": 1.00,
+            "unknown": 0.80,
         })
 
         # ── Position limits ──

@@ -853,6 +853,14 @@ class RenaissanceTradingBot:
         self._adaptive_weight_blend = 0.0  # starts at 0 (pure config), ramps to 0.5 max
         self._adaptive_min_samples = 15    # need this many observations before adjusting
 
+        # Council S3 #1/#5: ML prediction accuracy feedback loop
+        # Caches per-pair ML accuracy from DB, refreshed every 10 cycles
+        self._ml_accuracy_cache: Dict[str, Dict[str, float]] = {}  # {pair: {accuracy, n, edge}}
+        self._ml_accuracy_cache_cycle = 0
+        self._ml_eval_min_predictions = int(self.config.get('ml_evaluation', {}).get('min_predictions_for_edge', 50))
+        self._ml_eval_blend_measured = float(self.config.get('ml_evaluation', {}).get('edge_blend_measured', 0.6))
+        self._ml_eval_blend_model = float(self.config.get('ml_evaluation', {}).get('edge_blend_model', 0.4))
+
         self._killed = False
         self._start_time = datetime.now(timezone.utc)
         self._background_tasks: list = []
@@ -4778,6 +4786,10 @@ class RenaissanceTradingBot:
                     if self.scan_cycle_count % 10 == 0:
                         self._track_task(self.db_manager.evaluate_ml_outcomes())
                         self._track_task(self.db_manager.evaluate_audit_outcomes())
+                        # Council S3 #1/#5: Refresh ML accuracy cache for Kelly calibration
+                        if self.scan_cycle_count != self._ml_accuracy_cache_cycle:
+                            self._refresh_ml_accuracy_cache()
+                            self._ml_accuracy_cache_cycle = self.scan_cycle_count
 
                 # 5.5 Exit Engine — Monitor open positions for alpha decay
                 try:
@@ -6032,21 +6044,71 @@ class RenaissanceTradingBot:
 
     def _get_measured_edge(self, product_id: str) -> Optional[float]:
         """
-        Compute realized edge from signal scorecard instead of fabricating it.
+        Compute realized edge from signal scorecard + ML prediction accuracy.
+        Council S3 #1/#5: Blends scorecard edge with DB-measured ML accuracy.
         Returns None if insufficient data, else a float [0, 0.15].
         """
+        # Source 1: Signal scorecard (in-memory, per-signal)
+        scorecard_edge = None
         sc = self._signal_scorecard.get(product_id, {})
-        if not sc:
+        if sc:
+            total_correct = sum(s["correct"] for s in sc.values())
+            total_total = sum(s["total"] for s in sc.values())
+            if total_total >= 20:
+                accuracy = total_correct / total_total
+                scorecard_edge = max(0.0, accuracy - 0.5)
+
+        # Source 2: ML prediction accuracy (DB-backed, refreshed every 10 cycles)
+        ml_edge = None
+        ml_info = self._ml_accuracy_cache.get(product_id)
+        if ml_info and ml_info['n'] >= self._ml_eval_min_predictions:
+            ml_edge = max(0.0, ml_info['accuracy'] - 0.5)
+
+        # Blend sources
+        if scorecard_edge is not None and ml_edge is not None:
+            edge = (self._ml_eval_blend_measured * ml_edge +
+                    self._ml_eval_blend_model * scorecard_edge)
+        elif ml_edge is not None:
+            edge = ml_edge
+        elif scorecard_edge is not None:
+            edge = scorecard_edge
+        else:
             return None
-        total_correct = sum(s["correct"] for s in sc.values())
-        total_total = sum(s["total"] for s in sc.values())
-        if total_total < 20:
-            return None  # not enough data
-        # Aggregate accuracy across all signals
-        accuracy = total_correct / total_total
-        # Edge = accuracy - 0.5 (above random), capped at 0.15
-        edge = max(0.0, accuracy - 0.5)
+
         return min(edge, 0.15)
+
+    def _refresh_ml_accuracy_cache(self) -> None:
+        """Council S3 #1/#5: Query ML prediction accuracy per pair from DB."""
+        try:
+            import sqlite3
+            db_path = getattr(self.db_manager, 'db_path', None) or 'data/renaissance_bot.db'
+            conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            rows = conn.execute('''
+                SELECT product_id,
+                       COUNT(*) as n,
+                       SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct
+                FROM ml_predictions
+                WHERE is_correct IS NOT NULL
+                  AND model_name = 'MetaEnsemble'
+                  AND datetime(timestamp) > datetime('now', '-7 days')
+                GROUP BY product_id
+            ''').fetchall()
+            conn.close()
+            for pid, n, correct in rows:
+                acc = correct / n if n > 0 else 0.0
+                self._ml_accuracy_cache[pid] = {
+                    'accuracy': acc, 'n': n, 'edge': max(0.0, acc - 0.5)
+                }
+            if rows:
+                total_n = sum(r[1] for r in rows)
+                total_c = sum(r[2] for r in rows)
+                agg_acc = total_c / total_n if total_n > 0 else 0.0
+                self.logger.info(
+                    f"ML ACCURACY CACHE refreshed: {len(rows)} pairs, "
+                    f"{total_n} predictions, {agg_acc:.1%} overall accuracy"
+                )
+        except Exception as e:
+            self.logger.warning(f"ML accuracy cache refresh failed: {e}")
 
     # _get_polymarket_scanner_data() removed — Strategy A now discovers markets directly
 
