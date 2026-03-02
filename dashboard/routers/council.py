@@ -152,6 +152,41 @@ async def researcher_detail(session_id: str, name: str):
     }
 
 
+@router.get("/aggregate")
+async def aggregate_sessions():
+    """Aggregate all proposals across all council sessions, sorted by score."""
+    sessions = _scan_sessions()
+    all_proposals: list[dict[str, Any]] = []
+    total_reviews = 0
+    session_count = 0
+
+    for session in sessions:
+        if session.get("proposal_count", 0) == 0:
+            continue
+        session_count += 1
+        proposals = _load_ranked(session["session_id"])
+        for p in proposals:
+            p["_session_id"] = session["session_id"]
+            p["_session_timestamp"] = session["timestamp"]
+        all_proposals.extend(proposals)
+        total_reviews += session.get("review_count", 0)
+
+    # Sort by consensus_score descending
+    all_proposals.sort(key=lambda p: p.get("consensus_score", 0), reverse=True)
+
+    scores = [p.get("consensus_score", 0) for p in all_proposals if p.get("consensus_score")]
+    return {
+        "session_count": session_count,
+        "proposals": all_proposals,
+        "stats": {
+            "total": len(all_proposals),
+            "consensus_passed": sum(1 for p in all_proposals if p.get("passes_consensus")),
+            "avg_score": round(sum(scores) / len(scores), 2) if scores else 0,
+            "total_reviews": total_reviews,
+        },
+    }
+
+
 @router.get("/latest")
 async def latest_session():
     """Return the most recent session that has proposals (skip empty sessions)."""

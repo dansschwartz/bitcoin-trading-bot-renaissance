@@ -147,6 +147,7 @@ export const api = {
   councilSessions: () => get<Record<string, unknown>[]>('/api/council/sessions'),
   councilSession: (id: string) => get<Record<string, unknown>>(`/api/council/sessions/${id}`),
   councilLatest: () => get<Record<string, unknown>>('/api/council/latest'),
+  councilAggregate: () => get<Record<string, unknown>>('/api/council/aggregate'),
   councilResearcher: (sessionId: string, name: string) =>
     get<Record<string, unknown>>(`/api/council/sessions/${sessionId}/researchers/${name}`),
 

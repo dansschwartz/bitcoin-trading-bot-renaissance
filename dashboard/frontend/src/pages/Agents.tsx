@@ -84,9 +84,10 @@ interface CouncilProposal {
 
 interface CouncilLatest {
   session_id: string | null;
+  session_count?: number;
   timestamp?: string;
   proposals: CouncilProposal[];
-  stats: { total: number; consensus_passed: number; avg_score: number };
+  stats: { total: number; consensus_passed: number; avg_score: number; total_reviews?: number };
 }
 
 interface ResearcherInfo {
@@ -253,11 +254,11 @@ export default function Agents() {
     return () => clearInterval(id);
   }, []);
 
-  // Load council data
+  // Load council data — aggregate (all sessions) by default
   useEffect(() => {
     const loadCouncil = () => {
       api.councilSessions().then((d) => setCouncilSessions(d as unknown as CouncilSession[])).catch((e) => console.error('[Council] sessions error:', e));
-      api.councilLatest().then((d) => setCouncilLatest(d as unknown as CouncilLatest)).catch((e) => console.error('[Council] latest error:', e));
+      api.councilAggregate().then((d) => setCouncilLatest(d as unknown as CouncilLatest)).catch((e) => console.error('[Council] aggregate error:', e));
     };
     loadCouncil();
     const id = setInterval(loadCouncil, 60_000);
@@ -276,24 +277,57 @@ export default function Agents() {
     return () => clearInterval(id);
   }, [auditOpen]);
 
-  // Load researcher detail when expanded
+  // Load researcher detail when expanded — in aggregate mode, try all sessions with proposals
   const loadResearcher = useCallback((name: string) => {
-    const sessionId = councilLatest?.session_id;
-    if (!sessionId) return;
     if (expandedResearcher === name) {
       setExpandedResearcher(null);
       setResearcherInfo(null);
       return;
     }
     setExpandedResearcher(name);
-    api.councilResearcher(sessionId, name)
-      .then((d) => setResearcherInfo(d as unknown as ResearcherInfo))
-      .catch(() => setResearcherInfo(null));
-  }, [councilLatest, expandedResearcher]);
 
-  // Load different session when selected
+    // If filtering a specific session, use that
+    if (selectedSession) {
+      api.councilResearcher(selectedSession, name)
+        .then((d) => setResearcherInfo(d as unknown as ResearcherInfo))
+        .catch(() => setResearcherInfo(null));
+      return;
+    }
+
+    // Aggregate mode: fetch from all sessions with proposals, merge results
+    const sessionsWithData = councilSessions.filter(s => s.proposal_count > 0);
+    if (sessionsWithData.length === 0) {
+      setResearcherInfo(null);
+      return;
+    }
+    Promise.all(
+      sessionsWithData.map(s =>
+        api.councilResearcher(s.session_id, name)
+          .then(d => d as unknown as ResearcherInfo)
+          .catch(() => ({ name, proposals: [], reviews: [], proposal_count: 0, review_count: 0 } as ResearcherInfo))
+      )
+    ).then(results => {
+      const merged: ResearcherInfo = {
+        name,
+        proposals: results.flatMap(r => r.proposals),
+        reviews: results.flatMap(r => r.reviews),
+        proposal_count: results.reduce((s, r) => s + r.proposal_count, 0),
+        review_count: results.reduce((s, r) => s + r.review_count, 0),
+      };
+      setResearcherInfo(merged);
+    });
+  }, [councilSessions, selectedSession, expandedResearcher]);
+
+  // Load different session when selected (empty string = aggregate)
   useEffect(() => {
-    if (!selectedSession || selectedSession === councilLatest?.session_id) return;
+    if (selectedSession === '') {
+      // Switch back to aggregate view
+      api.councilAggregate()
+        .then((d) => setCouncilLatest(d as unknown as CouncilLatest))
+        .catch(() => {});
+      return;
+    }
+    if (!selectedSession) return;
     api.councilSession(selectedSession)
       .then((d) => {
         const data = d as unknown as CouncilLatest;
@@ -640,9 +674,10 @@ export default function Agents() {
         >
           <div className="flex items-center gap-3">
             <h2 className="text-sm font-semibold text-gray-300">Research Council</h2>
-            {councilLatest && councilLatest.session_id && (
+            {councilLatest && councilLatest.stats.total > 0 && (
               <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-accent-blue/20 text-accent-blue">
                 {councilLatest.stats.total} proposals
+                {councilLatest.session_count ? ` across ${councilLatest.session_count} sessions` : ''}
               </span>
             )}
             {councilLatest && councilLatest.stats.consensus_passed > 0 && (
@@ -662,20 +697,24 @@ export default function Agents() {
         {councilOpen && (
           <div className="px-4 pb-4 space-y-4">
             {/* Session selector */}
-            {councilSessions.length > 1 && (
+            {councilSessions.length > 0 && (
               <div className="flex items-center gap-2">
                 <span className="text-xs text-gray-500">Session:</span>
                 <select
                   className="bg-surface-2 border border-surface-3 rounded text-xs text-gray-300 px-2 py-1"
-                  value={selectedSession || councilLatest?.session_id || ''}
+                  value={selectedSession}
                   onChange={(e) => setSelectedSession(e.target.value)}
                 >
-                  {councilSessions.map((s) => (
+                  <option value="">All Sessions (aggregate)</option>
+                  {councilSessions.filter(s => s.proposal_count > 0).map((s) => (
                     <option key={s.session_id} value={s.session_id}>
                       {new Date(s.timestamp).toLocaleString()} ({s.proposal_count} proposals, {s.consensus_count} consensus)
                     </option>
                   ))}
                 </select>
+                {councilLatest?.stats.total_reviews != null && (
+                  <span className="text-[10px] text-gray-600">{councilLatest.stats.total_reviews} reviews total</span>
+                )}
               </div>
             )}
 
@@ -747,6 +786,9 @@ export default function Agents() {
                                       <span>Expected: <span className="text-accent-green">+{p.expected_improvement_bps}bps</span></span>
                                     )}
                                     <span>Rejections: <span className={p.rejections > 0 ? 'text-accent-red' : 'text-gray-400'}>{p.rejections}</span></span>
+                                    {(p as Record<string, unknown>)._session_timestamp != null && (
+                                      <span>Session: <span className="text-gray-400">{new Date(String((p as Record<string, unknown>)._session_timestamp)).toLocaleDateString()}</span></span>
+                                    )}
                                   </div>
                                 </div>
                               )}
