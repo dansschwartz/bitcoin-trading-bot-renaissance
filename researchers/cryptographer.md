@@ -65,3 +65,8 @@ Focus on: audit_regime_performance (HMM state quality), audit_signal_effectivene
 (signal separation), audit_feature_health (feature degradation).
 Key question: Is the HMM classifying regimes that actually differ in outcomes?
 Are there hidden regime states the HMM isn't detecting?
+
+## DEPLOYMENT AWARENESS
+Before proposing, read the `recent_deployments` and `in_progress_fixes` sections in
+the weekly report. Do not repropose already-deployed changes. Instead, evaluate whether
+recent deployments are working and look for second-order effects or new opportunities.

@@ -61,6 +61,10 @@ class ObservationCollector:
         )
         conn.row_factory = sqlite3.Row
 
+        # Context sections — researchers read these FIRST
+        report["recent_deployments"] = self._collect_recent_deployments(conn)
+        report["in_progress_fixes"] = self._collect_in_progress_fixes(conn)
+
         report["portfolio"] = self._portfolio_section(conn, window_hours)
         report["signals"] = self._signals_section(conn, window_hours)
         report["regimes"] = self._regimes_section(conn, window_hours)
@@ -121,6 +125,127 @@ class ObservationCollector:
             logger.warning("Failed to write report file: %s", exc)
 
         return str(filepath)
+
+    # ── Context sections (deployment awareness) ──
+
+    def _get_last_council_timestamp(self, conn: sqlite3.Connection) -> str:
+        """Find the most recent council session timestamp from weekly_reports."""
+        try:
+            row = conn.execute(
+                "SELECT MAX(generated_at) FROM weekly_reports"
+            ).fetchone()
+            if row and row[0]:
+                return row[0]
+        except sqlite3.OperationalError:
+            pass
+        # Fallback: 7 days ago
+        return (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    def _collect_recent_deployments(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        """Gather all changes deployed since last council session."""
+        deployments: Dict[str, Any] = {
+            "section": "recent_deployments",
+            "description": (
+                "Changes deployed since last council session. "
+                "DO NOT repropose these. Instead, evaluate whether "
+                "they are working as intended."
+            ),
+            "council_proposals_deployed": [],
+            "manual_fixes_deployed": [],
+            "active_experiments": [],
+            "last_council_timestamp": None,
+        }
+        try:
+            last_session = self._get_last_council_timestamp(conn)
+            deployments["last_council_timestamp"] = last_session
+
+            # Council proposals deployed since last session
+            try:
+                rows = conn.execute("""
+                    SELECT id, source, title, status, deployed_at, description
+                    FROM proposals
+                    WHERE status IN ('deployed', 'sandbox', 'safety_passed')
+                      AND created_at > ?
+                    ORDER BY created_at DESC
+                """, (last_session,)).fetchall()
+                for r in rows:
+                    deployments["council_proposals_deployed"].append({
+                        "id": r["id"], "source": r["source"],
+                        "title": r["title"], "status": r["status"],
+                        "deployed_at": r["deployed_at"],
+                        "description": r["description"],
+                    })
+            except sqlite3.OperationalError:
+                pass
+
+            # Improvement log entries (manual fixes, mega specs)
+            try:
+                rows = conn.execute("""
+                    SELECT timestamp, description, change_type
+                    FROM improvement_log
+                    WHERE timestamp > ?
+                    ORDER BY timestamp DESC
+                """, (last_session,)).fetchall()
+                for r in rows:
+                    deployments["manual_fixes_deployed"].append({
+                        "timestamp": r["timestamp"],
+                        "description": r["description"],
+                        "change_type": r["change_type"],
+                    })
+            except sqlite3.OperationalError:
+                pass
+
+            # Active experiments from outcome ledger
+            project_root = Path(self.db_path).parent.parent
+            ledger_path = project_root / "data" / "council_memory" / "outcome_ledger.json"
+            if ledger_path.exists():
+                try:
+                    with open(ledger_path) as f:
+                        ledger = json.load(f)
+                    active = [e for e in ledger.get("experiments", [])
+                              if e.get("status") == "active"]
+                    deployments["active_experiments"] = active
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+        except Exception as exc:
+            logger.warning("Failed to collect recent deployments: %s", exc)
+            deployments["error"] = str(exc)
+
+        return deployments
+
+    def _collect_in_progress_fixes(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        """List issues that have specs written or fixes in progress."""
+        in_progress: Dict[str, Any] = {
+            "section": "in_progress_fixes",
+            "description": (
+                "These issues are ALREADY BEING ADDRESSED. "
+                "Do not propose fixes for these unless you have "
+                "a fundamentally different approach."
+            ),
+            "items": [],
+        }
+        try:
+            rows = conn.execute("""
+                SELECT id, source, title, status, created_at
+                FROM proposals
+                WHERE status IN ('consensus_passed', 'safety_passed',
+                                 'sandbox', 'pending_review')
+                ORDER BY created_at DESC
+            """).fetchall()
+            for r in rows:
+                in_progress["items"].append({
+                    "id": r["id"], "source": r["source"],
+                    "title": r["title"], "status": r["status"],
+                    "created_at": r["created_at"],
+                })
+        except sqlite3.OperationalError:
+            pass
+        except Exception as exc:
+            logger.warning("Failed to collect in-progress fixes: %s", exc)
+            in_progress["error"] = str(exc)
+
+        return in_progress
 
     # ── Section builders ──
 

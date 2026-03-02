@@ -1060,6 +1060,26 @@ DATABASE SNAPSHOT: {snapshot_dir}/trading_snapshot.db (read-only SQLite — quer
 HISTORICAL DATA: {snapshot_dir}/training_data/ (5-year CSVs per pair)
 
 ===============================================================
+BEFORE PROPOSING — CHECK RECENT DEPLOYMENTS
+===============================================================
+
+Read the `recent_deployments` section of the weekly report FIRST.
+These changes were deployed since your last session. DO NOT repropose them.
+
+Instead, for each recent deployment, consider:
+1. Is it working as intended? Check the data.
+2. Are there second-order effects or interactions with other changes?
+3. Does it create new opportunities for complementary improvements?
+
+Also read the `in_progress_fixes` section — these issues are already
+being addressed. Only propose alternatives if you have a fundamentally
+DIFFERENT approach.
+
+If you have a fundamentally different approach to a problem that was
+already addressed, you may propose it — but explicitly acknowledge the
+existing fix and explain why your approach is better.
+
+===============================================================
 CRITICAL: OUTPUT-FIRST WORKFLOW — Follow this EXACT sequence
 ===============================================================
 

@@ -77,6 +77,35 @@ try:
 except Exception:
     summary['pairs'] = []
 
+# Recent changes since last council report
+try:
+    last_report = conn.execute(
+        'SELECT MAX(generated_at) FROM weekly_reports'
+    ).fetchone()[0]
+    if not last_report:
+        from datetime import timedelta
+        last_report = (now - timedelta(days=7)).isoformat()
+    proposals_deployed = conn.execute(
+        \"SELECT COUNT(*) FROM proposals WHERE status IN ('deployed','sandbox','safety_passed') AND created_at > ?\",
+        (last_report,)
+    ).fetchone()[0]
+    manual_fixes = conn.execute(
+        'SELECT COUNT(*) FROM improvement_log WHERE timestamp > ?',
+        (last_report,)
+    ).fetchone()[0]
+    in_progress = conn.execute(
+        \"SELECT COUNT(*) FROM proposals WHERE status IN ('consensus_passed','safety_passed','sandbox','pending_review')\"
+    ).fetchone()[0]
+    total_changes = proposals_deployed + manual_fixes
+    summary['recent_changes'] = {
+        'council_proposals_deployed_since_last_run': proposals_deployed,
+        'manual_fixes_deployed_since_last_run': manual_fixes,
+        'in_progress': in_progress,
+        'message': f'{total_changes} changes deployed since last council run. See recent_deployments section for details.',
+    }
+except Exception as e:
+    summary['recent_changes'] = {'error': str(e)}
+
 conn.close()
 
 with open('$SNAPSHOT_DIR/snapshot_summary.json', 'w') as f:

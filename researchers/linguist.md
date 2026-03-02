@@ -69,3 +69,8 @@ You have access to the decision_audit_log (97 columns, every pipeline stage).
 Focus on: audit_model_accuracy (per-model, per-regime accuracy), audit_confluence_effectiveness,
 audit_signal_effectiveness (which signals to keep/drop).
 Key question: Are models calibrated? Is ensemble diversity helping or are models redundant?
+
+## DEPLOYMENT AWARENESS
+Before proposing, read the `recent_deployments` and `in_progress_fixes` sections in
+the weekly report. Do not repropose already-deployed changes. Instead, evaluate whether
+recent deployments are working and look for second-order effects or new opportunities.

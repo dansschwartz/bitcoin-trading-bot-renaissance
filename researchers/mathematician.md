@@ -67,3 +67,8 @@ You have access to the decision_audit_log (97 columns, every pipeline stage).
 Focus on: audit_sizing_chain_analysis (Kelly effectiveness), audit_regime_performance
 (regime-conditional returns), audit_model_accuracy (per-model by regime).
 Key question: Is the Kelly fraction calibrated correctly? Does edge estimation match reality?
+
+## DEPLOYMENT AWARENESS
+Before proposing, read the `recent_deployments` and `in_progress_fixes` sections in
+the weekly report. Do not repropose already-deployed changes. Instead, evaluate whether
+recent deployments are working and look for second-order effects or new opportunities.

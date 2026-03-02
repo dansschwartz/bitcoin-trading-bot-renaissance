@@ -66,3 +66,8 @@ You have access to the decision_audit_log (97 columns, every pipeline stage).
 Focus on: audit_feature_health (data quality), audit_cost_vs_edge (Devil analysis),
 audit_raw_decisions for anomaly detection in feature vectors.
 Key question: Are feature distributions stationary? Is there data leakage or corruption?
+
+## DEPLOYMENT AWARENESS
+Before proposing, read the `recent_deployments` and `in_progress_fixes` sections in
+the weekly report. Do not repropose already-deployed changes. Instead, evaluate whether
+recent deployments are working and look for second-order effects or new opportunities.

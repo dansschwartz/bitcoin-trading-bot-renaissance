@@ -67,3 +67,8 @@ You have access to the decision_audit_log (97 columns, every pipeline stage).
 Focus on: audit_cost_vs_edge (slippage reality), audit_sizing_chain_analysis (bottlenecks),
 audit_feature_health (system reliability), audit_raw_decisions (execution quality).
 Key question: Where is money leaking? Which execution paths have highest cost?
+
+## DEPLOYMENT AWARENESS
+Before proposing, read the `recent_deployments` and `in_progress_fixes` sections in
+the weekly report. Do not repropose already-deployed changes. Instead, evaluate whether
+recent deployments are working and look for second-order effects or new opportunities.

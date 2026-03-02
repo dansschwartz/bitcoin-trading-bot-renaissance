@@ -64,7 +64,9 @@ _TABLES = {
             metric_before   TEXT,
             metric_after    TEXT,
             config_snapshot TEXT,
-            reverted        INTEGER DEFAULT 0
+            reverted        INTEGER DEFAULT 0,
+            source          TEXT DEFAULT 'manual',
+            details         TEXT
         )
     """,
     "model_ledger": """
@@ -117,6 +119,12 @@ def ensure_agent_tables(db_path: str) -> None:
             conn.execute(ddl)
         for idx in _INDEXES:
             conn.execute(idx)
+        # Backward-compatible migration: add source/details cols to improvement_log
+        for col_def in ["source TEXT DEFAULT 'manual'", "details TEXT"]:
+            try:
+                conn.execute(f"ALTER TABLE improvement_log ADD COLUMN {col_def}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         conn.commit()
         conn.close()
         logger.info("Agent tables verified (%d tables, %d indexes)", len(_TABLES), len(_INDEXES))
@@ -240,3 +248,33 @@ def log_improvement(
         conn.close()
     except Exception as exc:
         logger.debug("log_improvement failed: %s", exc)
+
+
+def log_deployment(
+    db_path: str,
+    description: str,
+    source: str = "manual",
+    details: Optional[str] = None,
+    change_type: str = "deployment",
+) -> None:
+    """Record a deployment event for council awareness.
+
+    Args:
+        db_path: Path to database
+        description: Short description of what changed
+        source: 'council_proposal', 'mega_fix_spec', 'manual', 'hotfix'
+        details: Optional longer description
+        change_type: Type of change (default 'deployment')
+    """
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.execute(
+            """INSERT INTO improvement_log
+               (change_type, description, source, details)
+               VALUES (?, ?, ?, ?)""",
+            (change_type, description, source, details),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.debug("log_deployment failed: %s", exc)
