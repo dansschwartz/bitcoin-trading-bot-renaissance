@@ -6089,8 +6089,9 @@ class RenaissanceTradingBot:
                        SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct
                 FROM ml_predictions
                 WHERE is_correct IS NOT NULL
+                  AND is_correct >= 0
                   AND model_name = 'MetaEnsemble'
-                  AND datetime(timestamp) > datetime('now', '-7 days')
+                  AND timestamp > datetime('now', '-7 days')
                 GROUP BY product_id
             ''').fetchall()
             conn.close()
@@ -6107,6 +6108,8 @@ class RenaissanceTradingBot:
                     f"ML ACCURACY CACHE refreshed: {len(rows)} pairs, "
                     f"{total_n} predictions, {agg_acc:.1%} overall accuracy"
                 )
+            else:
+                self.logger.info("ML ACCURACY CACHE: no evaluated MetaEnsemble predictions found")
         except Exception as e:
             self.logger.warning(f"ML accuracy cache refresh failed: {e}")
 
