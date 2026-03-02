@@ -219,7 +219,7 @@ class CrossExchangeDetector:
 
             # Periodic diagnostics every 1000 scans (~100 seconds)
             if self._scan_count % 1000 == 0:
-                logger.info(
+                logger.debug(
                     f"CROSS-X DIAG [{self._scan_count} scans]: "
                     f"signals={self._signals_generated} approved={self._signals_approved} "
                     f"below_threshold={_diag_below_threshold} below_notional={_diag_below_notional} "

@@ -160,7 +160,7 @@ class ArbitrageExecutor:
         if not fresh_ok:
             self._freshness_rejects += 1
             if self._freshness_rejects <= 5 or self._freshness_rejects % 100 == 0:
-                logger.info(f"GATE: freshness reject #{self._freshness_rejects} {signal.symbol}: {fresh_reason}")
+                logger.debug(f"GATE: freshness reject #{self._freshness_rejects} {signal.symbol}: {fresh_reason}")
             return ExecutionResult(trade_id=trade_id, status="book_stale", signal=signal)
 
         # LAYER 2: Book depth gate
@@ -168,7 +168,7 @@ class ArbitrageExecutor:
         if not depth_ok:
             self._depth_rejects += 1
             if self._depth_rejects <= 5 or self._depth_rejects % 100 == 0:
-                logger.info(f"GATE: depth reject #{self._depth_rejects} {signal.symbol}: {depth_reason}")
+                logger.debug(f"GATE: depth reject #{self._depth_rejects} {signal.symbol}: {depth_reason}")
             return ExecutionResult(trade_id=trade_id, status="depth_insufficient", signal=signal)
 
         buy_client = self.clients[signal.buy_exchange]

@@ -98,7 +98,10 @@ class StrategyAExecutor:
     MAX_BETS_PER_HOUR = 6
     COOLDOWN_AFTER_LOSS = 300         # 5 min in seconds
     MIN_BET = 5.0                     # Floor for Kelly sizing
-    MAX_BET_PCT = 0.15                # Ceiling: 15% of bankroll per bet
+    MAX_BET_PCT = 0.05                # Ceiling: 5% of bankroll per bet (was 15%, reduced after 72% drawdown on 2026-03-02)
+    MIN_BANKROLL_TO_TRADE = 200.0     # Stop betting below this bankroll level
+    DAILY_LOSS_LIMIT_PCT = 0.20       # Max 20% of start-of-day bankroll loss per day
+    MAX_ASSET_CONCENTRATION = 0.50    # Max 50% of open exposure in any single asset
 
     def __init__(self, config: dict, db_path: str, logger: Optional[logging.Logger] = None):
         self.config = config
@@ -120,8 +123,14 @@ class StrategyAExecutor:
         self._bets_this_hour: List[float] = []
         self._last_loss_time: float = 0.0
 
+        # Daily loss tracking (reset at start of each UTC day)
+        self._daily_start_bankroll: float = 0.0
+        self._daily_pnl: float = 0.0
+        self._last_trading_day: Optional[object] = None
+
         self._ensure_tables()
         self._load_bankroll()
+        self._reset_daily_if_needed()
 
     # -- Database Setup --
 
@@ -222,6 +231,88 @@ class StrategyAExecutor:
                 position_id TEXT,
                 amount REAL
             );
+
+            CREATE TABLE IF NOT EXISTS polymarket_lifecycle (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL,
+                question TEXT,
+                asset TEXT NOT NULL,
+                instrument_key TEXT,
+                market_open_time TEXT,
+                market_close_time TEXT,
+                duration_minutes INTEGER DEFAULT 15,
+
+                t0_timestamp TEXT,
+                t0_asset_price REAL,
+                t0_crowd_up REAL,
+                t0_crowd_down REAL,
+                t0_ml_prediction REAL,
+                t0_ml_confidence REAL,
+                t0_ml_agreement REAL,
+                t0_ml_direction TEXT,
+                t0_regime TEXT,
+
+                t5_timestamp TEXT,
+                t5_asset_price REAL,
+                t5_crowd_up REAL,
+                t5_crowd_down REAL,
+                t5_ml_prediction REAL,
+                t5_ml_confidence REAL,
+                t5_ml_agreement REAL,
+                t5_ml_direction TEXT,
+                t5_regime TEXT,
+                t5_price_change_from_t0 REAL,
+                t5_crowd_change_from_t0 REAL,
+                t5_price_direction TEXT,
+                t5_ml_agrees_with_t0 INTEGER,
+
+                t10_timestamp TEXT,
+                t10_asset_price REAL,
+                t10_crowd_up REAL,
+                t10_crowd_down REAL,
+                t10_ml_prediction REAL,
+                t10_ml_confidence REAL,
+                t10_ml_agreement REAL,
+                t10_ml_direction TEXT,
+                t10_regime TEXT,
+                t10_price_change_from_t0 REAL,
+                t10_price_change_from_t5 REAL,
+                t10_crowd_change_from_t0 REAL,
+                t10_price_direction TEXT,
+                t10_ml_agrees_with_t0 INTEGER,
+                t10_ml_agrees_with_t5 INTEGER,
+
+                conviction_score REAL,
+                conviction_label TEXT,
+                conviction_detail TEXT,
+                direction_readings TEXT,
+
+                decision TEXT,
+                decision_reason TEXT,
+                bet_amount REAL,
+                entry_price REAL,
+                edge_at_entry REAL,
+                position_id TEXT,
+
+                t15_timestamp TEXT,
+                t15_asset_price REAL,
+                t15_final_result TEXT,
+                t15_price_change_from_t0 REAL,
+                t15_price_change_from_t10 REAL,
+                t15_won INTEGER,
+                t15_pnl REAL,
+
+                crowd_lag_t0_to_t5 REAL,
+                crowd_lag_t5_to_t10 REAL,
+                crowd_total_lag REAL,
+                final_5min_reversed INTEGER,
+                ml_accuracy INTEGER,
+
+                UNIQUE(slug, market_open_time)
+            );
+            CREATE INDEX IF NOT EXISTS idx_lifecycle_slug ON polymarket_lifecycle(slug);
+            CREATE INDEX IF NOT EXISTS idx_lifecycle_asset ON polymarket_lifecycle(asset);
+            CREATE INDEX IF NOT EXISTS idx_lifecycle_decision ON polymarket_lifecycle(decision);
         """)
         conn.commit()
 
@@ -284,6 +375,54 @@ class StrategyAExecutor:
         if self._last_loss_time == 0:
             return True
         return (time.time() - self._last_loss_time) >= self.COOLDOWN_AFTER_LOSS
+
+    def _reset_daily_if_needed(self) -> None:
+        """Reset daily loss tracking at start of each UTC day."""
+        from datetime import timezone as _tz
+        today = datetime.now(_tz.utc).date()
+        if self._last_trading_day != today:
+            self._last_trading_day = today
+            self._daily_start_bankroll = self.bankroll
+            self._daily_pnl = 0.0
+            self.logger.info(
+                f"POLYMARKET DAILY RESET: bankroll=${self.bankroll:.2f}, "
+                f"loss_limit=${self.bankroll * self.DAILY_LOSS_LIMIT_PCT:.2f}"
+            )
+
+    def _check_daily_loss_limit(self) -> bool:
+        """Return True if within daily loss limit (can bet)."""
+        self._reset_daily_if_needed()
+        if self._daily_start_bankroll <= 0:
+            return True
+        limit = self._daily_start_bankroll * self.DAILY_LOSS_LIMIT_PCT
+        return self._daily_pnl > -limit
+
+    def _check_min_bankroll(self) -> bool:
+        """Return True if bankroll is above minimum to trade."""
+        return self.bankroll >= self.MIN_BANKROLL_TO_TRADE
+
+    def _check_asset_concentration(self, asset: str, bet_amount: float) -> bool:
+        """Ensure no single asset exceeds MAX_ASSET_CONCENTRATION of total open exposure."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT asset, COALESCE(SUM(total_invested), 0) as exposure "
+                "FROM polymarket_bets WHERE status = 'OPEN' GROUP BY asset"
+            ).fetchall()
+
+            total_exposure = sum(r[1] for r in rows) + bet_amount
+            asset_exposure = sum(r[1] for r in rows if r[0] == asset) + bet_amount
+
+            if total_exposure > 0 and (asset_exposure / total_exposure) > self.MAX_ASSET_CONCENTRATION:
+                self.logger.warning(
+                    f"POLYMARKET CONCENTRATION: {asset} would be "
+                    f"{asset_exposure/total_exposure*100:.0f}% of exposure "
+                    f"(limit {self.MAX_ASSET_CONCENTRATION*100:.0f}%)"
+                )
+                return False
+            return True
+        finally:
+            conn.close()
 
     # -- Main Cycle --
 
@@ -395,10 +534,24 @@ class StrategyAExecutor:
                                ml_conf, token_cost, ml_direction, minutes_left)
                 continue
 
-            # Gate: bankroll
-            if self.bankroll < self.MIN_BET:
+            # Gate: minimum bankroll
+            if not self._check_min_bankroll():
                 self._log_skip(inst.asset, slug,
-                               f"bankroll ${self.bankroll:.2f} < ${self.MIN_BET}",
+                               f"bankroll ${self.bankroll:.2f} < ${self.MIN_BANKROLL_TO_TRADE}",
+                               ml_conf, token_cost, ml_direction, minutes_left)
+                continue
+
+            # Gate: daily loss limit
+            if not self._check_daily_loss_limit():
+                self._log_skip(inst.asset, slug,
+                               f"daily loss limit hit (pnl=${self._daily_pnl:.2f})",
+                               ml_conf, token_cost, ml_direction, minutes_left)
+                continue
+
+            # Gate: asset concentration
+            est_bet = max(self.MIN_BET, self.bankroll * self.MAX_BET_PCT)
+            if not self._check_asset_concentration(inst.asset, est_bet):
+                self._log_skip(inst.asset, slug, "asset_concentration",
                                ml_conf, token_cost, ml_direction, minutes_left)
                 continue
 
@@ -512,6 +665,7 @@ class StrategyAExecutor:
         conn.close()
 
         self.bankroll += bet["total_invested"] + pnl
+        self._daily_pnl += pnl  # Track daily P&L for loss limit
         self._log_bankroll(f"closed_{reason}", str(bet["id"]), pnl)
 
         if pnl < 0:
@@ -520,6 +674,28 @@ class StrategyAExecutor:
         self.logger.info(
             f"CLOSED [{bet['asset']}]: {reason} | P&L: ${pnl:+.2f} ({return_pct:+.1f}%) | "
             f"Bankroll: ${self.bankroll:.2f}"
+        )
+
+        # Update lifecycle table for active close
+        exit_asset_price = 0
+        if current_prices:
+            inst = self._find_instrument(bet["asset"])
+            if inst:
+                exit_asset_price = current_prices.get(inst.price_pair, 0)
+        ml_direction = "UP" if bet["entry_side"] == "YES" else "DOWN"
+        # For active sells, the "result" is based on price movement
+        final_result = "CLOSED"
+        if exit_asset_price > 0 and bet["entry_asset_price"] and bet["entry_asset_price"] > 0:
+            final_result = "UP" if exit_asset_price > bet["entry_asset_price"] else "DOWN"
+        self._update_lifecycle_resolution(
+            slug=bet["slug"],
+            asset=bet["asset"],
+            asset_price=exit_asset_price,
+            final_result=final_result,
+            won=pnl > 0,
+            pnl=pnl,
+            ml_direction=ml_direction,
+            source=f"active_close_{reason}",
         )
 
     # -- Kelly Sizing --
@@ -587,6 +763,25 @@ class StrategyAExecutor:
         self._bets_this_hour.append(time.time())
         self._log_bankroll("bet_placed", str(bet_id), -bet_amount)
 
+        # Create lifecycle entry with t0 data
+        crowd_up = self._parse_crowd_up(market)
+        self._save_lifecycle_entry(
+            slug=slug,
+            question=market.get("question", ""),
+            asset=inst.asset,
+            instrument_key=self._find_instrument_key(inst.asset) or "",
+            direction=direction,
+            ml_confidence=ml_confidence,
+            ml_prediction=prob,
+            token_cost=token_cost,
+            asset_price=asset_price,
+            regime=regime,
+            bet_amount=bet_amount,
+            crowd_up=crowd_up,
+            bet_id=str(bet_id),
+            deadline=market.get("deadline", ""),
+        )
+
         self.logger.info(
             f"BET [{inst.asset}]: {direction} ({entry_side}) | "
             f"Conf: {ml_confidence:.1f}% | Token: ${token_cost:.2f} | "
@@ -636,6 +831,166 @@ class StrategyAExecutor:
             f"Total: ${new_total_invested:.0f}/${self.MAX_POSITION_PER_MARKET:.0f} | "
             f"Avg Cost: ${new_avg_cost:.3f} | Bankroll: ${self.bankroll:.2f}"
         )
+
+    # -- Lifecycle Tracking --
+
+    def _save_lifecycle_entry(self, slug: str, question: str, asset: str,
+                              instrument_key: str, direction: str,
+                              ml_confidence: float, ml_prediction: float,
+                              token_cost: float, asset_price: float,
+                              regime: str, bet_amount: float, crowd_up: float,
+                              bet_id: str, deadline: str) -> None:
+        """Create a lifecycle row with t0 data when a bet is placed."""
+        # Extract market_open_time from slug timestamp (e.g. btc-updown-15m-1709312400)
+        market_open_time = None
+        try:
+            slug_parts = slug.rsplit("-", 1)
+            if len(slug_parts) == 2 and slug_parts[1].isdigit():
+                ts = int(slug_parts[1])
+                market_open_time = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except (ValueError, OSError):
+            pass
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("""
+                INSERT OR REPLACE INTO polymarket_lifecycle (
+                    slug, question, asset, instrument_key,
+                    market_open_time, market_close_time,
+                    t0_timestamp, t0_asset_price, t0_crowd_up, t0_crowd_down,
+                    t0_ml_prediction, t0_ml_confidence, t0_ml_direction,
+                    t0_regime,
+                    decision, decision_reason,
+                    bet_amount, entry_price, position_id
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                slug, question, asset, instrument_key,
+                market_open_time, deadline,
+                asset_price, crowd_up, round(1.0 - crowd_up, 4),
+                ml_prediction, ml_confidence, direction,
+                regime,
+                "BET", f"conf={ml_confidence:.1f}%,token=${token_cost:.2f}",
+                bet_amount, token_cost, bet_id,
+            ))
+            conn.commit()
+            self.logger.info(
+                f"LIFECYCLE T0 [{asset}]: slug={slug}, bet_id={bet_id}, "
+                f"price=${asset_price:.2f}, crowd_up={crowd_up:.3f}, "
+                f"ml_conf={ml_confidence:.1f}%"
+            )
+        except Exception as e:
+            self.logger.warning(f"LIFECYCLE T0 save failed for {slug}: {e}")
+        finally:
+            conn.close()
+
+    def _update_lifecycle_resolution(self, slug: str, asset: str,
+                                     asset_price: float, final_result: str,
+                                     won: bool, pnl: float,
+                                     ml_direction: str,
+                                     source: str) -> None:
+        """Update lifecycle row with t15 resolution data.
+
+        Args:
+            slug: Market slug to match on.
+            asset: Asset symbol (BTC, ETH, etc.).
+            asset_price: Asset price at resolution time.
+            final_result: "UP" or "DOWN" -- actual outcome.
+            won: Whether our bet won.
+            pnl: Dollar P&L.
+            ml_direction: Our ML direction at entry ("UP" or "DOWN").
+            source: Resolution source (gamma_api, price_fallback, etc.).
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            # Compute price change from t0
+            t0_row = conn.execute(
+                "SELECT t0_asset_price, t10_asset_price, t10_price_direction, t0_ml_direction "
+                "FROM polymarket_lifecycle WHERE slug = ?",
+                (slug,)
+            ).fetchone()
+
+            t15_price_change_from_t0 = None
+            t15_price_change_from_t10 = None
+            final_5min_reversed = None
+            ml_accuracy = None
+
+            if t0_row:
+                t0_price = t0_row[0]
+                t10_price = t0_row[1]
+                t10_price_direction = t0_row[2]
+                t0_ml_direction = t0_row[3] or ml_direction
+
+                if t0_price and t0_price > 0 and asset_price > 0:
+                    t15_price_change_from_t0 = round(
+                        ((asset_price - t0_price) / t0_price) * 100, 4
+                    )
+                if t10_price and t10_price > 0 and asset_price > 0:
+                    t15_price_change_from_t10 = round(
+                        ((asset_price - t10_price) / t10_price) * 100, 4
+                    )
+                if t10_price_direction and final_result:
+                    final_5min_reversed = 1 if final_result != t10_price_direction else 0
+                if t0_ml_direction and final_result:
+                    ml_accuracy = 1 if t0_ml_direction == final_result else 0
+
+            rows_updated = conn.execute("""
+                UPDATE polymarket_lifecycle
+                SET t15_timestamp = datetime('now'),
+                    t15_asset_price = ?,
+                    t15_final_result = ?,
+                    t15_price_change_from_t0 = ?,
+                    t15_price_change_from_t10 = ?,
+                    t15_won = ?,
+                    t15_pnl = ?,
+                    final_5min_reversed = COALESCE(?, final_5min_reversed),
+                    ml_accuracy = COALESCE(?, ml_accuracy)
+                WHERE slug = ?
+            """, (
+                asset_price,
+                final_result,
+                t15_price_change_from_t0,
+                t15_price_change_from_t10,
+                1 if won else 0,
+                pnl,
+                final_5min_reversed,
+                ml_accuracy,
+                slug,
+            )).rowcount
+            conn.commit()
+
+            if rows_updated > 0:
+                self.logger.info(
+                    f"LIFECYCLE T15 [{asset}]: slug={slug}, result={final_result}, "
+                    f"won={won}, pnl=${pnl:+.2f}, ml_acc={ml_accuracy}, "
+                    f"price_chg={t15_price_change_from_t0}, via={source}"
+                )
+            else:
+                self.logger.warning(
+                    f"LIFECYCLE T15 no matching row for slug={slug} "
+                    f"(result={final_result}, won={won}, pnl=${pnl:+.2f}). "
+                    f"Creating retroactive lifecycle entry."
+                )
+                # Create a minimal lifecycle entry retroactively if none exists
+                conn.execute("""
+                    INSERT OR IGNORE INTO polymarket_lifecycle (
+                        slug, asset, t15_timestamp, t15_asset_price,
+                        t15_final_result, t15_won, t15_pnl, decision
+                    ) VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?)
+                """, (
+                    slug, asset, asset_price,
+                    final_result, 1 if won else 0, pnl,
+                    f"retroactive_{source}",
+                ))
+                conn.commit()
+                self.logger.info(
+                    f"LIFECYCLE T15 [{asset}]: retroactive entry created for slug={slug}"
+                )
+        except Exception as e:
+            self.logger.warning(
+                f"LIFECYCLE T15 update failed for {slug}: {e}"
+            )
+        finally:
+            conn.close()
 
     # -- Resolution --
 
@@ -709,8 +1064,26 @@ class StrategyAExecutor:
                     self.bankroll += bet["total_invested"]
                     self._log_bankroll("force_expired", str(bet["id"]), bet["total_invested"])
 
+                    # Update lifecycle for force-expired bets
+                    exit_asset_price = 0
+                    if current_prices:
+                        inst = self._find_instrument(bet["asset"])
+                        if inst:
+                            exit_asset_price = current_prices.get(inst.price_pair, 0)
+                    ml_direction = "UP" if bet["entry_side"] == "YES" else "DOWN"
+                    self._update_lifecycle_resolution(
+                        slug=slug,
+                        asset=bet["asset"],
+                        asset_price=exit_asset_price,
+                        final_result="EXPIRED",
+                        won=False,
+                        pnl=0,
+                        ml_direction=ml_direction,
+                        source="force_expired",
+                    )
+
             except Exception as e:
-                self.logger.debug(f"Resolution check failed for bet {bet['id']}: {e}")
+                self.logger.warning(f"Resolution check failed for bet {bet['id']}: {e}")
 
         conn.commit()
         conn.close()
@@ -747,12 +1120,28 @@ class StrategyAExecutor:
         if not won:
             self._last_loss_time = time.time()
 
+        self._daily_pnl += pnl  # Track daily P&L for loss limit
+
         self.logger.info(
             f"{'WON' if won else 'LOST'} [{bet['asset']}]: "
             f"{side} | P&L: ${pnl:+.2f} ({return_pct:+.1f}%) | "
             f"Bankroll: ${self.bankroll:.2f} | via {source}"
         )
         self._log_bankroll(f"resolved_{status.lower()}", str(bet["id"]), pnl)
+
+        # Update lifecycle table with t15 resolution data
+        final_result = "UP" if yes_price >= 0.95 else "DOWN"
+        ml_direction = "UP" if side == "YES" else "DOWN"
+        self._update_lifecycle_resolution(
+            slug=bet["slug"],
+            asset=bet["asset"],
+            asset_price=exit_asset_price,
+            final_result=final_result,
+            won=won,
+            pnl=pnl,
+            ml_direction=ml_direction,
+            source=source,
+        )
 
     def _check_legacy_resolutions(self, current_prices: Optional[dict] = None) -> None:
         """Check for any still-open legacy positions in polymarket_positions."""
@@ -815,6 +1204,19 @@ class StrategyAExecutor:
                             if won:
                                 self.bankroll += pos["bet_amount"] + pnl
                             self._log_bankroll(f"legacy_resolved_{status}", pos["position_id"], pnl)
+
+                            # Update lifecycle for legacy position (match on slug or position_id)
+                            final_result = "UP" if yes_price >= 0.95 else "DOWN"
+                            self._update_lifecycle_resolution(
+                                slug=slug,
+                                asset=pos["asset"],
+                                asset_price=0,
+                                final_result=final_result,
+                                won=won,
+                                pnl=pnl,
+                                ml_direction=direction,
+                                source="legacy_gamma_api",
+                            )
                             continue
 
                 # Force-expire legacy positions 30 min past deadline
@@ -828,8 +1230,21 @@ class StrategyAExecutor:
                     self.bankroll += pos["bet_amount"]
                     self._log_bankroll("legacy_force_expired", pos["position_id"], pos["bet_amount"])
 
+                    # Update lifecycle for force-expired legacy position
+                    ml_direction = pos["direction"] if pos["direction"] else "UNKNOWN"
+                    self._update_lifecycle_resolution(
+                        slug=slug,
+                        asset=pos["asset"],
+                        asset_price=0,
+                        final_result="EXPIRED",
+                        won=False,
+                        pnl=0,
+                        ml_direction=ml_direction,
+                        source="legacy_force_expired",
+                    )
+
             except Exception as e:
-                self.logger.debug(f"Legacy resolution check failed for {pos['position_id']}: {e}")
+                self.logger.warning(f"Legacy resolution check failed for {pos['position_id']}: {e}")
 
         conn.commit()
         conn.close()

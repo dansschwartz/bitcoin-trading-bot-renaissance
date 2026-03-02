@@ -245,7 +245,7 @@ class FeatureFanOutProcessor:
                 _price_series = price_df['close'].values.astype(float)
 
             # Run inference on trained models
-            raw_preds, _confidences = predict_with_models(self._trained_models, feat_array, price_series=_price_series)
+            raw_preds, _confidences = predict_with_models(self._trained_models, feat_array, price_series=_price_series, pair=_pair)
 
             # Map to display names
             for trained_name, pred_val in raw_preds.items():

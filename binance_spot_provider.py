@@ -51,6 +51,8 @@ EXCLUDED_BASES: Set[str] = {
     'PUMP', 'ALLO', 'SOMI', 'XPL', 'AT', 'BEL',
     # High-spread pairs where Devil > edge (council decision 2026-02-26)
     'AVAX',  # 15.12 bps avg spread vs ~2.7 bps gross edge
+    # 0% ML accuracy — likely data/mapping issue (diagnostic 2026-03-02)
+    'FXS',   # 292 predictions, 0 correct
 }
 
 

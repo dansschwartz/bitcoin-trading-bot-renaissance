@@ -320,30 +320,51 @@ class DevilTracker:
                     slippage_bps = abs(fill_price - signal_price) / signal_price * 10_000.0
 
                 # --- P&L computation (per-leg) ---
-                # Theoretical: assumes execution at signal_price with zero cost.
-                # For a BUY leg the "value" is that we acquired at signal_price;
-                # for a SELL leg the "value" is that we disposed at signal_price.
-                # We express P&L in quote currency (USD).
+                # Theoretical P&L: the return if we entered at signal_price
+                # (mid-price, no slippage/fees) and mark-to-market at
+                # fill_price.  Formula:
+                #   LONG:  (fill - signal) / signal * notional
+                #   SHORT: -(fill - signal) / signal * notional
+                # where notional = fill_quantity * signal_price.
+                # This simplifies to:
+                #   LONG:  (fill - signal) * qty
+                #   SHORT: (signal - fill) * qty
+                #
+                # Actual P&L: theoretical minus real execution costs (fees).
+                #
+                # Devil = theoretical - actual = execution cost leakage.
                 theoretical_pnl = 0.0
                 actual_pnl = 0.0
+                notional_usd = fill_quantity * fill_price if fill_quantity and fill_price else 0.0
                 if signal_price and signal_price > 0:
+                    price_return = (fill_price - signal_price) / signal_price
+                    notional_at_signal = fill_quantity * signal_price
                     if side and side.upper() == "BUY":
-                        # Lower fill is better for a buy.
-                        theoretical_pnl = 0.0  # baseline for the leg
-                        actual_pnl = (signal_price - fill_price) * fill_quantity - fill_fee
+                        # LONG: positive when fill > signal (market moved up)
+                        theoretical_pnl = price_return * notional_at_signal
+                        actual_pnl = theoretical_pnl - fill_fee
                     else:
-                        # Higher fill is better for a sell.
-                        theoretical_pnl = 0.0
-                        actual_pnl = (fill_price - signal_price) * fill_quantity - fill_fee
+                        # SHORT: positive when fill < signal (market moved down)
+                        theoretical_pnl = -price_return * notional_at_signal
+                        actual_pnl = theoretical_pnl - fill_fee
 
                 devil = theoretical_pnl - actual_pnl
+                logger.info(
+                    "DevilTracker P&L: id=%s side=%s signal=%.6f fill=%.6f qty=%.6f fee=%.6f "
+                    "theoretical=%.6f actual=%.6f devil=%.6f",
+                    trade_id, side, signal_price or 0.0, fill_price, fill_quantity,
+                    fill_fee, theoretical_pnl, actual_pnl, devil,
+                )
 
-                # Council S6: compute fee_bps and total devil_bps
+                # Compute fee_bps and total devil_bps (execution quality in bps)
                 fee_bps = 0.0
-                if fill_quantity > 0 and fill_price > 0:
-                    notional = fill_quantity * fill_price
-                    fee_bps = (fill_fee / notional) * 10_000 if notional > 0 else 0.0
+                if notional_usd > 0:
+                    fee_bps = (fill_fee / notional_usd) * 10_000.0
                 devil_bps = slippage_bps + fee_bps
+                logger.debug(
+                    "DevilTracker bps: id=%s slippage=%.2f fee=%.2f devil=%.2f",
+                    trade_id, slippage_bps, fee_bps, devil_bps,
+                )
 
                 conn.execute(
                     f"""

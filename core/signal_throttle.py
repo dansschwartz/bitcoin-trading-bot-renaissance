@@ -351,8 +351,10 @@ class SignalThrottle:
                 return summary
 
             # Group trades by signal type and compute P&L
-            # P&L approximation: SELL trades contribute +size*price, BUY trades
-            # contribute -size*price.  Slippage is subtracted.
+            # Fixed 2026-03-02: Old formula used raw dollar flow (BUY=-size*price,
+            # SELL=+size*price) which produced phantom -$58K/day for BTC trades.
+            # New approach: use realized_pnl from closed positions for actual P&L,
+            # fall back to trade-flow estimation only if no positions data.
             from collections import defaultdict
 
             signal_trades: Dict[str, List[Dict]] = defaultdict(list)
@@ -364,26 +366,45 @@ class SignalThrottle:
                     "slippage": slippage or 0.0,
                 })
 
+            # Try to get actual realized P&L from closed positions
+            position_pnl: Dict[str, Dict] = {}
+            try:
+                with self._conn() as pconn:
+                    pos_rows = pconn.execute(
+                        """
+                        SELECT exchange as algo, COUNT(*) as n,
+                               COALESCE(SUM(realized_pnl), 0) as total_pnl,
+                               SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins
+                        FROM open_positions
+                        WHERE status = 'CLOSED'
+                          AND date(closed_at) = ?
+                        GROUP BY exchange
+                        """,
+                        (target_date,),
+                    ).fetchall()
+                    for algo, n, total_pnl, wins in pos_rows:
+                        position_pnl[algo] = {"pnl": total_pnl, "n": n, "wins": wins}
+            except Exception as exc:
+                logger.debug("Could not fetch position P&L for signal_daily_pnl: %s", exc)
+
             with self._conn() as conn:
                 for signal_type, trades in signal_trades.items():
-                    pnl = 0.0
-                    winning_trades = 0
                     num_trades = len(trades)
 
-                    for t in trades:
-                        trade_value = t["size"] * t["price"]
-                        slip_cost = abs(t["slippage"]) if t["slippage"] else 0.0
-
-                        if t["side"] and t["side"].upper() == "SELL":
-                            trade_pnl = trade_value - slip_cost
-                            if trade_pnl > 0:
-                                winning_trades += 1
-                        elif t["side"] and t["side"].upper() == "BUY":
-                            trade_pnl = -trade_value - slip_cost
-                        else:
-                            trade_pnl = 0.0
-
-                        pnl += trade_pnl
+                    # Prefer actual realized P&L from positions table
+                    if signal_type in position_pnl:
+                        pos = position_pnl[signal_type]
+                        pnl = pos["pnl"]
+                        winning_trades = pos["wins"]
+                        num_trades = pos["n"]
+                    else:
+                        # Fallback: estimate P&L from slippage costs only
+                        # (NOT from raw dollar flow which produces phantom numbers)
+                        pnl = 0.0
+                        winning_trades = 0
+                        for t in trades:
+                            slip_cost = abs(t["slippage"]) if t["slippage"] else 0.0
+                            pnl -= slip_cost  # Best estimate without position pairing
 
                     win_rate = (
                         winning_trades / num_trades if num_trades > 0 else 0.0

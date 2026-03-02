@@ -679,7 +679,7 @@ class RenaissanceTradingBot:
         risk_cfg = self.config.get("risk_management", {})
         self.daily_loss_limit = float(risk_cfg.get("daily_loss_limit", 500))
         self.position_limit = float(risk_cfg.get("position_limit", 1000))
-        self.min_confidence = float(risk_cfg.get("min_confidence", 0.50))
+        self.min_confidence = float(risk_cfg.get("min_confidence", 0.45))
 
         # Initialize Coinbase Client & Position Manager
         cb_config = self.config.get("coinbase", {})
@@ -2235,13 +2235,38 @@ class RenaissanceTradingBot:
         except Exception:
             pass  # Don't let cost pre-screen crash the decision pipeline
 
-        # Calculate confidence based on signal strength and directional consensus
-        # signal_strength: rescale so that a strong signal (0.02) maps to 1.0
-        # Typical weighted signals are 0.001-0.03; old denominator 0.05 wasted
-        # the top 60% of the confidence range.
-        signal_strength = min(abs(weighted_signal) / 0.02, 1.0)
+        # Calculate confidence based on MODEL AGREEMENT (calibrated 2026-03-02)
+        # Diagnostic audit showed magnitude-based confidence was INVERSELY correlated
+        # with accuracy (0.7-0.9 conf → 43% accuracy, 0.0-0.3 conf → 48% accuracy).
+        # New approach: use fraction of models agreeing on direction.
+        #
+        # Agreement levels → confidence:
+        #   5/6+ agree (83%+) → 0.65
+        #   4/6  agree (67%+) → 0.55
+        #   3/6  agree (50%+) → 0.42 (below 0.45 threshold → HOLD)
+        #   <3/6 agree         → 0.30
 
-        # Directional consensus: fraction of non-trivial signals agreeing on direction
+        # Step 1: Get ML model agreement if available
+        ml_agreement = 0.5  # default
+        if ml_package and ml_package.ml_predictions:
+            _ml_preds = []
+            for mp in ml_package.ml_predictions:
+                _val = None
+                _name = None
+                if isinstance(mp, (tuple, list)) and len(mp) >= 2:
+                    _name, _val = mp[0], mp[1]
+                elif isinstance(mp, dict):
+                    _name = mp.get('model', mp.get('name', ''))
+                    _val = mp.get('prediction', mp.get('value', None))
+                if _name and isinstance(_val, (int, float)) and not str(_name).startswith('_'):
+                    _ml_preds.append(float(_val))
+            if _ml_preds:
+                _bullish = sum(1 for p in _ml_preds if p > 0.001)
+                _bearish = sum(1 for p in _ml_preds if p < -0.001)
+                _total = len(_ml_preds)
+                ml_agreement = max(_bullish, _bearish) / _total if _total > 0 else 0.5
+
+        # Step 2: Get traditional signal consensus
         raw_contribs = [v for v in signal_contributions.values() if abs(v) > 0.0001]
         if raw_contribs and weighted_signal != 0:
             agreeing = sum(1 for v in raw_contribs if np.sign(v) == np.sign(weighted_signal))
@@ -2249,30 +2274,31 @@ class RenaissanceTradingBot:
         else:
             signal_consensus = 0.5
 
-        # Geometric mean: both strength AND consensus must be present
-        confidence = float(np.sqrt(signal_strength * signal_consensus))
+        # Step 3: Combine — ML agreement weighted 60%, signal consensus 40%
+        combined_agreement = 0.6 * ml_agreement + 0.4 * signal_consensus
+
+        # Step 4: Map to calibrated confidence
+        if combined_agreement >= 0.83:
+            confidence = 0.65
+        elif combined_agreement >= 0.67:
+            confidence = 0.55
+        elif combined_agreement >= 0.50:
+            confidence = 0.42
+        else:
+            confidence = 0.30
 
         # Apply regime-derived confidence boost (max +/-5%)
         confidence = float(np.clip(confidence + self.regime_overlay.get_confidence_boost(), 0.0, 1.0))
 
-        # ML Enhanced Confidence
-        if ml_package:
-            direction_match = np.sign(weighted_signal) == np.sign(ml_package.ensemble_score)
-            overlay = 0.05 if direction_match else -0.05
-            consciousness_factor = ml_package.confidence_score
-            confidence = float(np.clip(confidence + (overlay * consciousness_factor), 0.0, 1.0))
-            self.logger.info(f"ML confidence adjustment: {(overlay * consciousness_factor):+.4f} (Consciousness: {consciousness_factor:.2f})")
-
         # Record confidence breakdown for audit
         if audit_logger:
             _regime_boost = self.regime_overlay.get_confidence_boost()
-            _ml_boost = (overlay * consciousness_factor) if ml_package else 0.0
             audit_logger.record_confidence(
-                signal_strength=signal_strength,
+                signal_strength=float(abs(weighted_signal)),
                 consensus=signal_consensus,
-                raw_conf=float(np.sqrt(signal_strength * signal_consensus)),
+                raw_conf=combined_agreement,
                 regime_boost=_regime_boost,
-                ml_boost=_ml_boost,
+                ml_boost=0.0,
                 final_conf=confidence,
             )
 
@@ -2352,12 +2378,12 @@ class RenaissanceTradingBot:
         if action == 'HOLD' and abs(weighted_signal) > 0.001:
             self._signal_filter_stats['filtered_threshold'] += 1
 
-        # ── SELL Inversion Gate: SELL signals are 23.2% accurate (anti-predictive) ──
-        # Require GRU model confirmation (pred < -0.005) to allow any SELL trade.
-        # Council proposals #5/#8: two independent researchers confirmed the asymmetry.
-        _sell_gate_threshold = -0.005
+        # ── SELL Inversion Gate: require majority model bearish consensus ──
+        # Original gate required GRU specifically, but GRU is in DISABLED_MODELS
+        # since Feb 27, which blocked ALL sells for 3+ days. Fixed 2026-03-02:
+        # Now requires >= 50% of active models to predict bearish (negative).
         if action == 'SELL' and ml_package and ml_package.ml_predictions:
-            gru_pred = None
+            _sell_preds = []
             for mp in ml_package.ml_predictions:
                 _name, _val = None, None
                 if isinstance(mp, (tuple, list)) and len(mp) >= 2:
@@ -2365,34 +2391,37 @@ class RenaissanceTradingBot:
                 elif isinstance(mp, dict):
                     _name = mp.get('model', mp.get('name', ''))
                     _val = mp.get('prediction', mp.get('value', None))
-                if _name and str(_name).lower() == 'gru' and isinstance(_val, (int, float)):
-                    gru_pred = float(_val)
-                    break
-            if gru_pred is not None and gru_pred >= _sell_gate_threshold:
-                self.logger.info(
-                    f"SELL INVERSION GATE: {product_id} blocked — "
-                    f"GRU pred={gru_pred:+.4f} >= {_sell_gate_threshold} (not bearish enough)"
-                )
-                self._signal_filter_stats['filtered_agreement'] += 1
-                if audit_logger:
-                    audit_logger.record_gate('sell_inversion', False,
-                                             f'gru={gru_pred:+.4f}>={_sell_gate_threshold}')
-                action = 'HOLD'
-            elif gru_pred is None:
-                # No GRU prediction available — block SELL as precaution
-                self.logger.info(
-                    f"SELL INVERSION GATE: {product_id} blocked — no GRU prediction available"
-                )
-                if audit_logger:
-                    audit_logger.record_gate('sell_inversion', False, 'no_gru_pred')
-                action = 'HOLD'
+                if _name and isinstance(_val, (int, float)) and not str(_name).startswith('_'):
+                    _sell_preds.append((_name, float(_val)))
+
+            if _sell_preds:
+                bearish_count = sum(1 for _, v in _sell_preds if v < -0.001)
+                total_models = len(_sell_preds)
+                bearish_pct = bearish_count / total_models if total_models > 0 else 0
+
+                if bearish_pct < 0.50:
+                    self.logger.info(
+                        f"SELL INVERSION GATE: {product_id} blocked — "
+                        f"only {bearish_count}/{total_models} models bearish ({bearish_pct:.0%} < 50%)"
+                    )
+                    self._signal_filter_stats['filtered_agreement'] += 1
+                    if audit_logger:
+                        audit_logger.record_gate('sell_inversion', False,
+                                                 f'bearish={bearish_count}/{total_models}={bearish_pct:.0%}')
+                    action = 'HOLD'
+                else:
+                    self.logger.info(
+                        f"SELL INVERSION GATE: {product_id} PASSED — "
+                        f"{bearish_count}/{total_models} models bearish ({bearish_pct:.0%})"
+                    )
+                    if audit_logger:
+                        audit_logger.record_gate('sell_inversion', True,
+                                                 f'bearish={bearish_count}/{total_models}={bearish_pct:.0%}')
             else:
-                self.logger.info(
-                    f"SELL INVERSION GATE: {product_id} PASSED — "
-                    f"GRU confirms bearish (pred={gru_pred:+.4f})"
-                )
+                # No predictions at all — allow sell (don't block on missing data)
+                self.logger.info(f"SELL INVERSION GATE: {product_id} PASSED — no ML predictions available")
                 if audit_logger:
-                    audit_logger.record_gate('sell_inversion', True, f'gru={gru_pred:+.4f}')
+                    audit_logger.record_gate('sell_inversion', True, 'no_ml_preds')
 
         # ── ML Agreement Gate: only trade when models agree strongly ──
         # Threshold is regime-adjusted: 0.65 with-trend, 0.71 neutral, 0.80 counter-trend
@@ -2455,7 +2484,7 @@ class RenaissanceTradingBot:
         if action != 'HOLD':
             cycle_num = getattr(self, 'scan_cycle_count', 0)
             last_trade = self._last_trade_cycle.get(product_id, -999)
-            min_hold_cycles = 12  # Must wait 12 cycles (~60min) between trades on same asset
+            min_hold_cycles = 6  # Must wait 6 cycles (~30min) between trades on same asset (was 12/60min, reduced 2026-03-02 — 55% block rate was too aggressive)
 
             # 1. Minimum hold period — don't trade if we just traded
             if cycle_num - last_trade < min_hold_cycles:
@@ -4980,8 +5009,27 @@ class RenaissanceTradingBot:
                                             f"reason=reeval:{_rr.reason_code} | P&L=${float(_rr_rpnl):.2f}"
                                         )
                                         if self.devil_tracker:
+                                            _rr_pnl_bps = 0.0
+                                            _rr_hold_s = _rr_hold_min * 60.0
+                                            _rr_adj_count = 0
+                                            if _rr_pos:
+                                                if _rr_pos.entry_price > 0 and current_price > 0:
+                                                    _rr_move = (current_price - _rr_pos.entry_price) / _rr_pos.entry_price * 10000
+                                                    _rr_pnl_bps = _rr_move if _rr_side == "long" else -_rr_move
+                                                _rr_adj_count = getattr(_rr_pos, 'adjustments', 0)
+                                                if isinstance(_rr_adj_count, list):
+                                                    _rr_adj_count = len(_rr_adj_count)
                                             self.devil_tracker.record_exit(
-                                                _rr.position_id, "reeval", _rr.reason_code
+                                                position_id=_rr.position_id,
+                                                pair=product_id,
+                                                side=_rr_side if _rr_pos else "",
+                                                entry_price=float(_rr_pos.entry_price) if _rr_pos else 0.0,
+                                                exit_price=float(current_price),
+                                                size=float(_rr_pos.size) if _rr_pos else 0.0,
+                                                reason_code=_rr.reason_code,
+                                                hold_time_seconds=_rr_hold_s,
+                                                adjustments=_rr_adj_count,
+                                                pnl_bps=_rr_pnl_bps,
                                             )
                                     else:
                                         self.logger.warning(

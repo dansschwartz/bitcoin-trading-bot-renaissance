@@ -172,32 +172,34 @@ class TestFillRecording:
         assert trade.slippage_bps == pytest.approx(10.0)
 
     def test_record_fill_computes_devil_buy(self, tracker):
-        """For a BUY, lower fill is better. Devil = theoretical - actual."""
+        """For a BUY, devil = theoretical - actual = fee."""
         tid = tracker.record_signal_detection(
             "stat_arb", "BTC-USD", "mexc", 100.0, side="BUY"
         )
-        # Fill at 102 (worse than signal 100), qty=1, fee=0.5
+        # Fill at 102 (market moved up), qty=1, fee=0.5
         tracker.record_fill(tid, 102.0, 1.0, 0.5)
         trade = tracker.get_trade(tid)
-        # actual_pnl = (100 - 102) * 1 - 0.5 = -2.5
-        # theoretical_pnl = 0 (baseline)
-        # devil = 0 - (-2.5) = 2.5
-        assert trade.actual_pnl == pytest.approx(-2.5)
-        assert trade.theoretical_pnl == pytest.approx(0.0)
-        assert trade.devil == pytest.approx(2.5)
+        # theoretical_pnl = (102 - 100) * 1 = 2.0
+        # actual_pnl = 2.0 - 0.5 = 1.5
+        # devil = 2.0 - 1.5 = 0.5
+        assert trade.theoretical_pnl == pytest.approx(2.0)
+        assert trade.actual_pnl == pytest.approx(1.5)
+        assert trade.devil == pytest.approx(0.5)
 
     def test_record_fill_computes_devil_sell(self, tracker):
-        """For a SELL, higher fill is better."""
+        """For a SELL, devil = theoretical - actual = fee."""
         tid = tracker.record_signal_detection(
             "stat_arb", "BTC-USD", "mexc", 100.0, side="SELL"
         )
-        # Fill at 98 (worse than signal 100), qty=1, fee=0.5
+        # Fill at 98 (market moved down), qty=1, fee=0.5
         tracker.record_fill(tid, 98.0, 1.0, 0.5)
         trade = tracker.get_trade(tid)
-        # actual_pnl = (98 - 100)*1 - 0.5 = -2.5
-        # devil = 0 - (-2.5) = 2.5
-        assert trade.actual_pnl == pytest.approx(-2.5)
-        assert trade.devil == pytest.approx(2.5)
+        # theoretical_pnl = -(98 - 100)/100 * (1*100) = 2.0
+        # actual_pnl = 2.0 - 0.5 = 1.5
+        # devil = 2.0 - 1.5 = 0.5
+        assert trade.theoretical_pnl == pytest.approx(2.0)
+        assert trade.actual_pnl == pytest.approx(1.5)
+        assert trade.devil == pytest.approx(0.5)
 
     def test_record_fill_missing_trade_id(self, tracker):
         result = tracker.record_fill("nonexistent_id", 64355.0, 0.01, 0.12)

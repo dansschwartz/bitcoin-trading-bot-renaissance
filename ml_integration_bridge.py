@@ -449,7 +449,7 @@ class MLIntegrationBridge:
                 _price_series = market_data['close'].values.astype(float)
 
             # Run inference on all loaded models
-            raw_preds, raw_confidences = predict_with_models(models, features, price_series=_price_series)
+            raw_preds, raw_confidences = predict_with_models(models, features, price_series=_price_series, pair=pair_name)
 
             # Convert raw predictions to ML prediction dicts
             for model_name, pred_value in raw_preds.items():

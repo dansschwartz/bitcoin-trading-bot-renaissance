@@ -30,6 +30,28 @@ logger = logging.getLogger(__name__)
 # These are not loaded, not run, and pass 0.0 to the meta-ensemble.
 DISABLED_MODELS: set = {'gru', 'bidirectional_lstm', 'dilated_cnn'}
 
+# ── Per-pair model exclusions (live accuracy audit 2026-03-02) ────────────────
+# Models that are actively anti-predictive (<35% accuracy) on specific pairs.
+# These models are still loaded/run on other pairs — just excluded from the
+# ensemble for these specific pairs where they hurt performance.
+MODEL_PAIR_EXCLUSIONS: dict = {
+    # QT: 91% on ZEC, 82% on ATOM, 80% on BCH — but 13% NEAR, 18% AVAX, 28% ETH, 32% UNI
+    "quantum_transformer": {"NEAR", "AVAX", "ETH", "UNI"},
+    # GRU: 33% on NEAR (already globally disabled, but if re-enabled this applies)
+    "gru": {"NEAR"},
+}
+
+
+def should_include_model(model_name: str, pair: str) -> bool:
+    """Check if a model should be included in ensemble for a specific pair."""
+    exclusions = MODEL_PAIR_EXCLUSIONS.get(model_name, set())
+    if not exclusions:
+        return True
+    # Normalize: extract base asset from any pair format (BTC-USD, BTC/USDT, BTCUSDT)
+    base = pair.upper().replace("-USD", "").replace("/USDT", "").replace("USDT", "").replace("/USD", "")
+    return base not in exclusions
+
+
 # ── Feature dimension constants ───────────────────────────────────────────────
 
 INPUT_DIM = 98          # Current feature dimension (padded to 98)
@@ -1346,6 +1368,7 @@ def predict_with_models(
     models: Dict[str, nn.Module],
     features: np.ndarray,
     price_series: Optional[np.ndarray] = None,
+    pair: Optional[str] = None,
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
     """Run inference on all loaded models (5 DL + LightGBM + meta-ensemble).
 
@@ -1353,6 +1376,7 @@ def predict_with_models(
         models: dict from load_trained_models()
         features: (seq_len, INPUT_DIM) numpy array from build_feature_sequence()
         price_series: Optional close prices (unused, kept for API compat)
+        pair: Optional pair name for per-pair model exclusions (e.g. "ETH-USD")
 
     Returns:
         (predictions, confidences) where:
@@ -1371,11 +1395,17 @@ def predict_with_models(
     x = torch.FloatTensor(features).unsqueeze(0)  # (1, seq_len, INPUT_DIM)
 
     # Run base models first (all take sequence input)
+    _pair_excluded = []
     for name, model in models.items():
         if name in ('meta_ensemble', 'lightgbm'):
             continue  # Handle separately
         if name in DISABLED_MODELS:
             continue  # Skip models disabled for poor accuracy
+        if pair and not should_include_model(name, pair):
+            _pair_excluded.append(name)
+            predictions[name] = 0.0  # Zero out excluded models (meta-ensemble still sees them)
+            confidences[name] = 0.0
+            continue
         try:
             with torch.no_grad():
                 # Match feature dim to model's expected input
@@ -1392,6 +1422,10 @@ def predict_with_models(
             logger.warning(f"Inference failed for {name}: {e}")
             predictions[name] = 0.0
             confidences[name] = 0.0
+
+    # Log per-pair exclusions
+    if _pair_excluded:
+        logger.info(f"MODEL_ROUTING: Excluded {_pair_excluded} for {pair}")
 
     # Run LightGBM if loaded (non-PyTorch, uses flattened features + momentum)
     if 'lightgbm' in models:

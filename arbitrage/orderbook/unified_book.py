@@ -296,7 +296,7 @@ class UnifiedBookManager:
                     continue
 
                 t_start = _time.monotonic()
-                logger.info(f"Validation cycle starting — {len(pairs)} pairs")
+                logger.debug(f"Validation cycle starting — {len(pairs)} pairs")
 
                 mexc_ok = 0
                 binance_ok = 0
@@ -335,7 +335,7 @@ class UnifiedBookManager:
 
                     elapsed_pair = _time.monotonic() - t_pair
                     if i == 0:
-                        logger.info(f"First pair {pair}: {elapsed_pair:.2f}s (M:{'ok' if mexc_ok else 'fail'} B:{'ok' if binance_ok else 'fail'})")
+                        logger.debug(f"First pair {pair}: {elapsed_pair:.2f}s (M:{'ok' if mexc_ok else 'fail'} B:{'ok' if binance_ok else 'fail'})")
 
                     await asyncio.sleep(PAIR_DELAY)
 

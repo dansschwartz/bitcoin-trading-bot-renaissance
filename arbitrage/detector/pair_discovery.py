@@ -230,7 +230,7 @@ class PairDiscoveryEngine:
             'active_discovered_pairs': len(self._promoted_pairs),
         })
 
-        logger.info(
+        logger.debug(
             f"PAIR_DISCOVERY: [{self._scan_count}] "
             f"{len(overlapping)} overlapping, "
             f"{len(above_threshold)} above {float(self.min_gross_spread_bps)}bps, "
@@ -239,8 +239,8 @@ class PairDiscoveryEngine:
             f"{elapsed:.1f}s"
         )
 
-        # Log top 5 spreads for visibility
-        if above_threshold and self._scan_count <= 3 or self._scan_count % 10 == 0:
+        # Log top 5 spreads for visibility (first 3 scans only)
+        if above_threshold and self._scan_count <= 3:
             top5 = above_threshold[:5]
             for c in top5:
                 logger.info(

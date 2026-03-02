@@ -455,7 +455,7 @@ class TriangularArbitrage:
 
                 # Log data source periodically
                 if self._scan_count % 100 == 1:
-                    logger.info(
+                    logger.debug(
                         f"TRI SCAN: source={data_source}, tickers={len(tickers)}, "
                         f"age={ticker_age_ms:.0f}ms, opportunities={len(opportunities)}"
                     )
