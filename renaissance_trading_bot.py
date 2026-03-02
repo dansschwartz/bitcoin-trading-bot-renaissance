@@ -1245,7 +1245,7 @@ class RenaissanceTradingBot:
         # Renaissance Research-Optimized Signal Weights (17 signals — ML included)
         raw_weights = self.config.get("signal_weights", {
             'order_flow': 0.14,               # Institutional Flow (reduced from 0.18)
-            'order_book': 0.12,               # Microstructure
+            'order_book': 0.0,                # Decommissioned — redundant with order_flow (Council S4)
             'volume': 0.08,                   # Volume
             'macd': 0.05,                     # Momentum
             'rsi': 0.05,                      # Mean Reversion (technical)
@@ -1257,7 +1257,7 @@ class RenaissanceTradingBot:
             'entropy': 0.05,                  # Market Entropy (Council #14: was 0.04)
             'quantum': 0.07,                  # Quantum Oscillator (Council #14: was 0.02)
             'lead_lag': 0.10,                 # Cross-Asset Lead-Lag (Council #14: was 0.03)
-            'correlation_divergence': 0.06,   # Correlation Network Divergence
+            'correlation_divergence': 0.0,    # Decommissioned — consistently throttle-killed (Council S4)
             'garch_vol': 0.06,                # GARCH Volatility Signal
             'ml_ensemble': 0.20,              # ML 7-model ensemble prediction (Council #5: boosted from 0.05)
             'ml_cnn': 0.0,                    # ML CNN model prediction (decommissioned, Council #1)
@@ -1344,8 +1344,10 @@ class RenaissanceTradingBot:
             min_vol = float(universe_cfg.get('min_volume_usd', 2_000_000))
             max_pairs = int(universe_cfg.get('max_pairs', 150))
 
+            max_spread = float(universe_cfg.get('max_spread_bps', 10.0))
             universe = await self.binance_spot.build_trading_universe(
                 min_volume_usd=min_vol, max_pairs=max_pairs,
+                max_spread_bps=max_spread,
             )
             if not universe:
                 self.logger.warning("UNIVERSE: Binance returned empty — keeping existing product_ids")
@@ -1922,10 +1924,10 @@ class RenaissanceTradingBot:
             if order_book_snapshot:
                 microstructure_signal = self.microstructure_engine.update_order_book(order_book_snapshot)
                 signals['order_flow'] = microstructure_signal.large_trade_flow
-                signals['order_book'] = microstructure_signal.order_book_imbalance
+                if self.signal_weights.get('order_book', 0) > 0:
+                    signals['order_book'] = microstructure_signal.order_book_imbalance
             else:
                 signals['order_flow'] = 0.0
-                signals['order_book'] = 0.0
 
             # 2. Technical indicators (38% total weight)
             _pid = market_data.get('product_id', 'BTC-USD')
@@ -2065,7 +2067,7 @@ class RenaissanceTradingBot:
                         # Council #12: Z-score rescaling before fusion
                         _ens_rescaled = self._ml_zscore_rescale(_pair_key + '_ens', float(_ens_val))
                         signals['ml_ensemble'] = float(np.clip(_ens_rescaled, -1.0, 1.0))
-                    if 'CNN' in rt_result:
+                    if 'CNN' in rt_result and self.signal_weights.get('ml_cnn', 0) > 0:
                         _cnn_rescaled = self._ml_zscore_rescale(_pair_key + '_cnn', float(rt_result['CNN']))
                         signals['ml_cnn'] = float(np.clip(_cnn_rescaled, -1.0, 1.0))
                     # Crash-regime LightGBM signal (multi-asset: uses 2bar as primary)
@@ -2095,13 +2097,14 @@ class RenaissanceTradingBot:
             except Exception as e:
                 self.logger.debug(f"Quantum signal failed: {e}")
 
-            # Correlation Network Divergence Signal
-            try:
-                if self.correlation_network.enabled:
-                    div_signal = self.correlation_network.get_correlation_divergence_signal(p_id)
-                    signals['correlation_divergence'] = div_signal
-            except Exception as e:
-                self.logger.debug(f"Correlation divergence signal failed: {e}")
+            # Correlation Network Divergence Signal (skip if weight is 0 — Council S4)
+            if self.signal_weights.get('correlation_divergence', 0) > 0:
+                try:
+                    if self.correlation_network.enabled:
+                        div_signal = self.correlation_network.get_correlation_divergence_signal(p_id)
+                        signals['correlation_divergence'] = div_signal
+                except Exception as e:
+                    self.logger.debug(f"Correlation divergence signal failed: {e}")
 
             # GARCH Volatility Signal (vol_ratio as directional bias)
             try:

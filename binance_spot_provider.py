@@ -228,10 +228,16 @@ class BinanceSpotProvider:
     # ── Universe Builder ───────────────────────────────────────
 
     async def build_trading_universe(self, min_volume_usd: float = 2_000_000,
-                                      max_pairs: int = 150) -> List[Dict[str, Any]]:
+                                      max_pairs: int = 150,
+                                      max_spread_bps: float = 10.0) -> List[Dict[str, Any]]:
         """Build trading universe: top Binance USDT pairs by 24h volume.
 
-        Returns list of dicts with: binance_symbol, product_id, daily_volume_usd, tier
+        Args:
+            min_volume_usd: Minimum 24h quote volume to include.
+            max_pairs: Maximum number of pairs to return.
+            max_spread_bps: Maximum bid-ask spread in basis points (Council S5).
+
+        Returns list of dicts with: binance_symbol, product_id, daily_volume_usd, spread_bps, tier
         """
         # Fetch all available pairs
         if not self._available_symbols:
@@ -264,10 +270,20 @@ class BinanceSpotProvider:
             price = ticker.get('price', 0)
             if price <= 0:
                 continue
+            # Per-pair spread filter (Council S5: auto-exclude wide-spread pairs)
+            bid = ticker.get('bid', 0)
+            ask = ticker.get('ask', 0)
+            if bid > 0 and ask > 0:
+                spread_bps = ((ask - bid) / ((ask + bid) / 2)) * 10000
+                if spread_bps > max_spread_bps:
+                    continue
+            else:
+                spread_bps = 0.0
             candidates.append({
                 'binance_symbol': sym,
                 'product_id': f"{base}-USD",
                 'daily_volume_usd': vol,
+                'spread_bps': round(spread_bps, 2),
             })
 
         # Sort by volume descending, take top N

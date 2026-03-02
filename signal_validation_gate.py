@@ -41,7 +41,7 @@ class SignalValidationGate:
         self._noise_accuracy_threshold = float(config.get("noise_accuracy_threshold", 0.55))
 
         # Step 3: Regime consistency
-        self._regime_penalty = float(config.get("regime_penalty", 0.5))  # Multiply contradicting signals
+        self._regime_penalty = float(config.get("regime_penalty", 0.70))  # Relaxed from 0.50 (Council S3/S4)
 
         # Rolling signal history: {signal_name: deque of values}
         self._signal_history: Dict[str, deque] = defaultdict(
