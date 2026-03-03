@@ -1401,6 +1401,48 @@ def get_kelly_calibration(db_path: str) -> Dict[str, Any]:
         return _sanitize_floats({"buckets": _rows_to_dicts(rows)})
 
 
+def get_model_scorecard(db_path: str, days: int = 7) -> Dict[str, Any]:
+    """Return latest model accuracy scorecard per model + trend over recent snapshots."""
+    with _conn(db_path) as c:
+        try:
+            # Latest scorecard entry per model
+            rows = c.execute('''
+                SELECT s.model_name, s.accuracy, s.total_predictions,
+                       s.correct_predictions, s.avg_confidence,
+                       s.avg_return_when_correct, s.avg_return_when_wrong,
+                       s.timestamp
+                FROM model_accuracy_scorecard s
+                INNER JOIN (
+                    SELECT model_name, MAX(id) as max_id
+                    FROM model_accuracy_scorecard
+                    WHERE window_days = ?
+                    GROUP BY model_name
+                ) latest ON s.id = latest.max_id
+                ORDER BY s.total_predictions DESC
+            ''', (days,)).fetchall()
+            models = _rows_to_dicts(rows)
+
+            # Trend: last 10 snapshots per model
+            trend_rows = c.execute('''
+                SELECT model_name, accuracy, timestamp
+                FROM model_accuracy_scorecard
+                WHERE window_days = ?
+                ORDER BY id DESC
+                LIMIT 100
+            ''', (days,)).fetchall()
+            trend = {}
+            for r in _rows_to_dicts(trend_rows):
+                mn = r.get('model_name', 'unknown')
+                if mn not in trend:
+                    trend[mn] = []
+                if len(trend[mn]) < 10:
+                    trend[mn].append({'accuracy': r['accuracy'], 'timestamp': r['timestamp']})
+
+            return _sanitize_floats({"models": models, "trend": trend, "window_days": days})
+        except Exception:
+            return {"models": [], "trend": {}, "window_days": days, "error": "table not found"}
+
+
 def get_audit_recent(db_path: str, limit: int = 50) -> List[Dict[str, Any]]:
     """Return most recent audit rows as flat dicts."""
     with _conn(db_path) as c:

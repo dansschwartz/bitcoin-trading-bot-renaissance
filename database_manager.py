@@ -303,6 +303,21 @@ class DatabaseManager:
                 except sqlite3.OperationalError:
                     pass  # Column already exists
 
+            # ── Council S3: ML Model Accuracy Scorecard ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS model_accuracy_scorecard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                window_days INTEGER DEFAULT 7,
+                total_predictions INTEGER,
+                correct_predictions INTEGER,
+                accuracy REAL,
+                avg_confidence REAL,
+                avg_return_when_correct REAL,
+                avg_return_when_wrong REAL
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_scorecard_ts ON model_accuracy_scorecard(timestamp DESC)')
+
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
 
@@ -797,6 +812,59 @@ class DatabaseManager:
                 f"Audit columns count: {len(self._AUDIT_COLUMNS)}, "
                 f"data keys: {list(audit_data.keys())[:10]}..."
             )
+
+    async def compute_model_scorecard(self, window_days: int = 7) -> List[Dict[str, Any]]:
+        """Council S3: Compute per-model accuracy scorecard from ml_predictions.
+
+        Queries evaluated predictions within the window, groups by model_name,
+        computes accuracy/confidence/avg_return stats, stores in model_accuracy_scorecard.
+        Returns list of per-model dicts.
+        """
+        results = []
+        try:
+            now_ts = datetime.now(timezone.utc).isoformat()
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                rows = cursor.execute('''
+                    SELECT model_name,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct,
+                           AVG(confidence) as avg_conf,
+                           AVG(CASE WHEN is_correct = 1 THEN actual_return_1bar ELSE NULL END) as avg_ret_correct,
+                           AVG(CASE WHEN is_correct = 0 THEN actual_return_1bar ELSE NULL END) as avg_ret_wrong
+                    FROM ml_predictions
+                    WHERE is_correct IS NOT NULL
+                      AND evaluated_at > datetime('now', ? || ' days')
+                    GROUP BY model_name
+                    ORDER BY total DESC
+                ''', (f"-{window_days}",)).fetchall()
+
+                for model_name, total, correct, avg_conf, avg_ret_c, avg_ret_w in rows:
+                    accuracy = round(correct / max(total, 1), 4)
+                    entry = {
+                        'model_name': model_name,
+                        'total_predictions': total,
+                        'correct_predictions': correct,
+                        'accuracy': accuracy,
+                        'avg_confidence': round(avg_conf, 4) if avg_conf else 0.0,
+                        'avg_return_when_correct': round(avg_ret_c, 6) if avg_ret_c else 0.0,
+                        'avg_return_when_wrong': round(avg_ret_w, 6) if avg_ret_w else 0.0,
+                    }
+                    results.append(entry)
+                    cursor.execute('''
+                        INSERT INTO model_accuracy_scorecard
+                        (timestamp, model_name, window_days, total_predictions,
+                         correct_predictions, accuracy, avg_confidence,
+                         avg_return_when_correct, avg_return_when_wrong)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (now_ts, model_name, window_days, total, correct,
+                          accuracy, entry['avg_confidence'],
+                          entry['avg_return_when_correct'], entry['avg_return_when_wrong']))
+                conn.commit()
+                self.logger.info(f"Model scorecard computed: {len(results)} models over {window_days}d")
+        except Exception as e:
+            self.logger.error(f"Error computing model scorecard: {e}")
+        return results
 
     async def evaluate_audit_outcomes(self, lookback_minutes: int = 60) -> int:
         """Fill outcome columns for audit rows where enough time has elapsed.

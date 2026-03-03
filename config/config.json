@@ -103,7 +103,8 @@
         "update_interval_cycles": 5,
         "min_history_length": 60,
         "divergence_zscore_threshold": 2.0,
-        "cluster_distance_threshold": 0.5
+        "cluster_distance_threshold": 0.5,
+        "eigenvalue_concentration_threshold": 0.85
     },
     "garch_volatility": {
         "enabled": true,
@@ -571,6 +572,13 @@
         "paper_mode": true,
         "initial_bankroll": 500.0,
         "max_positions": 10
+    },
+    "adverse_selection_bps": {
+        "BTCUSDT": 0.05, "ETHUSDT": 0.10, "SOLUSDT": 0.30,
+        "XRPUSDT": 0.25, "LINKUSDT": 0.30, "DOGEUSDT": 0.50,
+        "AVAXUSDT": 0.35,
+        "__default_large_cap__": 0.20,
+        "__default_small_cap__": 0.80
     },
     "ml_signal_scale": 10.0,
     "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],

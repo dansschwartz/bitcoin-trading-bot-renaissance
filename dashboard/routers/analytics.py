@@ -76,6 +76,12 @@ async def model_accuracy(request: Request, hours: int = 24):
     return db_queries.get_model_accuracy(db, hours=hours)
 
 
+@router.get("/model-scorecard")
+async def model_scorecard(request: Request, days: int = 7):
+    db = request.app.state.dashboard_config.db_path
+    return db_queries.get_model_scorecard(db, days=min(days, 30))
+
+
 @router.get("/pipeline-health")
 async def pipeline_health(request: Request):
     db = request.app.state.dashboard_config.db_path

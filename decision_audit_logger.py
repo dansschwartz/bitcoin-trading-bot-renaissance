@@ -15,12 +15,17 @@ Usage:
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_FALLBACK_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "audit_fallback.jsonl"
+)
 
 
 class DecisionAuditLogger:
@@ -332,15 +337,61 @@ class DecisionAuditLogger:
     # ── Finalize: single DB write ────────────────────────────────
 
     async def finalize(self) -> None:
-        """Flatten _current dict and store to DB via db_manager.store_audit_log()."""
-        if not self._current or 'product_id' not in self._current:
+        """Snapshot _current and store to DB. Clears immediately to avoid race."""
+        snapshot = self._current
+        self._current = {}  # clear immediately for next pair
+        if not snapshot or 'product_id' not in snapshot:
             return
         try:
-            await self.db_manager.store_audit_log(self._current)
+            await self.db_manager.store_audit_log(snapshot)
         except Exception as e:
-            logger.error(f"Audit log persist failed: {e}")
-        finally:
-            self._current = {}
+            import traceback
+            logger.error(f"Audit log persist failed: {e}\n{traceback.format_exc()}")
+            self._write_jsonl_fallback(snapshot)
+
+    def _write_jsonl_fallback(self, data: Dict[str, Any]) -> None:
+        """Append audit row to JSONL file when DB write fails."""
+        try:
+            os.makedirs(os.path.dirname(_FALLBACK_PATH), exist_ok=True)
+            with open(_FALLBACK_PATH, 'a') as f:
+                # Convert non-serializable types
+                safe = {}
+                for k, v in data.items():
+                    if isinstance(v, (int, float, str, bool, type(None))):
+                        safe[k] = v
+                    else:
+                        safe[k] = str(v)
+                f.write(json.dumps(safe, separators=(',', ':')) + '\n')
+            logger.info(f"Audit fallback written to {_FALLBACK_PATH}")
+        except Exception as fb_err:
+            logger.error(f"Audit JSONL fallback also failed: {fb_err}")
+
+    async def self_test(self) -> bool:
+        """Write a test row, read it back, delete it. Returns True on success."""
+        test_data = {
+            'product_id': '__SELF_TEST__',
+            'cycle_number': -1,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'price': 0.0,
+            'final_action': 'SELF_TEST',
+        }
+        try:
+            await self.db_manager.store_audit_log(test_data)
+            # Verify: read it back
+            with self.db_manager._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT id FROM decision_audit_log WHERE product_id = '__SELF_TEST__' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if not row:
+                    logger.error("Audit log self-test: row not found after insert")
+                    return False
+                conn.execute("DELETE FROM decision_audit_log WHERE product_id = '__SELF_TEST__'")
+                conn.commit()
+            logger.info("Audit log self-test PASSED")
+            return True
+        except Exception as e:
+            logger.error(f"Audit log self-test FAILED: {e}")
+            return False
 
 
 def _safe_float(val: Any) -> Optional[float]:

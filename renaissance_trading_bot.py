@@ -1246,6 +1246,8 @@ class RenaissanceTradingBot:
 
         if self.db_enabled:
             self._track_task(self.db_manager.init_database())
+            # Council S3: Audit log self-test — verify DB write path works
+            self._track_task(self.audit_logger.self_test())
 
         # Renaissance Research-Optimized Signal Weights (17 signals — ML included)
         raw_weights = self.config.get("signal_weights", {
@@ -1978,6 +1980,12 @@ class RenaissanceTradingBot:
                     parts.append(f"{model_name}={acc}% (n={total})")
                     total_all += total
                     correct_all += correct
+                    # Council S3: Degradation alert — flag models below 48% with 50+ samples
+                    if total >= 50 and acc < 48.0:
+                        self.logger.warning(
+                            f"ML MODEL DEGRADED: {model_name} accuracy={acc}% "
+                            f"(n={total}) — below 48% threshold"
+                        )
 
                 overall_acc = round(correct_all / max(total_all, 1) * 100, 1)
                 self.logger.info(
@@ -3337,20 +3345,22 @@ class RenaissanceTradingBot:
                     half_spread_bps = ((_ask - _bid) / ((_ask + _bid) / 2)) * 10000 / 2.0
                 else:
                     half_spread_bps = 0.5  # floor
-                # Council S3: Volume-dependent adverse selection
-                # Large-cap (>$50M daily volume): 0.5bps, small-cap: 1.5bps
-                _default_adv_bps = float(self.config.get('paper_trading', {}).get('adverse_selection_bps', 1.0))
-                try:
-                    _vol_24h = self._force_float(ticker.get('volume_24h') or ticker.get('volume', 0))
-                    _daily_vol_usd = _vol_24h * current_price if _vol_24h > 0 else 0
-                    if _daily_vol_usd > 50_000_000:
-                        adverse_bps = 0.5  # Large-cap: tight adverse selection
-                    elif _daily_vol_usd > 0:
-                        adverse_bps = 1.5  # Small-cap: wider adverse selection
-                    else:
-                        adverse_bps = _default_adv_bps
-                except Exception:
-                    adverse_bps = _default_adv_bps
+                # Council S3: Per-pair adverse selection from config, with volume-based fallback
+                _adv_cfg = self.config.get('adverse_selection_bps', {})
+                _pair_key = product_id.replace('-', '').replace('/', '').upper()
+                if _pair_key in _adv_cfg:
+                    adverse_bps = float(_adv_cfg[_pair_key])
+                else:
+                    # Volume-based fallback
+                    try:
+                        _vol_24h = self._force_float(ticker.get('volume_24h') or ticker.get('volume', 0))
+                        _daily_vol_usd = _vol_24h * current_price if _vol_24h > 0 else 0
+                        if _daily_vol_usd > 50_000_000:
+                            adverse_bps = float(_adv_cfg.get('__default_large_cap__', 0.20))
+                        else:
+                            adverse_bps = float(_adv_cfg.get('__default_small_cap__', 0.80))
+                    except Exception:
+                        adverse_bps = float(_adv_cfg.get('__default_small_cap__', 0.80))
                 floor_bps = float(self.config.get('paper_trading', {}).get('slippage_floor_bps', 0.5))
                 _slippage_bps = max(half_spread_bps + adverse_bps, floor_bps)
                 slippage_frac = _slippage_bps / 10000.0
@@ -3732,7 +3742,18 @@ class RenaissanceTradingBot:
             # Each trade is ~$1K (10% of $10K), 50% cap → ~5 simultaneous max from exposure
             self.position_manager.risk_limits.max_position_size_usd = account_balance * 0.10
             self.position_manager.risk_limits.max_total_exposure_usd = account_balance * 0.50
-            self.position_manager.risk_limits.max_total_positions = min(len(self.product_ids), 10)
+            _base_max_positions = min(len(self.product_ids), 10)
+            # Council S3: Reduce max positions when eigenvalue concentration is high
+            if (hasattr(self, 'correlation_network') and self.correlation_network.enabled
+                    and self.correlation_network.should_reduce_positions()):
+                _reduced = max(3, int(_base_max_positions * 0.6))
+                self.logger.info(
+                    f"EIGENVALUE CONCENTRATION: reducing max_positions "
+                    f"{_base_max_positions} -> {_reduced} "
+                    f"(ratio={self.correlation_network.get_eigenvalue_ratio():.3f})"
+                )
+                _base_max_positions = _reduced
+            self.position_manager.risk_limits.max_total_positions = _base_max_positions
             self.position_manager.risk_limits.max_positions_per_product = 1
 
             # ── Drawdown tracking (Renaissance discipline) ──
@@ -5133,7 +5154,7 @@ class RenaissanceTradingBot:
                             open_positions_count=_open_count,
                             scan_tier=getattr(self, '_current_scan_tier', 0),
                         )
-                        self._track_task(_audit.finalize())
+                        await _audit.finalize()
                     except Exception as _audit_err:
                         self.logger.warning(f"Audit finalize failed: {_audit_err}")
 
@@ -5630,6 +5651,18 @@ class RenaissanceTradingBot:
                 self._prune_old_data()
                 # Council S2 P3: Log ML accuracy summary every 100 cycles
                 self._track_task(self._log_ml_accuracy_summary())
+                # Council S3: Compute model accuracy scorecard
+                self._track_task(self.db_manager.compute_model_scorecard(window_days=7))
+                # Council S3: Log spread stats for slippage calibration
+                if hasattr(self, '_pair_spread_history') and self._pair_spread_history:
+                    _spread_parts = []
+                    for _sp_pair, _sp_hist in sorted(self._pair_spread_history.items()):
+                        if _sp_hist:
+                            _avg = sum(_sp_hist) / len(_sp_hist)
+                            _short = _sp_pair.replace('USDT', '').replace('-USD', '')
+                            _spread_parts.append(f"{_short}={_avg:.2f}bps")
+                    if _spread_parts:
+                        self.logger.info(f"SPREAD STATS: {', '.join(_spread_parts[:15])}")
 
             # Council S3: Kelly calibration check every 500 cycles (~8 hours)
             if self.scan_cycle_count % 500 == 0 and self.scan_cycle_count > 0:

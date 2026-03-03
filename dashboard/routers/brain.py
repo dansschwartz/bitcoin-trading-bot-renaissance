@@ -200,3 +200,25 @@ async def cascade_collection_stats(request: Request):
         }
     except Exception:
         return {'total_snapshots': 0, 'message': 'no data yet (tables not created)'}
+
+
+@router.get("/correlation/eigenvalue")
+async def eigenvalue_status(request: Request):
+    """Council S3: Return eigenvalue concentration ratio + history from bot instance."""
+    bot = getattr(request.app.state, "bot_instance", None)
+    if bot and hasattr(bot, 'correlation_network'):
+        cn = bot.correlation_network
+        return {
+            "enabled": cn.enabled,
+            "eigenvalue_ratio": round(cn.get_eigenvalue_ratio(), 4),
+            "concentrated": cn.should_reduce_positions(),
+            "threshold": cn.concentration_threshold,
+            "history": list(cn._eigenvalue_history)[-20:],
+            "tracked_assets": len(cn._price_history),
+        }
+    return {
+        "enabled": False,
+        "eigenvalue_ratio": 0.0,
+        "concentrated": False,
+        "message": "correlation network not available",
+    }

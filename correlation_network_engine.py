@@ -35,6 +35,7 @@ class CorrelationNetworkEngine:
         self.min_history = config.get("min_history_length", 60)
         self.divergence_threshold = config.get("divergence_zscore_threshold", 2.0)
         self.cluster_threshold = config.get("cluster_distance_threshold", 0.5)
+        self.concentration_threshold = config.get("eigenvalue_concentration_threshold", 0.85)
 
         # Per-asset price history
         self._price_history: Dict[str, deque] = {}
@@ -44,6 +45,10 @@ class CorrelationNetworkEngine:
         self._cached_clusters: Dict[int, List[str]] = {}
         self._cached_divergences: Dict[str, float] = {}
         self._last_compute_cycle = -1
+
+        # Council S3: Eigenvalue concentration tracking
+        self._eigenvalue_ratio: float = 0.0
+        self._eigenvalue_history: deque = deque(maxlen=100)
 
     def update_prices(self, prices: Dict[str, float]) -> None:
         """Batch update prices for all tracked assets."""
@@ -186,6 +191,37 @@ class CorrelationNetworkEngine:
         self._cached_divergences = divergences
         return divergences
 
+    def compute_eigenvalue_ratio(self, corr_matrix: pd.DataFrame) -> float:
+        """Council S3: Compute top eigenvalue / sum(eigenvalues) concentration ratio.
+
+        High ratio (>0.85) means one factor dominates — positions are highly correlated
+        and diversification benefit is low. Should reduce position count.
+        """
+        try:
+            eigenvalues = np.linalg.eigvalsh(corr_matrix.values)
+            total = np.sum(np.abs(eigenvalues))
+            if total < 1e-9:
+                return 0.0
+            ratio = float(np.max(eigenvalues) / total)
+            self._eigenvalue_ratio = ratio
+            self._eigenvalue_history.append({
+                'ratio': round(ratio, 4),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'n_assets': len(corr_matrix),
+            })
+            return ratio
+        except Exception as e:
+            self.logger.error(f"Eigenvalue computation failed: {e}")
+            return 0.0
+
+    def get_eigenvalue_ratio(self) -> float:
+        """Return the most recent eigenvalue concentration ratio."""
+        return self._eigenvalue_ratio
+
+    def should_reduce_positions(self) -> bool:
+        """Returns True if eigenvalue concentration exceeds threshold."""
+        return self._eigenvalue_ratio > self.concentration_threshold
+
     def get_correlation_divergence_signal(self, product_id: str) -> float:
         """Return cached divergence signal for a specific product."""
         if not self.enabled:
@@ -203,6 +239,9 @@ class CorrelationNetworkEngine:
                 key=lambda x: abs(x[1]),
                 reverse=True,
             )[:5],
+            "eigenvalue_ratio": round(self._eigenvalue_ratio, 4),
+            "eigenvalue_concentrated": self.should_reduce_positions(),
+            "eigenvalue_history": list(self._eigenvalue_history)[-20:],
         }
 
     def run_full_update(self, cycle_count: int) -> None:
@@ -214,3 +253,5 @@ class CorrelationNetworkEngine:
         if corr_matrix is not None:
             clusters = self.identify_clusters(corr_matrix)
             self.detect_divergences(corr_matrix, clusters)
+            # Council S3: Eigenvalue concentration monitoring
+            self.compute_eigenvalue_ratio(corr_matrix)
