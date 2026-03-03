@@ -51,6 +51,9 @@ class InstrumentConfig:
     slug_pattern: str
     enabled: bool = True
     timeframe: int = 15  # minutes (15 or 5)
+    kelly_fraction: float = 0.5   # Half-Kelly by default
+    max_bet_usd: float = 0.0     # 0 = use global MAX_BET_PCT
+    lead_asset: str = ""          # If set, require this asset's ML to agree on direction
 
 
 INSTRUMENTS: Dict[str, InstrumentConfig] = {
@@ -61,10 +64,15 @@ INSTRUMENTS: Dict[str, InstrumentConfig] = {
     "doge_15m": InstrumentConfig("DOGE", "DOGE-USD", "DOGE-USD", "doge-updown-15m-{ts}", enabled=False),
     "xrp_15m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-15m-{ts}"),
     # 5-minute direction markets (1-bar / 5-min ML horizon, 52.4% acc)
-    "btc_5m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-5m-{ts}", timeframe=5),
-    "eth_5m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-5m-{ts}", timeframe=5),
-    "sol_5m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-5m-{ts}", timeframe=5),
-    "xrp_5m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-5m-{ts}", timeframe=5),
+    # Tighter sizing: 40% Kelly, $25 max bet, altcoins require BTC lead agreement
+    "btc_5m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-5m-{ts}",
+                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0),
+    "eth_5m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-5m-{ts}",
+                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC"),
+    "sol_5m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-5m-{ts}",
+                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC"),
+    "xrp_5m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-5m-{ts}",
+                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC"),
 }
 
 
@@ -100,7 +108,9 @@ class StrategyAExecutor:
     MAX_BET_PCT = 0.05                # Ceiling: 5% of bankroll per bet (was 15%, reduced after 72% drawdown on 2026-03-02)
     MIN_BANKROLL_TO_TRADE = 200.0     # Stop betting below this bankroll level
     DAILY_LOSS_LIMIT_PCT = 0.20       # Max 20% of start-of-day bankroll loss per day
+    DAILY_LOSS_LIMIT_5M_PCT = 0.10   # Max 10% of start-of-day bankroll loss for 5m markets alone
     MAX_ASSET_CONCENTRATION = 0.50    # Max 50% of open exposure in any single asset
+    MAX_OPEN_BETS = 8                 # Max total concurrent open bets across all instruments
 
     def __init__(self, config: dict, db_path: str, logger: Optional[logging.Logger] = None):
         self.config = config
@@ -125,6 +135,7 @@ class StrategyAExecutor:
         # Daily loss tracking (reset at start of each UTC day)
         self._daily_start_bankroll: float = 0.0
         self._daily_pnl: float = 0.0
+        self._daily_pnl_5m: float = 0.0  # Separate 5m loss tracking
         self._last_trading_day: Optional[object] = None
 
         self._ensure_tables()
@@ -332,6 +343,24 @@ class StrategyAExecutor:
             except Exception:
                 pass  # Column already exists
 
+        # Add timeframe column if not exists (migration for 5m markets)
+        if "timeframe" not in bet_cols:
+            try:
+                conn.execute("ALTER TABLE polymarket_bets ADD COLUMN timeframe INTEGER DEFAULT 15")
+                conn.commit()
+                self.logger.info("Added timeframe column to polymarket_bets")
+            except Exception:
+                pass
+
+        skip_cols = [r[1] for r in conn.execute("PRAGMA table_info(polymarket_skip_log)").fetchall()]
+        if "timeframe" not in skip_cols:
+            try:
+                conn.execute("ALTER TABLE polymarket_skip_log ADD COLUMN timeframe INTEGER DEFAULT 15")
+                conn.commit()
+                self.logger.info("Added timeframe column to polymarket_skip_log")
+            except Exception:
+                pass
+
         # Prune skip log entries older than 7 days
         conn.execute("DELETE FROM polymarket_skip_log WHERE timestamp < datetime('now', '-7 days')")
         conn.commit()
@@ -379,14 +408,15 @@ class StrategyAExecutor:
 
     def _log_skip(self, asset: str, slug: Optional[str], reason: str,
                   ml_confidence: float = 0, token_cost: float = 0,
-                  ml_direction: str = "", minutes_left: float = 0) -> None:
+                  ml_direction: str = "", minutes_left: float = 0,
+                  timeframe: int = 15) -> None:
         """Write to polymarket_skip_log table."""
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             "INSERT INTO polymarket_skip_log "
-            "(asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left),
+            "(asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left, timeframe) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left, timeframe),
         )
         conn.commit()
         conn.close()
@@ -414,18 +444,32 @@ class StrategyAExecutor:
             self._last_trading_day = today
             self._daily_start_bankroll = self.bankroll
             self._daily_pnl = 0.0
+            self._daily_pnl_5m = 0.0
             self.logger.info(
                 f"POLYMARKET DAILY RESET: bankroll=${self.bankroll:.2f}, "
-                f"loss_limit=${self.bankroll * self.DAILY_LOSS_LIMIT_PCT:.2f}"
+                f"loss_limit=${self.bankroll * self.DAILY_LOSS_LIMIT_PCT:.2f}, "
+                f"5m_loss_limit=${self.bankroll * self.DAILY_LOSS_LIMIT_5M_PCT:.2f}"
             )
 
-    def _check_daily_loss_limit(self) -> bool:
-        """Return True if within daily loss limit (can bet)."""
+    def _check_daily_loss_limit(self, timeframe: int = 15) -> bool:
+        """Return True if within daily loss limit (can bet).
+
+        Checks both the global daily limit and, for 5m markets,
+        the separate 5m-specific daily loss cap.
+        """
         self._reset_daily_if_needed()
         if self._daily_start_bankroll <= 0:
             return True
+        # Global check
         limit = self._daily_start_bankroll * self.DAILY_LOSS_LIMIT_PCT
-        return self._daily_pnl > -limit
+        if self._daily_pnl <= -limit:
+            return False
+        # 5m-specific check
+        if timeframe == 5:
+            limit_5m = self._daily_start_bankroll * self.DAILY_LOSS_LIMIT_5M_PCT
+            if self._daily_pnl_5m <= -limit_5m:
+                return False
+        return True
 
     def _check_min_bankroll(self) -> bool:
         """Return True if bankroll is above minimum to trade."""
@@ -484,6 +528,9 @@ class StrategyAExecutor:
         # 1. Check resolutions on old and new tables
         self._check_resolutions(current_prices)
 
+        # 1b. Log per-timeframe stats
+        self._log_timeframe_stats()
+
         # 2. Manage open bets (from new polymarket_bets table)
         self._manage_positions(ml_predictions, current_prices)
 
@@ -527,13 +574,30 @@ class StrategyAExecutor:
             if ml_conf < self.CONFIDENCE_THRESHOLD:
                 self._log_skip(inst.asset, slug,
                                f"conf {ml_conf:.0f}% < {self.CONFIDENCE_THRESHOLD}%",
-                               ml_conf, token_cost, ml_direction, minutes_left)
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
                 continue
+
+            # Gate: lead asset agreement (5m altcoins must agree with BTC direction)
+            if inst.lead_asset:
+                lead_data = ml_predictions.get(f"{inst.lead_asset}-USD", {})
+                if "prediction_1bar" in lead_data:
+                    lead_pred = lead_data.get("prediction_1bar", 0)
+                else:
+                    lead_pred = lead_data.get("prediction", 0)
+                lead_direction = "UP" if lead_pred > 0 else "DOWN"
+                if lead_direction != ml_direction:
+                    self._log_skip(inst.asset, slug,
+                                   f"lead_{inst.lead_asset}_disagrees",
+                                   ml_conf, token_cost, ml_direction, minutes_left,
+                                   timeframe=inst.timeframe)
+                    continue
 
             # Gate: rate limit
             if not self._check_rate_limit():
                 self._log_skip(inst.asset, slug, "rate_limit",
-                               ml_conf, token_cost, ml_direction, minutes_left)
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
                 continue
 
             # Gate: cooldown
@@ -541,7 +605,8 @@ class StrategyAExecutor:
                 remaining = self.COOLDOWN_AFTER_LOSS - (time.time() - self._last_loss_time)
                 self._log_skip(inst.asset, slug,
                                f"cooldown {remaining:.0f}s remaining",
-                               ml_conf, token_cost, ml_direction, minutes_left)
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
                 continue
 
             # Gate: not already positioned on this slug
@@ -555,6 +620,19 @@ class StrategyAExecutor:
             if existing > 0:
                 continue  # Already have a bet, management handles adds
 
+            # Gate: max concurrent open bets
+            conn = sqlite3.connect(self.db_path)
+            open_count = conn.execute(
+                "SELECT COUNT(*) FROM polymarket_bets WHERE status = 'OPEN'"
+            ).fetchone()[0]
+            conn.close()
+            if open_count >= self.MAX_OPEN_BETS:
+                self._log_skip(inst.asset, slug,
+                               f"max_open_bets ({open_count}/{self.MAX_OPEN_BETS})",
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
+                continue
+
             # Gate: max exposure check
             conn = sqlite3.connect(self.db_path)
             total_open = conn.execute(
@@ -563,28 +641,35 @@ class StrategyAExecutor:
             conn.close()
             if total_open + self.MIN_BET > self.bankroll * 0.8:
                 self._log_skip(inst.asset, slug, "max_exposure",
-                               ml_conf, token_cost, ml_direction, minutes_left)
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
                 continue
 
             # Gate: minimum bankroll
             if not self._check_min_bankroll():
                 self._log_skip(inst.asset, slug,
                                f"bankroll ${self.bankroll:.2f} < ${self.MIN_BANKROLL_TO_TRADE}",
-                               ml_conf, token_cost, ml_direction, minutes_left)
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
                 continue
 
-            # Gate: daily loss limit
-            if not self._check_daily_loss_limit():
+            # Gate: daily loss limit (5m has separate cap)
+            if not self._check_daily_loss_limit(timeframe=inst.timeframe):
+                pnl_detail = f"pnl=${self._daily_pnl:.2f}"
+                if inst.timeframe == 5:
+                    pnl_detail += f", 5m_pnl=${self._daily_pnl_5m:.2f}"
                 self._log_skip(inst.asset, slug,
-                               f"daily loss limit hit (pnl=${self._daily_pnl:.2f})",
-                               ml_conf, token_cost, ml_direction, minutes_left)
+                               f"daily loss limit hit ({pnl_detail})",
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
                 continue
 
             # Gate: asset concentration
             est_bet = max(self.MIN_BET, self.bankroll * self.MAX_BET_PCT)
             if not self._check_asset_concentration(inst.asset, est_bet):
                 self._log_skip(inst.asset, slug, "asset_concentration",
-                               ml_conf, token_cost, ml_direction, minutes_left)
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
                 continue
 
             # Get asset price for recording
@@ -667,7 +752,7 @@ class StrategyAExecutor:
                 if market:
                     token_cost = current_share
                     if self._check_rate_limit():
-                        self._add_to_bet(bet, token_cost, ml_conf)
+                        self._add_to_bet(bet, token_cost, ml_conf, inst)
 
             # Rule 4: Hold (implicit - do nothing)
 
@@ -695,6 +780,10 @@ class StrategyAExecutor:
 
         self.bankroll += bet["total_invested"] + pnl
         self._daily_pnl += pnl  # Track daily P&L for loss limit
+        # Track 5m PnL separately for the 5m-specific daily loss cap
+        bet_timeframe = bet["timeframe"] if "timeframe" in bet.keys() else 15
+        if bet_timeframe == 5:
+            self._daily_pnl_5m += pnl
         self._log_bankroll(f"closed_{reason}", str(bet["id"]), pnl)
 
         if pnl < 0:
@@ -729,15 +818,19 @@ class StrategyAExecutor:
 
     # -- Kelly Sizing --
 
-    def _compute_kelly_bet(self, probability: float, token_cost: float) -> float:
-        """Half-Kelly optimal bet size for Polymarket.
+    def _compute_kelly_bet(self, probability: float, token_cost: float,
+                           kelly_fraction: float = 0.5,
+                           max_bet_usd: float = 0.0) -> float:
+        """Kelly-fraction optimal bet size for Polymarket.
 
         Args:
             probability: Model's P(correct outcome) — e.g. 0.55 means 55% chance we're right.
             token_cost: Price of the token we're buying (0.0 to 1.0).
+            kelly_fraction: Fraction of full Kelly to use (0.5 = half-Kelly, 0.4 = 40% Kelly).
+            max_bet_usd: Hard dollar ceiling per bet (0 = use global MAX_BET_PCT).
 
         Returns:
-            Dollar amount to bet (floored at MIN_BET, capped at MAX_BET_PCT of bankroll).
+            Dollar amount to bet (floored at MIN_BET, capped at ceiling).
         """
         # Payout ratio: if we buy at token_cost and win, we get $1 per token
         b = (1.0 - token_cost) / (token_cost + 1e-10)
@@ -750,14 +843,17 @@ class StrategyAExecutor:
         kelly = (p * b - q) / (b + 1e-10)
         kelly = max(0.0, kelly)
 
-        # Half-Kelly for safety
-        half_kelly = kelly * 0.5
+        # Fractional Kelly for safety
+        frac_kelly = kelly * kelly_fraction
 
         # Dollar bet
-        bet = self.bankroll * half_kelly
+        bet = self.bankroll * frac_kelly
 
         # Floor and ceiling
-        bet = max(self.MIN_BET, min(bet, self.bankroll * self.MAX_BET_PCT))
+        ceiling = self.bankroll * self.MAX_BET_PCT
+        if max_bet_usd > 0:
+            ceiling = min(ceiling, max_bet_usd)
+        bet = max(self.MIN_BET, min(bet, ceiling))
         return round(bet, 2)
 
     # -- Bet Placement --
@@ -768,7 +864,11 @@ class StrategyAExecutor:
         """Place a Kelly-sized bet."""
         # Convert confidence (50-100% scale) to probability (0.5-1.0)
         prob = ml_confidence / 100.0
-        bet_amount = self._compute_kelly_bet(prob, token_cost)
+        bet_amount = self._compute_kelly_bet(
+            prob, token_cost,
+            kelly_fraction=inst.kelly_fraction,
+            max_bet_usd=inst.max_bet_usd,
+        )
         tokens = bet_amount / token_cost if token_cost > 0 else 0
         slug = market.get("slug", "")
 
@@ -782,12 +882,13 @@ class StrategyAExecutor:
             INSERT INTO polymarket_bets
             (slug, asset, entry_side, entry_token_cost, entry_amount, entry_tokens,
              entry_confidence, adds, total_invested, total_tokens, avg_cost,
-             status, regime, entry_asset_price, window_start_price, question)
-            VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'OPEN', ?, ?, ?, ?)
+             status, regime, entry_asset_price, window_start_price, question, timeframe)
+            VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)
         """, (
             slug, inst.asset, entry_side, token_cost, bet_amount, tokens,
             ml_confidence, bet_amount, tokens, token_cost,
             regime, asset_price, window_start_price, market.get("question", ""),
+            inst.timeframe,
         ))
         bet_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
@@ -814,6 +915,7 @@ class StrategyAExecutor:
             crowd_up=crowd_up,
             bet_id=str(bet_id),
             deadline=market.get("deadline", ""),
+            timeframe=inst.timeframe,
         )
 
         self.logger.info(
@@ -822,10 +924,13 @@ class StrategyAExecutor:
             f"Kelly: ${bet_amount:.2f} | Bankroll: ${self.bankroll:.2f}"
         )
 
-    def _add_to_bet(self, bet, token_cost: float, ml_confidence: float) -> None:
+    def _add_to_bet(self, bet, token_cost: float, ml_confidence: float,
+                    inst: Optional[InstrumentConfig] = None) -> None:
         """Add a Kelly-sized increment to an existing open bet."""
         prob = ml_confidence / 100.0
-        add_amount = self._compute_kelly_bet(prob, token_cost)
+        kf = inst.kelly_fraction if inst else 0.5
+        mbu = inst.max_bet_usd if inst else 0.0
+        add_amount = self._compute_kelly_bet(prob, token_cost, kelly_fraction=kf, max_bet_usd=mbu)
         new_tokens = add_amount / token_cost if token_cost > 0 else 0
 
         # Parse existing adds
@@ -873,7 +978,8 @@ class StrategyAExecutor:
                               ml_confidence: float, ml_prediction: float,
                               token_cost: float, asset_price: float,
                               regime: str, bet_amount: float, crowd_up: float,
-                              bet_id: str, deadline: str) -> None:
+                              bet_id: str, deadline: str,
+                              timeframe: int = 15) -> None:
         """Create a lifecycle row with t0 data when a bet is placed."""
         # Extract market_open_time from slug timestamp (e.g. btc-updown-15m-1709312400)
         market_open_time = None
@@ -890,16 +996,16 @@ class StrategyAExecutor:
             conn.execute("""
                 INSERT OR REPLACE INTO polymarket_lifecycle (
                     slug, question, asset, instrument_key,
-                    market_open_time, market_close_time,
+                    market_open_time, market_close_time, duration_minutes,
                     t0_timestamp, t0_asset_price, t0_crowd_up, t0_crowd_down,
                     t0_ml_prediction, t0_ml_confidence, t0_ml_direction,
                     t0_regime,
                     decision, decision_reason,
                     bet_amount, entry_price, position_id
-                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 slug, question, asset, instrument_key,
-                market_open_time, deadline,
+                market_open_time, deadline, timeframe,
                 asset_price, crowd_up, round(1.0 - crowd_up, 4),
                 ml_prediction, ml_confidence, direction,
                 regime,
@@ -1162,6 +1268,10 @@ class StrategyAExecutor:
             self._last_loss_time = time.time()
 
         self._daily_pnl += pnl  # Track daily P&L for loss limit
+        # Track 5m PnL separately for the 5m-specific daily loss cap
+        bet_timeframe = bet["timeframe"] if "timeframe" in bet.keys() else 15
+        if bet_timeframe == 5:
+            self._daily_pnl_5m += pnl
 
         self.logger.info(
             f"{'WON' if won else 'LOST'} [{bet['asset']}]: "
@@ -1436,6 +1546,32 @@ class StrategyAExecutor:
             return (deadline - datetime.now(timezone.utc)).total_seconds() / 60.0
         except (ValueError, TypeError):
             return None
+
+    # -- Per-Timeframe Stats --
+
+    def _log_timeframe_stats(self) -> None:
+        """Log separate 5m vs 15m performance stats (last 24 hours)."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            for tf in [5, 15]:
+                row = conn.execute("""
+                    SELECT COUNT(*) as n,
+                           COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                           COALESCE(SUM(pnl), 0) as total_pnl
+                    FROM polymarket_bets
+                    WHERE timeframe = ? AND status IN ('WON', 'LOST', 'CLOSED')
+                    AND opened_at > datetime('now', '-24 hours')
+                """, (tf,)).fetchone()
+                n, wins, pnl = row
+                if n > 0:
+                    wr = (wins / n) * 100
+                    self.logger.info(
+                        f"POLYMARKET {tf}M 24H: {n} bets, {wr:.0f}% win, ${pnl:+.2f}"
+                    )
+        except Exception as e:
+            self.logger.debug(f"Timeframe stats query failed: {e}")
+        finally:
+            conn.close()
 
     # -- Helpers --
 
