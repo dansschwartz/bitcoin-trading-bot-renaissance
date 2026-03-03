@@ -1018,10 +1018,12 @@ class StrategyAExecutor:
                     if isinstance(prices, list) and len(prices) >= 2:
                         yes_price = float(prices[0])
                         no_price = float(prices[1])
-                        is_definitive = (yes_price >= 0.95 and no_price <= 0.05) or \
-                                        (yes_price <= 0.05 and no_price >= 0.95)
 
-                        if is_resolved or is_definitive:
+                        # Only resolve if Gamma API explicitly marks as resolved.
+                        # DO NOT use is_definitive (price >= 0.95) — these are LIVE
+                        # trading prices mid-window, not final outcomes. Resolving
+                        # on live prices gave 6% win rate vs 71% on price_fallback.
+                        if is_resolved:
                             self._resolve_bet(conn, bet, yes_price, no_price, "gamma_api", current_prices)
                             continue
 
@@ -1180,10 +1182,9 @@ class StrategyAExecutor:
                     if isinstance(prices, list) and len(prices) >= 2:
                         yes_price = float(prices[0])
                         no_price = float(prices[1])
-                        is_definitive = (yes_price >= 0.95 and no_price <= 0.05) or \
-                                        (yes_price <= 0.05 and no_price >= 0.95)
 
-                        if is_resolved or is_definitive:
+                        # Only resolve on explicit resolved flag — not live prices
+                        if is_resolved:
                             direction = pos["direction"]
                             won = (yes_price >= 0.95) if direction == "UP" else (no_price >= 0.95)
                             exit_price = 1.0 if won else 0.0
