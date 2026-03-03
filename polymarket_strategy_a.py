@@ -329,12 +329,32 @@ class StrategyAExecutor:
 
     def _load_bankroll(self) -> None:
         conn = sqlite3.connect(self.db_path)
-        row = conn.execute(
-            "SELECT bankroll FROM polymarket_bankroll_log ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        # Reconcile bankroll from P&L data (self-healing after resolution bugs).
+        # Correct = initial + sum(resolved PnL) - sum(open exposure).
+        try:
+            pnl_row = conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM polymarket_bets "
+                "WHERE status IN ('WON', 'LOST', 'CLOSED')"
+            ).fetchone()
+            open_row = conn.execute(
+                "SELECT COALESCE(SUM(total_invested), 0) FROM polymarket_bets "
+                "WHERE status = 'OPEN'"
+            ).fetchone()
+            total_pnl = pnl_row[0] if pnl_row else 0
+            open_exposure = open_row[0] if open_row else 0
+            self.bankroll = self.initial_bankroll + total_pnl - open_exposure
+            logger.info(f"BANKROLL RECONCILED: ${self.bankroll:.2f} "
+                        f"(initial=${self.initial_bankroll:.2f} + pnl=${total_pnl:.2f} "
+                        f"- open=${open_exposure:.2f})")
+        except Exception as e:
+            # Fallback to bankroll_log if polymarket_bets doesn't exist yet
+            row = conn.execute(
+                "SELECT bankroll FROM polymarket_bankroll_log ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                self.bankroll = row[0]
+            logger.warning(f"Bankroll fallback to log: ${self.bankroll:.2f} ({e})")
         conn.close()
-        if row:
-            self.bankroll = row[0]
 
     def _log_bankroll(self, event: str, position_id: Optional[str] = None, amount: float = 0) -> None:
         conn = sqlite3.connect(self.db_path)

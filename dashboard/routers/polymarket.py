@@ -96,20 +96,31 @@ async def polymarket_overview(request: Request):
 
                 total = overall["total"] or 0
                 wins = overall["wins"] or 0
+                losses = overall["losses"] or 0
+
+                # Bankroll: recalculate from P&L data (bankroll_log can drift
+                # due to resolution bugs). Correct = initial + total_pnl - open_exposure.
+                total_pnl = round(overall["total_pnl"] or 0, 2)
+                open_exposure = round(open_row["exposure"], 2)
+                corrected_bankroll = round(500.0 + total_pnl - open_exposure, 2)
+
+                # Win rate: wins / (wins + losses), excluding CLOSED bets
+                decided = wins + losses
+                win_rate = round(wins / decided * 100, 1) if decided > 0 else 0
 
                 return {
-                    "bankroll": round(bankroll, 2),
+                    "bankroll": corrected_bankroll,
                     "initial_bankroll": 500.0,
                     "open_count": open_row["count"],
-                    "open_exposure": round(open_row["exposure"], 2),
+                    "open_exposure": open_exposure,
                     "today_pnl": round(today_row["pnl"] or 0, 2),
                     "today_bets": today_row["bets"] or 0,
                     "today_wins": today_row["wins"] or 0,
-                    "total_pnl": round(overall["total_pnl"] or 0, 2),
+                    "total_pnl": total_pnl,
                     "total_bets": total,
                     "wins": wins,
-                    "losses": overall["losses"] or 0,
-                    "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                    "losses": losses,
+                    "win_rate": win_rate,
                     "total_wagered": round(overall["total_wagered"] or 0, 2),
                     "model_info": _model_info(),
                 }
@@ -344,12 +355,14 @@ async def polymarket_stats(request: Request):
 
                 total = overall["total"] or 0
                 wins = overall["wins"] or 0
+                losses = overall["losses"] or 0
+                decided = wins + losses
 
                 return {
                     "total_bets": total,
                     "wins": wins,
-                    "losses": overall["losses"] or 0,
-                    "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                    "losses": losses,
+                    "win_rate": round(wins / decided * 100, 1) if decided > 0 else 0,
                     "total_pnl": round(overall["total_pnl"] or 0, 2),
                     "avg_return": round(overall["avg_pnl"] or 0, 2),
                     "best_trade": round(overall["best"] or 0, 2),
@@ -384,12 +397,14 @@ async def polymarket_stats(request: Request):
 
                 total = overall["total"] or 0
                 wins = overall["wins"] or 0
+                losses = overall["losses"] or 0
+                decided = wins + losses
 
                 return {
                     "total_bets": total,
                     "wins": wins,
-                    "losses": overall["losses"] or 0,
-                    "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                    "losses": losses,
+                    "win_rate": round(wins / decided * 100, 1) if decided > 0 else 0,
                     "total_pnl": round(overall["total_pnl"] or 0, 2),
                     "avg_return": round(overall["avg_pnl"] or 0, 2),
                     "best_trade": round(overall["best"] or 0, 2),
@@ -546,9 +561,9 @@ def _model_info() -> dict:
         "source": "crash_lightgbm",
         "test_accuracy": 52.9,
         "test_auc": 0.5432,
-        "confidence_threshold": 55.0,
+        "confidence_threshold": 52.0,
         "kelly_mode": "half-kelly",
-        "stop_loss": "40% share price drop",
+        "stop_loss": "disabled",
     }
 
 
