@@ -93,7 +93,7 @@ class StrategyAExecutor:
     EXIT_CONFIDENCE = 50.0            # Exit when model is pure coin-flip
     ADD_CONFIDENCE = 52.0             # Same as entry threshold
     MAX_POSITION_PER_MARKET = 150.0   # dollar cap
-    STOP_LOSS_PCT = 0.40              # close if share price drops 40% from avg cost
+    STOP_LOSS_PCT = None              # disabled — direction_flip handles exits; binary options resolve in 15min
     MAX_BETS_PER_HOUR = 6
     COOLDOWN_AFTER_LOSS = 300         # 5 min in seconds
     MIN_BET = 5.0                     # Floor for Kelly sizing
@@ -592,14 +592,11 @@ class StrategyAExecutor:
 
             share_change = (current_share / bet["avg_cost"] - 1) if bet["avg_cost"] > 0 else 0
 
-            # Rule 0: STOP LOSS — close if share price dropped too far
-            if share_change <= -self.STOP_LOSS_PCT:
-                self.logger.warning(
-                    f"STOP LOSS [{asset}]: share {current_share:.3f} vs avg {bet['avg_cost']:.3f} "
-                    f"({share_change*100:+.1f}%) | Limit: -{self.STOP_LOSS_PCT*100:.0f}%"
-                )
-                self._close_bet(bet, "stop_loss", current_prices)
-                continue
+            # Rule 0: STOP LOSS — disabled (direction_flip handles exits;
+            # binary options resolve in 15min so stop-loss just crystallizes
+            # losses on bets that win 50% of the time if held).
+            # Was: STOP_LOSS_PCT = 0.40, but avg actual drop was -60% (20pp
+            # overshoot due to 5-min check interval). Cost $45.68 on known bets.
 
             # Current ML data (per-horizon routing for position management)
             ml_data = ml_predictions.get(inst.ml_pair, {})
