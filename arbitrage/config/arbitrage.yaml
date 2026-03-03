@@ -102,7 +102,7 @@ triangular:
   scan_interval_ms_rest: 5000       # REST fallback interval
   max_single_trade_usd: 15000      # Hard cap per trade (raised ceiling — depth sizing scales down)
   max_trade_usd: 3000               # Legacy — kept for backward compat, overridden by max_single_trade_usd
-  min_trade_usd: 50                 # Floor — skip if optimal is below this
+  min_trade_usd: 20                 # Floor — skip if optimal is below this
   max_depth_fraction: 0.15          # Use at most 15% of thinnest leg's depth (was 0.25)
   max_capital_per_cycle: 25000      # Total USD deployed per 60s cycle
   hourly_capital_limit: 500000      # Hourly capital breaker
