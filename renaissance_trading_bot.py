@@ -6567,11 +6567,12 @@ class RenaissanceTradingBot:
         # ── One-time: reset ML evaluations to use corrected 1-bar horizon method ──
         # The old evaluation compared prediction-time vs "latest" price (variable horizon).
         # The corrected method compares prediction-time vs 1-bar-later price (fixed 5min horizon).
-        _reset_flag_file = os.path.join(os.path.dirname(self.db_path), '.ml_eval_1bar_reset_done')
+        _db_path = self.db_manager.db_path if hasattr(self.db_manager, 'db_path') else "data/renaissance_bot.db"
+        _reset_flag_file = os.path.join(os.path.dirname(_db_path), '.ml_eval_1bar_reset_done')
         if not os.path.exists(_reset_flag_file):
             try:
                 import sqlite3 as _sq
-                _conn = _sq.connect(self.db_path)
+                _conn = _sq.connect(_db_path)
                 _reset_count = _conn.execute(
                     "SELECT COUNT(*) FROM ml_predictions WHERE evaluated_at IS NOT NULL"
                 ).fetchone()[0]
