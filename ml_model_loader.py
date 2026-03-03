@@ -25,11 +25,27 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 # ── Disabled models ──────────────────────────────────────────────────────────
-# Models with live accuracy below 40% — disabled until retrained.
-# GRU: 32% (as of 2026-02-27 dashboard audit)
-# Re-enabled: DilatedCNN (47.66% acc, best model), BiLSTM
+# Models disabled from inference. Loaded from config/config.json "disabled_models".
 # These are not loaded, not run, and pass 0.0 to the meta-ensemble.
-DISABLED_MODELS: set = {'gru'}
+
+# Default disabled models — overridden by config/config.json "disabled_models" if present
+_DEFAULT_DISABLED_MODELS: set = {'gru'}
+
+def _load_disabled_models() -> set:
+    """Load disabled model list from config file."""
+    try:
+        import json
+        config_path = os.path.join(os.path.dirname(__file__), 'config', 'config.json')
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        disabled = config.get('disabled_models', [])
+        if isinstance(disabled, list) and disabled:
+            return set(disabled)
+    except Exception:
+        pass
+    return _DEFAULT_DISABLED_MODELS
+
+DISABLED_MODELS: set = _load_disabled_models()
 
 # ── Per-pair model exclusions (live accuracy audit 2026-03-02) ────────────────
 # Models that are actively anti-predictive (<35% accuracy) on specific pairs.

@@ -124,7 +124,7 @@ class BootstrapRegimeClassifier:
 def _load_bars_from_db(db_path: str, pair: str = "BTC-USD", limit: int = 500) -> pd.DataFrame:
     """Load OHLCV bars from the five_minute_bars table."""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT bar_start, open, high, low, close, volume "

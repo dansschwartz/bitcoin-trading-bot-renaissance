@@ -138,9 +138,10 @@ class BarAggregator:
     @contextmanager
     def _get_connection(self):
         """Context manager for safe SQLite connections."""
-        conn = sqlite3.connect(self._db_path, timeout=10.0)
+        conn = sqlite3.connect(self._db_path, timeout=30.0)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             yield conn
         except Exception:
             conn.rollback()

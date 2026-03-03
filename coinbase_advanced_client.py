@@ -50,23 +50,21 @@ class CoinbaseAdvancedClient:
         self.recent_trades = {}
 
     async def connect_websocket(self):
-        """Connect to Coinbase WebSocket feed"""
-        try:
-            self.websocket = await websockets.connect(self.base_url)
+        """Connect to Coinbase WebSocket feed.
 
-            # Subscribe to channels
-            subscribe_message = {
-                "type": "subscribe",
-                "product_ids": self.config['symbols'],
-                "channels": self.config['websocket_channels']
-            }
+        Raises on failure so the caller can implement its own retry/backoff.
+        """
+        self.websocket = await websockets.connect(self.base_url)
 
-            await self.websocket.send(json.dumps(subscribe_message))
-            self.logger.info("Connected to Coinbase WebSocket")
+        # Subscribe to channels
+        subscribe_message = {
+            "type": "subscribe",
+            "product_ids": self.config['symbols'],
+            "channels": self.config['websocket_channels']
+        }
 
-        except Exception as e:
-            self.logger.error(f"Failed to connect to Coinbase WebSocket: {e}")
-            raise
+        await self.websocket.send(json.dumps(subscribe_message))
+        self.logger.info("Connected to Coinbase WebSocket")
 
     async def listen_for_messages(self, data_queue: queue.Queue):
         """Listen for WebSocket messages and process them"""

@@ -148,9 +148,10 @@ class RegimeDetector:
     @contextmanager
     def _get_connection(self):
         """Yield a SQLite connection with WAL mode and reasonable timeout."""
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             yield conn
         except Exception:
             conn.rollback()
@@ -493,6 +494,13 @@ class RegimeDetector:
                 pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
             self.logger.info("Model saved to %s", self.model_path)
             return True
+        except PermissionError as exc:
+            self.logger.warning(
+                "Permission denied saving model to %s (file may be owned by "
+                "another user). Skipping save — model remains in memory. %s",
+                self.model_path, exc,
+            )
+            return False
         except Exception as exc:
             self.logger.error("Failed to save model: %s", exc)
             return False

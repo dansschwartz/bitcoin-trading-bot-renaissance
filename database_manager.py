@@ -43,10 +43,17 @@ class DatabaseManager:
 
     @contextmanager
     def _get_connection(self):
-        """Context manager for safe SQLite connections with WAL mode and timeout."""
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        """Context manager for safe SQLite connections with WAL mode and timeout.
+
+        Uses a 30-second timeout to tolerate concurrent writers (the main bot
+        loop, dashboard, arbitrage engine, and background tasks all hit the
+        same SQLite file).  WAL mode is set on every connection so that readers
+        never block writers.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             yield conn
         except Exception:
             conn.rollback()
@@ -945,29 +952,26 @@ class DatabaseManager:
                 if not rows:
                     return 0
 
-                products = list({r[1] for r in rows})
-                latest_prices: Dict[str, float] = {}
-                for pid in products:
-                    px_row = cursor.execute('''
-                        SELECT price FROM market_data
-                        WHERE product_id = ?
-                        ORDER BY timestamp DESC LIMIT 1
-                    ''', (pid,)).fetchone()
-                    if px_row:
-                        latest_prices[pid] = float(px_row[0])
-                    else:
-                        # Council S6: fallback to five_minute_bars close price
-                        bar_row = cursor.execute('''
-                            SELECT close FROM five_minute_bars
-                            WHERE pair = ?
-                            ORDER BY bar_end DESC LIMIT 1
-                        ''', (pid,)).fetchone()
-                        if bar_row:
-                            latest_prices[pid] = float(bar_row[0])
-
                 now_ts = datetime.now(timezone.utc).isoformat()
                 for row_id, pid, prediction, entry_px, ts in rows:
-                    current_px = latest_prices.get(pid)
+                    # Get the 1-bar-later price (5 min after prediction), NOT the latest price.
+                    # Models predict 1-bar forward returns, so we must evaluate at that horizon.
+                    current_px = None
+                    if ts:
+                        try:
+                            from datetime import datetime as _dt
+                            _pred_dt = _dt.fromisoformat(ts.replace('Z', '+00:00'))
+                            _target_epoch = _pred_dt.timestamp() + 300  # 1 bar = 5 minutes
+                            # Find the bar whose end is closest to 5 min after prediction
+                            bar_1bar = cursor.execute('''
+                                SELECT close FROM five_minute_bars
+                                WHERE pair = ? AND bar_end >= ? AND bar_end <= ?
+                                ORDER BY bar_end ASC LIMIT 1
+                            ''', (pid, _target_epoch - 60, _target_epoch + 120)).fetchone()
+                            if bar_1bar:
+                                current_px = float(bar_1bar[0])
+                        except Exception:
+                            pass
                     if not current_px:
                         continue
                     # If price_at_prediction is NULL, look up from five_minute_bars
@@ -996,9 +1000,15 @@ class DatabaseManager:
                     if not entry_px or entry_px <= 0:
                         continue
                     actual_return = (current_px - entry_px) / entry_px
-                    actual_dir = 1 if actual_return > 0.001 else (-1 if actual_return < -0.001 else 0)
+                    # Use sign of actual return directly (no dead zone).
+                    # Old code had ±0.1% dead zone marking all tiny moves as "wrong".
+                    actual_dir = 1 if actual_return > 0 else (-1 if actual_return < 0 else 0)
                     pred_dir = 1 if prediction > 0 else (-1 if prediction < 0 else 0)
-                    is_correct = 1 if (pred_dir != 0 and pred_dir == actual_dir) else 0
+                    # Correct if: both have a direction and they agree, OR both are exactly 0
+                    if actual_dir == 0:
+                        is_correct = 1 if pred_dir == 0 else 0  # Flat market: only correct if pred is also flat
+                    else:
+                        is_correct = 1 if pred_dir == actual_dir else 0
                     cursor.execute('''
                         UPDATE ml_predictions
                         SET actual_return_1bar = ?, actual_direction = ?,
@@ -1050,29 +1060,25 @@ class DatabaseManager:
                     if not rows:
                         break
 
-                    products = list({r[1] for r in rows})
-                    latest_prices: Dict[str, float] = {}
-                    for pid in products:
-                        px_row = cursor.execute('''
-                            SELECT price FROM market_data
-                            WHERE product_id = ?
-                            ORDER BY timestamp DESC LIMIT 1
-                        ''', (pid,)).fetchone()
-                        if px_row:
-                            latest_prices[pid] = float(px_row[0])
-                        else:
-                            bar_row = cursor.execute('''
-                                SELECT close FROM five_minute_bars
-                                WHERE pair = ?
-                                ORDER BY bar_end DESC LIMIT 1
-                            ''', (pid,)).fetchone()
-                            if bar_row:
-                                latest_prices[pid] = float(bar_row[0])
-
                     now_ts = datetime.now(timezone.utc).isoformat()
                     batch_updated = 0
                     for row_id, pid, prediction, entry_px, ts in rows:
-                        current_px = latest_prices.get(pid)
+                        # Get 1-bar-later price (5 min after prediction), NOT latest price
+                        current_px = None
+                        if ts:
+                            try:
+                                from datetime import datetime as _dt
+                                _pred_dt = _dt.fromisoformat(ts.replace('Z', '+00:00'))
+                                _target_epoch = _pred_dt.timestamp() + 300  # 1 bar = 5 min
+                                bar_1bar = cursor.execute('''
+                                    SELECT close FROM five_minute_bars
+                                    WHERE pair = ? AND bar_end >= ? AND bar_end <= ?
+                                    ORDER BY bar_end ASC LIMIT 1
+                                ''', (pid, _target_epoch - 60, _target_epoch + 120)).fetchone()
+                                if bar_1bar:
+                                    current_px = float(bar_1bar[0])
+                            except Exception:
+                                pass
                         if not current_px:
                             continue
                         if not entry_px or entry_px <= 0:
@@ -1097,9 +1103,13 @@ class DatabaseManager:
                         if not entry_px or entry_px <= 0:
                             continue
                         actual_return = (current_px - entry_px) / entry_px
-                        actual_dir = 1 if actual_return > 0.001 else (-1 if actual_return < -0.001 else 0)
+                        # Use sign of actual return directly (no dead zone)
+                        actual_dir = 1 if actual_return > 0 else (-1 if actual_return < 0 else 0)
                         pred_dir = 1 if prediction > 0 else (-1 if prediction < 0 else 0)
-                        is_correct = 1 if (pred_dir != 0 and pred_dir == actual_dir) else 0
+                        if actual_dir == 0:
+                            is_correct = 1 if pred_dir == 0 else 0
+                        else:
+                            is_correct = 1 if pred_dir == actual_dir else 0
                         cursor.execute('''
                             UPDATE ml_predictions
                             SET actual_return_1bar = ?, actual_direction = ?,

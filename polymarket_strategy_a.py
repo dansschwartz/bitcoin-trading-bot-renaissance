@@ -170,6 +170,7 @@ class StrategyAExecutor:
                 return_pct REAL,
                 regime TEXT,
                 entry_asset_price REAL,
+                window_start_price REAL,
                 exit_asset_price REAL,
                 opened_at TEXT NOT NULL DEFAULT (datetime('now')),
                 question TEXT
@@ -320,6 +321,16 @@ class StrategyAExecutor:
         if "strategy" not in pos_cols:
             conn.execute("ALTER TABLE polymarket_positions ADD COLUMN strategy TEXT DEFAULT 'legacy'")
             conn.commit()
+
+        # Add window_start_price column if not exists (migration for existing DBs)
+        bet_cols = [r[1] for r in conn.execute("PRAGMA table_info(polymarket_bets)").fetchall()]
+        if "window_start_price" not in bet_cols:
+            try:
+                conn.execute("ALTER TABLE polymarket_bets ADD COLUMN window_start_price REAL")
+                conn.commit()
+                self.logger.info("Added window_start_price column to polymarket_bets")
+            except Exception:
+                pass  # Column already exists
 
         # Prune skip log entries older than 7 days
         conn.execute("DELETE FROM polymarket_skip_log WHERE timestamp < datetime('now', '-7 days')")
@@ -761,17 +772,22 @@ class StrategyAExecutor:
         tokens = bet_amount / token_cost if token_cost > 0 else 0
         slug = market.get("slug", "")
 
+        # Get window start price for correct resolution later
+        window_start_price = self._get_window_start_price(slug, inst) if slug else 0.0
+        if window_start_price <= 0:
+            window_start_price = asset_price  # fallback to current price
+
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
             INSERT INTO polymarket_bets
             (slug, asset, entry_side, entry_token_cost, entry_amount, entry_tokens,
              entry_confidence, adds, total_invested, total_tokens, avg_cost,
-             status, regime, entry_asset_price, question)
-            VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'OPEN', ?, ?, ?)
+             status, regime, entry_asset_price, window_start_price, question)
+            VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'OPEN', ?, ?, ?, ?)
         """, (
             slug, inst.asset, entry_side, token_cost, bet_amount, tokens,
             ml_confidence, bet_amount, tokens, token_cost,
-            regime, asset_price, market.get("question", ""),
+            regime, asset_price, window_start_price, market.get("question", ""),
         ))
         bet_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
@@ -1064,9 +1080,14 @@ class StrategyAExecutor:
                     inst = self._find_instrument(bet["asset"])
                     if inst:
                         current_asset_price = current_prices.get(inst.price_pair, 0)
-                        entry_asset_price = bet["entry_asset_price"] or 0
-                        if current_asset_price > 0 and entry_asset_price > 0:
-                            went_up = current_asset_price > entry_asset_price
+                        # Use window-start price (from slug timestamp), NOT bet entry price
+                        window_start_price = bet["window_start_price"] if "window_start_price" in bet.keys() else 0
+                        window_start_price = window_start_price or 0
+                        if window_start_price <= 0:
+                            # Fallback: extract from slug and look up bar price
+                            window_start_price = self._get_window_start_price(bet["slug"], inst)
+                        if current_asset_price > 0 and window_start_price > 0:
+                            went_up = current_asset_price > window_start_price
                             yes_price = 1.0 if went_up else 0.0
                             no_price = 1.0 - yes_price
                             self._resolve_bet(conn, bet, yes_price, no_price, "price_fallback", current_prices)
@@ -1267,6 +1288,37 @@ class StrategyAExecutor:
 
         conn.commit()
         conn.close()
+
+    # -- Window Start Price Lookup --
+
+    def _get_window_start_price(self, slug: str, inst: InstrumentConfig) -> float:
+        """Extract window-start price from slug timestamp by looking up the bar table.
+
+        The slug format is e.g. 'btc-updown-15m-1709312400' where the last segment
+        is a unix timestamp for the window open. We look up the closest 5-min bar
+        close price at or just before that timestamp to get the reference price
+        that the market resolves against.
+        """
+        try:
+            slug_parts = slug.rsplit("-", 1)
+            if len(slug_parts) != 2 or not slug_parts[1].isdigit():
+                return 0.0
+            window_ts = int(slug_parts[1])
+            # Convert pair format: "BTC-USD" -> "BTCUSDT" for bar table lookup
+            pair = inst.price_pair.replace("-", "").replace("USD", "USDT")
+            # Look up the closest bar at or just before window start
+            conn = sqlite3.connect(self.db_path)
+            row = conn.execute("""
+                SELECT close FROM five_minute_bars
+                WHERE pair = ? AND bar_start <= ?
+                ORDER BY bar_start DESC LIMIT 1
+            """, (pair, float(window_ts))).fetchone()
+            conn.close()
+            if row:
+                return float(row[0])
+        except Exception as e:
+            self.logger.warning(f"Failed to get window start price for {slug}: {e}")
+        return 0.0
 
     # -- Market Discovery --
 

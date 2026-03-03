@@ -1468,7 +1468,7 @@ class RenaissanceTradingBot:
                         return 0
 
                     # Insert into five_minute_bars (deduplicate via INSERT OR IGNORE)
-                    conn = _sqlite3.connect(db_path)
+                    conn = _sqlite3.connect(db_path, timeout=30.0)
                     inserted = 0
                     for c in candles:
                         try:
@@ -1572,7 +1572,7 @@ class RenaissanceTradingBot:
                             if not candles:
                                 continue
 
-                            conn = _sqlite3.connect(db_path)
+                            conn = _sqlite3.connect(db_path, timeout=30.0)
                             for c in candles:
                                 try:
                                     bar_start = c['timestamp']
@@ -3278,6 +3278,11 @@ class RenaissanceTradingBot:
                 'reasons': sizing_result.reasons,
             }
 
+        # Final safety: never trade with zero or negative confidence
+        if action != 'HOLD' and confidence <= 0:
+            self.logger.warning(f"ZERO-CONF GUARD: {product_id} {action} blocked (confidence={confidence})")
+            action = 'HOLD'
+
         decision = TradingDecision(
             action=action,
             confidence=confidence,
@@ -3795,6 +3800,14 @@ class RenaissanceTradingBot:
                         ok, _ = self.position_manager.close_position(pos.position_id, reason="Circuit breaker: 15% drawdown")
                         if ok:
                             _cpx = getattr(pos, 'current_price', 0.0) or 0.0
+                            # If position lacks current_price, fetch from latest market data
+                            if _cpx <= 0:
+                                _pair_id = pos.position_id.rsplit('_', 2)[0] if '_' in pos.position_id else pos.position_id
+                                _cpx = self._last_prices.get(_pair_id, 0.0) if hasattr(self, '_last_prices') else 0.0
+                            if _cpx <= 0:
+                                # Last resort: use entry price (better than 0)
+                                _cpx = pos.entry_price
+                                self.logger.warning(f"CIRCUIT BREAKER CLOSE: No current price for {pos.position_id}, using entry price")
                             _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
                             _rpnl = self._compute_realized_pnl(
                                 pos.entry_price, _cpx, pos.size, _side
@@ -3844,6 +3857,14 @@ class RenaissanceTradingBot:
                             )
                             if ok:
                                 _cpx = getattr(worst_pos, 'current_price', 0.0) or 0.0
+                                # If position lacks current_price, fetch from latest market data
+                                if _cpx <= 0:
+                                    _pair_id = worst_pos.position_id.rsplit('_', 2)[0] if '_' in worst_pos.position_id else worst_pos.position_id
+                                    _cpx = self._last_prices.get(_pair_id, 0.0) if hasattr(self, '_last_prices') else 0.0
+                                if _cpx <= 0:
+                                    # Last resort: use entry price (better than 0)
+                                    _cpx = worst_pos.entry_price
+                                    self.logger.warning(f"EXPOSURE CLOSE: No current price for {worst_pos.position_id}, using entry price")
                                 _side = worst_pos.side.value if hasattr(worst_pos.side, 'value') else str(worst_pos.side)
                                 _rpnl = self._compute_realized_pnl(
                                     worst_pos.entry_price, _cpx, worst_pos.size, _side
@@ -4255,6 +4276,12 @@ class RenaissanceTradingBot:
                                 f"STALENESS: {product_id} last bar {_staleness_min:.0f}min old — "
                                 f"confidence decay={_staleness_decay:.2f}"
                             )
+                        # Hard cutoff: skip trading entirely if data is too stale
+                        if _staleness_min > 30:
+                            self.logger.info(
+                                f"STALE SKIP: {product_id} data is {_staleness_min:.0f}min old — skipping trade decisions"
+                            )
+                            market_data['_skip_stale'] = True
                         market_data['_staleness_minutes'] = _staleness_min
                         market_data['_staleness_decay'] = _staleness_decay
                 except Exception:
@@ -5031,6 +5058,13 @@ class RenaissanceTradingBot:
                 else:
                     signals['stat_arb'] = 0.0
 
+                # ── Hard staleness gate: skip trading for pairs with data > 30min old ──
+                if market_data.get('_skip_stale'):
+                    pair_elapsed = time.time() - pair_start_time
+                    if pair_elapsed > 10:
+                        self.logger.warning(f"SLOW PAIR: {product_id} took {pair_elapsed:.1f}s (stale skip)")
+                    continue
+
                 # 5. Make trading decision
                 ticker = market_data.get('ticker', {})
                 current_price = self._force_float(ticker.get('price', 0.0))
@@ -5156,6 +5190,17 @@ class RenaissanceTradingBot:
                 _staleness_decay = market_data.get('_staleness_decay', 1.0)
                 if _staleness_decay < 1.0 and decision.confidence > 0:
                     decision.confidence *= _staleness_decay
+                    # Post-decay safety: if confidence dropped below min_confidence, force HOLD
+                    if decision.action != 'HOLD' and decision.confidence < self.min_confidence:
+                        self.logger.warning(
+                            f"STALENESS CONF GUARD: {product_id} {decision.action} blocked — "
+                            f"confidence={decision.confidence:.4f} < min={self.min_confidence} after staleness decay={_staleness_decay:.4f}"
+                        )
+                        decision = TradingDecision(
+                            action='HOLD', confidence=decision.confidence,
+                            position_size=0.0, reasoning=decision.reasoning,
+                            timestamp=datetime.now()
+                        )
 
                 # ── Audit Logger: record decision + finalize ──
                 if _audit:
@@ -5501,6 +5546,16 @@ class RenaissanceTradingBot:
                 # Same-direction positions are blocked; reversals close existing positions
 
                 # 6. Smart Execution (Step 10)
+                # Final pre-execution confidence guard (defense-in-depth)
+                if decision.action != 'HOLD' and decision.confidence <= 0:
+                    self.logger.warning(
+                        f"PRE-EXEC GUARD: {product_id} {decision.action} blocked — confidence={decision.confidence:.4f} <= 0"
+                    )
+                    decision = TradingDecision(
+                        action='HOLD', confidence=decision.confidence,
+                        position_size=0.0, reasoning=decision.reasoning,
+                        timestamp=datetime.now()
+                    )
                 if decision.action != 'HOLD':
                     if self.config.get("market_making", {}).get("enabled", False):
                         # ⚖️ Market Making Mode (Liquidity Provider)
@@ -5942,14 +5997,26 @@ class RenaissanceTradingBot:
     #  WebSocket Feed
     # ──────────────────────────────────────────────
     async def _run_websocket_feed(self):
-        """Background WebSocket feed for real-time market data."""
+        """Background WebSocket feed for real-time market data.
+
+        Uses exponential backoff (5s -> 10s -> 20s ... capped at 300s) so
+        persistent Coinbase WebSocket failures don't flood the logs or
+        consume CPU in a tight reconnect loop.  This is a best-effort data
+        source; the bot works fine via REST polling when the WS is down.
+        """
+        backoff = 5
+        max_backoff = 300
         while not self._killed:
             try:
                 await self._ws_client.connect_websocket()
+                backoff = 5  # Reset backoff on successful connect
                 await self._ws_client.listen_for_messages(self._ws_queue)
             except Exception as e:
-                self.logger.warning(f"WebSocket reconnecting: {e}")
-                await asyncio.sleep(5)
+                self.logger.warning(
+                    f"Coinbase WebSocket error (retry in {backoff}s): {e}"
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
     # ──────────────────────────────────────────────
     #  Multi-Exchange Arbitrage Engine
@@ -6188,7 +6255,7 @@ class RenaissanceTradingBot:
                         try:
                             import sqlite3
                             cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-                            conn = sqlite3.connect(self.db_path, timeout=5.0)
+                            conn = sqlite3.connect(self.db_path, timeout=30.0)
                             row = conn.execute(
                                 "SELECT COUNT(*), COALESCE(SUM(CASE WHEN UPPER(side)='SELL' "
                                 "THEN size*price WHEN UPPER(side)='BUY' THEN -size*price ELSE 0 END), 0) "
@@ -6267,7 +6334,7 @@ class RenaissanceTradingBot:
         try:
             import sqlite3
             db_path = self.db_manager.db_path if hasattr(self.db_manager, 'db_path') else "data/renaissance_bot.db"
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, timeout=30.0)
 
             # Prune tables older than retention period
             pruned = {}
@@ -6296,6 +6363,46 @@ class RenaissanceTradingBot:
                         pruned[table] = cur.rowcount
                 except Exception as e:
                     self.logger.debug(f"Prune {table} skipped: {e}")
+
+            # ── Remove bars for pairs no longer in the active universe ──
+            # product_ids use "BTC-USD" format; bars may also be stored as "BTC/USDT".
+            # Build a set of base assets (e.g. {"BTC","ETH",...}) from the active universe
+            # and keep bars whose base asset matches any active pair.
+            if hasattr(self, 'product_ids') and self.product_ids:
+                active_bases = set()
+                for pid in self.product_ids:
+                    # "BTC-USD" → "BTC", "ETH/USDT" → "ETH"
+                    base = pid.split('-')[0].split('/')[0].upper()
+                    active_bases.add(base)
+
+                # Find distinct pairs currently stored in five_minute_bars
+                try:
+                    stored_pairs = [
+                        r[0] for r in conn.execute(
+                            "SELECT DISTINCT pair FROM five_minute_bars"
+                        ).fetchall()
+                    ]
+                    orphan_pairs = []
+                    for sp in stored_pairs:
+                        sp_base = sp.split('-')[0].split('/')[0].upper()
+                        if sp_base not in active_bases:
+                            orphan_pairs.append(sp)
+
+                    if orphan_pairs:
+                        placeholders = ','.join('?' * len(orphan_pairs))
+                        cur = conn.execute(
+                            f"DELETE FROM five_minute_bars WHERE pair IN ({placeholders})",
+                            orphan_pairs,
+                        )
+                        if cur.rowcount > 0:
+                            pruned['five_minute_bars_orphan'] = cur.rowcount
+                            self.logger.info(
+                                f"DB PRUNE: removed {cur.rowcount} bars for "
+                                f"{len(orphan_pairs)} orphan pairs no longer in "
+                                f"universe: {orphan_pairs}"
+                            )
+                except Exception as e:
+                    self.logger.debug(f"Orphan bar prune skipped: {e}")
 
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.commit()
@@ -6456,6 +6563,35 @@ class RenaissanceTradingBot:
 
         # ── Prune old data to reduce DB size and memory pressure ──
         self._prune_old_data()
+
+        # ── One-time: reset ML evaluations to use corrected 1-bar horizon method ──
+        # The old evaluation compared prediction-time vs "latest" price (variable horizon).
+        # The corrected method compares prediction-time vs 1-bar-later price (fixed 5min horizon).
+        _reset_flag_file = os.path.join(os.path.dirname(self.db_path), '.ml_eval_1bar_reset_done')
+        if not os.path.exists(_reset_flag_file):
+            try:
+                import sqlite3 as _sq
+                _conn = _sq.connect(self.db_path)
+                _reset_count = _conn.execute(
+                    "SELECT COUNT(*) FROM ml_predictions WHERE evaluated_at IS NOT NULL"
+                ).fetchone()[0]
+                if _reset_count > 0:
+                    _conn.execute("""
+                        UPDATE ml_predictions
+                        SET is_correct = NULL, actual_return_1bar = NULL,
+                            actual_direction = NULL, evaluated_at = NULL,
+                            price_at_evaluation = NULL
+                    """)
+                    _conn.commit()
+                    self.logger.info(
+                        f"ML EVAL RESET: Cleared {_reset_count} old evaluations — "
+                        f"will re-evaluate with corrected 1-bar horizon method"
+                    )
+                _conn.close()
+                with open(_reset_flag_file, 'w') as _f:
+                    _f.write('done')
+            except Exception as _e:
+                self.logger.debug(f"ML eval reset check: {_e}")
 
         # ── Module A: Set RUNNING state ──
         if self.state_manager:
