@@ -9,6 +9,7 @@ CRITICAL PRINCIPLES:
 """
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -368,11 +369,16 @@ class TriangularExecutor:
                 return symbol, self._precision_cache[symbol]
             try:
                 info = await self.client.get_symbol_info(symbol)
-                prec = (
-                    int(info.get('price_precision', 8)),
-                    int(info.get('quantity_precision', 8)),
-                )
+                raw_price = info.get('price_precision', 8)
+                raw_qty = info.get('quantity_precision', 8)
+                # Safety: convert TICK_SIZE floats (e.g. 0.0001) to decimal
+                # place counts.  MEXCClient.get_symbol_info already does this,
+                # but guard against any client that still returns raw tick sizes.
+                price_prec = self._safe_precision(raw_price)
+                qty_prec = self._safe_precision(raw_qty)
+                prec = (price_prec, qty_prec)
                 self._precision_cache[symbol] = prec
+                logger.debug(f"Precision {symbol}: raw=({raw_price},{raw_qty}) → dp=({price_prec},{qty_prec})")
                 return symbol, prec
             except Exception:
                 return symbol, (8, 8)
@@ -409,11 +415,38 @@ class TriangularExecutor:
         return books, precisions, raw_books
 
     @staticmethod
-    def _round_decimal(value: Decimal, precision: int) -> Decimal:
-        """Round a decimal to given precision."""
-        if precision <= 0:
+    def _safe_precision(raw) -> int:
+        """Convert a precision value to integer decimal places.
+
+        Handles both TICK_SIZE (float like 0.0001 → 4) and DECIMAL_PLACES
+        (int like 4 → 4).  Prevents the catastrophic int(0.0001)=0 bug.
+        """
+        if isinstance(raw, int) and raw >= 1:
+            return raw
+        t = float(raw)
+        if t >= 1:
+            return int(t)
+        if t <= 0:
+            return 8  # safe fallback
+        return max(0, -int(math.floor(math.log10(t))))
+
+    @staticmethod
+    def _round_decimal(value: Decimal, precision) -> Decimal:
+        """Round a decimal to given precision.
+
+        precision can be:
+        - int >= 1: decimal place count (normal case after _safe_precision)
+        - float < 1: tick size (safety fallback if raw tick leaked through)
+        """
+        p = float(precision)
+        if 0 < p < 1:
+            # TICK_SIZE leaked through — handle it directly
+            tick = Decimal(str(precision))
+            return (value / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+        places = int(p)
+        if places <= 0:
             return value.quantize(Decimal('1'), rounding=ROUND_DOWN)
-        quant = Decimal(10) ** -precision
+        quant = Decimal(10) ** -places
         return value.quantize(quant, rounding=ROUND_DOWN)
 
     async def _unwind(self, completed_legs: List[TriLegResult], trade_id: str) -> None:

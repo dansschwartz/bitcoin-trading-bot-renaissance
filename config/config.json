@@ -22,7 +22,7 @@
     },
     "universe": {
         "min_volume_usd": 2000000,
-        "max_pairs": 6,
+        "max_pairs": 90,
         "data_source": "binance",
         "refresh_interval_hours": 24
     },

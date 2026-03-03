@@ -13,6 +13,8 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Callable, Awaitable, Dict, List
 
+import math
+
 import aiohttp
 import ccxt.async_support as ccxt_async
 import websockets
@@ -737,16 +739,43 @@ class MEXCClient(ExchangeClient):
     async def get_trading_fees(self, symbol: str) -> dict:
         return {"maker": Decimal('0.0000'), "taker": Decimal('0.0005')}
 
+    @staticmethod
+    def _tick_size_to_decimals(tick: float) -> int:
+        """Convert a TICK_SIZE float (e.g. 0.0001) to decimal places (e.g. 4).
+
+        MEXC ccxt uses precisionMode=TICK_SIZE, so precision values are floats
+        like 0.0001 rather than integers like 4.  Calling int(0.0001) gives 0,
+        which truncates prices to whole numbers — a catastrophic rounding bug.
+
+        For values >= 1 (already decimal-place counts), returns them as-is.
+        """
+        if isinstance(tick, int) and tick >= 1:
+            return tick
+        t = float(tick)
+        if t >= 1:
+            return int(t)
+        if t <= 0:
+            return 8  # safe fallback
+        return max(0, -int(math.floor(math.log10(t))))
+
     async def get_symbol_info(self, symbol: str) -> dict:
         if symbol in self._symbol_info_cache:
             return self._symbol_info_cache[symbol]
 
         if self._exchange and self._exchange.markets and symbol in self._exchange.markets:
             market = self._exchange.markets[symbol]
+            raw_price_prec = market.get('precision', {}).get('price', 8)
+            raw_qty_prec = market.get('precision', {}).get('amount', 8)
+            price_prec = self._tick_size_to_decimals(raw_price_prec)
+            qty_prec = self._tick_size_to_decimals(raw_qty_prec)
+            logger.debug(
+                f"Symbol {symbol} precision: raw_price={raw_price_prec} → {price_prec} dp, "
+                f"raw_qty={raw_qty_prec} → {qty_prec} dp"
+            )
             info = {
                 'symbol': symbol,
-                'price_precision': market.get('precision', {}).get('price', 8),
-                'quantity_precision': market.get('precision', {}).get('amount', 8),
+                'price_precision': price_prec,
+                'quantity_precision': qty_prec,
                 'min_quantity': Decimal(str(market.get('limits', {}).get('amount', {}).get('min', 0) or 0)),
                 'min_notional': Decimal(str(market.get('limits', {}).get('cost', {}).get('min', 0) or 0)),
             }

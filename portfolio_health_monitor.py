@@ -14,6 +14,7 @@ import math
 import numpy as np
 from collections import deque
 from datetime import datetime, timezone
+import time
 from typing import Dict, Any, Optional, List
 
 
@@ -48,9 +49,14 @@ class PortfolioHealthMonitor:
         # Trade history: deque of pnl_pct values
         self._trade_returns: deque = deque(maxlen=self._long_window)
 
+        # Deadlock escape hatch config
+        self._exits_only_max_seconds = int(config.get("exits_only_max_seconds", 7200))  # 2 hours
+        self._min_trades_for_sharpe_mode = int(config.get("min_trades_for_sharpe_mode", 20))
+
         # Current state
         self._size_multiplier = 1.0
         self._exits_only = False
+        self._exits_only_since: Optional[float] = None  # timestamp when EXITS-ONLY started
         self._last_sharpe = 0.0
         self._total_trades = 0
         self._total_wins = 0
@@ -75,12 +81,24 @@ class PortfolioHealthMonitor:
         self._update_state()
 
     def _update_state(self):
-        """Recompute Sharpe and update size multiplier."""
+        """Recompute Sharpe and update size multiplier with deadlock escape hatch."""
         returns = list(self._trade_returns)
         if len(returns) < self._short_window:
             # Not enough data — stay at full size
             self._size_multiplier = 1.0
             self._exits_only = False
+            self._exits_only_since = None
+            return
+
+        # Guard: skip Sharpe-based mode changes if fewer than min trades in window
+        if len(returns) < self._min_trades_for_sharpe_mode:
+            self.logger.info(
+                f"HEALTH MONITOR: Only {len(returns)} trades in window "
+                f"(need {self._min_trades_for_sharpe_mode}) — staying at full size"
+            )
+            self._size_multiplier = 1.0
+            self._exits_only = False
+            self._exits_only_since = None
             return
 
         # Compute rolling Sharpe on medium window (or whatever we have)
@@ -91,21 +109,46 @@ class PortfolioHealthMonitor:
         old_multiplier = self._size_multiplier
         old_exits_only = self._exits_only
 
+        # Time-based escape hatch: auto-recover from EXITS-ONLY after max duration
+        if self._exits_only and self._exits_only_since is not None:
+            elapsed = time.time() - self._exits_only_since
+            if elapsed >= self._exits_only_max_seconds:
+                self.logger.warning(
+                    f"HEALTH MONITOR: EXITS-ONLY ESCAPE HATCH triggered after "
+                    f"{elapsed:.0f}s ({elapsed/3600:.1f}h) — auto-recovering to NORMAL. "
+                    f"Sharpe={sharpe:.2f}, trades_in_window={len(returns)}"
+                )
+                self._size_multiplier = 0.5  # Recover at half size, not full
+                self._exits_only = False
+                self._exits_only_since = None
+                self._last_alert_level = "caution"
+                return
+
         # Apply auto-sizing rules
         if sharpe >= self._full_size_sharpe:
             self._size_multiplier = 1.0
             self._exits_only = False
+            self._exits_only_since = None
             alert_level = "healthy"
         elif sharpe >= self._half_size_sharpe:
             self._size_multiplier = 0.5
             self._exits_only = False
+            self._exits_only_since = None
             alert_level = "caution"
         elif sharpe >= self._exits_only_sharpe:
             self._size_multiplier = 0.25
             self._exits_only = False
+            self._exits_only_since = None
             alert_level = "warning"
         else:
             self._size_multiplier = 0.0
+            if not old_exits_only:
+                # Just entered EXITS-ONLY — record the timestamp
+                self._exits_only_since = time.time()
+                self.logger.warning(
+                    f"HEALTH MONITOR: Entering EXITS-ONLY mode at {datetime.now(timezone.utc).isoformat()}. "
+                    f"Escape hatch will trigger after {self._exits_only_max_seconds}s ({self._exits_only_max_seconds/3600:.1f}h)"
+                )
             self._exits_only = True
             alert_level = "critical"
 
@@ -158,6 +201,11 @@ class PortfolioHealthMonitor:
             "win_rate": self._total_wins / max(self._total_trades, 1),
             "size_multiplier": self._size_multiplier,
             "exits_only": self._exits_only,
+            "exits_only_since": self._exits_only_since,
+            "exits_only_remaining_s": (
+                max(0, self._exits_only_max_seconds - (time.time() - self._exits_only_since))
+                if self._exits_only and self._exits_only_since else None
+            ),
             "alert_level": self._last_alert_level,
         }
 
