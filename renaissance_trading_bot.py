@@ -1987,6 +1987,81 @@ class RenaissanceTradingBot:
         except Exception as e:
             self.logger.error(f"ML accuracy summary failed: {e}")
 
+    async def _log_kelly_calibration(self) -> None:
+        """Council S3: Log Kelly calibration — compare estimated vs actual win rates.
+
+        Called every 500 cycles (~8 hours at 60s interval).
+        Buckets closed positions by confidence and checks if estimated win probability
+        matches actual win rate. Results are stored in kelly_calibration_log table.
+        """
+        try:
+            with self.db_manager._get_connection() as conn:
+                cursor = conn.cursor()
+                # Get closed positions with confidence and outcome
+                cursor.execute('''
+                    SELECT d.confidence, op.realized_pnl
+                    FROM open_positions op
+                    JOIN decisions d ON d.product_id = op.product_id
+                        AND d.timestamp >= op.opened_at
+                        AND d.action != 'HOLD'
+                    WHERE op.status = 'CLOSED'
+                      AND op.realized_pnl IS NOT NULL
+                      AND d.confidence > 0
+                    ORDER BY op.closed_at DESC
+                    LIMIT 2000
+                ''')
+                rows = cursor.fetchall()
+                if len(rows) < 20:
+                    self.logger.info(f"KELLY CALIBRATION: Only {len(rows)} closed trades — need 20+")
+                    return
+
+                # Bucket by confidence
+                buckets = {}
+                for conf, pnl in rows:
+                    if conf <= 0.50:
+                        bucket = '0.00-0.50'
+                    elif conf <= 0.55:
+                        bucket = '0.50-0.55'
+                    elif conf <= 0.60:
+                        bucket = '0.55-0.60'
+                    elif conf <= 0.65:
+                        bucket = '0.60-0.65'
+                    elif conf <= 0.70:
+                        bucket = '0.65-0.70'
+                    else:
+                        bucket = '0.70-1.00'
+
+                    if bucket not in buckets:
+                        buckets[bucket] = {'wins': 0, 'total': 0, 'conf_sum': 0.0}
+                    buckets[bucket]['total'] += 1
+                    buckets[bucket]['conf_sum'] += conf
+                    if pnl > 0:
+                        buckets[bucket]['wins'] += 1
+
+                ts = datetime.now(timezone.utc).isoformat()
+                for bucket, data in sorted(buckets.items()):
+                    actual_wr = data['wins'] / max(data['total'], 1)
+                    avg_conf = data['conf_sum'] / max(data['total'], 1)
+                    # Estimated win prob from the Kelly formula: 0.48 + conf * 0.10, shrunk
+                    est_raw = 0.48 + avg_conf * 0.10
+                    est_wp = 0.5 + (min(est_raw, 0.65) - 0.5) * 0.55
+
+                    cursor.execute('''
+                        INSERT INTO kelly_calibration_log
+                        (timestamp, confidence_bucket, estimated_win_prob, actual_win_rate,
+                         sample_size, kelly_fraction, avg_position_size_pct)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (ts, bucket, round(est_wp, 4), round(actual_wr, 4),
+                          data['total'], None, None))
+
+                    self.logger.info(
+                        f"KELLY CALIBRATION: bucket={bucket} est={est_wp*100:.1f}% "
+                        f"actual={actual_wr*100:.1f}% (n={data['total']})"
+                    )
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Kelly calibration logging failed: {e}")
+
     async def _check_pipeline_health(self) -> None:
         """Council S2 P1: Watchdog — check pipeline_heartbeat for stale components.
 
@@ -3262,7 +3337,20 @@ class RenaissanceTradingBot:
                     half_spread_bps = ((_ask - _bid) / ((_ask + _bid) / 2)) * 10000 / 2.0
                 else:
                     half_spread_bps = 0.5  # floor
-                adverse_bps = float(self.config.get('paper_trading', {}).get('adverse_selection_bps', 1.0))
+                # Council S3: Volume-dependent adverse selection
+                # Large-cap (>$50M daily volume): 0.5bps, small-cap: 1.5bps
+                _default_adv_bps = float(self.config.get('paper_trading', {}).get('adverse_selection_bps', 1.0))
+                try:
+                    _vol_24h = self._force_float(ticker.get('volume_24h') or ticker.get('volume', 0))
+                    _daily_vol_usd = _vol_24h * current_price if _vol_24h > 0 else 0
+                    if _daily_vol_usd > 50_000_000:
+                        adverse_bps = 0.5  # Large-cap: tight adverse selection
+                    elif _daily_vol_usd > 0:
+                        adverse_bps = 1.5  # Small-cap: wider adverse selection
+                    else:
+                        adverse_bps = _default_adv_bps
+                except Exception:
+                    adverse_bps = _default_adv_bps
                 floor_bps = float(self.config.get('paper_trading', {}).get('slippage_floor_bps', 0.5))
                 _slippage_bps = max(half_spread_bps + adverse_bps, floor_bps)
                 slippage_frac = _slippage_bps / 10000.0
@@ -4130,6 +4218,27 @@ class RenaissanceTradingBot:
                             self.logger.warning(f"SLOW PAIR: {product_id} took {pair_elapsed:.1f}s (warmup)")
                         continue
 
+                # ── Council S3: Feature Staleness Circuit Breaker ──
+                # Decay confidence based on how old the pair's newest bar is
+                _staleness_decay = 1.0
+                try:
+                    _tech = self._get_tech(product_id)
+                    if _tech.price_history and hasattr(_tech.price_history[-1], 'timestamp'):
+                        _last_bar_ts = _tech.price_history[-1].timestamp
+                        _staleness_sec = (datetime.now() - _last_bar_ts).total_seconds()
+                        _staleness_min = _staleness_sec / 60.0
+                        if _staleness_min > 10:
+                            import math as _math
+                            _staleness_decay = _math.exp(-_staleness_min / 30.0)  # tau=30min
+                            self.logger.warning(
+                                f"STALENESS: {product_id} last bar {_staleness_min:.0f}min old — "
+                                f"confidence decay={_staleness_decay:.2f}"
+                            )
+                        market_data['_staleness_minutes'] = _staleness_min
+                        market_data['_staleness_decay'] = _staleness_decay
+                except Exception:
+                    pass
+
                 # ── Signal Scorecard: evaluate last cycle's predictions ──
                 if product_id in self._pending_predictions and current_price > 0:
                     pred = self._pending_predictions[product_id]
@@ -4924,7 +5033,7 @@ class RenaissanceTradingBot:
                     if len(self._pair_spread_history[product_id]) >= 10:
                         avg_spread = sum(self._pair_spread_history[product_id]) / len(self._pair_spread_history[product_id])
                         if avg_spread > self._max_spread_bps:
-                            self.logger.debug(
+                            self.logger.info(
                                 f"SPREAD FILTER: {product_id} avg_spread={avg_spread:.1f}bps > {self._max_spread_bps}bps — skipping"
                             )
                             continue
@@ -4996,6 +5105,11 @@ class RenaissanceTradingBot:
                                                     market_data=market_data,
                                                     drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
                                                     audit_logger=_audit)
+
+                # Council S3: Apply staleness decay to confidence
+                _staleness_decay = market_data.get('_staleness_decay', 1.0)
+                if _staleness_decay < 1.0 and decision.confidence > 0:
+                    decision.confidence *= _staleness_decay
 
                 # ── Audit Logger: record decision + finalize ──
                 if _audit:
@@ -5516,6 +5630,10 @@ class RenaissanceTradingBot:
                 self._prune_old_data()
                 # Council S2 P3: Log ML accuracy summary every 100 cycles
                 self._track_task(self._log_ml_accuracy_summary())
+
+            # Council S3: Kelly calibration check every 500 cycles (~8 hours)
+            if self.scan_cycle_count % 500 == 0 and self.scan_cycle_count > 0:
+                self._track_task(self._log_kelly_calibration())
 
             # Random baseline position management
             if hasattr(self, 'random_baseline'):

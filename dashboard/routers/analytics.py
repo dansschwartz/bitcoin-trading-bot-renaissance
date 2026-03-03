@@ -80,3 +80,9 @@ async def model_accuracy(request: Request, hours: int = 24):
 async def pipeline_health(request: Request):
     db = request.app.state.dashboard_config.db_path
     return db_queries.get_pipeline_health(db)
+
+
+@router.get("/kelly-calibration")
+async def kelly_calibration(request: Request):
+    db = request.app.state.dashboard_config.db_path
+    return db_queries.get_kelly_calibration(db)

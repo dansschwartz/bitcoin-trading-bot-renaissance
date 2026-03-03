@@ -459,6 +459,7 @@ class RenaissancePositionSizer:
             base_win_prob = 0.6 * base_win_prob + 0.4 * (0.48 + ml_conf * 0.10)
 
         win_prob = float(np.clip(base_win_prob, 0.0, 0.65))
+        win_prob = 0.5 + (win_prob - 0.5) * 0.55  # Council S3: Bayesian shrinkage toward 50%
 
         # Payoff ratio: crypto is near-symmetric, slight edge from timing
         # Strong signal → slightly better entries → payoff ~1.05-1.15x

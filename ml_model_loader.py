@@ -148,7 +148,7 @@ class PredictionDebiaser:
         self.alpha = alpha
         self._ema: Dict[str, float] = {}  # model_name -> running EMA
         self._count: Dict[str, int] = {}  # model_name -> sample count
-        self._warmup = 50  # Don't debias until we have this many samples
+        self._warmup = 200  # Council S3: 200 for stable bias estimate (was 50)
 
     def debias(self, model_name: str, raw_prediction: float) -> float:
         """Apply debiasing to a raw prediction. Returns debiased value."""
@@ -184,8 +184,54 @@ class PredictionDebiaser:
         }
 
 
-# Module-level singleton — shared across all predict_with_models calls
+# ── Per-Model Z-Score Normalization ──────────────────────────────────────────
+
+class ModelPredictionNormalizer:
+    """Running z-score normalization to equalize model output scales.
+
+    Models output on very different scales (LightGBM avg|pred|=0.168 vs DL 0.004-0.063).
+    This normalizer applies EMA-based z-score normalization so all models contribute
+    equally to the ensemble regardless of their raw output magnitude.
+    Council S3 proposal #5.
+    """
+
+    def __init__(self, alpha: float = 0.05, min_samples: int = 200):
+        self.alpha = alpha
+        self.min_samples = min_samples
+        self.stats: Dict[str, Dict[str, float]] = {}  # model_name -> {mean, var, count}
+
+    def normalize(self, model_name: str, prediction: float) -> float:
+        """Apply running z-score normalization to a prediction."""
+        if model_name not in self.stats:
+            self.stats[model_name] = {'mean': 0.0, 'var': 1.0, 'count': 0}
+
+        s = self.stats[model_name]
+        s['count'] += 1
+        s['mean'] += self.alpha * (prediction - s['mean'])
+        s['var'] += self.alpha * ((prediction - s['mean']) ** 2 - s['var'])
+
+        if s['count'] < self.min_samples:
+            return prediction  # Passthrough during warmup
+
+        std = max(s['var'] ** 0.5, 1e-8)
+        return (prediction - s['mean']) / std
+
+    def get_stats(self) -> Dict[str, Dict[str, float]]:
+        """Return all model normalization stats for dashboard."""
+        return {
+            name: {
+                'mean': round(s['mean'], 6),
+                'std': round(max(s['var'] ** 0.5, 1e-8), 6),
+                'samples': int(s['count']),
+                'warmed_up': s['count'] >= self.min_samples,
+            }
+            for name, s in self.stats.items()
+        }
+
+
+# Module-level singletons — shared across all predict_with_models calls
 _debiaser = PredictionDebiaser(alpha=0.01)
+_normalizer = ModelPredictionNormalizer(alpha=0.05, min_samples=200)
 
 
 # ── Attention (matching trained weights) ──────────────────────────────────────
@@ -1473,6 +1519,7 @@ def predict_with_models(
                     pred = output
                 pred_val = float(pred[0, 0])  # Already tanh-bounded by model output layer
                 pred_val = _debiaser.debias(name, pred_val)  # Remove systematic bias
+                pred_val = _normalizer.normalize(name, pred_val)  # Council S3: z-score normalization
                 predictions[name] = pred_val
                 confidences[name] = min(abs(pred_val) + 0.5, 0.95)
         except Exception as e:
@@ -1490,6 +1537,7 @@ def predict_with_models(
             models['lightgbm'], features, price_series
         )
         lgbm_pred = _debiaser.debias('lightgbm', lgbm_pred)  # Remove systematic bias
+        lgbm_pred = _normalizer.normalize('lightgbm', lgbm_pred)  # Council S3: z-score normalization
         predictions['lightgbm'] = lgbm_pred
         confidences['lightgbm'] = lgbm_conf
 
@@ -1524,7 +1572,8 @@ def predict_with_models(
                 meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, meta_dim + n_models)
                 pred, conf = meta_model(meta_input)
                 meta_pred_val = _debiaser.debias('meta_ensemble', float(pred[0, 0]))
-                predictions['meta_ensemble'] = meta_pred_val  # Debiased
+                meta_pred_val = _normalizer.normalize('meta_ensemble', meta_pred_val)  # Council S3: z-score
+                predictions['meta_ensemble'] = meta_pred_val  # Debiased + normalized
                 confidences['meta_ensemble'] = float(conf[0, 0])
         except Exception as e:
             logger.warning(f"Inference failed for meta_ensemble: {e}")

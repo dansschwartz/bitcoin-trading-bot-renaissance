@@ -275,6 +275,19 @@ class DatabaseManager:
                 UNIQUE(component)
             )''')
 
+            # ── Kelly Calibration Log: tracks estimated vs actual win rates by confidence bucket ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS kelly_calibration_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                confidence_bucket TEXT NOT NULL,
+                estimated_win_prob REAL,
+                actual_win_rate REAL,
+                sample_size INTEGER,
+                kelly_fraction REAL,
+                avg_position_size_pct REAL
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_kelly_cal_ts ON kelly_calibration_log(timestamp DESC)')
+
             # Add outcome columns to ml_predictions (backward-compatible migration)
             for col_def in [
                 "price_at_prediction REAL",

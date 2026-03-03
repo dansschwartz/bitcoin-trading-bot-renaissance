@@ -1385,6 +1385,22 @@ def get_pipeline_health(db_path: str) -> Dict[str, Any]:
         return _sanitize_floats({"components": components})
 
 
+def get_kelly_calibration(db_path: str) -> Dict[str, Any]:
+    """Return Kelly calibration log — estimated vs actual win rates by confidence bucket."""
+    with _conn(db_path) as c:
+        try:
+            rows = c.execute('''
+                SELECT timestamp, confidence_bucket, estimated_win_prob,
+                       actual_win_rate, sample_size
+                FROM kelly_calibration_log
+                ORDER BY id DESC
+                LIMIT 200
+            ''').fetchall()
+        except Exception:
+            return {"buckets": [], "error": "kelly_calibration_log table not found"}
+        return _sanitize_floats({"buckets": _rows_to_dicts(rows)})
+
+
 def get_audit_recent(db_path: str, limit: int = 50) -> List[Dict[str, Any]]:
     """Return most recent audit rows as flat dicts."""
     with _conn(db_path) as c:
