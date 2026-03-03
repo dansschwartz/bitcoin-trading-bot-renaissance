@@ -94,8 +94,8 @@ class StrategyAExecutor:
     ADD_CONFIDENCE = 52.0             # Same as entry threshold
     MAX_POSITION_PER_MARKET = 150.0   # dollar cap
     STOP_LOSS_PCT = None              # disabled — direction_flip handles exits; binary options resolve in 15min
-    MAX_BETS_PER_HOUR = 6
-    COOLDOWN_AFTER_LOSS = 300         # 5 min in seconds
+    MAX_BETS_PER_HOUR = 16            # 8 instruments × ~2 bets/hr each
+    COOLDOWN_AFTER_LOSS = 120         # 2 min (was 5min — too long for 5min markets)
     MIN_BET = 5.0                     # Floor for Kelly sizing
     MAX_BET_PCT = 0.05                # Ceiling: 5% of bankroll per bet (was 15%, reduced after 72% drawdown on 2026-03-02)
     MIN_BANKROLL_TO_TRADE = 200.0     # Stop betting below this bankroll level
@@ -429,13 +429,15 @@ class StrategyAExecutor:
                 "FROM polymarket_bets WHERE status = 'OPEN' GROUP BY asset"
             ).fetchall()
 
-            existing_exposure = sum(r[1] for r in rows)
+            n_assets = len(rows)
 
-            # Allow first bet — when no positions are open, concentration
-            # check is meaningless (1/1 = 100% but that's expected).
-            if existing_exposure == 0:
+            # With fewer than 3 distinct assets open, concentration check
+            # is counterproductive — it blocks diversification by preventing
+            # new assets from entering. Only enforce once portfolio is built up.
+            if n_assets < 3:
                 return True
 
+            existing_exposure = sum(r[1] for r in rows)
             total_exposure = existing_exposure + bet_amount
             asset_exposure = sum(r[1] for r in rows if r[0] == asset) + bet_amount
 
