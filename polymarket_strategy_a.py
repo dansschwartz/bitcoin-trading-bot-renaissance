@@ -409,7 +409,14 @@ class StrategyAExecutor:
                 "FROM polymarket_bets WHERE status = 'OPEN' GROUP BY asset"
             ).fetchall()
 
-            total_exposure = sum(r[1] for r in rows) + bet_amount
+            existing_exposure = sum(r[1] for r in rows)
+
+            # Allow first bet — when no positions are open, concentration
+            # check is meaningless (1/1 = 100% but that's expected).
+            if existing_exposure == 0:
+                return True
+
+            total_exposure = existing_exposure + bet_amount
             asset_exposure = sum(r[1] for r in rows if r[0] == asset) + bet_amount
 
             if total_exposure > 0 and (asset_exposure / total_exposure) > self.MAX_ASSET_CONCENTRATION:

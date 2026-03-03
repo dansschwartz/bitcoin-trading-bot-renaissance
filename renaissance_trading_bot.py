@@ -4905,18 +4905,43 @@ class RenaissanceTradingBot:
                         # Build per-horizon entries for Strategy A routing
                         _crash_prob_2 = (float(_crash_2bar) + 1.0) / 2.0
                         _dir_conf_2 = max(_crash_prob_2, 1.0 - _crash_prob_2)
+                        # Use model's known test accuracy as confidence floor —
+                        # individual LightGBM predictions cluster near 0.5 but
+                        # model accuracy (e.g. 53.3%) is the validated edge.
+                        _model_acc_2 = 0.50
+                        try:
+                            _rtp2 = self.real_time_pipeline.processor
+                            if hasattr(_rtp2, '_crash_loader') and _rtp2._crash_loader:
+                                _pm_a2 = product_id.split('-')[0] if '-' in product_id else 'BTC'
+                                _key2 = (_pm_a2.upper(), '2bar')
+                                _entry2 = _rtp2._crash_loader._models.get(_key2)
+                                if _entry2:
+                                    _model_acc_2 = _entry2.accuracy
+                        except Exception:
+                            pass
+                        _conf_2 = max(_dir_conf_2, _model_acc_2) * 100.0
                         _entry = {
                             "prediction": float(_crash_2bar),
                             "agreement": abs(_crash_prob_2 - 0.5) * 2.0,
-                            "confidence": _dir_conf_2 * 100.0,
+                            "confidence": _conf_2,
                             "source": "crash_lgbm_2bar",
                         }
                         # Add 1bar prediction if available
                         if _crash_1bar is not None:
                             _crash_prob_1 = (float(_crash_1bar) + 1.0) / 2.0
                             _dir_conf_1 = max(_crash_prob_1, 1.0 - _crash_prob_1)
+                            _model_acc_1 = 0.50
+                            try:
+                                if hasattr(_rtp2, '_crash_loader') and _rtp2._crash_loader:
+                                    _key1 = (_pm_a2.upper(), '1bar')
+                                    _entry1 = _rtp2._crash_loader._models.get(_key1)
+                                    if _entry1:
+                                        _model_acc_1 = _entry1.accuracy
+                            except Exception:
+                                pass
+                            _conf_1 = max(_dir_conf_1, _model_acc_1) * 100.0
                             _entry["prediction_1bar"] = float(_crash_1bar)
-                            _entry["confidence_1bar"] = _dir_conf_1 * 100.0
+                            _entry["confidence_1bar"] = _conf_1
 
                         self._sa_ml_cache[product_id] = _entry
                     elif ml_package and hasattr(ml_package, 'ensemble_score'):
