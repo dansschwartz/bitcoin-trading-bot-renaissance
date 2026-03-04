@@ -78,7 +78,12 @@ class KuCoinClient(ExchangeClient):
     # ── Lifecycle ─────────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """Initialize ccxt KuCoin exchange and load markets."""
+        """Initialize KuCoin exchange — lightweight, skips load_markets().
+
+        Uses direct REST (aiohttp) for order books and tickers.
+        Keeps a minimal ccxt instance for fetch_currencies (contract verifier)
+        without loading all 1141 market definitions into memory.
+        """
         config = {
             'enableRateLimit': True,
             'options': {
@@ -91,18 +96,29 @@ class KuCoinClient(ExchangeClient):
             config['password'] = self._passphrase  # ccxt uses 'password' for passphrase
 
         self._exchange = ccxt_async.kucoin(config)
-
-        try:
-            await self._exchange.load_markets()
-            logger.info(f"KuCoin connected — {len(self._exchange.markets)} markets loaded")
-        except Exception as e:
-            logger.warning(f"KuCoin market load failed (read-only mode): {e}")
+        # Skip load_markets() — saves ~200MB RAM and 30s CPU on VPS
+        # We use direct REST for order books, tickers, and symbol info
 
         # Shared aiohttp session for direct REST calls
         self._http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=20),
+            timeout=aiohttp.ClientTimeout(total=15),
             headers=_HTTP_HEADERS,
         )
+
+        # Quick connectivity check
+        try:
+            url = "https://api.kucoin.com/api/v1/market/orderbook/level2_20?symbol=BTC-USDT"
+            async with self._http_session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("code") == "200000":
+                        logger.info("KuCoin connected — REST API OK (lightweight mode, no market load)")
+                    else:
+                        logger.warning(f"KuCoin API returned code {data.get('code')}")
+                else:
+                    logger.warning(f"KuCoin connectivity check HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"KuCoin connectivity check failed: {e}")
 
     async def disconnect(self) -> None:
         """Disconnect WebSocket and close ccxt/HTTP sessions."""
@@ -412,11 +428,27 @@ class KuCoinClient(ExchangeClient):
         return {}
 
     async def get_all_tickers(self) -> Dict[str, dict]:
-        """Get tickers for all trading pairs."""
+        """Get tickers for all trading pairs via direct REST."""
         try:
-            if self._exchange:
-                tickers = await self._exchange.fetch_tickers()
-                return tickers
+            if self._http_session:
+                url = "https://api.kucoin.com/api/v1/market/allTickers"
+                async with self._http_session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("code") == "200000":
+                            tickers = {}
+                            for t in data.get("data", {}).get("ticker", []):
+                                kc_sym = t.get("symbol", "")
+                                norm_sym = self._from_kucoin_symbol(kc_sym)
+                                tickers[norm_sym] = {
+                                    "symbol": norm_sym,
+                                    "last": float(t.get("last", 0)),
+                                    "bid": float(t.get("buy", 0)),
+                                    "ask": float(t.get("sell", 0)),
+                                    "volume": float(t.get("vol", 0)),
+                                    "quoteVolume": float(t.get("volValue", 0)),
+                                }
+                            return tickers
         except Exception as e:
             logger.debug(f"KuCoin all tickers fetch failed: {e}")
         return {}
@@ -593,25 +625,31 @@ class KuCoinClient(ExchangeClient):
         }
 
     async def get_symbol_info(self, symbol: str) -> dict:
-        """Get symbol precision info (cached)."""
+        """Get symbol precision info via REST API (cached)."""
         if symbol in self._symbol_info_cache:
             return self._symbol_info_cache[symbol]
 
         info = {"price_precision": 8, "quantity_precision": 8}
 
         try:
-            if self._exchange and symbol in self._exchange.markets:
-                market = self._exchange.markets[symbol]
-                precision = market.get('precision', {})
-
-                # KuCoin ccxt uses 'amount' for quantity precision
-                price_prec = precision.get('price', 8)
-                qty_prec = precision.get('amount', 8)
-
-                info = {
-                    "price_precision": price_prec,
-                    "quantity_precision": qty_prec,
-                }
+            kc_symbol = self._to_kucoin_symbol(symbol)
+            if self._http_session:
+                url = f"https://api.kucoin.com/api/v2/symbols/{kc_symbol}"
+                async with self._http_session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("code") == "200000":
+                            sym_data = data.get("data", {})
+                            # KuCoin returns priceIncrement/baseIncrement as strings
+                            price_inc = sym_data.get("priceIncrement", "0.00000001")
+                            base_inc = sym_data.get("baseIncrement", "0.00000001")
+                            # Count decimal places
+                            price_prec = len(price_inc.rstrip('0').split('.')[-1]) if '.' in price_inc else 0
+                            qty_prec = len(base_inc.rstrip('0').split('.')[-1]) if '.' in base_inc else 0
+                            info = {
+                                "price_precision": price_prec,
+                                "quantity_precision": qty_prec,
+                            }
         except Exception as e:
             logger.debug(f"KuCoin symbol info failed for {symbol}: {e}")
 
