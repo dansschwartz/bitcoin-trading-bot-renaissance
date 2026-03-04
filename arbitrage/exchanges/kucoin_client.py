@@ -610,6 +610,9 @@ class KuCoinClient(ExchangeClient):
 
     async def get_balance(self, currency: str) -> Balance:
         """Get balance for a specific currency."""
+        if self.paper_trading:
+            # Paper trading: return generous balance for ANY token
+            return Balance("kucoin", currency, Decimal('1000000'), Decimal('0'), Decimal('1000000'))
         balances = await self.get_balances()
         if currency in balances:
             return balances[currency]
