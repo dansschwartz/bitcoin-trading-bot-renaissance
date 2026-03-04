@@ -90,7 +90,7 @@ class ArbitrageCostModel:
         buy_slippage = self._estimate_slippage(symbol, buy_exchange, quantity)
         sell_slippage = self._estimate_slippage(symbol, sell_exchange, quantity)
 
-        timing_cost = Decimal('0.5')  # Conservative 0.5 bps
+        timing_cost = Decimal('0.1')  # Sequential maker-first execution is fast
 
         # Maker-maker (default — our preferred mode)
         total_mm = (
@@ -141,13 +141,16 @@ class ArbitrageCostModel:
             avg = sum(recent) / len(recent)
             return avg * Decimal('1.2')  # 20% safety margin
 
-        # Default conservative estimates
+        # Default estimates — MEXC uses LIMIT_MAKER (zero slippage by definition,
+        # fills at exact price or cancels). Binance/KuCoin use LIMIT+IOC (taker,
+        # small slippage from book depth). These are overridden once we have
+        # 10+ execution samples via the learning mechanism above.
         base_slippage = {
-            "mexc": Decimal('1.5'),
+            "mexc": Decimal('0.0'),    # LIMIT_MAKER: zero slippage
             "binance": Decimal('0.5'),
-            "kucoin": Decimal('1.0'),  # Between mexc (1.5) and binance (0.5)
+            "kucoin": Decimal('0.5'),
         }
-        return base_slippage.get(exchange, Decimal('2.0'))
+        return base_slippage.get(exchange, Decimal('1.0'))
 
     def update_from_execution(self, trade_result: dict):
         """After every trade, compare estimated vs realized cost. LEARN."""

@@ -547,17 +547,40 @@ class BinanceClient(ExchangeClient):
     def _paper_fill(self, order: OrderRequest) -> OrderResult:
         """Simulate a fill with realistic Binance fee model.
 
+        Fee rules (Binance spot VIP0):
+          MARKET      → taker (0.075% with BNB, 0.10% without)
+          LIMIT_MAKER → maker (0.075% with BNB, 0.10% without)
+          LIMIT       → taker if price crosses spread, maker otherwise
+                        LIMIT+IOC always crosses (immediate execution)
+
         Fee denomination matches received currency:
           BUY  → fee in base  (qty * rate)
           SELL → fee in quote (qty * price * rate)
         """
         book = self._last_books.get(order.symbol)
+        MAKER_FEE = Decimal('0.00075') if self.bnb_fee_discount else Decimal('0.001')
+        TAKER_FEE = Decimal('0.00075') if self.bnb_fee_discount else Decimal('0.001')
+
         if order.order_type == OrderType.MARKET:
             fill_price = (book.best_ask if order.side == OrderSide.BUY else book.best_bid) if book else order.price
-            fee_rate = Decimal('0.00075') if self.bnb_fee_discount else Decimal('0.001')   # taker
-        else:
+            fee_rate = TAKER_FEE
+        elif order.order_type == OrderType.LIMIT_MAKER:
             fill_price = order.price
-            fee_rate = Decimal('0.0001') if self.bnb_fee_discount else Decimal('0.0002')   # maker
+            fee_rate = MAKER_FEE
+        else:
+            # LIMIT: check if it crosses the spread (IOC always crosses)
+            fill_price = order.price
+            crosses_spread = False
+            if order.time_in_force == TimeInForce.IOC:
+                crosses_spread = True  # IOC = immediate fill = taker
+            elif book and fill_price:
+                if order.side == OrderSide.BUY and book.best_ask and fill_price >= book.best_ask:
+                    crosses_spread = True
+                elif order.side == OrderSide.SELL and book.best_bid and fill_price <= book.best_bid:
+                    crosses_spread = True
+            elif fill_price:
+                crosses_spread = True  # No book data — assume taker
+            fee_rate = TAKER_FEE if crosses_spread else MAKER_FEE
 
         if order.side == OrderSide.BUY:
             fee = order.quantity * fee_rate                                    # base units

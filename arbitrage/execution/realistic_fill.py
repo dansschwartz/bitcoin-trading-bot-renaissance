@@ -1,19 +1,18 @@
 """
-Realistic Cross-Exchange Paper Fill — models the REAL costs for simultaneous
-execution (inventory-based arb, NOT transfer-based arb).
+Realistic Cross-Exchange Paper Fill — models costs NOT already captured by
+the paper fill simulation.
 
-The system uses SynchronizedExecutor — both legs fire at the same time.
-There is NO token transfer between exchanges during a trade. USDT is
-pre-funded on both exchanges.
+Each exchange client's _paper_fill() already deducts exchange-specific fees
+(MEXC 0% maker, Binance 0.075% taker, KuCoin 0.10% taker) from the
+OrderResult.fee_amount, and _calculate_actual_profit() subtracts those.
 
-REAL costs per trade:
-1. Taker fee on Binance leg (0.075% with BNB discount)
-2. MEXC maker fee: 0% (LIMIT_MAKER)
-3. Amortized rebalancing: ~$0.01/trade (periodic inventory transfers)
+This module adds ONLY the costs that paper fills DON'T model:
+1. Amortized rebalancing: ~$0.01/trade (periodic USDT inventory transfers)
 
 NOT a cost per trade (simultaneous execution):
 - Withdrawal fee: NO withdrawal happens during a trade
 - Transfer time slippage: both legs execute within milliseconds
+- Exchange fees: already deducted in paper fill
 """
 import logging
 from dataclasses import dataclass
@@ -37,17 +36,11 @@ class RealisticCostBreakdown:
 class RealisticCrossExchangeFill:
     """Applies realistic cost adjustments to cross-exchange paper fills.
 
-    The system uses inventory-based arb (both legs fire simultaneously).
-    The only real cost per trade is the Binance taker fee (0.075% with BNB
-    or 0.1% without). MEXC charges 0% for LIMIT_MAKER orders.
-
-    Periodic inventory rebalancing costs are amortized as a tiny per-trade cost.
+    Exchange fees (MEXC 0% maker, Binance 0.075% taker, KuCoin 0.10% taker)
+    are already deducted by each client's _paper_fill() and subtracted in
+    _calculate_actual_profit(). This module adds ONLY the residual costs
+    that paper fills don't capture: amortized inventory rebalancing.
     """
-
-    # Fee rates per exchange
-    BINANCE_TAKER_FEE = Decimal('0.00075')   # 0.075% with BNB discount
-    KUCOIN_FEE = Decimal('0.001')            # 0.10% maker/taker (Class A)
-    MEXC_MAKER_FEE = Decimal('0')            # 0% maker (LIMIT_MAKER)
 
     def __init__(self, config: Optional[dict] = None):
         cfg = (config or {}).get('realistic_fill', {})
@@ -58,13 +51,6 @@ class RealisticCrossExchangeFill:
         self.rebalance_cost_per_trade = Decimal(str(
             cfg.get('rebalance_cost_per_trade', 0.01)
         ))
-
-        # Whether Binance BNB fee discount is active
-        self.bnb_discount = cfg.get('bnb_discount', True)
-        self.binance_taker_fee = (
-            self.BINANCE_TAKER_FEE if self.bnb_discount
-            else Decimal('0.001')  # 0.1% without BNB
-        )
 
         # Stats
         self._total_applied = 0
@@ -91,23 +77,15 @@ class RealisticCrossExchangeFill:
         Returns:
             RealisticCostBreakdown with all cost components
         """
-        # Taker fee on non-MEXC leg(s) only
-        # MEXC = 0% maker (LIMIT_MAKER), Binance = 0.075%, KuCoin = 0.10%
-        taker_fee = Decimal('0')
-        if buy_exchange == 'binance':
-            taker_fee += trade_size_usd * self.binance_taker_fee
-        elif buy_exchange == 'kucoin':
-            taker_fee += trade_size_usd * self.KUCOIN_FEE
-        if sell_exchange == 'binance':
-            taker_fee += trade_size_usd * self.binance_taker_fee
-        elif sell_exchange == 'kucoin':
-            taker_fee += trade_size_usd * self.KUCOIN_FEE
+        # Exchange fees are already deducted in paper fill — don't double-count.
+        # Only add costs that paper fills don't model.
+        taker_fee = Decimal('0')  # Already in paper_profit via _paper_fill() fees
 
         # Amortized rebalancing cost (NOT a withdrawal fee per trade)
         rebalance_cost = self.rebalance_cost_per_trade
 
-        # Total realistic cost
-        total_cost = taker_fee + rebalance_cost
+        # Total realistic cost (just rebalancing — fees already deducted)
+        total_cost = rebalance_cost
 
         # Adjusted profit
         realistic_profit = paper_profit_usd - total_cost
@@ -140,6 +118,5 @@ class RealisticCrossExchangeFill:
             'edge_survival_rate': (
                 self._edge_survived_count / max(1, self._total_applied)
             ),
-            'binance_taker_fee_bps': float(self.binance_taker_fee * 10000),
             'rebalance_cost_per_trade': float(self.rebalance_cost_per_trade),
         }
