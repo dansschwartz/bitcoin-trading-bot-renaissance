@@ -6627,7 +6627,12 @@ class RenaissanceTradingBot:
                     pass
 
             # ── Council #1: Gap-fill missing bars from Binance on startup ──
-            await self._gap_fill_bars_on_startup()
+            try:
+                await asyncio.wait_for(self._gap_fill_bars_on_startup(), timeout=120)
+            except asyncio.TimeoutError:
+                self.logger.warning("GAP-FILL: Timed out after 120s — continuing startup")
+            except Exception as e:
+                self.logger.warning(f"GAP-FILL: Failed — {e}")
 
         # ── Council S6: Batch-evaluate unevaluated ML predictions on startup ──
         if self.db_enabled:

@@ -229,7 +229,12 @@ class ArbitrageOrchestrator:
             connect_tasks.append(self.bybit.connect())
         if self.kucoin:
             connect_tasks.append(self.kucoin.connect())
-        await asyncio.gather(*connect_tasks)
+        results = await asyncio.gather(*connect_tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                names = ["mexc", "binance"] + (["bybit"] if self.bybit else []) + (["kucoin"] if self.kucoin else [])
+                logger.error(f"Exchange {names[i]} connect failed: {result}")
+        logger.info(f"Exchange connections complete ({len(connect_tasks)} exchanges)")
 
         # Contract verification cache (try to populate, degrade gracefully)
         try:
