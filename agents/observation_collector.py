@@ -64,6 +64,7 @@ class ObservationCollector:
         # Context sections — researchers read these FIRST
         report["recent_deployments"] = self._collect_recent_deployments(conn)
         report["in_progress_fixes"] = self._collect_in_progress_fixes(conn)
+        report["known_issues_unfixed"] = self._collect_known_issues_unfixed(conn)
 
         report["portfolio"] = self._portfolio_section(conn, window_hours)
         report["signals"] = self._signals_section(conn, window_hours)
@@ -246,6 +247,90 @@ class ObservationCollector:
             in_progress["error"] = str(exc)
 
         return in_progress
+
+    def _collect_known_issues_unfixed(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        """List acknowledged issues that remain unfixed.
+
+        Includes forensic audit findings at P-MEDIUM/LOW severity and
+        any rejected/stalled proposals that identify real problems.
+        Researchers should investigate these — they may propose fixes
+        or validate that they're no longer relevant.
+        """
+        issues: Dict[str, Any] = {
+            "section": "known_issues_unfixed",
+            "description": (
+                "These issues have been IDENTIFIED but NOT YET FIXED. "
+                "Researchers may propose solutions, validate severity, "
+                "or determine they are no longer relevant."
+            ),
+            "forensic_findings": [
+                {
+                    "id": "F-9", "severity": "P-MEDIUM",
+                    "title": "Duplicate UNI-USD Polymarket position",
+                    "details": "Two open positions for same market creating ambiguous P&L tracking.",
+                },
+                {
+                    "id": "F-10", "severity": "P-MEDIUM",
+                    "title": "Timestamp format inconsistency",
+                    "details": "Mix of ISO 8601 and Unix timestamps across tables complicates joins.",
+                },
+                {
+                    "id": "F-11", "severity": "P-MEDIUM",
+                    "title": "$25 Polymarket bankroll discrepancy",
+                    "details": "Config says $500 but actual deployed bankroll was $475.",
+                },
+                {
+                    "id": "F-12", "severity": "P-MEDIUM",
+                    "title": "No balance snapshots",
+                    "details": "No periodic exchange balance snapshots — can't audit equity curve.",
+                },
+                {
+                    "id": "F-13", "severity": "P-LOW",
+                    "title": "HMM file permissions may recur",
+                    "details": "Fixed in forensic #6 but root cause (root touching .git) may recur on VPS.",
+                },
+                {
+                    "id": "F-14", "severity": "P-MEDIUM",
+                    "title": "BUY signal bias (3.4:1 BUY/SELL ratio)",
+                    "details": (
+                        "Partially addressed by disabling zombie models. "
+                        "Needs re-measurement with clean ensemble."
+                    ),
+                },
+                {
+                    "id": "F-15", "severity": "P-MEDIUM",
+                    "title": "26+ silent except+pass blocks in codebase",
+                    "details": (
+                        "Bare exception handlers silently swallowing errors. "
+                        "Each one could be hiding a bug."
+                    ),
+                },
+            ],
+            "stalled_proposals": [],
+        }
+
+        # Add any rejected/stalled proposals that identified real problems
+        try:
+            rows = conn.execute("""
+                SELECT id, source, title, status, created_at, description
+                FROM proposals
+                WHERE status IN ('rejected', 'stalled', 'reverted')
+                ORDER BY created_at DESC
+                LIMIT 10
+            """).fetchall()
+            for r in rows:
+                issues["stalled_proposals"].append({
+                    "id": r["id"], "source": r["source"],
+                    "title": r["title"], "status": r["status"],
+                    "created_at": r["created_at"],
+                    "description": r["description"],
+                })
+        except sqlite3.OperationalError:
+            pass
+        except Exception as exc:
+            logger.warning("Failed to collect stalled proposals: %s", exc)
+
+        return issues
 
     # ── Section builders ──
 
