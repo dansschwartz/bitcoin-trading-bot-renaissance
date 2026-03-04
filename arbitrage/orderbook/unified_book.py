@@ -400,10 +400,16 @@ class UnifiedBookManager:
                 binance_fail = 0
                 kucoin_fail = 0
 
-                # Direct REST using exchange's aiohttp session with strict
-                # per-request timeout. Does NOT use exchange client
-                # get_order_book() which has sync thread fallback that hangs.
+                # Create a FRESH aiohttp session with its own connection pool
+                # and strict timeout. Using exchange clients' shared sessions
+                # causes queuing behind stuck connections in their pool.
+                _headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
                 strict_timeout = aiohttp.ClientTimeout(total=CALL_TIMEOUT)
+                val_session = aiohttp.ClientSession(
+                    timeout=strict_timeout,
+                    headers=_headers,
+                    connector=aiohttp.TCPConnector(limit=10, force_close=True),
+                )
 
                 for i, pair in enumerate(pairs):
                     if not self._running:
@@ -413,7 +419,7 @@ class UnifiedBookManager:
                     try:
                         mexc_sym = pair.replace("/", "")
                         url = f"https://api.mexc.com/api/v3/depth?symbol={mexc_sym}&limit=20"
-                        async with self.mexc._http_session.get(url, timeout=strict_timeout) as resp:
+                        async with val_session.get(url) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:20]]
@@ -435,7 +441,7 @@ class UnifiedBookManager:
                     try:
                         bn_sym = pair.replace("/", "")
                         url = f"https://api.binance.com/api/v3/depth?symbol={bn_sym}&limit=20"
-                        async with self.binance._http_session.get(url, timeout=strict_timeout) as resp:
+                        async with val_session.get(url) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:20]]
@@ -454,11 +460,11 @@ class UnifiedBookManager:
                             logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}")
 
                     # KuCoin — direct REST
-                    if self.kucoin and self.kucoin._http_session:
+                    if self.kucoin:
                         try:
                             kc_sym = pair.replace("/", "-")
                             url = f"https://api.kucoin.com/api/v1/market/orderbook/level2_20?symbol={kc_sym}"
-                            async with self.kucoin._http_session.get(url, timeout=strict_timeout) as resp:
+                            async with val_session.get(url) as resp:
                                 if resp.status == 200:
                                     data = await resp.json()
                                     if data.get("code") == "200000":
@@ -479,6 +485,7 @@ class UnifiedBookManager:
 
                     await asyncio.sleep(PAIR_DELAY)
 
+                await val_session.close()
                 elapsed = _time.monotonic() - t_start
                 tradeable = sum(1 for v in self.pairs.values() if v.is_tradeable)
                 kc_str = f" | KuCoin {kucoin_ok}ok/{kucoin_fail}fail" if self.kucoin else ""
