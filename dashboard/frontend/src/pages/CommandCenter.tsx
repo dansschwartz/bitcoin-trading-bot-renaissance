@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import PageShell from '../components/layout/PageShell';
 import PnLCard from '../components/cards/PnLCard';
 import MetricCard from '../components/cards/MetricCard';
@@ -8,10 +9,28 @@ import AssetSummaryPanel from '../components/panels/AssetSummaryPanel';
 import ActivityFeed from '../components/panels/ActivityFeed';
 import SystemHealthBar from '../components/panels/SystemHealthBar';
 import { useDashboard } from '../context/DashboardContext';
+import { api } from '../api';
+
+interface SpraySnapshot {
+  total_sprayed: number;
+  total_open: number;
+  today_pnl_usd: number;
+  today_tokens: number;
+  budget?: { deployed_usd: number; total_capital: number; deployed_pct: number };
+}
 
 export default function CommandCenter() {
   const { state } = useDashboard();
   const { status, pnl } = state;
+  const [spray, setSpray] = useState<SpraySnapshot | null>(null);
+
+  useEffect(() => {
+    api.sprayStatus().then(d => setSpray(d as unknown as SpraySnapshot)).catch(() => {});
+    const id = setInterval(() => {
+      api.sprayStatus().then(d => setSpray(d as unknown as SpraySnapshot)).catch(() => {});
+    }, 10_000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <PageShell title="Command Center" subtitle="Real-time operational overview">
@@ -23,14 +42,14 @@ export default function CommandCenter() {
         <PnLCard />
         <RegimeCard />
         <MetricCard
-          title="Cycles Today"
-          value={status?.cycle_count ?? '--'}
-          subtitle={`${status?.product_ids?.length ?? 0} assets tracked`}
+          title="Tokens Sprayed"
+          value={spray ? `${spray.today_tokens ?? 0}` : '--'}
+          subtitle={`${spray?.total_open ?? 0} open | ${(spray?.total_sprayed ?? 0).toLocaleString()} lifetime`}
         />
         <MetricCard
-          title="Avg Slippage"
-          value={status?.paper_trading ? 'N/A (paper)' : pnl ? `${(pnl.avg_slippage * 100).toFixed(3)}%` : '--'}
-          subtitle={`${pnl?.total_trades ?? 0} trades (24h)`}
+          title="Deployed Capital"
+          value={spray?.budget ? `$${spray.budget.deployed_usd.toFixed(0)}` : '--'}
+          subtitle={spray?.budget ? `${spray.budget.deployed_pct.toFixed(0)}% of $${spray.budget.total_capital.toFixed(0)}` : `${pnl?.total_trades ?? 0} trades (24h)`}
         />
       </div>
 

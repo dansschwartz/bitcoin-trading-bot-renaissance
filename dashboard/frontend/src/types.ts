@@ -81,6 +81,7 @@ export interface Position {
   status: string;
   unrealized_pnl?: number;
   current_price?: number;
+  source?: string;
 }
 
 // ─── Analytics ───────────────────────────────────────────────────────────
@@ -311,6 +312,7 @@ export interface ClosedPosition {
   realized_pnl: number | null;
   exit_reason: string | null;
   hold_duration_seconds: number | null;
+  source?: string;
 }
 
 export interface PositionSummary {

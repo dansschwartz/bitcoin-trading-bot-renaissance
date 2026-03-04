@@ -8,6 +8,7 @@ import type { RegimePerformance, HourlyPnL } from '../types';
 import { regimeColor, CHART_COLORS } from '../utils/colors';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import SignalAttributionPanel from '../components/panels/SignalAttributionPanel';
+import DirectionRulePanel from '../components/panels/DirectionRulePanel';
 
 function RegimePerformanceTable() {
   const [data, setData] = useState<RegimePerformance[]>([]);
@@ -132,8 +133,11 @@ export default function Analytics() {
 
       <ExecutionPerformance />
 
-      {/* Signal Attribution */}
-      <SignalAttributionPanel />
+      {/* Attribution */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <DirectionRulePanel />
+        <SignalAttributionPanel />
+      </div>
     </PageShell>
   );
 }

@@ -5,9 +5,10 @@ import Sidebar from './components/layout/Sidebar';
 import StatusStrip from './components/layout/StatusStrip';
 import CommandCenter from './pages/CommandCenter';
 import Brain from './pages/Brain';
+import TokenSpray from './pages/TokenSpray';
+import ExitEngine from './pages/ExitEngine';
 import Positions from './pages/Positions';
 import Analytics from './pages/Analytics';
-import SimLab from './pages/SimLab';
 import Risk from './pages/Risk';
 import Agents from './pages/Agents';
 import Arbitrage from './pages/Arbitrage';
@@ -26,10 +27,11 @@ export default function App() {
             <main className="flex-1 overflow-y-auto p-4 lg:p-6">
               <Routes>
                 <Route path="/" element={<CommandCenter />} />
+                <Route path="/token-spray" element={<TokenSpray />} />
+                <Route path="/exit-engine" element={<ExitEngine />} />
                 <Route path="/brain" element={<Brain />} />
                 <Route path="/positions" element={<Positions />} />
                 <Route path="/analytics" element={<Analytics />} />
-                <Route path="/simlab" element={<SimLab />} />
                 <Route path="/risk" element={<Risk />} />
                 <Route path="/arbitrage" element={<Arbitrage />} />
                 <Route path="/breakout" element={<BreakoutScanner />} />

@@ -162,4 +162,17 @@ export const api = {
   bsHistory: (limit = 50) => get<Record<string, unknown>>(`/api/breakout-strategy/history?limit=${limit}`),
   bsWallet: (limit = 50) => get<Record<string, unknown>>(`/api/breakout-strategy/wallet?limit=${limit}`),
   bsStats: () => get<Record<string, unknown>>('/api/breakout-strategy/stats'),
+
+  // Token Spray
+  sprayStatus: () => get<Record<string, unknown>>('/api/token-spray/status'),
+  sprayLiveFeed: () => get<Record<string, unknown>[]>('/api/token-spray/live-feed'),
+  sprayHourlyPnl: () => get<Record<string, unknown>[]>('/api/token-spray/hourly-pnl'),
+  sprayPairEconomics: () => get<Record<string, unknown>[]>('/api/token-spray/pair-economics'),
+  sprayAbTest: () => get<Record<string, unknown>>('/api/token-spray/ab-test'),
+  sprayVolatility: () => get<Record<string, unknown>>('/api/token-spray/volatility'),
+
+  // Exit Engine
+  exitSummary: () => get<Record<string, unknown>>('/api/exit-engine/summary'),
+  exitRecentExits: () => get<Record<string, unknown>[]>('/api/exit-engine/recent-exits'),
+  exitHoldTimeDist: () => get<Record<string, unknown>[]>('/api/exit-engine/hold-time-distribution'),
 };
