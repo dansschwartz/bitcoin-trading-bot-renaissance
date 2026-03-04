@@ -59,7 +59,7 @@ class InstrumentConfig:
 INSTRUMENTS: Dict[str, InstrumentConfig] = {
     # 15-minute direction markets (2-bar / 10-min ML horizon, 53.3% acc)
     "btc_15m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-15m-{ts}"),
-    "eth_15m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-15m-{ts}"),
+    "eth_15m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-15m-{ts}", enabled=False),
     "sol_15m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-15m-{ts}"),
     "doge_15m": InstrumentConfig("DOGE", "DOGE-USD", "DOGE-USD", "doge-updown-15m-{ts}", enabled=False),
     "xrp_15m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-15m-{ts}"),
@@ -68,7 +68,7 @@ INSTRUMENTS: Dict[str, InstrumentConfig] = {
     "btc_5m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-5m-{ts}",
                                timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0),
     "eth_5m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-5m-{ts}",
-                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC"),
+                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC", enabled=False),
     "sol_5m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-5m-{ts}",
                                timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC"),
     "xrp_5m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-5m-{ts}",
