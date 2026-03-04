@@ -6718,7 +6718,7 @@ class RenaissanceTradingBot:
         in parallel, falling back to ``_last_prices`` for any that fail.
         """
         prices: Dict[str, float] = {}
-        provider = getattr(self, 'binance_spot_provider', None)
+        provider = getattr(self, 'binance_spot', None)
         pair_map = getattr(self, '_pair_binance_symbols', {})
 
         # Parallel Binance fetch for all pairs that have a symbol mapping
