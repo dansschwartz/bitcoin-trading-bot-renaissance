@@ -201,16 +201,23 @@ async def volatility_current(request: Request) -> dict[str, Any]:
         except Exception:
             pass
 
-    # Fallback: check DB for recent volatility predictions
+    # Fallback: check DB for recent volatility regimes from spray log
     db = request.app.state.dashboard_config.db_path
     rows = _safe_query(
         db,
-        """SELECT product_id, vol_regime, predicted_magnitude_bps
+        """SELECT pair, vol_regime, expected_move_bps
            FROM (
-               SELECT product_id, vol_regime, predicted_magnitude_bps,
-                      ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY timestamp DESC) as rn
+               SELECT pair, vol_regime, expected_move_bps,
+                      ROW_NUMBER() OVER (PARTITION BY pair ORDER BY timestamp DESC) as rn
                FROM token_spray_log
                WHERE vol_regime IS NOT NULL
            ) WHERE rn = 1""",
     )
-    return {r["product_id"]: r for r in rows} if rows else {}
+    return {
+        r["pair"]: {
+            "regime": r["vol_regime"],
+            "predicted_bps": round(r["expected_move_bps"] or 0, 1),
+            "tradeable": True,
+        }
+        for r in rows
+    } if rows else {}
