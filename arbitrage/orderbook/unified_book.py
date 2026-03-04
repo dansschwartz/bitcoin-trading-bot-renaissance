@@ -389,6 +389,7 @@ class UnifiedBookManager:
                     continue
 
                 t_start = _time.monotonic()
+                logger.info(f"Validation cycle starting — {len(pairs)} pairs")
 
                 mexc_ok = 0
                 binance_ok = 0
@@ -400,6 +401,9 @@ class UnifiedBookManager:
                 for i, pair in enumerate(pairs):
                     if not self._running:
                         break
+
+                    if i % 10 == 0:
+                        logger.info(f"Validation pair {i}/{len(pairs)}: {pair} (elapsed {_time.monotonic()-t_start:.1f}s)")
 
                     # MEXC (10s hard timeout)
                     try:
