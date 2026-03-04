@@ -372,10 +372,10 @@ class UnifiedBookManager:
         added pairs are also refreshed.
 
         Sequential per-pair with 150ms spacing to respect rate limits.
-        All exchanges fetched sequentially per pair, each wrapped in
-        try/except so one failing exchange doesn't block others.
+        Each exchange call has a 10s hard timeout via asyncio.wait_for.
         """
         PAIR_DELAY = 0.15  # 150ms between pairs
+        CALL_TIMEOUT = 10.0  # Hard timeout per exchange call (seconds)
 
         logger.info("Validation loop started — will refresh every 15s")
 
@@ -401,9 +401,12 @@ class UnifiedBookManager:
                     if not self._running:
                         break
 
-                    # MEXC
+                    # MEXC (10s hard timeout)
                     try:
-                        rest_book = await self.mexc.get_order_book(pair, depth=20)
+                        rest_book = await asyncio.wait_for(
+                            self.mexc.get_order_book(pair, depth=20),
+                            timeout=CALL_TIMEOUT,
+                        )
                         if pair in self.pairs:
                             self.pairs[pair].mexc_book = rest_book
                             self.pairs[pair].mexc_last_update = datetime.utcnow()
@@ -414,9 +417,12 @@ class UnifiedBookManager:
                         if i < 3:
                             logger.debug(f"Validation MEXC fail {pair}: {type(e).__name__}: {e}")
 
-                    # Binance
+                    # Binance (10s hard timeout)
                     try:
-                        rest_book = await self.binance.get_order_book(pair, depth=20)
+                        rest_book = await asyncio.wait_for(
+                            self.binance.get_order_book(pair, depth=20),
+                            timeout=CALL_TIMEOUT,
+                        )
                         if pair in self.pairs:
                             self.pairs[pair].binance_book = rest_book
                             self.pairs[pair].binance_last_update = datetime.utcnow()
@@ -427,10 +433,13 @@ class UnifiedBookManager:
                         if i < 3:
                             logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}: {e}")
 
-                    # KuCoin (optional — skip if not enabled)
+                    # KuCoin (10s hard timeout — skip if not enabled)
                     if self.kucoin:
                         try:
-                            rest_book = await self.kucoin.get_order_book(pair, depth=20)
+                            rest_book = await asyncio.wait_for(
+                                self.kucoin.get_order_book(pair, depth=20),
+                                timeout=CALL_TIMEOUT,
+                            )
                             if pair in self.pairs:
                                 self.pairs[pair].kucoin_book = rest_book
                                 self.pairs[pair].kucoin_last_update = datetime.utcnow()
