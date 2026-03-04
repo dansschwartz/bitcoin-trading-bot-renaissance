@@ -365,14 +365,37 @@ class UnifiedBookManager:
         except Exception as e:
             logger.debug(f"Binance validation error {pair}: {e}")
 
+    async def _fetch_book_with_timeout(
+        self, exchange_name: str, client, pair: str, timeout: float = 5.0
+    ) -> tuple:
+        """Fetch a single order book with a hard timeout.
+
+        Returns (exchange_name, book) on success or (exchange_name, None) on failure.
+        Uses asyncio.wait with explicit task cancellation to avoid hanging
+        when ccxt HTTP sessions don't respond to asyncio cancellation.
+        """
+        task = asyncio.ensure_future(client.get_order_book(pair, depth=20))
+        done, pending = await asyncio.wait({task}, timeout=timeout)
+        if pending:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            return (exchange_name, None)
+        try:
+            return (exchange_name, task.result())
+        except Exception:
+            return (exchange_name, None)
+
     async def _validation_loop(self):
         """Periodically refresh all pairs via REST.
 
         Uses self.pairs.keys() instead of self.monitored_pairs so dynamically
         added pairs are also refreshed.
 
-        Per-pair: all exchanges fetched in parallel (asyncio.gather) with a
-        5-second timeout per call so one slow exchange can't block the others.
+        Per-pair: all exchanges fetched in parallel (asyncio.wait) with a
+        5-second hard timeout per call so one slow exchange can't block the others.
         Sequential between pairs with 150ms spacing to respect rate limits.
         """
         PAIR_DELAY = 0.15  # 150ms between pairs
@@ -403,37 +426,29 @@ class UnifiedBookManager:
                     if not self._running:
                         break
 
-                    # Build parallel fetch tasks for all exchanges
-                    async def _fetch_mexc(p=pair):
-                        return "mexc", await asyncio.wait_for(
-                            self.mexc.get_order_book(p, depth=20),
-                            timeout=FETCH_TIMEOUT,
-                        )
-
-                    async def _fetch_binance(p=pair):
-                        return "binance", await asyncio.wait_for(
-                            self.binance.get_order_book(p, depth=20),
-                            timeout=FETCH_TIMEOUT,
-                        )
-
-                    async def _fetch_kucoin(p=pair):
-                        return "kucoin", await asyncio.wait_for(
-                            self.kucoin.get_order_book(p, depth=20),
-                            timeout=FETCH_TIMEOUT,
-                        )
-
-                    tasks = [_fetch_mexc(), _fetch_binance()]
+                    # Fetch all exchanges in parallel with hard timeouts
+                    coros = [
+                        self._fetch_book_with_timeout("mexc", self.mexc, pair, FETCH_TIMEOUT),
+                        self._fetch_book_with_timeout("binance", self.binance, pair, FETCH_TIMEOUT),
+                    ]
                     if self.kucoin:
-                        tasks.append(_fetch_kucoin())
+                        coros.append(
+                            self._fetch_book_with_timeout("kucoin", self.kucoin, pair, FETCH_TIMEOUT)
+                        )
 
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    results = await asyncio.gather(*coros)
 
-                    for result in results:
-                        if isinstance(result, Exception):
-                            # Figure out which exchange failed from the exception
-                            # (gather preserves order)
+                    for exch, rest_book in results:
+                        if rest_book is None:
+                            if exch == "mexc":
+                                mexc_fail += 1
+                            elif exch == "binance":
+                                binance_fail += 1
+                            elif exch == "kucoin":
+                                kucoin_fail += 1
+                            if i < 3:
+                                logger.debug(f"Validation {exch} fail {pair}: timeout or error")
                             continue
-                        exch, rest_book = result
                         if pair in self.pairs:
                             if exch == "mexc":
                                 self.pairs[pair].mexc_book = rest_book
@@ -450,20 +465,6 @@ class UnifiedBookManager:
                                 self.pairs[pair].kucoin_last_update = datetime.utcnow()
                                 self.pairs[pair].kucoin_update_count += 1
                                 kucoin_ok += 1
-
-                    # Count failures from exceptions (gather preserves order)
-                    exchange_names = ["mexc", "binance"] + (["kucoin"] if self.kucoin else [])
-                    for idx, result in enumerate(results):
-                        if isinstance(result, Exception):
-                            ename = exchange_names[idx]
-                            if ename == "mexc":
-                                mexc_fail += 1
-                            elif ename == "binance":
-                                binance_fail += 1
-                            elif ename == "kucoin":
-                                kucoin_fail += 1
-                            if i < 3:
-                                logger.debug(f"Validation {ename} fail {pair}: {type(result).__name__}: {result}")
 
                     await asyncio.sleep(PAIR_DELAY)
 
