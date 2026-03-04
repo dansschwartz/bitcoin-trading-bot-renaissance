@@ -1,6 +1,31 @@
 import { useDashboard } from '../../context/DashboardContext';
 import { formatCurrency, pnlColor, pnlSign } from '../../utils/formatters';
 
+function formatAge(openedAt: string | null | undefined): string {
+  if (!openedAt) return '--';
+  const opened = new Date(openedAt).getTime();
+  if (isNaN(opened)) return '--';
+  const now = Date.now();
+  const diffMs = now - opened;
+  if (diffMs < 0) return '--';
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ${mins % 60}m`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ${hrs % 24}h`;
+}
+
+function formatOpenTime(openedAt: string | null | undefined): string {
+  if (!openedAt) return '--';
+  try {
+    const d = new Date(openedAt);
+    return `${(d.getUTCMonth()+1).toString().padStart(2,'0')}/${d.getUTCDate().toString().padStart(2,'0')} ${d.getUTCHours().toString().padStart(2,'0')}:${d.getUTCMinutes().toString().padStart(2,'0')}`;
+  } catch {
+    return '--';
+  }
+}
+
 export default function OpenPositionsTable() {
   const { state } = useDashboard();
   const positions = state.positions;
@@ -23,6 +48,8 @@ export default function OpenPositionsTable() {
                 <th className="text-right py-2 px-2">Entry</th>
                 <th className="text-right py-2 px-2">Current</th>
                 <th className="text-right py-2 px-2">P&L</th>
+                <th className="text-left py-2 px-2">Opened</th>
+                <th className="text-right py-2 px-2">Age</th>
                 <th className="text-right py-2 px-2">SL</th>
                 <th className="text-right py-2 px-2">TP</th>
               </tr>
@@ -45,6 +72,12 @@ export default function OpenPositionsTable() {
                     {p.unrealized_pnl != null
                       ? `${pnlSign(p.unrealized_pnl)}${formatCurrency(p.unrealized_pnl)}`
                       : '--'}
+                  </td>
+                  <td className="py-2 px-2 text-gray-500">
+                    {formatOpenTime(p.opened_at)}
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-400">
+                    {formatAge(p.opened_at)}
                   </td>
                   <td className="py-2 px-2 text-right text-gray-600">
                     {p.stop_loss_price ? formatCurrency(p.stop_loss_price) : '--'}
