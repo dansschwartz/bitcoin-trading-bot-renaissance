@@ -373,15 +373,13 @@ class UnifiedBookManager:
         Returns (exchange_name, book) on success or (exchange_name, None) on failure.
         Uses asyncio.wait with explicit task cancellation to avoid hanging
         when ccxt HTTP sessions don't respond to asyncio cancellation.
+        Does NOT await the cancelled task — fire-and-forget cancel to avoid
+        hanging if the underlying coroutine swallows CancelledError.
         """
         task = asyncio.ensure_future(client.get_order_book(pair, depth=20))
         done, pending = await asyncio.wait({task}, timeout=timeout)
         if pending:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            task.cancel()  # Fire-and-forget — do NOT await cancelled task
             return (exchange_name, None)
         try:
             return (exchange_name, task.result())
