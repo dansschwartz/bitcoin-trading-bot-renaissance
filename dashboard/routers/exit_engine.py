@@ -54,8 +54,8 @@ async def exit_engine_summary(request: Request) -> dict[str, Any]:
             "running": True,
             "observation_mode": True,
             "scan_interval_seconds": 10,
-            "total_scans": sub_bar_counts[0]["total_scans"] if sub_bar_counts else 0,
-            "triggers_fired": sub_bar_counts[0]["triggers_fired"] if sub_bar_counts else 0,
+            "total_scans": (sub_bar_counts[0]["total_scans"] or 0) if sub_bar_counts else 0,
+            "triggers_fired": (sub_bar_counts[0]["triggers_fired"] or 0) if sub_bar_counts else 0,
         }
 
     # Exit performance by reason (from token_spray_log)
@@ -89,11 +89,10 @@ async def exit_engine_summary(request: Request) -> dict[str, Any]:
     # Reeval events breakdown (if table exists)
     reeval_events = _safe_query(
         db,
-        """SELECT reason, COUNT(*) as count,
+        """SELECT reason_code as reason, COUNT(*) as count,
                   ROUND(AVG(pnl_bps), 2) as avg_pnl_bps
            FROM reeval_events
-           WHERE observation_mode = 0
-           GROUP BY reason""",
+           GROUP BY reason_code""",
     )
 
     return {
