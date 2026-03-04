@@ -5,7 +5,7 @@ exchanges:
   primary: mexc
   secondary: binance
   mexc_order_rate_limit_per_second: 5
-  kucoin_enabled: false                   # Toggle KuCoin spoke (start disabled)
+  kucoin_enabled: true                    # KuCoin spoke enabled
   kucoin_order_rate_limit_per_second: 3
 
 websocket:
