@@ -402,13 +402,12 @@ class UnifiedBookManager:
                     if not self._running:
                         break
 
-                    if i % 10 == 0:
-                        logger.info(f"Validation pair {i}/{len(pairs)}: {pair} (elapsed {_time.monotonic()-t_start:.1f}s)")
-
-                    # MEXC (10s hard timeout)
+                    # Use _fetch_order_book_direct (pure aiohttp, no sync thread
+                    # fallback) to avoid asyncio.to_thread hanging on blocked sockets.
+                    # MEXC
                     try:
                         rest_book = await asyncio.wait_for(
-                            self.mexc.get_order_book(pair, depth=20),
+                            self.mexc._fetch_order_book_direct(pair, depth=20),
                             timeout=CALL_TIMEOUT,
                         )
                         if pair in self.pairs:
@@ -421,10 +420,10 @@ class UnifiedBookManager:
                         if i < 3:
                             logger.debug(f"Validation MEXC fail {pair}: {type(e).__name__}: {e}")
 
-                    # Binance (10s hard timeout)
+                    # Binance
                     try:
                         rest_book = await asyncio.wait_for(
-                            self.binance.get_order_book(pair, depth=20),
+                            self.binance._fetch_order_book_direct(pair, depth=20),
                             timeout=CALL_TIMEOUT,
                         )
                         if pair in self.pairs:
@@ -437,7 +436,7 @@ class UnifiedBookManager:
                         if i < 3:
                             logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}: {e}")
 
-                    # KuCoin (10s hard timeout — skip if not enabled)
+                    # KuCoin (already uses pure aiohttp, no sync fallback)
                     if self.kucoin:
                         try:
                             rest_book = await asyncio.wait_for(
