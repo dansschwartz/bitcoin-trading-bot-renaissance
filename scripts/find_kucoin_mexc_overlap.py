@@ -1,69 +1,108 @@
 #!/usr/bin/env python3
 """
 Find overlapping USDT trading pairs between KuCoin, MEXC, and Binance.
-Outputs: pair counts, overlap analysis, and saves full list to data/kucoin_mexc_pairs.txt
+
+Uses our async exchange clients (with browser-like UA) to avoid geo-blocking.
+
+Outputs:
+  - KuCoin∩MEXC count (arb-able via hub-spoke)
+  - KuCoin∩MEXC−Binance count (NEW opportunities not on Binance spoke)
+  - Full overlap list saved to data/kucoin_mexc_pairs.txt
 """
-import ccxt
+import asyncio
+import sys
+from decimal import Decimal
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-def main():
-    print("Loading exchange markets...")
+from arbitrage.exchanges.kucoin_client import KuCoinClient
+from arbitrage.exchanges.mexc_client import MEXCClient
+from arbitrage.exchanges.binance_client import BinanceClient
 
-    kucoin = ccxt.kucoin()
-    mexc = ccxt.mexc()
-    binance = ccxt.binance()
 
-    kucoin.load_markets()
-    mexc.load_markets()
-    binance.load_markets()
+async def main():
+    kucoin = KuCoinClient(paper_trading=True)
+    mexc = MEXCClient(paper_trading=True)
+    binance = BinanceClient(paper_trading=True)
 
-    # Extract USDT spot pairs (active only)
-    kc_usdt = {s for s in kucoin.markets if s.endswith("/USDT") and kucoin.markets[s].get("active", True)}
-    mx_usdt = {s for s in mexc.markets if s.endswith("/USDT") and mexc.markets[s].get("active", True)}
-    bn_usdt = {s for s in binance.markets if s.endswith("/USDT") and binance.markets[s].get("active", True)}
+    await kucoin.connect()
+    await mexc.connect()
+    await binance.connect()
 
-    print(f"\nUSDT pairs per exchange:")
-    print(f"  KuCoin:  {len(kc_usdt)}")
-    print(f"  MEXC:    {len(mx_usdt)}")
-    print(f"  Binance: {len(bn_usdt)}")
+    try:
+        print("Fetching all tickers from 3 exchanges...")
+        kc_tickers, mx_tickers = await asyncio.gather(
+            kucoin.get_all_tickers(),
+            mexc.get_all_tickers(),
+        )
+        # Binance may be geo-blocked locally (451)
+        try:
+            bn_tickers = await binance.get_all_tickers()
+        except Exception as e:
+            print(f"  (Binance geo-blocked: {e} — skipping Binance comparison)")
+            bn_tickers = {}
 
-    # Overlaps
-    kc_mx = kc_usdt & mx_usdt
-    kc_bn = kc_usdt & bn_usdt
-    mx_bn = mx_usdt & bn_usdt
-    all_three = kc_usdt & mx_usdt & bn_usdt
+        kc_usdt = {s for s in kc_tickers if s.endswith("/USDT")}
+        mx_usdt = {s for s in mx_tickers if s.endswith("/USDT")}
+        bn_usdt = {s for s in bn_tickers if s.endswith("/USDT")}
 
-    # KuCoin+MEXC but NOT Binance = new opportunity surface
-    kc_mx_not_bn = kc_mx - bn_usdt
+        # Overlaps
+        kc_mx = kc_usdt & mx_usdt
+        kc_bn = kc_usdt & bn_usdt
+        mx_bn = mx_usdt & bn_usdt
+        all_three = kc_usdt & mx_usdt & bn_usdt
+        kc_mx_not_bn = kc_mx - bn_usdt
 
-    print(f"\nOverlap analysis:")
-    print(f"  KuCoin ∩ MEXC:              {len(kc_mx)} (arb-able)")
-    print(f"  KuCoin ∩ Binance:           {len(kc_bn)}")
-    print(f"  MEXC ∩ Binance:             {len(mx_bn)} (existing arb)")
-    print(f"  All three:                  {len(all_three)}")
-    print(f"  KuCoin ∩ MEXC - Binance:    {len(kc_mx_not_bn)} (NEW opportunities)")
+        print(f"\n{'='*60}")
+        print(f"USDT pairs per exchange:")
+        print(f"  KuCoin:  {len(kc_usdt)}")
+        print(f"  MEXC:    {len(mx_usdt)}")
+        print(f"  Binance: {len(bn_usdt)}")
+        print(f"\nOverlap analysis:")
+        print(f"  KuCoin ∩ MEXC:              {len(kc_mx)} (arb-able)")
+        print(f"  KuCoin ∩ Binance:           {len(kc_bn)}")
+        print(f"  MEXC ∩ Binance:             {len(mx_bn)} (existing arb)")
+        print(f"  All three:                  {len(all_three)}")
+        print(f"  KuCoin ∩ MEXC - Binance:    {len(kc_mx_not_bn)} (NEW opportunities)")
+        print(f"{'='*60}")
 
-    # Save pair list
-    output_dir = Path("data")
-    output_dir.mkdir(exist_ok=True)
-    output_file = output_dir / "kucoin_mexc_pairs.txt"
+        # Show KuCoin-only pairs with spread data
+        if kc_mx_not_bn:
+            print(f"\nNEW pairs (KuCoin ∩ MEXC, not on Binance) — top 30:")
+            spreads = []
+            for pair in kc_mx_not_bn:
+                kc_data = kc_tickers.get(pair, {})
+                mx_data = mx_tickers.get(pair, {})
+                kc_bid = float(kc_data.get('bid', 0) or 0)
+                mx_bid = float(mx_data.get('bid', 0) or 0)
+                if kc_bid > 0 and mx_bid > 0:
+                    spread = abs(kc_bid - mx_bid) / min(kc_bid, mx_bid) * 10000
+                    spreads.append((pair, spread))
+            spreads.sort(key=lambda x: x[1], reverse=True)
+            for pair, spread in spreads[:30]:
+                print(f"  {pair:20s}  spread={spread:7.1f}bps")
 
-    with open(output_file, "w") as f:
-        f.write(f"# KuCoin ∩ MEXC overlapping USDT pairs ({len(kc_mx)} total)\n")
-        f.write(f"# Generated by find_kucoin_mexc_overlap.py\n\n")
-        for pair in sorted(kc_mx):
-            tag = " [also on Binance]" if pair in bn_usdt else " [KuCoin+MEXC ONLY]"
-            f.write(f"{pair}{tag}\n")
+        # Save full overlap to file
+        output_dir = Path("data")
+        output_dir.mkdir(exist_ok=True)
+        output_file = output_dir / "kucoin_mexc_pairs.txt"
 
-    print(f"\nSaved to {output_file}")
+        with open(output_file, "w") as f:
+            f.write(f"# KuCoin ∩ MEXC overlapping USDT pairs ({len(kc_mx)} total)\n")
+            f.write(f"# Also on Binance: {len(all_three)}\n")
+            f.write(f"# KuCoin+MEXC only: {len(kc_mx_not_bn)}\n\n")
+            for pair in sorted(kc_mx):
+                tag = "" if pair in bn_usdt else " [NEW]"
+                f.write(f"{pair}{tag}\n")
 
-    # Show some examples of KuCoin-only pairs
-    if kc_mx_not_bn:
-        print(f"\nSample KuCoin+MEXC only pairs (first 20):")
-        for pair in sorted(kc_mx_not_bn)[:20]:
-            print(f"  {pair}")
+        print(f"\nFull list saved to {output_file}")
+
+    finally:
+        await kucoin.disconnect()
+        await mexc.disconnect()
+        await binance.disconnect()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

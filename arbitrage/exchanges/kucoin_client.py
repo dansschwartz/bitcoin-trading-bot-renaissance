@@ -419,10 +419,19 @@ class KuCoinClient(ExchangeClient):
             await asyncio.sleep(2)  # 2s between full cycles
 
     async def get_ticker(self, symbol: str) -> dict:
-        """Get current ticker for a symbol."""
+        """Get current ticker for a symbol (standardized format)."""
         try:
             if self._exchange:
-                return await self._exchange.fetch_ticker(symbol)
+                ticker = await self._exchange.fetch_ticker(symbol)
+                return {
+                    'symbol': symbol,
+                    'last_price': Decimal(str(ticker.get('last', 0))),
+                    'bid': Decimal(str(ticker.get('bid', 0))),
+                    'ask': Decimal(str(ticker.get('ask', 0))),
+                    'volume_24h': Decimal(str(ticker.get('baseVolume', 0))),
+                    'quote_volume_24h': Decimal(str(ticker.get('quoteVolume', 0))),
+                    'timestamp': datetime.utcnow(),
+                }
         except Exception as e:
             logger.debug(f"KuCoin ticker fetch failed for {symbol}: {e}")
         return {}
@@ -440,13 +449,14 @@ class KuCoinClient(ExchangeClient):
                             for t in data.get("data", {}).get("ticker", []):
                                 kc_sym = t.get("symbol", "")
                                 norm_sym = self._from_kucoin_symbol(kc_sym)
+                                if "/" not in norm_sym:
+                                    continue
                                 tickers[norm_sym] = {
-                                    "symbol": norm_sym,
-                                    "last": float(t.get("last", 0)),
-                                    "bid": float(t.get("buy", 0)),
-                                    "ask": float(t.get("sell", 0)),
-                                    "volume": float(t.get("vol", 0)),
-                                    "quoteVolume": float(t.get("volValue", 0)),
+                                    'symbol': norm_sym,
+                                    'last_price': Decimal(str(t.get("last", "0") or "0")),
+                                    'bid': Decimal(str(t.get("buy", "0") or "0")),
+                                    'ask': Decimal(str(t.get("sell", "0") or "0")),
+                                    'volume_24h': Decimal(str(t.get("vol", "0") or "0")),
                                 }
                             return tickers
         except Exception as e:
