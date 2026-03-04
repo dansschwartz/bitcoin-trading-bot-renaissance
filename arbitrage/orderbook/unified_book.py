@@ -12,7 +12,9 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, List
 
-from ..exchanges.base import OrderBook, OrderSide
+import aiohttp
+
+from ..exchanges.base import OrderBook, OrderBookLevel, OrderSide
 
 logger = logging.getLogger("arb.orderbook")
 
@@ -398,60 +400,82 @@ class UnifiedBookManager:
                 binance_fail = 0
                 kucoin_fail = 0
 
+                # Direct REST using exchange's aiohttp session with strict
+                # per-request timeout. Does NOT use exchange client
+                # get_order_book() which has sync thread fallback that hangs.
+                strict_timeout = aiohttp.ClientTimeout(total=CALL_TIMEOUT)
+
                 for i, pair in enumerate(pairs):
                     if not self._running:
                         break
 
-                    # Use _fetch_order_book_direct (pure aiohttp, no sync thread
-                    # fallback) to avoid asyncio.to_thread hanging on blocked sockets.
-                    # MEXC
+                    # MEXC — direct REST
                     try:
-                        rest_book = await asyncio.wait_for(
-                            self.mexc._fetch_order_book_direct(pair, depth=20),
-                            timeout=CALL_TIMEOUT,
-                        )
-                        if pair in self.pairs:
-                            self.pairs[pair].mexc_book = rest_book
-                            self.pairs[pair].mexc_last_update = datetime.utcnow()
-                            self.pairs[pair].mexc_update_count += 1
-                            mexc_ok += 1
+                        mexc_sym = pair.replace("/", "")
+                        url = f"https://api.mexc.com/api/v3/depth?symbol={mexc_sym}&limit=20"
+                        async with self.mexc._http_session.get(url, timeout=strict_timeout) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:20]]
+                                asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get('asks', [])[:20]]
+                                rest_book = OrderBook(exchange="mexc", symbol=pair, timestamp=datetime.utcnow(), bids=bids, asks=asks)
+                                if pair in self.pairs:
+                                    self.pairs[pair].mexc_book = rest_book
+                                    self.pairs[pair].mexc_last_update = datetime.utcnow()
+                                    self.pairs[pair].mexc_update_count += 1
+                                    mexc_ok += 1
+                            else:
+                                mexc_fail += 1
                     except Exception as e:
                         mexc_fail += 1
                         if i < 3:
-                            logger.debug(f"Validation MEXC fail {pair}: {type(e).__name__}: {e}")
+                            logger.debug(f"Validation MEXC fail {pair}: {type(e).__name__}")
 
-                    # Binance
+                    # Binance — direct REST
                     try:
-                        rest_book = await asyncio.wait_for(
-                            self.binance._fetch_order_book_direct(pair, depth=20),
-                            timeout=CALL_TIMEOUT,
-                        )
-                        if pair in self.pairs:
-                            self.pairs[pair].binance_book = rest_book
-                            self.pairs[pair].binance_last_update = datetime.utcnow()
-                            self.pairs[pair].binance_update_count += 1
-                            binance_ok += 1
+                        bn_sym = pair.replace("/", "")
+                        url = f"https://api.binance.com/api/v3/depth?symbol={bn_sym}&limit=20"
+                        async with self.binance._http_session.get(url, timeout=strict_timeout) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:20]]
+                                asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get('asks', [])[:20]]
+                                rest_book = OrderBook(exchange="binance", symbol=pair, timestamp=datetime.utcnow(), bids=bids, asks=asks)
+                                if pair in self.pairs:
+                                    self.pairs[pair].binance_book = rest_book
+                                    self.pairs[pair].binance_last_update = datetime.utcnow()
+                                    self.pairs[pair].binance_update_count += 1
+                                    binance_ok += 1
+                            else:
+                                binance_fail += 1
                     except Exception as e:
                         binance_fail += 1
                         if i < 3:
-                            logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}: {e}")
+                            logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}")
 
-                    # KuCoin (already uses pure aiohttp, no sync fallback)
-                    if self.kucoin:
+                    # KuCoin — direct REST
+                    if self.kucoin and self.kucoin._http_session:
                         try:
-                            rest_book = await asyncio.wait_for(
-                                self.kucoin.get_order_book(pair, depth=20),
-                                timeout=CALL_TIMEOUT,
-                            )
-                            if pair in self.pairs:
-                                self.pairs[pair].kucoin_book = rest_book
-                                self.pairs[pair].kucoin_last_update = datetime.utcnow()
-                                self.pairs[pair].kucoin_update_count += 1
-                                kucoin_ok += 1
+                            kc_sym = pair.replace("/", "-")
+                            url = f"https://api.kucoin.com/api/v1/market/orderbook/level2_20?symbol={kc_sym}"
+                            async with self.kucoin._http_session.get(url, timeout=strict_timeout) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    if data.get("code") == "200000":
+                                        rest_book = self.kucoin._parse_rest_book(pair, data["data"])
+                                        if pair in self.pairs:
+                                            self.pairs[pair].kucoin_book = rest_book
+                                            self.pairs[pair].kucoin_last_update = datetime.utcnow()
+                                            self.pairs[pair].kucoin_update_count += 1
+                                            kucoin_ok += 1
+                                    else:
+                                        kucoin_fail += 1
+                                else:
+                                    kucoin_fail += 1
                         except Exception as e:
                             kucoin_fail += 1
                             if i < 3:
-                                logger.debug(f"Validation KuCoin fail {pair}: {type(e).__name__}: {e}")
+                                logger.debug(f"Validation KuCoin fail {pair}: {type(e).__name__}")
 
                     await asyncio.sleep(PAIR_DELAY)
 
