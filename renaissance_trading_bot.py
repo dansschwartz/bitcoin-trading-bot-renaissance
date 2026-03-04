@@ -1337,6 +1337,19 @@ class RenaissanceTradingBot:
             except Exception as _ac_err:
                 self.logger.warning(f"AgentCoordinator init failed (trading unaffected): {_ac_err}")
 
+        # ── Token Spray Engine (rapid-fire micro-positions) ──
+        self.token_spray = None
+        spray_config = self.config.get('token_spray', {})
+        if spray_config.get('enabled', False):
+            try:
+                from token_spray_engine import TokenSprayEngine
+                _spray_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+                self.token_spray = TokenSprayEngine(
+                    config=spray_config, db_path=_spray_db, logger=self.logger,
+                )
+            except Exception as _spray_err:
+                self.logger.warning(f"TokenSprayEngine init failed: {_spray_err}")
+
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
 
@@ -5238,6 +5251,84 @@ class RenaissanceTradingBot:
                     )
                     continue
 
+                # ── Token Spray Path ──
+                # When spray is active, bypass the legacy decision path entirely.
+                # Open micro-positions and persist ML predictions, then continue.
+                if self.token_spray:
+                    spray_token = await self.token_spray.spray(
+                        pair=product_id,
+                        weighted_signal=weighted_signal,
+                        contributions=contributions,
+                        ml_package=ml_package,
+                        market_data=market_data,
+                        confidence=None,
+                    )
+
+                    # Determine spray action label
+                    _spray_action = "HOLD"
+                    if spray_token:
+                        _spray_action = "BUY" if spray_token.side == "LONG" else "SELL"
+
+                    # Keep: ML prediction persistence (same as legacy path)
+                    if self.db_enabled:
+                        hmm_regime_label = self.regime_overlay.get_hmm_regime_label()
+                        decision_persist = {
+                            'timestamp': datetime.now(timezone.utc).isoformat(),
+                            'product_id': product_id,
+                            'action': _spray_action,
+                            'confidence': spray_token.confidence if spray_token else 0.0,
+                            'position_size': spray_token.size_usd if spray_token else 0.0,
+                            'weighted_signal': weighted_signal,
+                            'reasoning': {'source': 'token_spray', 'rule': spray_token.direction_rule if spray_token else None},
+                            'hmm_regime': hmm_regime_label,
+                            'vae_loss': None,
+                        }
+                        self._track_task(self.db_manager.store_decision(decision_persist))
+
+                        _ml_preds = {}
+                        if ml_package and ml_package.ml_predictions:
+                            for mp in ml_package.ml_predictions:
+                                if isinstance(mp, dict):
+                                    _ml_preds[mp.get('model', 'unknown')] = (
+                                        mp.get('prediction', 0.0),
+                                        mp.get('confidence'),
+                                    )
+                                elif isinstance(mp, tuple) and len(mp) >= 2:
+                                    _ml_preds[mp[0]] = (mp[1], mp[2] if len(mp) > 2 else None)
+                        elif rt_result and 'predictions' in rt_result:
+                            for mn, pv in rt_result['predictions'].items():
+                                _ml_preds[mn] = (pv, None)
+                        for model_name, (pred, conf) in _ml_preds.items():
+                            self._track_task(self.db_manager.store_ml_prediction({
+                                'product_id': product_id,
+                                'model_name': model_name,
+                                'prediction': pred,
+                                'confidence': conf,
+                                'price_at_prediction': current_price,
+                            }))
+                        _ml_inference_count += len(_ml_preds)
+
+                    # Dashboard emit for spray
+                    try:
+                        self._track_task(self.dashboard_emitter.emit("cycle", {
+                            "product_id": product_id,
+                            "action": _spray_action,
+                            "confidence": float(spray_token.confidence) if spray_token else 0.0,
+                            "position_size": float(spray_token.size_usd) if spray_token else 0.0,
+                            "weighted_signal": float(weighted_signal),
+                            "hmm_regime": self.regime_overlay.get_hmm_regime_label() if self.regime_overlay.enabled else None,
+                            "price": float(current_price),
+                            "source": "token_spray",
+                        }))
+                    except Exception:
+                        pass
+
+                    # Skip legacy decision path — move to next pair
+                    pair_elapsed = time.time() - pair_start_time
+                    if pair_elapsed > 10:
+                        self.logger.warning(f"SLOW PAIR: {product_id} took {pair_elapsed:.1f}s (spray)")
+                    continue
+
                 # 5.1 Meta-Strategy Selection
                 regime_data = self.regime_overlay.current_regime or {}
                 self.last_vpin = market_data.get('vpin', 0.5)
@@ -6079,6 +6170,14 @@ class RenaissanceTradingBot:
         """Activate kill switch: close all positions, halt trading loop."""
         self.logger.critical(f"KILL SWITCH ACTIVATED: {reason}")
         self._killed = True
+        # Stop token spray exit loop
+        if self.token_spray:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self.token_spray.stop_exit_loop())
+            except Exception:
+                pass
         try:
             self.position_manager.set_emergency_stop(True, reason)
         except Exception as e:
@@ -6607,6 +6706,30 @@ class RenaissanceTradingBot:
         except Exception as e:
             self.logger.warning(f"Prune error: {e}")
 
+    async def _get_spray_prices(self, pairs: List[str]) -> Dict[str, float]:
+        """Fetch current prices for token spray exit checks.
+
+        Tries BinanceSpotProvider cached tickers first, falls back to
+        ``_last_prices`` cache populated during the per-pair trading loop.
+        """
+        prices: Dict[str, float] = {}
+        for pair in pairs:
+            px = 0.0
+            # Try Binance cached ticker
+            if hasattr(self, 'binance_spot_provider') and self.binance_spot_provider:
+                try:
+                    ticker = self.binance_spot_provider.get_cached_ticker(pair)
+                    if ticker and ticker.get('last_price', 0) > 0:
+                        px = float(ticker['last_price'])
+                except Exception:
+                    pass
+            # Fallback to _last_prices
+            if px <= 0 and hasattr(self, '_last_prices'):
+                px = float(self._last_prices.get(pair, 0.0))
+            if px > 0:
+                prices[pair] = px
+        return prices
+
     async def _deduplicate_positions_on_startup(self) -> None:
         """Close duplicate and opposing positions found after DB restore.
 
@@ -6744,6 +6867,10 @@ class RenaissanceTradingBot:
 
         # ── Startup deduplication: close duplicate/opposing positions from DB ──
         await self._deduplicate_positions_on_startup()
+
+        # ── Start Token Spray exit loop ──
+        if self.token_spray:
+            await self.token_spray.start_exit_loop(self._get_spray_prices)
 
         # ── Prune old data to reduce DB size and memory pressure ──
         self._prune_old_data()

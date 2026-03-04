@@ -341,6 +341,35 @@ class DatabaseManager:
             )''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_portfolio_snap_ts ON portfolio_snapshots(timestamp)')
 
+            # ── Token Spray Engine log ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS token_spray_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT DEFAULT (datetime('now')),
+                token_id TEXT,
+                pair TEXT,
+                direction TEXT,
+                direction_rule TEXT,
+                token_size_usd REAL,
+                entry_price REAL,
+                vol_regime TEXT,
+                expected_move_bps REAL,
+                target_bps REAL,
+                stop_bps REAL,
+                max_hold_seconds REAL,
+                observation_mode INTEGER DEFAULT 0,
+                exit_price REAL,
+                exit_time TEXT,
+                exit_reason TEXT,
+                exit_pnl_bps REAL,
+                exit_pnl_usd REAL,
+                hold_time_seconds REAL,
+                weighted_signal REAL,
+                confidence REAL
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_spray_token ON token_spray_log(token_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_spray_pair ON token_spray_log(pair)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_spray_ts ON token_spray_log(timestamp DESC)')
+
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
 

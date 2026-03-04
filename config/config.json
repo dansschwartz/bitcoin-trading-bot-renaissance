@@ -605,6 +605,23 @@
         "max_exits_per_scan": 3,
         "cooldown_after_exit_seconds": 60
     },
+    "token_spray": {
+        "enabled": true,
+        "observation_mode": true,
+        "token_size_usd": 20,
+        "max_budget_usd": 2000,
+        "max_open_tokens": 100,
+        "max_tokens_per_pair": 5,
+        "min_signal_strength": 0.02,
+        "min_confidence": 0.42,
+        "target_fraction": 0.5,
+        "stop_bps": 50,
+        "max_hold_seconds": 300,
+        "edge_consumed_min_age_seconds": 120,
+        "cooldown_seconds": 30,
+        "exit_check_interval_seconds": 5,
+        "vol_scaling": { "low": 1.0, "medium": 0.7, "high": 0.4 }
+    },
     "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],
     "model_retraining": {
         "enabled": true,
