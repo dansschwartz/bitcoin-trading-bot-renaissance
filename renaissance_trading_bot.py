@@ -5323,6 +5323,11 @@ class RenaissanceTradingBot:
                     except Exception:
                         pass
 
+                    # Update price cache so exit loop can fetch current prices
+                    if not hasattr(self, '_last_prices'):
+                        self._last_prices = {}
+                    self._last_prices[product_id] = current_price
+
                     # Skip legacy decision path — move to next pair
                     pair_elapsed = time.time() - pair_start_time
                     if pair_elapsed > 10:
@@ -6709,25 +6714,34 @@ class RenaissanceTradingBot:
     async def _get_spray_prices(self, pairs: List[str]) -> Dict[str, float]:
         """Fetch current prices for token spray exit checks.
 
-        Tries BinanceSpotProvider cached tickers first, falls back to
-        ``_last_prices`` cache populated during the per-pair trading loop.
+        Called every 5s by the exit loop.  Fetches live Binance tickers
+        in parallel, falling back to ``_last_prices`` for any that fail.
         """
         prices: Dict[str, float] = {}
-        for pair in pairs:
-            px = 0.0
-            # Try Binance cached ticker
-            if hasattr(self, 'binance_spot_provider') and self.binance_spot_provider:
+        provider = getattr(self, 'binance_spot_provider', None)
+        pair_map = getattr(self, '_pair_binance_symbols', {})
+
+        # Parallel Binance fetch for all pairs that have a symbol mapping
+        if provider:
+            fetchable = [(p, pair_map[p]) for p in pairs if pair_map.get(p)]
+            if fetchable:
                 try:
-                    ticker = self.binance_spot_provider.get_cached_ticker(pair)
-                    if ticker and ticker.get('last_price', 0) > 0:
-                        px = float(ticker['last_price'])
+                    results = await asyncio.gather(
+                        *(provider.fetch_ticker(bsym) for _, bsym in fetchable),
+                        return_exceptions=True,
+                    )
+                    for (pair, _), ticker in zip(fetchable, results):
+                        if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
+                            prices[pair] = float(ticker['price'])
                 except Exception:
                     pass
-            # Fallback to _last_prices
-            if px <= 0 and hasattr(self, '_last_prices'):
-                px = float(self._last_prices.get(pair, 0.0))
-            if px > 0:
-                prices[pair] = px
+
+        # Fill gaps from _last_prices cache
+        last = getattr(self, '_last_prices', {})
+        for pair in pairs:
+            if pair not in prices and last.get(pair, 0) > 0:
+                prices[pair] = float(last[pair])
+
         return prices
 
     async def _deduplicate_positions_on_startup(self) -> None:
