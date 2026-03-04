@@ -151,10 +151,10 @@ class KuCoinClient(ExchangeClient):
     # ── Market Data ───────────────────────────────────────────────
 
     async def get_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        """Fetch order book via direct REST, with ccxt fallback."""
+        """Fetch order book via direct REST (no ccxt fallback — ccxt auto-loads
+        markets which hangs for minutes on degraded VPS network)."""
         kc_symbol = self._to_kucoin_symbol(symbol)
 
-        # Primary: direct REST via aiohttp
         try:
             if self._http_session:
                 url = f"https://api.kucoin.com/api/v1/market/orderbook/level2_20?symbol={kc_symbol}"
@@ -167,22 +167,7 @@ class KuCoinClient(ExchangeClient):
         except Exception as e:
             logger.debug(f"KuCoin REST book failed for {symbol}: {e}")
 
-        # Fallback: ccxt
-        try:
-            if self._exchange:
-                raw = await self._exchange.fetch_order_book(symbol, limit=depth)
-                bids = [OrderBookLevel(Decimal(str(p)), Decimal(str(q))) for p, q in raw.get("bids", [])]
-                asks = [OrderBookLevel(Decimal(str(p)), Decimal(str(q))) for p, q in raw.get("asks", [])]
-                return OrderBook(
-                    exchange="kucoin", symbol=symbol,
-                    timestamp=datetime.utcnow(),
-                    bids=sorted(bids, key=lambda x: x.price, reverse=True),
-                    asks=sorted(asks, key=lambda x: x.price),
-                )
-        except Exception as e:
-            logger.debug(f"KuCoin ccxt book fallback failed for {symbol}: {e}")
-
-        # Return empty book as last resort
+        # Return empty book on failure
         return OrderBook(
             exchange="kucoin", symbol=symbol,
             timestamp=datetime.utcnow(),
