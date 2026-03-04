@@ -238,9 +238,12 @@ class KuCoinClient(ExchangeClient):
         2. Connect to endpoint?token=xxx&connectId=yyy
         3. Subscribe to depth channels
         4. Send JSON pings every 25s
+
+        Uses exponential backoff for REST fallback duration when WS keeps failing.
         """
         reconnect_attempts = 0
         max_reconnects = 3
+        rest_fallback_duration = 60  # Grows with backoff: 60 → 120 → 300 → 600
 
         while self._ws_running:
             try:
@@ -248,7 +251,8 @@ class KuCoinClient(ExchangeClient):
                 token_data = await self._get_ws_token()
                 if not token_data:
                     logger.warning("KuCoin WS: Failed to get token, falling back to REST")
-                    await self._rest_fallback_loop()
+                    await self._rest_fallback_loop(duration=rest_fallback_duration)
+                    rest_fallback_duration = min(rest_fallback_duration * 2, 600)
                     continue
 
                 endpoint = token_data["endpoint"]
@@ -257,30 +261,37 @@ class KuCoinClient(ExchangeClient):
 
                 ws_url = f"{endpoint}?token={token}&connectId={int(time.time()*1000)}"
 
-                # Step 2: Connect
+                # Step 2: Connect with explicit timeout
                 try:
                     import websockets
                     async with websockets.connect(
                         ws_url,
+                        open_timeout=10,     # Fail fast — VPS often hangs on KuCoin WS handshake
                         ping_interval=None,  # We handle pings manually (JSON, not WS protocol)
+                        ping_timeout=None,
                         close_timeout=5,
+                        additional_headers=_HTTP_HEADERS,
                     ) as ws:
                         logger.info(f"KuCoin WS connected — {len(self._ws_callbacks)} symbols to subscribe")
                         reconnect_attempts = 0
+                        rest_fallback_duration = 60  # Reset backoff on successful connect
 
-                        # Step 3: Subscribe to all depth channels
+                        # Step 3: Subscribe in batches of 100 symbols (KuCoin limit)
                         symbols_to_sub = list(self._ws_callbacks.keys())
                         if symbols_to_sub:
-                            kc_symbols = [self._to_kucoin_symbol(s) for s in symbols_to_sub]
-                            topic = f"{WS_DEPTH_SNAPSHOT_TOPIC}:{','.join(kc_symbols)}"
-                            sub_msg = {
-                                "id": str(int(time.time() * 1000)),
-                                "type": "subscribe",
-                                "topic": topic,
-                                "privateChannel": False,
-                                "response": True,
-                            }
-                            await ws.send(json.dumps(sub_msg))
+                            batch_size = 100
+                            for batch_start in range(0, len(symbols_to_sub), batch_size):
+                                batch = symbols_to_sub[batch_start:batch_start + batch_size]
+                                kc_symbols = [self._to_kucoin_symbol(s) for s in batch]
+                                topic = f"{WS_DEPTH_SNAPSHOT_TOPIC}:{','.join(kc_symbols)}"
+                                sub_msg = {
+                                    "id": str(int(time.time() * 1000)),
+                                    "type": "subscribe",
+                                    "topic": topic,
+                                    "privateChannel": False,
+                                    "response": True,
+                                }
+                                await ws.send(json.dumps(sub_msg))
 
                         # Step 4: Message + ping loop
                         connection_start = time.monotonic()
@@ -321,8 +332,9 @@ class KuCoinClient(ExchangeClient):
                     reconnect_attempts += 1
 
                 if reconnect_attempts >= max_reconnects:
-                    logger.warning(f"KuCoin WS: {max_reconnects} failures, falling back to REST")
-                    await self._rest_fallback_loop()
+                    logger.warning(f"KuCoin WS: {max_reconnects} failures, REST fallback for {rest_fallback_duration}s")
+                    await self._rest_fallback_loop(duration=rest_fallback_duration)
+                    rest_fallback_duration = min(rest_fallback_duration * 2, 600)
                     reconnect_attempts = 0
 
             except asyncio.CancelledError:
@@ -400,23 +412,33 @@ class KuCoinClient(ExchangeClient):
                     except Exception as e:
                         logger.debug(f"KuCoin WS callback error for {norm_symbol}: {e}")
 
-    async def _rest_fallback_loop(self):
-        """REST polling fallback when WebSocket is unavailable."""
-        logger.info("KuCoin: Entering REST fallback mode (60s)")
-        end_time = time.monotonic() + 60  # 60s of REST before retrying WS
+    async def _rest_fallback_loop(self, duration: int = 60):
+        """REST polling fallback when WebSocket is unavailable.
 
-        while self._ws_running and time.monotonic() < end_time:
-            for symbol, callback in list(self._ws_callbacks.items()):
-                if not self._ws_running:
-                    break
+        Uses parallel batch fetching (semaphore-limited) to keep books fresh
+        across all symbols without exceeding rate limits.
+        """
+        logger.info(f"KuCoin: Entering REST fallback mode ({duration}s)")
+        end_time = time.monotonic() + duration
+        sem = asyncio.Semaphore(5)  # 5 concurrent REST calls
+
+        async def _fetch_one(symbol: str, callback):
+            async with sem:
                 try:
                     book = await self.get_order_book(symbol, depth=20)
                     self._last_books[symbol] = book
                     await callback(book)
                 except Exception:
                     pass
-                await asyncio.sleep(0.2)  # 200ms between pairs
-            await asyncio.sleep(2)  # 2s between full cycles
+
+        while self._ws_running and time.monotonic() < end_time:
+            items = list(self._ws_callbacks.items())
+            if not items:
+                await asyncio.sleep(2)
+                continue
+            tasks = [_fetch_one(sym, cb) for sym, cb in items]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(3)  # 3s between full cycles
 
     async def get_ticker(self, symbol: str) -> dict:
         """Get current ticker for a symbol (standardized format)."""

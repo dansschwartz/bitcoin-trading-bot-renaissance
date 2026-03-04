@@ -366,15 +366,17 @@ class UnifiedBookManager:
             logger.debug(f"Binance validation error {pair}: {e}")
 
     async def _validation_loop(self):
-        """Periodically refresh all pairs via REST sequentially.
+        """Periodically refresh all pairs via REST.
 
         Uses self.pairs.keys() instead of self.monitored_pairs so dynamically
         added pairs are also refreshed.
 
-        Sequential with 200ms spacing to avoid MEXC 403/429 rate limits.
-        30 pairs × 200ms = ~6s per cycle, well within both exchanges' limits.
+        Per-pair: all exchanges fetched in parallel (asyncio.gather) with a
+        5-second timeout per call so one slow exchange can't block the others.
+        Sequential between pairs with 150ms spacing to respect rate limits.
         """
         PAIR_DELAY = 0.15  # 150ms between pairs
+        FETCH_TIMEOUT = 5.0  # Max seconds per REST call
 
         logger.info("Validation loop started — will refresh every 15s")
 
@@ -392,63 +394,87 @@ class UnifiedBookManager:
 
                 mexc_ok = 0
                 binance_ok = 0
+                kucoin_ok = 0
                 mexc_fail = 0
                 binance_fail = 0
+                kucoin_fail = 0
 
                 for i, pair in enumerate(pairs):
                     if not self._running:
                         break
-                    t_pair = _time.monotonic()
-                    # MEXC
-                    try:
-                        rest_book = await self.mexc.get_order_book(pair, depth=20)
-                        if pair in self.pairs:
-                            self.pairs[pair].mexc_book = rest_book
-                            self.pairs[pair].mexc_last_update = datetime.utcnow()
-                            self.pairs[pair].mexc_update_count += 1
-                            mexc_ok += 1
-                    except Exception as e:
-                        mexc_fail += 1
-                        if i < 3:  # Log first 3 failures for debugging
-                            logger.debug(f"Validation MEXC fail {pair}: {type(e).__name__}: {e}")
 
-                    # Binance
-                    try:
-                        rest_book = await self.binance.get_order_book(pair, depth=20)
-                        if pair in self.pairs:
-                            self.pairs[pair].binance_book = rest_book
-                            self.pairs[pair].binance_last_update = datetime.utcnow()
-                            self.pairs[pair].binance_update_count += 1
-                            binance_ok += 1
-                    except Exception as e:
-                        binance_fail += 1
-                        if i < 3:
-                            logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}: {e}")
+                    # Build parallel fetch tasks for all exchanges
+                    async def _fetch_mexc(p=pair):
+                        return "mexc", await asyncio.wait_for(
+                            self.mexc.get_order_book(p, depth=20),
+                            timeout=FETCH_TIMEOUT,
+                        )
 
-                    # KuCoin (optional)
+                    async def _fetch_binance(p=pair):
+                        return "binance", await asyncio.wait_for(
+                            self.binance.get_order_book(p, depth=20),
+                            timeout=FETCH_TIMEOUT,
+                        )
+
+                    async def _fetch_kucoin(p=pair):
+                        return "kucoin", await asyncio.wait_for(
+                            self.kucoin.get_order_book(p, depth=20),
+                            timeout=FETCH_TIMEOUT,
+                        )
+
+                    tasks = [_fetch_mexc(), _fetch_binance()]
                     if self.kucoin:
-                        try:
-                            rest_book = await self.kucoin.get_order_book(pair, depth=20)
-                            if pair in self.pairs:
+                        tasks.append(_fetch_kucoin())
+
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    for result in results:
+                        if isinstance(result, Exception):
+                            # Figure out which exchange failed from the exception
+                            # (gather preserves order)
+                            continue
+                        exch, rest_book = result
+                        if pair in self.pairs:
+                            if exch == "mexc":
+                                self.pairs[pair].mexc_book = rest_book
+                                self.pairs[pair].mexc_last_update = datetime.utcnow()
+                                self.pairs[pair].mexc_update_count += 1
+                                mexc_ok += 1
+                            elif exch == "binance":
+                                self.pairs[pair].binance_book = rest_book
+                                self.pairs[pair].binance_last_update = datetime.utcnow()
+                                self.pairs[pair].binance_update_count += 1
+                                binance_ok += 1
+                            elif exch == "kucoin":
                                 self.pairs[pair].kucoin_book = rest_book
                                 self.pairs[pair].kucoin_last_update = datetime.utcnow()
                                 self.pairs[pair].kucoin_update_count += 1
-                        except Exception as e:
-                            if i < 3:
-                                logger.debug(f"Validation KuCoin fail {pair}: {type(e).__name__}: {e}")
+                                kucoin_ok += 1
 
-                    elapsed_pair = _time.monotonic() - t_pair
-                    if i == 0:
-                        logger.debug(f"First pair {pair}: {elapsed_pair:.2f}s (M:{'ok' if mexc_ok else 'fail'} B:{'ok' if binance_ok else 'fail'})")
+                    # Count failures from exceptions (gather preserves order)
+                    exchange_names = ["mexc", "binance"] + (["kucoin"] if self.kucoin else [])
+                    for idx, result in enumerate(results):
+                        if isinstance(result, Exception):
+                            ename = exchange_names[idx]
+                            if ename == "mexc":
+                                mexc_fail += 1
+                            elif ename == "binance":
+                                binance_fail += 1
+                            elif ename == "kucoin":
+                                kucoin_fail += 1
+                            if i < 3:
+                                logger.debug(f"Validation {ename} fail {pair}: {type(result).__name__}: {result}")
 
                     await asyncio.sleep(PAIR_DELAY)
 
                 elapsed = _time.monotonic() - t_start
                 tradeable = sum(1 for v in self.pairs.values() if v.is_tradeable)
+                kc_str = f" | KuCoin {kucoin_ok}ok/{kucoin_fail}fail" if self.kucoin else ""
                 logger.info(
                     f"Book refresh: {len(pairs)} pairs | "
                     f"MEXC {mexc_ok}ok/{mexc_fail}fail | "
-                    f"Binance {binance_ok}ok/{binance_fail}fail | "
+                    f"Binance {binance_ok}ok/{binance_fail}fail"
+                    f"{kc_str} | "
                     f"{tradeable} tradeable | {elapsed:.1f}s"
                 )
             except asyncio.CancelledError:
