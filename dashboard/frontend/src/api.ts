@@ -93,9 +93,10 @@ export const api = {
   backtestDownloadUrl: () => `${BASE}/api/backtest/download`,
 
   // Positions (round-trip P&L)
-  closedPositions: (limit = 50, offset = 0) =>
-    get<ClosedPosition[]>(`/api/positions/closed?limit=${limit}&offset=${offset}`),
-  positionSummary: () => get<PositionSummary>('/api/positions/summary'),
+  closedPositions: (limit = 50, offset = 0, startDate?: string) =>
+    get<ClosedPosition[]>(`/api/positions/closed?limit=${limit}&offset=${offset}${startDate ? `&start_date=${startDate}` : ''}`),
+  positionSummary: (startDate?: string) =>
+    get<PositionSummary>(`/api/positions/summary${startDate ? `?start_date=${startDate}` : ''}`),
 
   // Arbitrage
   arbStatus: () => get<ArbStatus>('/api/arbitrage/status'),

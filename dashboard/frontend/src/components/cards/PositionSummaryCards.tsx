@@ -11,23 +11,29 @@ function formatDuration(seconds: number): string {
   return `${(seconds / 86400).toFixed(1)}d`;
 }
 
-export default function PositionSummaryCards() {
+interface Props {
+  startDate?: string;
+}
+
+export default function PositionSummaryCards({ startDate }: Props) {
   const [summary, setSummary] = useState<PositionSummary | null>(null);
 
   useEffect(() => {
-    api.positionSummary().then(setSummary).catch(() => {});
+    api.positionSummary(startDate).then(setSummary).catch(() => {});
     const id = setInterval(() => {
-      api.positionSummary().then(setSummary).catch(() => {});
+      api.positionSummary(startDate).then(setSummary).catch(() => {});
     }, 30_000);
     return () => clearInterval(id);
-  }, []);
+  }, [startDate]);
 
   if (!summary || summary.total_closed === 0) return null;
+
+  const label = startDate ? `Win Rate (since ${startDate.slice(0, 10)})` : 'Win Rate (All-Time)';
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
       <MetricCard
-        title="Win Rate (All-Time)"
+        title={label}
         value={`${(summary.win_rate * 100).toFixed(1)}%`}
         subtitle={`${summary.wins}W / ${summary.losses}L of ${summary.total_closed} closed`}
         valueColor={summary.win_rate >= 0.5 ? 'text-accent-green' : 'text-accent-red'}

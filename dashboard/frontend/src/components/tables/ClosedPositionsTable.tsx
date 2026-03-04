@@ -11,14 +11,22 @@ function formatDuration(seconds: number | null): string {
   return `${(seconds / 86400).toFixed(1)}d`;
 }
 
-export default function ClosedPositionsTable() {
+interface Props {
+  startDate?: string;
+}
+
+export default function ClosedPositionsTable({ startDate }: Props) {
   const [positions, setPositions] = useState<ClosedPosition[]>([]);
   const [offset, setOffset] = useState(0);
   const limit = 25;
 
   useEffect(() => {
-    api.closedPositions(limit, offset).then(setPositions).catch(() => {});
-  }, [offset]);
+    setOffset(0);
+  }, [startDate]);
+
+  useEffect(() => {
+    api.closedPositions(limit, offset, startDate).then(setPositions).catch(() => {});
+  }, [offset, startDate]);
 
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">

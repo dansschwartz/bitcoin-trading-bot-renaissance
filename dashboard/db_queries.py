@@ -203,12 +203,18 @@ def get_trade_lifecycle(db_path: str, trade_id: int) -> Dict[str, Any]:
 # ─── Closed Positions (round-trip P&L) ────────────────────────────────────
 
 def get_closed_positions(
-    db_path: str, limit: int = 50, offset: int = 0
+    db_path: str, limit: int = 50, offset: int = 0, start_date: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Return closed positions with exit data, recomputing P&L from prices."""
     with _conn(db_path) as c:
+        where = "WHERE status = 'CLOSED'"
+        params: list = []
+        if start_date:
+            where += " AND datetime(closed_at) >= datetime(?)"
+            params.append(start_date)
+        params.extend([limit, offset])
         rows = c.execute(
-            """SELECT position_id, product_id, side, size, entry_price,
+            f"""SELECT position_id, product_id, side, size, entry_price,
                       close_price, opened_at, closed_at,
                       CASE WHEN close_price IS NOT NULL AND close_price > 0
                            THEN CASE WHEN side IN ('BUY','LONG')
@@ -219,20 +225,25 @@ def get_closed_positions(
                       END as realized_pnl,
                       exit_reason, hold_duration_seconds
                FROM open_positions
-               WHERE status = 'CLOSED'
+               {where}
                ORDER BY closed_at DESC NULLS LAST, rowid DESC
                LIMIT ? OFFSET ?""",
-            (limit, offset),
+            params,
         ).fetchall()
         return _rows_to_dicts(rows)
 
 
-def get_position_summary_stats(db_path: str) -> Dict[str, Any]:
+def get_position_summary_stats(db_path: str, start_date: Optional[str] = None) -> Dict[str, Any]:
     """Aggregate stats from closed positions, recomputing P&L from entry/close prices."""
     with _conn(db_path) as c:
         # Recompute P&L from prices to avoid relying on stored realized_pnl
+        where = "WHERE status = 'CLOSED' AND close_price IS NOT NULL AND close_price > 0"
+        params: list = []
+        if start_date:
+            where += " AND datetime(closed_at) >= datetime(?)"
+            params.append(start_date)
         row = c.execute(
-            """SELECT
+            f"""SELECT
                  COUNT(*) as total_closed,
                  SUM(CASE WHEN
                        (CASE WHEN side IN ('BUY','LONG')
@@ -277,8 +288,8 @@ def get_position_summary_stats(db_path: str) -> Dict[str, Any]:
                  ), 0.0) as largest_loss,
                  COALESCE(AVG(hold_duration_seconds), 0.0) as avg_hold_seconds
                FROM open_positions
-               WHERE status = 'CLOSED'
-                 AND close_price IS NOT NULL AND close_price > 0"""
+               {where}""",
+            params,
         ).fetchone()
         total = row["total_closed"] or 0
         wins = row["wins"] or 0
