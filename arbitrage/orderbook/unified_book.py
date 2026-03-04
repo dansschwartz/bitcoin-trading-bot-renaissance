@@ -24,24 +24,31 @@ PHASE_1_PAIRS = [
 
 @dataclass
 class UnifiedPairView:
-    """Combined view of one trading pair across both exchanges."""
+    """Combined view of one trading pair across exchanges (MEXC, Binance, optional KuCoin)."""
     symbol: str
     mexc_book: Optional[OrderBook] = None
     binance_book: Optional[OrderBook] = None
+    kucoin_book: Optional[OrderBook] = None
     mexc_last_update: datetime = field(default_factory=datetime.utcnow)
     binance_last_update: datetime = field(default_factory=datetime.utcnow)
+    kucoin_last_update: datetime = field(default_factory=datetime.utcnow)
     # Tracking
     mexc_update_count: int = 0
     binance_update_count: int = 0
+    kucoin_update_count: int = 0
 
     @property
     def is_fresh(self) -> bool:
         now = datetime.utcnow()
         max_age = timedelta(seconds=90)  # 90s — tolerant of sequential REST polling (30 pairs × 2 exchanges)
-        return (
+        fresh = (
             (now - self.mexc_last_update) < max_age
             and (now - self.binance_last_update) < max_age
         )
+        # KuCoin freshness only required if book exists
+        if self.kucoin_book is not None:
+            fresh = fresh and (now - self.kucoin_last_update) < max_age
+        return fresh
 
     @property
     def is_tradeable(self) -> bool:
@@ -115,6 +122,75 @@ class UnifiedPairView:
 
         return None
 
+    def get_all_cross_exchange_spreads(self) -> List[dict]:
+        """Returns all profitable cross-exchange spreads (may include multiple).
+
+        Checks MEXC↔Binance (existing) plus MEXC↔KuCoin if kucoin book exists.
+        Each spread dict has the same format as get_cross_exchange_spread().
+        """
+        results = []
+
+        # MEXC vs Binance (existing logic)
+        spread = self.get_cross_exchange_spread()
+        if spread:
+            results.append(spread)
+
+        # MEXC vs KuCoin (new)
+        if self.kucoin_book and self.mexc_book:
+            kc_spread = self._cross_spread_between(
+                "mexc", self.mexc_book, "kucoin", self.kucoin_book
+            )
+            if kc_spread:
+                results.append(kc_spread)
+
+        return results
+
+    def _cross_spread_between(
+        self, exch_a: str, book_a: OrderBook, exch_b: str, book_b: OrderBook
+    ) -> Optional[dict]:
+        """Generic spread calculation between two exchange books.
+
+        Same logic as get_cross_exchange_spread() but parameterized.
+        """
+        if not (book_a.best_bid and book_a.best_ask and book_b.best_bid and book_b.best_ask):
+            return None
+
+        a_ask = book_a.best_ask
+        a_bid = book_a.best_bid
+        b_ask = book_b.best_ask
+        b_bid = book_b.best_bid
+
+        # Direction 1: Buy on A, Sell on B
+        spread_1_bps = ((b_bid - a_ask) / a_ask) * 10000 if a_ask > 0 else Decimal('0')
+
+        # Direction 2: Buy on B, Sell on A
+        spread_2_bps = ((a_bid - b_ask) / b_ask) * 10000 if b_ask > 0 else Decimal('0')
+
+        if spread_1_bps > spread_2_bps and spread_1_bps > 0:
+            return {
+                "direction": f"buy_{exch_a}_sell_{exch_b}",
+                "buy_exchange": exch_a,
+                "sell_exchange": exch_b,
+                "buy_price": a_ask,
+                "sell_price": b_bid,
+                "gross_spread_bps": spread_1_bps,
+                "buy_depth": book_a.available_liquidity_at_impact(OrderSide.BUY, Decimal('5')),
+                "sell_depth": book_b.available_liquidity_at_impact(OrderSide.SELL, Decimal('5')),
+            }
+        elif spread_2_bps > 0:
+            return {
+                "direction": f"buy_{exch_b}_sell_{exch_a}",
+                "buy_exchange": exch_b,
+                "sell_exchange": exch_a,
+                "buy_price": b_ask,
+                "sell_price": a_bid,
+                "gross_spread_bps": spread_2_bps,
+                "buy_depth": book_b.available_liquidity_at_impact(OrderSide.BUY, Decimal('5')),
+                "sell_depth": book_a.available_liquidity_at_impact(OrderSide.SELL, Decimal('5')),
+            }
+
+        return None
+
 
 class UnifiedBookManager:
     """Manages order books for all monitored pairs across both exchanges.
@@ -124,9 +200,10 @@ class UnifiedBookManager:
     """
 
     def __init__(self, mexc_client, binance_client, pairs: Optional[List[str]] = None,
-                 bar_aggregator=None):
+                 bar_aggregator=None, kucoin=None):
         self.mexc = mexc_client
         self.binance = binance_client
+        self.kucoin = kucoin  # Optional KuCoin spoke exchange
         self.monitored_pairs = pairs or PHASE_1_PAIRS
         self._initial_pairs: List[str] = list(self.monitored_pairs)  # Static pairs (never demoted)
         self.pairs: Dict[str, UnifiedPairView] = {}
@@ -152,10 +229,17 @@ class UnifiedBookManager:
                 callback=lambda book, p=pair: self._on_binance_update(p, book),
                 depth=20,
             ))
+            if self.kucoin:
+                tasks.append(self.kucoin.subscribe_order_book(
+                    pair,
+                    callback=lambda book, p=pair: self._on_kucoin_update(p, book),
+                    depth=20,
+                ))
 
         self._validation_task = asyncio.create_task(self._validation_loop())
 
-        logger.info(f"UnifiedBookManager started — monitoring {len(self.monitored_pairs)} pairs")
+        kc_tag = " + KuCoin" if self.kucoin else ""
+        logger.info(f"UnifiedBookManager started — monitoring {len(self.monitored_pairs)} pairs (MEXC + Binance{kc_tag})")
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def stop(self):
@@ -236,6 +320,14 @@ class UnifiedBookManager:
                     )
                 except Exception:
                     pass
+
+    async def _on_kucoin_update(self, pair: str, book: OrderBook):
+        if pair in self.pairs:
+            self.pairs[pair].kucoin_book = book
+            self.pairs[pair].kucoin_last_update = datetime.utcnow()
+            self.pairs[pair].kucoin_update_count += 1
+            if self.pairs[pair].kucoin_update_count == 1:
+                logger.info(f"KuCoin first book for {pair}: bid={book.best_bid} ask={book.best_ask}")
 
     async def _refresh_pair(self, pair: str) -> None:
         """REST-refresh a single pair on both exchanges (used by validation loop)."""
@@ -333,6 +425,18 @@ class UnifiedBookManager:
                         if i < 3:
                             logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}: {e}")
 
+                    # KuCoin (optional)
+                    if self.kucoin:
+                        try:
+                            rest_book = await self.kucoin.get_order_book(pair, depth=20)
+                            if pair in self.pairs:
+                                self.pairs[pair].kucoin_book = rest_book
+                                self.pairs[pair].kucoin_last_update = datetime.utcnow()
+                                self.pairs[pair].kucoin_update_count += 1
+                        except Exception as e:
+                            if i < 3:
+                                logger.debug(f"Validation KuCoin fail {pair}: {type(e).__name__}: {e}")
+
                     elapsed_pair = _time.monotonic() - t_pair
                     if i == 0:
                         logger.debug(f"First pair {pair}: {elapsed_pair:.2f}s (M:{'ok' if mexc_ok else 'fail'} B:{'ok' if binance_ok else 'fail'})")
@@ -355,18 +459,24 @@ class UnifiedBookManager:
 
     def get_status(self) -> dict:
         fresh = sum(1 for v in self.pairs.values() if v.is_tradeable)
-        total_updates = sum(v.mexc_update_count + v.binance_update_count for v in self.pairs.values())
+        total_updates = sum(
+            v.mexc_update_count + v.binance_update_count + v.kucoin_update_count
+            for v in self.pairs.values()
+        )
         return {
             "total_pairs": len(self.pairs),
             "tradeable_pairs": fresh,
             "total_updates": total_updates,
+            "kucoin_enabled": self.kucoin is not None,
             "pairs": {
                 p: {
                     "tradeable": v.is_tradeable,
                     "mexc_updates": v.mexc_update_count,
                     "binance_updates": v.binance_update_count,
+                    "kucoin_updates": v.kucoin_update_count,
                     "mexc_spread": float(v.mexc_book.spread_bps) if v.mexc_book and v.mexc_book.spread_bps else None,
                     "binance_spread": float(v.binance_book.spread_bps) if v.binance_book and v.binance_book.spread_bps else None,
+                    "kucoin_spread": float(v.kucoin_book.spread_bps) if v.kucoin_book and v.kucoin_book.spread_bps else None,
                 }
                 for p, v in self.pairs.items()
             }

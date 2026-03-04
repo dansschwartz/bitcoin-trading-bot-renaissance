@@ -58,11 +58,14 @@ class ArbitrageExecutor:
 
     def __init__(self, mexc_client, binance_client, cost_model, risk_engine,
                  config: Optional[dict] = None,
-                 book_manager: Optional['UnifiedBookManager'] = None):
+                 book_manager: Optional['UnifiedBookManager'] = None,
+                 kucoin_client=None):
         self.clients = {
             "mexc": mexc_client,
             "binance": binance_client,
         }
+        if kucoin_client:
+            self.clients["kucoin"] = kucoin_client
         self.costs = cost_model
         self.risk = risk_engine
         self.book_manager = book_manager
@@ -89,14 +92,21 @@ class ArbitrageExecutor:
             return False, "pair_not_monitored"
 
         now = datetime.utcnow()
-        mexc_age = (now - view.mexc_last_update).total_seconds()
-        binance_age = (now - view.binance_last_update).total_seconds()
+        # Dynamically check the two exchanges in this signal
+        ages = {}
+        for exch in [signal.buy_exchange, signal.sell_exchange]:
+            update_time = getattr(view, f"{exch}_last_update", None)
+            if update_time:
+                ages[exch] = (now - update_time).total_seconds()
+            else:
+                ages[exch] = 999.0  # No data = very stale
 
-        if mexc_age > self.MAX_BOOK_AGE_SEC:
-            return False, f"mexc_stale:{mexc_age:.1f}s"
-        if binance_age > self.MAX_BOOK_AGE_SEC:
-            return False, f"binance_stale:{binance_age:.1f}s"
-        return True, f"fresh:M={mexc_age:.1f}s,B={binance_age:.1f}s"
+        for exch, age in ages.items():
+            if age > self.MAX_BOOK_AGE_SEC:
+                return False, f"{exch}_stale:{age:.1f}s"
+
+        age_summary = ",".join(f"{e[0].upper()}={a:.1f}s" for e, a in ages.items())
+        return True, f"fresh:{age_summary}"
 
     def _check_book_depth(self, signal: ArbitrageSignal) -> tuple:
         """Reject if either book lacks depth at target price. Returns (ok, reason)."""
@@ -104,11 +114,14 @@ class ArbitrageExecutor:
             return True, "no_book_manager"
 
         view = self.book_manager.pairs.get(signal.symbol)
-        if not view or not view.mexc_book or not view.binance_book:
+        if not view:
             return False, "missing_book"
 
-        buy_book = view.mexc_book if signal.buy_exchange == "mexc" else view.binance_book
-        sell_book = view.mexc_book if signal.sell_exchange == "mexc" else view.binance_book
+        # Dynamically look up books for the exchanges in this signal
+        buy_book = getattr(view, f"{signal.buy_exchange}_book", None)
+        sell_book = getattr(view, f"{signal.sell_exchange}_book", None)
+        if not buy_book or not sell_book:
+            return False, "missing_book"
 
         target_qty = signal.recommended_quantity
 

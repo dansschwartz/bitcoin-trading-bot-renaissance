@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from arbitrage.exchanges.mexc_client import MEXCClient
 from arbitrage.exchanges.binance_client import BinanceClient
 from arbitrage.exchanges.bybit_client import BybitClient
+from arbitrage.exchanges.kucoin_client import KuCoinClient
 from arbitrage.orderbook.unified_book import UnifiedBookManager
 from arbitrage.costs.model import ArbitrageCostModel
 from arbitrage.detector.cross_exchange import CrossExchangeDetector
@@ -77,6 +78,17 @@ class ArbitrageOrchestrator:
             paper_trading=paper,
         ) if bybit_cfg.get('enabled', False) else None
 
+        # KuCoin exchange client (spoke, for cross-exchange arb)
+        kucoin_enabled = self.config.get('exchanges', {}).get('kucoin_enabled', False)
+        self.kucoin = KuCoinClient(
+            api_key=os.getenv('KUCOIN_API_KEY', ''),
+            api_secret=os.getenv('KUCOIN_API_SECRET', ''),
+            passphrase=os.getenv('KUCOIN_PASSPHRASE', ''),
+            paper_trading=paper,
+        ) if kucoin_enabled else None
+        if self.kucoin:
+            logger.info("KuCoin spoke exchange ENABLED")
+
         # BarAggregator for trade/book data
         self.bar_aggregator = self._init_bar_aggregator()
 
@@ -86,6 +98,7 @@ class ArbitrageOrchestrator:
         self.book_manager = UnifiedBookManager(
             self.mexc, self.binance, pairs=pairs,
             bar_aggregator=self.bar_aggregator,
+            kucoin=self.kucoin,
         )
         self.cost_model = ArbitrageCostModel()
         self.risk_engine = ArbitrageRiskEngine(self.config.get('risk', {}))
@@ -95,7 +108,9 @@ class ArbitrageOrchestrator:
 
         # Contract verification safety layer
         self.contract_verifier = ContractVerifier(
-            self.mexc, self.binance, config=self.config,
+            self.mexc, self.binance,
+            kucoin_client=self.kucoin,
+            config=self.config,
         )
 
         # Volume participation limiter for cross-exchange arb
@@ -104,6 +119,8 @@ class ArbitrageOrchestrator:
         # Wire volume limiter into exchange clients for fill rate degradation
         self.mexc.volume_limiter = self.volume_limiter
         self.binance.volume_limiter = self.volume_limiter
+        if self.kucoin:
+            self.kucoin.volume_limiter = self.volume_limiter
 
         # Dynamic pair discovery for cross-exchange arb
         self.pair_discovery = PairDiscoveryEngine(
@@ -123,6 +140,7 @@ class ArbitrageOrchestrator:
         self.executor = ArbitrageExecutor(
             self.mexc, self.binance, self.cost_model, self.risk_engine,
             config=self.config, book_manager=self.book_manager,
+            kucoin_client=self.kucoin,
         )
         # Support modules (tracker must be created before funding_arb and triangular_arb)
         self.inventory = InventoryManager(self.mexc, self.binance)
@@ -209,6 +227,8 @@ class ArbitrageOrchestrator:
         connect_tasks = [self.mexc.connect(), self.binance.connect()]
         if self.bybit:
             connect_tasks.append(self.bybit.connect())
+        if self.kucoin:
+            connect_tasks.append(self.kucoin.connect())
         await asyncio.gather(*connect_tasks)
 
         # Contract verification cache (try to populate, degrade gracefully)
@@ -279,6 +299,8 @@ class ArbitrageOrchestrator:
         disconnect_tasks = [self.mexc.disconnect(), self.binance.disconnect()]
         if self.bybit:
             disconnect_tasks.append(self.bybit.disconnect())
+        if self.kucoin:
+            disconnect_tasks.append(self.kucoin.disconnect())
         await asyncio.gather(*disconnect_tasks, return_exceptions=True)
         logger.info("Arbitrage engine stopped")
         self._log_final_summary()

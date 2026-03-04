@@ -34,11 +34,16 @@ class ContractVerifier:
         self,
         mexc_client,
         binance_client,
+        kucoin_client=None,
         config: Optional[dict] = None,
         cache_ttl_hours: int = 24,
     ):
         self.mexc = mexc_client
         self.binance = binance_client
+        self.kucoin = kucoin_client
+        self._clients: Dict[str, object] = {"mexc": mexc_client, "binance": binance_client}
+        if kucoin_client:
+            self._clients["kucoin"] = kucoin_client
         self.cache_ttl = cache_ttl_hours * 3600
         self._config = config or {}
 
@@ -71,13 +76,19 @@ class ContractVerifier:
         }
 
     async def refresh_cache(self) -> None:
-        """Fetch token network/contract info from both exchanges."""
+        """Fetch token network/contract info from all exchanges."""
         logger.info("CONTRACT VERIFIER: Refreshing token contract cache...")
 
         mexc_data = await self._fetch_exchange_currencies("mexc")
         binance_data = await self._fetch_exchange_currencies("binance")
 
         self._currency_cache = {"mexc": mexc_data, "binance": binance_data}
+
+        # KuCoin (optional)
+        if self.kucoin:
+            kucoin_data = await self._fetch_exchange_currencies("kucoin")
+            self._currency_cache["kucoin"] = kucoin_data
+
         self._cache_timestamp = time.time()
         self._stats["cache_refreshes"] += 1
 
@@ -85,17 +96,20 @@ class ContractVerifier:
         for symbol in list(self._verified.keys()):
             self._verified[symbol] = self._check_contract_match(symbol)
 
-        logger.info(
-            f"CONTRACT VERIFIER: Cached {len(mexc_data)} MEXC tokens, "
-            f"{len(binance_data)} Binance tokens"
+        token_counts = ", ".join(
+            f"{len(v)} {k.title()}" for k, v in self._currency_cache.items()
         )
+        logger.info(f"CONTRACT VERIFIER: Cached {token_counts} tokens")
 
     async def _fetch_exchange_currencies(self, exchange: str) -> Dict:
         """Fetch currency info from an exchange via ccxt.
 
         Returns: {symbol: {network: {"contract": "0x...", "deposit": bool, "withdraw": bool}}}
         """
-        client = self.mexc if exchange == "mexc" else self.binance
+        client = self._clients.get(exchange)
+        if not client:
+            logger.warning(f"CONTRACT VERIFIER: Unknown exchange {exchange}")
+            return {}
         try:
             # Use the ccxt exchange object stored in the client
             ccxt_exchange = getattr(client, "_exchange", None)
@@ -139,58 +153,81 @@ class ContractVerifier:
             return {}
 
     def _check_contract_match(self, symbol: str) -> bool:
-        """Check if a token has matching contract addresses on both exchanges.
+        """Check if a token has matching contract addresses across exchanges.
+
+        Checks all pairs of cached exchanges (not just mexc vs binance).
+        A token is verified if ANY pair of exchanges agrees on contract.
 
         Returns True (allow) if:
         - At least one shared network has identical contract addresses
         - Token is a native chain token (BTC, ETH, etc.)
-        - Token not found on one/both exchanges (permissive when we can't verify)
+        - Token not found on exchanges (permissive when we can't verify)
 
         Returns False (block) if:
         - All shared networks have different contract addresses
         """
         base = symbol.split("/")[0] if "/" in symbol else symbol
 
-        mexc_nets = self._currency_cache.get("mexc", {}).get(base, {})
-        binance_nets = self._currency_cache.get("binance", {}).get(base, {})
+        # Collect exchange data for this token
+        exchange_nets: Dict[str, Dict] = {}
+        for exch_name, exch_data in self._currency_cache.items():
+            nets = exch_data.get(base, {})
+            if nets:
+                exchange_nets[exch_name] = nets
 
         # If cache is empty (no API keys), be permissive
-        if not self._currency_cache.get("mexc") and not self._currency_cache.get("binance"):
+        if not self._currency_cache:
             return True
 
-        if not mexc_nets or not binance_nets:
+        # Need at least 2 exchanges with data to compare
+        if len(exchange_nets) < 2:
             logger.debug(
-                f"CONTRACT VERIFIER: {base} not in cache for one/both exchanges, "
+                f"CONTRACT VERIFIER: {base} found on {len(exchange_nets)} exchanges, "
                 f"allowing (permissive)"
             )
             return True
 
-        shared_networks = set(mexc_nets.keys()) & set(binance_nets.keys())
-        if not shared_networks:
-            # No shared networks = can't transfer between exchanges
+        # Check all pairs of exchanges for contract match
+        exch_names = list(exchange_nets.keys())
+        for i in range(len(exch_names)):
+            for j in range(i + 1, len(exch_names)):
+                nets_a = exchange_nets[exch_names[i]]
+                nets_b = exchange_nets[exch_names[j]]
+
+                shared_networks = set(nets_a.keys()) & set(nets_b.keys())
+                if not shared_networks:
+                    continue
+
+                for network in shared_networks:
+                    ca = nets_a[network].get("contract", "")
+                    cb = nets_b[network].get("contract", "")
+
+                    # Native tokens may have empty contracts
+                    if not ca and not cb:
+                        return True
+                    if ca and cb and ca == cb:
+                        return True
+
+        # No exchange pair agreed — check if it's because no shared networks at all
+        any_shared = False
+        for i in range(len(exch_names)):
+            for j in range(i + 1, len(exch_names)):
+                shared = set(exchange_nets[exch_names[i]].keys()) & set(exchange_nets[exch_names[j]].keys())
+                if shared:
+                    any_shared = True
+                    break
+
+        if not any_shared:
             logger.warning(
-                f"CONTRACT VERIFIER: {base} has no shared networks. "
-                f"MEXC: {list(mexc_nets.keys())}, Binance: {list(binance_nets.keys())}"
+                f"CONTRACT VERIFIER: {base} has no shared networks across any exchange pair"
             )
             return False
-
-        for network in shared_networks:
-            mc = mexc_nets[network].get("contract", "")
-            bc = binance_nets[network].get("contract", "")
-
-            # Native tokens may have empty contracts
-            if not mc and not bc:
-                return True
-            if mc and bc and mc == bc:
-                return True
 
         # All shared networks have different contracts — mismatch
         self._mismatches.append({
             "symbol": base,
             "timestamp": time.time(),
-            "shared_networks": list(shared_networks),
-            "mexc_contracts": {n: mexc_nets[n].get("contract", "") for n in shared_networks},
-            "binance_contracts": {n: binance_nets[n].get("contract", "") for n in shared_networks},
+            "exchanges": exch_names,
         })
         logger.warning(
             f"CONTRACT MISMATCH: {base} has different contracts on all shared networks!"
@@ -359,5 +396,6 @@ class ContractVerifier:
             else None,
             "mexc_tokens_cached": len(self._currency_cache.get("mexc", {})),
             "binance_tokens_cached": len(self._currency_cache.get("binance", {})),
+            "kucoin_tokens_cached": len(self._currency_cache.get("kucoin", {})),
             **self._stats,
         }

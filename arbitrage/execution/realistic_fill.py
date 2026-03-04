@@ -44,8 +44,9 @@ class RealisticCrossExchangeFill:
     Periodic inventory rebalancing costs are amortized as a tiny per-trade cost.
     """
 
-    # Binance fee rates
+    # Fee rates per exchange
     BINANCE_TAKER_FEE = Decimal('0.00075')   # 0.075% with BNB discount
+    KUCOIN_FEE = Decimal('0.001')            # 0.10% maker/taker (Class A)
     MEXC_MAKER_FEE = Decimal('0')            # 0% maker (LIMIT_MAKER)
 
     def __init__(self, config: Optional[dict] = None):
@@ -90,13 +91,17 @@ class RealisticCrossExchangeFill:
         Returns:
             RealisticCostBreakdown with all cost components
         """
-        # Taker fee on Binance leg(s) only
-        # MEXC = 0% maker (LIMIT_MAKER), Binance = 0.075% (with BNB)
+        # Taker fee on non-MEXC leg(s) only
+        # MEXC = 0% maker (LIMIT_MAKER), Binance = 0.075%, KuCoin = 0.10%
         taker_fee = Decimal('0')
         if buy_exchange == 'binance':
             taker_fee += trade_size_usd * self.binance_taker_fee
+        elif buy_exchange == 'kucoin':
+            taker_fee += trade_size_usd * self.KUCOIN_FEE
         if sell_exchange == 'binance':
             taker_fee += trade_size_usd * self.binance_taker_fee
+        elif sell_exchange == 'kucoin':
+            taker_fee += trade_size_usd * self.KUCOIN_FEE
 
         # Amortized rebalancing cost (NOT a withdrawal fee per trade)
         rebalance_cost = self.rebalance_cost_per_trade

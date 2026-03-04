@@ -53,6 +53,16 @@ class ArbitrageCostModel:
                 "taker": Decimal('0.0005'),
             },
         },
+        "kucoin": {
+            "spot": {
+                "maker": Decimal('0.0010'),   # 0.10% Class A
+                "taker": Decimal('0.0010'),   # 0.10% Class A
+            },
+            "futures": {
+                "maker": Decimal('0.0002'),
+                "taker": Decimal('0.0006'),
+            },
+        },
     }
 
     def __init__(self):
@@ -135,6 +145,7 @@ class ArbitrageCostModel:
         base_slippage = {
             "mexc": Decimal('1.5'),
             "binance": Decimal('0.5'),
+            "kucoin": Decimal('1.0'),  # Between mexc (1.5) and binance (0.5)
         }
         return base_slippage.get(exchange, Decimal('2.0'))
 

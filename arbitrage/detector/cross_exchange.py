@@ -114,106 +114,108 @@ class CrossExchangeDetector:
                     self._contract_skips += 1
                     continue
 
-                spread_info = view.get_cross_exchange_spread()
-                if spread_info is None or spread_info['gross_spread_bps'] <= 0:
-                    continue
-
-                # Layer 2: Price sanity check (instant, no API needed)
-                if self.contract_verifier:
-                    buy_p = float(spread_info['buy_price'])
-                    sell_p = float(spread_info['sell_price'])
-                    if not self.contract_verifier.price_sanity_check(pair, buy_p, sell_p):
-                        self._price_sanity_skips += 1
+                all_spreads = view.get_all_cross_exchange_spreads()
+                for spread_info in all_spreads:
+                    if spread_info['gross_spread_bps'] <= 0:
                         continue
 
-                # Calculate costs
-                cost_est = self.costs.estimate_arbitrage_cost(
-                    symbol=pair,
-                    buy_exchange=spread_info['buy_exchange'],
-                    sell_exchange=spread_info['sell_exchange'],
-                    buy_price=spread_info['buy_price'],
-                    sell_price=spread_info['sell_price'],
-                )
+                    # Layer 2: Price sanity check (instant, no API needed)
+                    if self.contract_verifier:
+                        buy_p = float(spread_info['buy_price'])
+                        sell_p = float(spread_info['sell_price'])
+                        if not self.contract_verifier.price_sanity_check(pair, buy_p, sell_p):
+                            self._price_sanity_skips += 1
+                            continue
 
-                net_spread = spread_info['gross_spread_bps'] - cost_est.total_cost_bps
+                    # Calculate costs
+                    cost_est = self.costs.estimate_arbitrage_cost(
+                        symbol=pair,
+                        buy_exchange=spread_info['buy_exchange'],
+                        sell_exchange=spread_info['sell_exchange'],
+                        buy_price=spread_info['buy_price'],
+                        sell_price=spread_info['sell_price'],
+                    )
 
-                # Track best spread seen for diagnostics
-                gross = float(spread_info['gross_spread_bps'])
-                net = float(net_spread)
-                if gross > _diag_best_gross:
-                    _diag_best_gross = gross
-                    _diag_best_net = net
-                    _diag_best_pair = pair
+                    net_spread = spread_info['gross_spread_bps'] - cost_est.total_cost_bps
 
-                if net_spread < self.MIN_NET_SPREAD_BPS:
-                    _diag_below_threshold += 1
-                    continue
+                    # Track best spread seen for diagnostics
+                    gross = float(spread_info['gross_spread_bps'])
+                    net = float(net_spread)
+                    if gross > _diag_best_gross:
+                        _diag_best_gross = gross
+                        _diag_best_net = net
+                        _diag_best_pair = pair
 
-                # Size the trade
-                max_qty = min(spread_info['buy_depth'], spread_info['sell_depth'])
-                mid_price = (spread_info['buy_price'] + spread_info['sell_price']) / 2
+                    if net_spread < self.MIN_NET_SPREAD_BPS:
+                        _diag_below_threshold += 1
+                        continue
 
-                if mid_price <= 0:
-                    continue
+                    # Size the trade
+                    max_qty = min(spread_info['buy_depth'], spread_info['sell_depth'])
+                    mid_price = (spread_info['buy_price'] + spread_info['sell_price']) / 2
 
-                max_qty_by_usd = self.MAX_TRADE_USD / mid_price
-                recommended_qty = min(max_qty, max_qty_by_usd)
+                    if mid_price <= 0:
+                        continue
 
-                notional = recommended_qty * mid_price
-                if notional < self.MIN_TRADE_USD:
-                    _diag_below_notional += 1
-                    continue
+                    max_qty_by_usd = self.MAX_TRADE_USD / mid_price
+                    recommended_qty = min(max_qty, max_qty_by_usd)
 
-                # Per-pair cooldown: don't flood queue with same pair
-                now_mono = time.monotonic()
-                last_emit = self._last_signal_time.get(pair, 0)
-                if now_mono - last_emit < self.SIGNAL_COOLDOWN_SEC:
-                    continue
+                    notional = recommended_qty * mid_price
+                    if notional < self.MIN_TRADE_USD:
+                        _diag_below_notional += 1
+                        continue
 
-                expected_profit = notional * (net_spread / 10000)
+                    # Per-pair+route cooldown: don't flood queue with same pair on same route
+                    route_key = f"{pair}_{spread_info['buy_exchange']}_{spread_info['sell_exchange']}"
+                    now_mono = time.monotonic()
+                    last_emit = self._last_signal_time.get(route_key, 0)
+                    if now_mono - last_emit < self.SIGNAL_COOLDOWN_SEC:
+                        continue
 
-                signal = ArbitrageSignal(
-                    signal_id=f"arb_{pair.replace('/', '')}_{self._scan_count}_{uuid.uuid4().hex[:8]}",
-                    signal_type="cross_exchange",
-                    timestamp=datetime.utcnow(),
-                    symbol=pair,
-                    buy_exchange=spread_info['buy_exchange'],
-                    sell_exchange=spread_info['sell_exchange'],
-                    buy_price=spread_info['buy_price'],
-                    sell_price=spread_info['sell_price'],
-                    gross_spread_bps=spread_info['gross_spread_bps'],
-                    total_cost_bps=cost_est.total_cost_bps,
-                    net_spread_bps=net_spread,
-                    max_quantity=max_qty,
-                    recommended_quantity=recommended_qty,
-                    expected_profit_usd=expected_profit,
-                    buy_fee_bps=cost_est.buy_fee_bps,
-                    sell_fee_bps=cost_est.sell_fee_bps,
-                    buy_slippage_bps=cost_est.buy_slippage_bps,
-                    sell_slippage_bps=cost_est.sell_slippage_bps,
-                    expires_at=datetime.utcnow() + timedelta(seconds=self.SIGNAL_TTL_SECONDS),
-                    confidence=self._calculate_confidence(view, spread_info),
-                )
+                    expected_profit = notional * (net_spread / 10000)
 
-                self._signals_generated += 1
+                    signal = ArbitrageSignal(
+                        signal_id=f"arb_{pair.replace('/', '')}_{self._scan_count}_{uuid.uuid4().hex[:8]}",
+                        signal_type="cross_exchange",
+                        timestamp=datetime.utcnow(),
+                        symbol=pair,
+                        buy_exchange=spread_info['buy_exchange'],
+                        sell_exchange=spread_info['sell_exchange'],
+                        buy_price=spread_info['buy_price'],
+                        sell_price=spread_info['sell_price'],
+                        gross_spread_bps=spread_info['gross_spread_bps'],
+                        total_cost_bps=cost_est.total_cost_bps,
+                        net_spread_bps=net_spread,
+                        max_quantity=max_qty,
+                        recommended_quantity=recommended_qty,
+                        expected_profit_usd=expected_profit,
+                        buy_fee_bps=cost_est.buy_fee_bps,
+                        sell_fee_bps=cost_est.sell_fee_bps,
+                        buy_slippage_bps=cost_est.buy_slippage_bps,
+                        sell_slippage_bps=cost_est.sell_slippage_bps,
+                        expires_at=datetime.utcnow() + timedelta(seconds=self.SIGNAL_TTL_SECONDS),
+                        confidence=self._calculate_confidence(view, spread_info),
+                    )
 
-                # Risk check
-                if self.risk.approve_arbitrage(signal):
-                    try:
-                        self.signal_queue.put_nowait(signal)
-                        self._signals_approved += 1
-                        self._last_signal_time[pair] = now_mono
-                        logger.info(
-                            f"ARB SIGNAL: {pair} {spread_info['direction']} | "
-                            f"gross={float(spread_info['gross_spread_bps']):.1f}bps "
-                            f"net={float(net_spread):.1f}bps "
-                            f"profit=${float(expected_profit):.2f} "
-                            f"qty={float(recommended_qty):.6f}"
-                        )
-                    except asyncio.QueueFull:
-                        pass  # Drop if consumer is slow
+                    self._signals_generated += 1
 
-                self._last_spreads[pair] = spread_info['gross_spread_bps']
+                    # Risk check
+                    if self.risk.approve_arbitrage(signal):
+                        try:
+                            self.signal_queue.put_nowait(signal)
+                            self._signals_approved += 1
+                            self._last_signal_time[route_key] = now_mono
+                            logger.info(
+                                f"ARB SIGNAL: {pair} {spread_info['direction']} | "
+                                f"gross={float(spread_info['gross_spread_bps']):.1f}bps "
+                                f"net={float(net_spread):.1f}bps "
+                                f"profit=${float(expected_profit):.2f} "
+                                f"qty={float(recommended_qty):.6f}"
+                            )
+                        except asyncio.QueueFull:
+                            pass  # Drop if consumer is slow
+
+                    self._last_spreads[pair] = spread_info['gross_spread_bps']
 
             self._scan_count += 1
 
@@ -245,10 +247,13 @@ class CrossExchangeDetector:
     def _calculate_confidence(self, view, spread_info) -> Decimal:
         confidence = Decimal('0.5')
 
-        # Freshness bonus
-        age_mexc = (datetime.utcnow() - view.mexc_last_update).total_seconds()
-        age_binance = (datetime.utcnow() - view.binance_last_update).total_seconds()
-        max_age = max(age_mexc, age_binance)
+        # Freshness bonus — check the two exchanges actually in this spread
+        now = datetime.utcnow()
+        ages = []
+        for exch in [spread_info['buy_exchange'], spread_info['sell_exchange']]:
+            update_time = getattr(view, f"{exch}_last_update", now)
+            ages.append((now - update_time).total_seconds())
+        max_age = max(ages) if ages else 999
         if max_age < 0.5:
             confidence += Decimal('0.2')
         elif max_age < 1.0:
