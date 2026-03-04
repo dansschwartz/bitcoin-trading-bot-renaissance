@@ -325,6 +325,22 @@ class DatabaseManager:
             )''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_scorecard_ts ON model_accuracy_scorecard(timestamp DESC)')
 
+            # ── Council S4: Balance Snapshots for equity curve audit (F-12) ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS balance_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                total_equity REAL,
+                unrealized_pnl REAL,
+                realized_pnl_cumulative REAL,
+                open_position_count INTEGER,
+                cash_balance REAL,
+                drawdown_pct REAL,
+                high_watermark REAL,
+                daily_pnl REAL,
+                source TEXT DEFAULT 'periodic'
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_balance_ts ON balance_snapshots(timestamp)')
+
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
 
@@ -652,24 +668,51 @@ class DatabaseManager:
             return []
 
     async def get_daily_pnl(self, date_str: str) -> float:
-        """Sum realized PnL from today's trades (approximated from trade records)."""
+        """Sum realized PnL from closed positions for the date."""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                # Council S4: Use actual realized_pnl from closed positions, NOT dollar flow
                 cursor.execute('''
-                    SELECT COALESCE(SUM(
-                        CASE WHEN side = 'SELL' THEN size * price
-                             WHEN side = 'BUY'  THEN -size * price
-                             ELSE 0 END
-                    ), 0.0)
-                    FROM trades
-                    WHERE date(timestamp) = ?
+                    SELECT COALESCE(SUM(realized_pnl), 0.0)
+                    FROM open_positions
+                    WHERE status = 'CLOSED'
+                      AND date(closed_at) = ?
                 ''', (date_str,))
                 result = cursor.fetchone()
                 return float(result[0]) if result else 0.0
         except Exception as e:
             self.logger.error(f"Error getting daily PnL: {e}")
             return 0.0
+
+    async def store_balance_snapshot(
+        self,
+        total_equity: float,
+        unrealized_pnl: float = 0.0,
+        realized_pnl_cumulative: float = 0.0,
+        open_position_count: int = 0,
+        cash_balance: float = 0.0,
+        drawdown_pct: float = 0.0,
+        high_watermark: float = 0.0,
+        daily_pnl: float = 0.0,
+        source: str = 'periodic',
+    ) -> None:
+        """Council S4: Record a balance snapshot for equity curve tracking (F-12)."""
+        try:
+            with self._get_connection() as conn:
+                conn.execute('''
+                    INSERT INTO balance_snapshots
+                        (timestamp, total_equity, unrealized_pnl,
+                         realized_pnl_cumulative, open_position_count,
+                         cash_balance, drawdown_pct, high_watermark,
+                         daily_pnl, source)
+                    VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (total_equity, unrealized_pnl, realized_pnl_cumulative,
+                      open_position_count, cash_balance, drawdown_pct,
+                      high_watermark, daily_pnl, source))
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error storing balance snapshot: {e}")
 
     # ──────────────────────────────────────────────
     #  Decision Audit Log
@@ -876,18 +919,31 @@ class DatabaseManager:
     async def evaluate_audit_outcomes(self, lookback_minutes: int = 60) -> int:
         """Fill outcome columns for audit rows where enough time has elapsed.
 
-        Compares decision-time price to current price for the product.
+        Uses five_minute_bars for bar-based evaluation at multiple horizons:
+          outcome_1bar  =  1 bar  =  5 min after decision
+          outcome_6bar  =  6 bars = 30 min after decision
+          outcome_12bar = 12 bars = 60 min after decision
+          outcome_24bar = 24 bars = 120 min after decision
+
         Returns number of rows updated.
         """
         updated = 0
+        HORIZONS = {
+            'outcome_1bar': 1,
+            'outcome_6bar': 6,
+            'outcome_12bar': 12,
+            'outcome_24bar': 24,
+        }
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                # Find rows that need outcome evaluation (outcome_1bar IS NULL and old enough)
+                # Find rows that need any outcome evaluation and are old enough
                 rows = cursor.execute('''
-                    SELECT id, product_id, price, timestamp
+                    SELECT id, product_id, price, timestamp,
+                           outcome_1bar, outcome_6bar, outcome_12bar, outcome_24bar
                     FROM decision_audit_log
-                    WHERE outcome_1bar IS NULL
+                    WHERE (outcome_1bar IS NULL OR outcome_6bar IS NULL
+                           OR outcome_12bar IS NULL OR outcome_24bar IS NULL)
                       AND price IS NOT NULL
                       AND timestamp < datetime('now', ? || ' minutes')
                     ORDER BY id
@@ -897,32 +953,50 @@ class DatabaseManager:
                 if not rows:
                     return 0
 
-                # Get latest prices per product from market_data
-                products = list({r[1] for r in rows})
-                latest_prices: Dict[str, float] = {}
-                for pid in products:
-                    px_row = cursor.execute('''
-                        SELECT price FROM market_data
-                        WHERE product_id = ?
-                        ORDER BY timestamp DESC LIMIT 1
-                    ''', (pid,)).fetchone()
-                    if px_row:
-                        latest_prices[pid] = float(px_row[0])
-
                 now_ts = datetime.now(timezone.utc).isoformat()
-                for row_id, pid, entry_price, ts in rows:
-                    current_px = latest_prices.get(pid)
-                    if not current_px or entry_price <= 0:
+                for row_id, pid, entry_price, ts, o1, o6, o12, o24 in rows:
+                    if not entry_price or entry_price <= 0 or not ts:
                         continue
-                    ret = (current_px - entry_price) / entry_price
-                    cursor.execute('''
-                        UPDATE decision_audit_log
-                        SET outcome_1bar = ?, outcome_evaluated_at = ?
-                        WHERE id = ?
-                    ''', (round(ret, 6), now_ts, row_id))
-                    updated += 1
+                    existing = {'outcome_1bar': o1, 'outcome_6bar': o6,
+                                'outcome_12bar': o12, 'outcome_24bar': o24}
+
+                    # Parse decision timestamp to epoch
+                    try:
+                        _dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                        _decision_epoch = _dt.timestamp()
+                    except Exception:
+                        continue
+
+                    updates = {}
+                    for col, n_bars in HORIZONS.items():
+                        if existing[col] is not None:
+                            continue  # Already filled
+                        target_epoch = _decision_epoch + n_bars * 300  # 5 min per bar
+                        # Find bar whose end is at/after the target time
+                        bar_row = cursor.execute('''
+                            SELECT close FROM five_minute_bars
+                            WHERE pair = ? AND bar_end >= ? AND bar_end <= ?
+                            ORDER BY bar_end ASC LIMIT 1
+                        ''', (pid, target_epoch - 60, target_epoch + 120)).fetchone()
+                        if bar_row:
+                            ret = (float(bar_row[0]) - entry_price) / entry_price
+                            updates[col] = round(ret, 6)
+
+                    if updates:
+                        set_clause = ', '.join(f'{k} = ?' for k in updates)
+                        vals = list(updates.values())
+                        # Also update outcome_evaluated_at
+                        set_clause += ', outcome_evaluated_at = ?'
+                        vals.append(now_ts)
+                        vals.append(row_id)
+                        cursor.execute(
+                            f'UPDATE decision_audit_log SET {set_clause} WHERE id = ?',
+                            vals)
+                        updated += 1
 
                 conn.commit()
+                if updated > 0:
+                    self.logger.info(f"Audit outcome evaluation: {updated} rows updated (multi-horizon)")
         except Exception as e:
             self.logger.error(f"Error evaluating audit outcomes: {e}")
         return updated
@@ -1009,13 +1083,30 @@ class DatabaseManager:
                         is_correct = 1 if pred_dir == 0 else 0  # Flat market: only correct if pred is also flat
                     else:
                         is_correct = 1 if pred_dir == actual_dir else 0
+
+                    # Council S4: Also evaluate 6-bar return (30 min horizon)
+                    actual_return_6bar = None
+                    try:
+                        _target_6bar = _pred_dt.timestamp() + 6 * 300  # 6 bars = 30 min
+                        bar_6 = cursor.execute('''
+                            SELECT close FROM five_minute_bars
+                            WHERE pair = ? AND bar_end >= ? AND bar_end <= ?
+                            ORDER BY bar_end ASC LIMIT 1
+                        ''', (pid, _target_6bar - 60, _target_6bar + 120)).fetchone()
+                        if bar_6:
+                            actual_return_6bar = round((float(bar_6[0]) - entry_px) / entry_px, 6)
+                    except Exception:
+                        pass
+
                     cursor.execute('''
                         UPDATE ml_predictions
-                        SET actual_return_1bar = ?, actual_direction = ?,
+                        SET actual_return_1bar = ?, actual_return_6bar = ?,
+                            actual_direction = ?,
                             is_correct = ?, evaluated_at = ?,
                             price_at_evaluation = ?
                         WHERE id = ?
-                    ''', (round(actual_return, 6), actual_dir, is_correct, now_ts, current_px, row_id))
+                    ''', (round(actual_return, 6), actual_return_6bar,
+                          actual_dir, is_correct, now_ts, current_px, row_id))
                     updated += 1
 
                 conn.commit()

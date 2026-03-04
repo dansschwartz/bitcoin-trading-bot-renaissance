@@ -331,6 +331,7 @@ class SignalThrottle:
                     """
                     SELECT
                         algo_used,
+                        product_id,
                         side,
                         size,
                         price,
@@ -350,40 +351,53 @@ class SignalThrottle:
                 )
                 return summary
 
-            # Group trades by signal type and compute P&L
-            # Fixed 2026-03-02: Old formula used raw dollar flow (BUY=-size*price,
-            # SELL=+size*price) which produced phantom -$58K/day for BTC trades.
-            # New approach: use realized_pnl from closed positions for actual P&L,
-            # fall back to trade-flow estimation only if no positions data.
+            # Council S4: Use realized_pnl from closed positions (ground truth P&L).
+            # Old code referenced non-existent 'exchange' column in open_positions,
+            # producing phantom -$155K values. New approach: group trades by algo_used,
+            # find matching closed positions by product_id, sum actual realized_pnl.
             from collections import defaultdict
 
             signal_trades: Dict[str, List[Dict]] = defaultdict(list)
-            for algo_used, side, size, price, slippage in rows:
+            signal_products: Dict[str, set] = defaultdict(set)
+            for algo_used, product_id, side, size, price, slippage in rows:
                 signal_trades[algo_used].append({
                     "side": side,
                     "size": size or 0.0,
                     "price": price or 0.0,
                     "slippage": slippage or 0.0,
                 })
+                signal_products[algo_used].add(product_id)
 
-            # Try to get actual realized P&L from closed positions
+            # Get actual realized P&L from closed positions, grouped by algo_used
+            # via product_id matching (open_positions has no algo_used column)
             position_pnl: Dict[str, Dict] = {}
             try:
                 with self._conn() as pconn:
-                    pos_rows = pconn.execute(
+                    # Get ALL closed positions for the day
+                    all_closed = pconn.execute(
                         """
-                        SELECT exchange as algo, COUNT(*) as n,
-                               COALESCE(SUM(realized_pnl), 0) as total_pnl,
-                               SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins
+                        SELECT product_id, realized_pnl
                         FROM open_positions
                         WHERE status = 'CLOSED'
                           AND date(closed_at) = ?
-                        GROUP BY exchange
+                          AND realized_pnl IS NOT NULL
                         """,
                         (target_date,),
                     ).fetchall()
-                    for algo, n, total_pnl, wins in pos_rows:
-                        position_pnl[algo] = {"pnl": total_pnl, "n": n, "wins": wins}
+
+                    # Attribute each closed position to the signal type that
+                    # traded that product_id
+                    for signal_type, products in signal_products.items():
+                        matching = [(pid, pnl) for pid, pnl in all_closed
+                                    if pid in products]
+                        if matching:
+                            total_pnl = sum(pnl for _, pnl in matching)
+                            wins = sum(1 for _, pnl in matching if pnl > 0)
+                            position_pnl[signal_type] = {
+                                "pnl": total_pnl,
+                                "n": len(matching),
+                                "wins": wins,
+                            }
             except Exception as exc:
                 logger.debug("Could not fetch position P&L for signal_daily_pnl: %s", exc)
 
@@ -398,13 +412,9 @@ class SignalThrottle:
                         winning_trades = pos["wins"]
                         num_trades = pos["n"]
                     else:
-                        # Fallback: estimate P&L from slippage costs only
-                        # (NOT from raw dollar flow which produces phantom numbers)
+                        # No closed positions for this signal today — report 0
                         pnl = 0.0
                         winning_trades = 0
-                        for t in trades:
-                            slip_cost = abs(t["slippage"]) if t["slippage"] else 0.0
-                            pnl -= slip_cost  # Best estimate without position pairing
 
                     win_rate = (
                         winning_trades / num_trades if num_trades > 0 else 0.0

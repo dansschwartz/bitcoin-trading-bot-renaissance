@@ -2687,12 +2687,11 @@ class RenaissanceTradingBot:
         if action == 'HOLD' and abs(weighted_signal) > 0.001:
             self._signal_filter_stats['filtered_threshold'] += 1
 
-        # ── SELL Inversion Gate: require majority model bearish consensus ──
-        # Original gate required GRU specifically, but GRU is in DISABLED_MODELS
-        # since Feb 27, which blocked ALL sells for 3+ days. Fixed 2026-03-02:
-        # Now requires >= 50% of active models to predict bearish (negative).
-        if action == 'SELL' and ml_package and ml_package.ml_predictions:
-            _sell_preds = []
+        # ── Direction Consensus Gate: require majority model agreement with trade direction ──
+        # Council S4 fix: was SELL-only ("sell_inversion"), causing 3.2:1 BUY/SELL asymmetry.
+        # Now symmetric: BUY requires >=50% bullish, SELL requires >=50% bearish.
+        if action in ('BUY', 'SELL') and ml_package and ml_package.ml_predictions:
+            _dir_preds = []
             for mp in ml_package.ml_predictions:
                 _name, _val = None, None
                 if isinstance(mp, (tuple, list)) and len(mp) >= 2:
@@ -2701,36 +2700,40 @@ class RenaissanceTradingBot:
                     _name = mp.get('model', mp.get('name', ''))
                     _val = mp.get('prediction', mp.get('value', None))
                 if _name and isinstance(_val, (int, float)) and not str(_name).startswith('_'):
-                    _sell_preds.append((_name, float(_val)))
+                    _dir_preds.append((_name, float(_val)))
 
-            if _sell_preds:
-                bearish_count = sum(1 for _, v in _sell_preds if v < -0.001)
-                total_models = len(_sell_preds)
-                bearish_pct = bearish_count / total_models if total_models > 0 else 0
+            if _dir_preds:
+                total_models = len(_dir_preds)
+                if action == 'SELL':
+                    aligned_count = sum(1 for _, v in _dir_preds if v < -0.001)
+                    label = 'bearish'
+                else:  # BUY
+                    aligned_count = sum(1 for _, v in _dir_preds if v > 0.001)
+                    label = 'bullish'
+                aligned_pct = aligned_count / total_models if total_models > 0 else 0
 
-                if bearish_pct < 0.50:
+                if aligned_pct < 0.50:
                     self.logger.info(
-                        f"SELL INVERSION GATE: {product_id} blocked — "
-                        f"only {bearish_count}/{total_models} models bearish ({bearish_pct:.0%} < 50%)"
+                        f"DIRECTION CONSENSUS GATE: {product_id} {action} blocked — "
+                        f"only {aligned_count}/{total_models} models {label} ({aligned_pct:.0%} < 50%)"
                     )
                     self._signal_filter_stats['filtered_agreement'] += 1
                     if audit_logger:
-                        audit_logger.record_gate('sell_inversion', False,
-                                                 f'bearish={bearish_count}/{total_models}={bearish_pct:.0%}')
+                        audit_logger.record_gate('direction_consensus', False,
+                                                 f'{label}={aligned_count}/{total_models}={aligned_pct:.0%}')
                     action = 'HOLD'
                 else:
                     self.logger.info(
-                        f"SELL INVERSION GATE: {product_id} PASSED — "
-                        f"{bearish_count}/{total_models} models bearish ({bearish_pct:.0%})"
+                        f"DIRECTION CONSENSUS GATE: {product_id} {action} PASSED — "
+                        f"{aligned_count}/{total_models} models {label} ({aligned_pct:.0%})"
                     )
                     if audit_logger:
-                        audit_logger.record_gate('sell_inversion', True,
-                                                 f'bearish={bearish_count}/{total_models}={bearish_pct:.0%}')
+                        audit_logger.record_gate('direction_consensus', True,
+                                                 f'{label}={aligned_count}/{total_models}={aligned_pct:.0%}')
             else:
-                # No predictions at all — allow sell (don't block on missing data)
-                self.logger.info(f"SELL INVERSION GATE: {product_id} PASSED — no ML predictions available")
+                # No predictions at all — allow trade (don't block on missing data)
                 if audit_logger:
-                    audit_logger.record_gate('sell_inversion', True, 'no_ml_preds')
+                    audit_logger.record_gate('direction_consensus', True, 'no_ml_preds')
 
         # ── ML Agreement Gate: only trade when models agree strongly ──
         # Threshold is regime-adjusted: 0.65 with-trend, 0.71 neutral, 0.80 counter-trend
@@ -3780,6 +3783,28 @@ class RenaissanceTradingBot:
             elif now.weekday() != 0:
                 self._week_reset_today = False
             self._weekly_pnl = account_balance - self._week_start_balance
+
+            # ── Council S4: Periodic balance snapshot (every cycle) ──
+            try:
+                with self.position_manager._lock:
+                    _open_count = len([p for p in self.position_manager.positions.values()
+                                       if hasattr(p, 'status') and str(p.status).upper() != 'CLOSED'])
+                _unrealized = sum(
+                    getattr(p, 'unrealized_pnl', 0.0) or 0.0
+                    for p in self.position_manager.positions.values()
+                ) if hasattr(self.position_manager, 'positions') else 0.0
+                self._track_task(self.db_manager.store_balance_snapshot(
+                    total_equity=account_balance,
+                    unrealized_pnl=_unrealized,
+                    open_position_count=_open_count,
+                    cash_balance=account_balance - _unrealized,
+                    drawdown_pct=self._current_drawdown_pct,
+                    high_watermark=self._high_watermark_usd,
+                    daily_pnl=getattr(self, 'daily_pnl', 0.0),
+                    source='periodic',
+                ))
+            except Exception as e:
+                self.logger.debug(f"Balance snapshot failed: {e}")
 
             if self._current_drawdown_pct >= 0.03:
                 self.logger.warning(
