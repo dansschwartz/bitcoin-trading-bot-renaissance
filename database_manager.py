@@ -325,8 +325,8 @@ class DatabaseManager:
             )''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_scorecard_ts ON model_accuracy_scorecard(timestamp DESC)')
 
-            # ── Council S4: Balance Snapshots for equity curve audit (F-12) ──
-            cursor.execute('''CREATE TABLE IF NOT EXISTS balance_snapshots (
+            # ── Council S4: Portfolio Snapshots for equity curve audit (F-12) ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS portfolio_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL DEFAULT (datetime('now')),
                 total_equity REAL,
@@ -339,7 +339,7 @@ class DatabaseManager:
                 daily_pnl REAL,
                 source TEXT DEFAULT 'periodic'
             )''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_balance_ts ON balance_snapshots(timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_portfolio_snap_ts ON portfolio_snapshots(timestamp)')
 
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
@@ -697,11 +697,11 @@ class DatabaseManager:
         daily_pnl: float = 0.0,
         source: str = 'periodic',
     ) -> None:
-        """Council S4: Record a balance snapshot for equity curve tracking (F-12)."""
+        """Council S4: Record a portfolio snapshot for equity curve tracking (F-12)."""
         try:
             with self._get_connection() as conn:
                 conn.execute('''
-                    INSERT INTO balance_snapshots
+                    INSERT INTO portfolio_snapshots
                         (timestamp, total_equity, unrealized_pnl,
                          realized_pnl_cumulative, open_position_count,
                          cash_balance, drawdown_pct, high_watermark,
@@ -712,7 +712,7 @@ class DatabaseManager:
                       high_watermark, daily_pnl, source))
                 conn.commit()
         except Exception as e:
-            self.logger.error(f"Error storing balance snapshot: {e}")
+            self.logger.error(f"Error storing portfolio snapshot: {e}")
 
     # ──────────────────────────────────────────────
     #  Decision Audit Log
