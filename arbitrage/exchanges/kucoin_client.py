@@ -101,7 +101,7 @@ class KuCoinClient(ExchangeClient):
 
         # Shared aiohttp session for direct REST calls
         self._http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15),
+            timeout=aiohttp.ClientTimeout(total=8),  # 8s — keeps validation loop fast
             headers=_HTTP_HEADERS,
         )
 
