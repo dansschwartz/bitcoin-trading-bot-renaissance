@@ -109,6 +109,9 @@ class TokenSprayEngine:
             f"obs_mode={self.observation_mode}"
         )
 
+        # Close orphaned tokens from previous runs
+        self._close_orphaned_tokens()
+
     # ------------------------------------------------------------------
     # spray() — Entry point called from per-pair trading loop
     # ------------------------------------------------------------------
@@ -461,6 +464,40 @@ class TokenSprayEngine:
     # ------------------------------------------------------------------
     # DB persistence
     # ------------------------------------------------------------------
+
+    def _close_orphaned_tokens(self) -> None:
+        """Close any DB tokens left open from a previous process.
+
+        On restart, in-memory state is empty but the DB may have tokens
+        whose exit_reason is NULL.  Mark them as 'restart_orphan' with
+        0 P&L (we can't know the exit price retroactively).
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            orphans = conn.execute(
+                "SELECT token_id, pair, entry_price FROM token_spray_log "
+                "WHERE exit_reason IS NULL"
+            ).fetchall()
+            if not orphans:
+                conn.close()
+                return
+            now_iso = datetime.now(timezone.utc).isoformat()
+            conn.executemany(
+                """UPDATE token_spray_log
+                   SET exit_price = entry_price, exit_time = ?,
+                       exit_reason = 'restart_orphan',
+                       exit_pnl_bps = 0, exit_pnl_usd = 0,
+                       hold_time_seconds = 0
+                   WHERE token_id = ?""",
+                [(now_iso, row[0]) for row in orphans],
+            )
+            conn.commit()
+            conn.close()
+            self.log.info(
+                f"TokenSprayEngine: closed {len(orphans)} orphaned tokens from previous run"
+            )
+        except Exception as e:
+            self.log.warning(f"Spray orphan cleanup failed: {e}")
 
     def _log_to_db(self, token: SprayToken) -> None:
         """Insert a new token entry row into token_spray_log."""
