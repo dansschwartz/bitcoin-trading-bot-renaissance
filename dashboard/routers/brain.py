@@ -270,7 +270,8 @@ async def sub_bar_status(request: Request):
 @router.get("/sub-bar/events")
 async def sub_bar_events(request: Request):
     """Recent sub-bar trigger events from database."""
-    db_path = getattr(request.app.state, "dashboard_config", {}).get("db_path")
+    cfg = getattr(request.app.state, "dashboard_config", None)
+    db_path = getattr(cfg, "db_path", None) if cfg else None
     if not db_path:
         return {"events": [], "total": 0}
 
