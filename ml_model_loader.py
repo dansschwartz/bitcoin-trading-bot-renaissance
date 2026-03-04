@@ -2082,3 +2082,255 @@ def predict_crash_lgbm(
     except Exception as e:
         logger.warning(f"Crash LightGBM inference failed: {e}")
         return 0.0, 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VOLATILITY PREDICTION MODEL — LightGBM regression for magnitude prediction
+# Predicts |forward_6bar_return| (magnitude, NOT direction) for Kelly sizing
+# and dead-zone filtering.
+# ══════════════════════════════════════════════════════════════════════════════
+
+VOLATILITY_LGBM_PKL = os.path.join('models', 'volatility_lgbm.pkl')
+
+# Regime classification from training percentiles
+VOL_REGIMES = ('dead_zone', 'normal', 'active', 'explosive')
+
+
+def load_volatility_model(base_dir: str = '.') -> Tuple[Optional[object], Optional[dict]]:
+    """Load the volatility prediction LightGBM model and metadata.
+
+    Returns:
+        (model, meta_dict) on success, (None, None) on failure.
+        meta_dict has keys: feature_names, n_features, label_percentiles,
+        train_mae, val_mae, test_mae, trained_at
+    """
+    import pickle
+
+    pkl_path = os.path.join(base_dir, VOLATILITY_LGBM_PKL)
+    if not os.path.exists(pkl_path):
+        logger.debug(f"Volatility model not found: {pkl_path}")
+        return None, None
+
+    try:
+        with open(pkl_path, 'rb') as f:
+            data = pickle.load(f)
+
+        if isinstance(data, dict) and 'model' in data:
+            model = data['model']
+            meta = {k: v for k, v in data.items() if k != 'model'}
+            n_feat = meta.get('n_features', '?')
+            mae = meta.get('test_mae', '?')
+            logger.info(f"Volatility LightGBM loaded: {n_feat} features, test MAE={mae}")
+            return model, meta
+        else:
+            # Direct model object
+            logger.info("Volatility LightGBM loaded (raw model, no metadata)")
+            return data, None
+
+    except ImportError:
+        logger.debug("LightGBM not installed — skipping volatility model")
+        return None, None
+    except Exception as e:
+        logger.error(f"Failed to load volatility model: {e}")
+        return None, None
+
+
+def _build_volatility_features(
+    price_df: 'pd.DataFrame',
+    cross_vol_5: Optional[float] = None,
+    oi_change_pct: Optional[float] = None,
+    funding_rate_z: Optional[float] = None,
+) -> Optional[np.ndarray]:
+    """Build feature vector for volatility prediction.
+
+    Uses the standard 46 single-pair features from _compute_single_pair_features()
+    plus ~13 volatility-specific features.
+
+    Args:
+        price_df: OHLCV DataFrame (needs 30+ rows for feature stability)
+        cross_vol_5: 5-bar realized vol of cross-asset (BTC for alts, ETH for BTC)
+        oi_change_pct: Open interest change %, or None
+        funding_rate_z: Funding rate z-score, or None
+
+    Returns:
+        (1, N) numpy array ready for model.predict(), or None on failure.
+    """
+    import pandas as pd
+
+    if price_df is None or len(price_df) < 20:
+        return None
+
+    try:
+        # 1. Compute base 46 features
+        base_feats = _compute_single_pair_features(price_df)
+
+        # Extract last-bar values as a dict
+        feat_vals = {}
+        for name, series in base_feats.items():
+            val = series.iloc[-1] if hasattr(series, 'iloc') else float(series)
+            feat_vals[name] = float(val) if not (isinstance(val, float) and math.isnan(val)) else 0.0
+
+        # 2. Volatility-specific features
+        close = price_df['close'].astype(float)
+        high = price_df['high'].astype(float) if 'high' in price_df.columns else close
+        low = price_df['low'].astype(float) if 'low' in price_df.columns else close
+        pct_ret = close.pct_change()
+
+        # Vol ratios
+        vol_5 = pct_ret.rolling(5).std().iloc[-1]
+        vol_10 = pct_ret.rolling(10).std().iloc[-1]
+        vol_20 = pct_ret.rolling(20).std().iloc[-1]
+        feat_vals['vol_ratio_5_20'] = float(vol_5 / (vol_20 + 1e-10)) if not math.isnan(vol_5) else 1.0
+        feat_vals['vol_ratio_10_20'] = float(vol_10 / (vol_20 + 1e-10)) if not math.isnan(vol_10) else 1.0
+
+        # Parkinson volatility at 5, 10, 20 bars
+        ln_hl = np.log(high / (low + 1e-10))
+        ln_hl_sq = ln_hl ** 2 / (4 * np.log(2))
+        for w in [5, 10, 20]:
+            park = ln_hl_sq.rolling(w).mean().iloc[-1]
+            feat_vals[f'parkinson_vol_{w}'] = float(park) if not math.isnan(park) else 0.0
+
+        # Garman-Klass volatility (10 bars)
+        _open = price_df['open'].astype(float) if 'open' in price_df.columns else close
+        gk_term1 = 0.5 * np.log(high / (low + 1e-10)) ** 2
+        gk_term2 = -(2 * np.log(2) - 1) * np.log(close / (_open + 1e-10)) ** 2
+        gk = (gk_term1 + gk_term2).rolling(10).mean().iloc[-1]
+        feat_vals['garman_klass_vol'] = float(gk) if not math.isnan(gk) else 0.0
+
+        # Time features (sin/cos encoding)
+        if 'bar_start' in price_df.columns:
+            ts = pd.to_datetime(price_df['bar_start'].iloc[-1])
+        elif price_df.index.dtype == 'datetime64[ns]':
+            ts = price_df.index[-1]
+        else:
+            ts = datetime.now(timezone.utc)
+
+        hour = ts.hour + ts.minute / 60.0
+        dow = ts.weekday()
+        feat_vals['hour_sin'] = float(np.sin(2 * np.pi * hour / 24))
+        feat_vals['hour_cos'] = float(np.cos(2 * np.pi * hour / 24))
+        feat_vals['dow_sin'] = float(np.sin(2 * np.pi * dow / 7))
+        feat_vals['dow_cos'] = float(np.cos(2 * np.pi * dow / 7))
+
+        # Cross-asset vol
+        feat_vals['cross_asset_vol_5'] = float(cross_vol_5) if cross_vol_5 is not None else 0.0
+
+        # Derivatives features
+        feat_vals['oi_change_pct'] = float(oi_change_pct) if oi_change_pct is not None else 0.0
+        feat_vals['funding_rate_z'] = float(funding_rate_z) if funding_rate_z is not None else 0.0
+
+        # 3. Assemble in consistent order (sorted by name for reproducibility)
+        all_names = sorted(feat_vals.keys())
+        vec = np.array([feat_vals.get(n, 0.0) for n in all_names], dtype=np.float32)
+        vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
+        return vec.reshape(1, -1)
+
+    except Exception as e:
+        logger.warning(f"_build_volatility_features failed: {e}")
+        return None
+
+
+def predict_volatility(
+    model: object,
+    meta: Optional[dict],
+    price_df: 'pd.DataFrame',
+    cross_vol_5: Optional[float] = None,
+    oi_change_pct: Optional[float] = None,
+    funding_rate_z: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Predict price move magnitude and classify volatility regime.
+
+    Args:
+        model: LightGBM model from load_volatility_model()
+        meta: Metadata dict with label_percentiles and feature_names
+        price_df: OHLCV DataFrame (30+ rows recommended)
+        cross_vol_5: Cross-asset 5-bar vol (optional)
+        oi_change_pct: OI change % (optional)
+        funding_rate_z: Funding rate z-score (optional)
+
+    Returns:
+        Dict with keys:
+          predicted_log_magnitude: raw model output (log1p scale)
+          predicted_magnitude_bps: back-transformed to bps
+          vol_regime: 'dead_zone' | 'normal' | 'active' | 'explosive'
+          vol_multiplier: float for Kelly sizing (0.0 to 2.0)
+    """
+    result = {
+        'predicted_log_magnitude': 0.0,
+        'predicted_magnitude_bps': 100.0,  # default fallback
+        'vol_regime': 'normal',
+        'vol_multiplier': 1.0,
+    }
+
+    if model is None:
+        return result
+
+    try:
+        features = _build_volatility_features(
+            price_df, cross_vol_5, oi_change_pct, funding_rate_z,
+        )
+        if features is None:
+            return result
+
+        # Handle feature count mismatch
+        if meta and 'feature_names' in meta:
+            expected_n = len(meta['feature_names'])
+            n_have = features.shape[1]
+            if n_have < expected_n:
+                pad = np.zeros((1, expected_n - n_have), dtype=np.float32)
+                features = np.concatenate([features, pad], axis=1)
+            elif n_have > expected_n:
+                features = features[:, :expected_n]
+        else:
+            # Auto-detect from model
+            expected_n = None
+            if hasattr(model, 'num_feature'):
+                expected_n = model.num_feature()
+            elif hasattr(model, 'n_features_'):
+                expected_n = model.n_features_
+            if expected_n is not None:
+                n_have = features.shape[1]
+                if n_have < expected_n:
+                    pad = np.zeros((1, expected_n - n_have), dtype=np.float32)
+                    features = np.concatenate([features, pad], axis=1)
+                elif n_have > expected_n:
+                    features = features[:, :expected_n]
+
+        # Predict (regression output: log1p(magnitude_bps))
+        pred_log = float(model.predict(features)[0])
+        result['predicted_log_magnitude'] = pred_log
+
+        # Back-transform: expm1 to get magnitude in bps
+        magnitude_bps = float(np.expm1(max(pred_log, 0.0)))
+        result['predicted_magnitude_bps'] = magnitude_bps
+
+        # Classify regime using training percentiles
+        percentiles = {}
+        if meta and 'label_percentiles' in meta:
+            percentiles = meta['label_percentiles']
+
+        p25 = percentiles.get('p25', 2.0)
+        p75 = percentiles.get('p75', 4.5)
+        p90 = percentiles.get('p90', 5.5)
+
+        if pred_log < p25:
+            regime = 'dead_zone'
+            vol_multiplier = 0.0  # Skip trading
+        elif pred_log < p75:
+            regime = 'normal'
+            vol_multiplier = 1.0
+        elif pred_log < p90:
+            regime = 'active'
+            vol_multiplier = 1.5
+        else:
+            regime = 'explosive'
+            vol_multiplier = 2.0
+
+        result['vol_regime'] = regime
+        result['vol_multiplier'] = vol_multiplier
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"predict_volatility failed: {e}")
+        return result

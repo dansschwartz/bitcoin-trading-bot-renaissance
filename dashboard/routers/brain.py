@@ -222,3 +222,80 @@ async def eigenvalue_status(request: Request):
         "concentrated": False,
         "message": "correlation network not available",
     }
+
+
+@router.get("/volatility")
+async def volatility_status(request: Request):
+    """Volatility prediction model status and recent predictions."""
+    bot = getattr(request.app.state, "bot_instance", None)
+    result = {"model_loaded": False, "recent_predictions": {}}
+
+    if bot and hasattr(bot, 'real_time_pipeline'):
+        proc = bot.real_time_pipeline.processor
+        if hasattr(proc, '_vol_model') and proc._vol_model is not None:
+            result["model_loaded"] = True
+            meta = proc._vol_meta or {}
+            result["model_info"] = {
+                "n_features": meta.get("n_features", "?"),
+                "test_mae": meta.get("test_mae", "?"),
+                "trained_at": meta.get("trained_at", "?"),
+                "label_percentiles": meta.get("label_percentiles", {}),
+            }
+
+    # Get recent volatility predictions from pending predictions
+    if bot and hasattr(bot, '_pending_predictions'):
+        for pid, pred in bot._pending_predictions.items():
+            mag = pred.get('predicted_magnitude_bps')
+            if mag is not None:
+                result["recent_predictions"][pid] = round(mag, 1)
+
+    return result
+
+
+@router.get("/sub-bar/status")
+async def sub_bar_status(request: Request):
+    """Sub-bar scanner status and recent events."""
+    bot = getattr(request.app.state, "bot_instance", None)
+    if bot and hasattr(bot, 'sub_bar_scanner') and bot.sub_bar_scanner is not None:
+        return bot.sub_bar_scanner.get_status()
+
+    return {
+        "enabled": False,
+        "running": False,
+        "observation_mode": True,
+        "message": "sub-bar scanner not initialized",
+    }
+
+
+@router.get("/sub-bar/events")
+async def sub_bar_events(request: Request):
+    """Recent sub-bar trigger events from database."""
+    db_path = getattr(request.app.state, "dashboard_config", {}).get("db_path")
+    if not db_path:
+        return {"events": [], "total": 0}
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+        rows = conn.execute(
+            """SELECT id, timestamp, product_id, trigger_type, side,
+                      entry_price, current_price, pnl_bps, expected_magnitude_bps,
+                      observation_mode, action_taken, details
+               FROM sub_bar_events
+               ORDER BY id DESC LIMIT 50"""
+        ).fetchall()
+        conn.close()
+
+        events = []
+        for r in rows:
+            events.append({
+                "id": r[0], "timestamp": r[1], "product_id": r[2],
+                "trigger_type": r[3], "side": r[4],
+                "entry_price": r[5], "current_price": r[6],
+                "pnl_bps": round(r[7], 1) if r[7] else 0,
+                "expected_magnitude_bps": round(r[8], 1) if r[8] else 0,
+                "observation_mode": bool(r[9]), "action_taken": r[10],
+                "details": r[11],
+            })
+        return {"events": events, "total": len(events)}
+    except Exception as e:
+        return {"events": [], "total": 0, "error": str(e)}

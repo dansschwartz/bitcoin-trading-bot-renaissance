@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 try:
     from ml_model_loader import load_trained_models, predict_with_models, build_feature_sequence
     from ml_model_loader import load_crash_lgbm, build_crash_features, predict_crash_lgbm
+    from ml_model_loader import load_volatility_model, predict_volatility
     HAS_TRAINED_MODELS = True
 except ImportError:
     HAS_TRAINED_MODELS = False
@@ -180,6 +181,18 @@ class FeatureFanOutProcessor:
             except Exception as e:
                 self.logger.warning(f"Multi-asset crash loader failed: {e}")
 
+        # Load volatility prediction model (LightGBM regression for magnitude)
+        self._vol_model = None
+        self._vol_meta = None
+        if HAS_TRAINED_MODELS:
+            try:
+                self._vol_model, self._vol_meta = load_volatility_model()
+                if self._vol_model:
+                    mae = self._vol_meta.get('test_mae', '?') if self._vol_meta else '?'
+                    self.logger.info(f"Volatility prediction model loaded (test MAE={mae})")
+            except Exception as e:
+                self.logger.debug(f"Volatility model load skipped: {e}")
+
     def set_cross_data(self, cross_data: Optional[Dict[str, Any]], pair_name: Optional[str] = None) -> None:
         """Set cross-asset data for the next inference call.
 
@@ -317,6 +330,47 @@ class FeatureFanOutProcessor:
                     )
             except Exception as e:
                 self.logger.warning(f"Crash LightGBM inference skipped: {e}")
+
+        # Volatility magnitude prediction (for Kelly sizing and dead-zone filter)
+        if self._vol_model is not None and price_df is not None:
+            try:
+                # Compute cross-asset vol for the current pair
+                _cross_vol_5 = None
+                if _cross:
+                    # Use BTC vol for alts, ETH vol for BTC
+                    _lead_asset = 'BTC' if _asset and _asset != 'BTC' else 'ETH'
+                    for _ck in _cross:
+                        if _lead_asset in str(_ck).upper():
+                            _lead_df = _cross[_ck]
+                            if hasattr(_lead_df, 'empty') and not _lead_df.empty and 'close' in _lead_df.columns:
+                                _lead_ret = _lead_df['close'].astype(float).pct_change()
+                                _cross_vol_5 = float(_lead_ret.rolling(5).std().iloc[-1])
+                            break
+
+                # Extract derivatives features if available
+                _oi_chg = None
+                _fund_z = None
+                if derivatives_data:
+                    for dk, dv in derivatives_data.items():
+                        if 'oi_change' in dk:
+                            _oi_chg = float(dv.iloc[-1]) if hasattr(dv, 'iloc') else float(dv)
+                        elif 'funding' in dk and 'z' in dk:
+                            _fund_z = float(dv.iloc[-1]) if hasattr(dv, 'iloc') else float(dv)
+
+                vol_result = predict_volatility(
+                    self._vol_model, self._vol_meta, price_df,
+                    cross_vol_5=_cross_vol_5,
+                    oi_change_pct=_oi_chg,
+                    funding_rate_z=_fund_z,
+                )
+                predictions['_volatility'] = vol_result
+                self.logger.info(
+                    f"Volatility: regime={vol_result['vol_regime']} "
+                    f"mag={vol_result['predicted_magnitude_bps']:.1f}bps "
+                    f"mult={vol_result['vol_multiplier']:.1f}"
+                )
+            except Exception as e:
+                self.logger.debug(f"Volatility prediction skipped: {e}")
 
         processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
         self.logger.info(f"Processed {len(predictions)} trained models in {processing_time:.4f}s")

@@ -73,6 +73,11 @@ try:
 except ImportError as _sa_err:
     STRATEGY_A_AVAILABLE = False
     logging.getLogger(__name__).warning(f"Strategy A import failed: {_sa_err}")
+try:
+    from sub_bar_scanner import SubBarScanner
+    SUB_BAR_SCANNER_AVAILABLE = True
+except ImportError:
+    SUB_BAR_SCANNER_AVAILABLE = False
 from volume_profile_engine import VolumeProfileEngine
 from fractal_intelligence import FractalIntelligenceEngine
 from market_entropy_engine import MarketEntropyEngine
@@ -994,6 +999,22 @@ class RenaissanceTradingBot:
                 self.logger.info("Cascade data collector initialized (30s poll interval)")
             except Exception as _cc_err:
                 self.logger.warning(f"Cascade collector init failed: {_cc_err}")
+
+        # Initialize Sub-Bar Scanner (10-second early exit monitor)
+        self.sub_bar_scanner = None
+        _sub_bar_cfg = self.config.get('sub_bar_scanner', {})
+        if SUB_BAR_SCANNER_AVAILABLE and _sub_bar_cfg.get('enabled', False):
+            try:
+                self.sub_bar_scanner = SubBarScanner(
+                    config=_sub_bar_cfg,
+                    db_path=db_cfg.get("path", "data/renaissance_bot.db"),
+                )
+                self.logger.info(
+                    f"Sub-bar scanner initialized "
+                    f"(observation_mode={_sub_bar_cfg.get('observation_mode', True)})"
+                )
+            except Exception as _sbs_err:
+                self.logger.warning(f"Sub-bar scanner init failed: {_sbs_err}")
 
         self.volume_profile_engine = VolumeProfileEngine()
         self.fractal_intelligence = FractalIntelligenceEngine(logger=self.logger)
@@ -1922,6 +1943,12 @@ class RenaissanceTradingBot:
                 self.cascade_collector.stop()
             except Exception:
                 pass
+        # Stop sub-bar scanner
+        if self.sub_bar_scanner:
+            try:
+                await self.sub_bar_scanner.stop()
+            except Exception:
+                pass
         for task in self._background_tasks:
             if not task.done():
                 task.cancel()
@@ -2326,6 +2353,13 @@ class RenaissanceTradingBot:
             except Exception as e:
                 self.logger.debug(f"Stat arb signal failed: {e}")
 
+            # Feed price to sub-bar scanner for early exit monitoring
+            if self.sub_bar_scanner and cur_price > 0:
+                try:
+                    self.sub_bar_scanner.update_price(p_id, cur_price)
+                except Exception:
+                    pass
+
             # Cross-Asset Lead-Lag Alpha (Step 16)
             try:
                 if len(self.product_ids) > 1 and cur_price > 0:
@@ -2397,6 +2431,15 @@ class RenaissanceTradingBot:
                         f"cnn={signals.get('ml_cnn', 0):.4f} (raw: E={_ens_val:.4f}, "
                         f"C={rt_result.get('CNN', 0):.4f}, zscore_rescale=on)"
                     )
+                    # Extract volatility prediction for dead-zone filter + position tracking
+                    _vol_pred = rt_result.get('_volatility')
+                    if _vol_pred and isinstance(_vol_pred, dict):
+                        market_data['volatility_prediction'] = _vol_pred
+                        self.logger.info(
+                            f"VOL PRED [{p_id}]: regime={_vol_pred.get('vol_regime', '?')} "
+                            f"mag={_vol_pred.get('predicted_magnitude_bps', 0):.1f}bps "
+                            f"mult={_vol_pred.get('vol_multiplier', 1.0):.1f}"
+                        )
             except Exception as e:
                 self.logger.warning(f"ML RT pipeline failed: {e}")
 
@@ -2950,6 +2993,25 @@ class RenaissanceTradingBot:
                     audit_logger.record_gate('vae', True, f'vae_loss={vae_loss:.4f}')
                     audit_logger.record_gate('risk_gateway', True)
 
+        # ── Volatility Dead-Zone Gate: skip trading when expected move is negligible ──
+        _vol_prediction = None
+        if market_data:
+            _vol_prediction = (market_data or {}).get('volatility_prediction')
+        if action != 'HOLD' and _vol_prediction and isinstance(_vol_prediction, dict):
+            _vol_regime = _vol_prediction.get('vol_regime', 'normal')
+            if _vol_regime == 'dead_zone':
+                self.logger.info(
+                    f"VOL DEAD-ZONE GATE: {product_id} {action} blocked — "
+                    f"predicted magnitude={_vol_prediction.get('predicted_magnitude_bps', 0):.1f}bps "
+                    f"(regime={_vol_regime}, not enough expected move to cover costs)"
+                )
+                if audit_logger:
+                    audit_logger.record_gate('vol_dead_zone', False, f'regime={_vol_regime}')
+                action = 'HOLD'
+            else:
+                if audit_logger:
+                    audit_logger.record_gate('vol_dead_zone', True, f'regime={_vol_regime}')
+
         # ── Renaissance Position Sizing (Kelly + cost gate + vol normalization) ──
         position_size = 0.0
         sizing_result = None
@@ -3087,6 +3149,19 @@ class RenaissanceTradingBot:
                 if tier_scores:
                     _tier_multiplier = sum(tier_scores) / len(tier_scores)
 
+            # ── Volatility Magnitude Sizing: scale position by predicted move size ──
+            _chain["vol_mag"] = 1.0
+            if _vol_prediction and isinstance(_vol_prediction, dict):
+                _vm = _vol_prediction.get('vol_multiplier', 1.0)
+                _chain["vol_mag"] = _vm
+                _tier_multiplier *= _vm
+                if _vm != 1.0:
+                    self.logger.info(
+                        f"VOL SIZING: {product_id} multiplier={_vm:.1f}x "
+                        f"(regime={_vol_prediction.get('vol_regime', '?')}, "
+                        f"mag={_vol_prediction.get('predicted_magnitude_bps', 0):.1f}bps)"
+                    )
+
             # Cap prediction strength for sizing — strong predictions (>0.06) lose money
             # Data: weak (<0.02) = 67.5% win/$4.52, strong (>0.10) = 48.7% win/-$3.63
             PREDICTION_CAP = 0.06
@@ -3151,7 +3226,8 @@ class RenaissanceTradingBot:
             self.logger.info(
                 f"SIZING CHAIN {product_id}: "
                 f"regime={_chain['regime']:.2f} x corr={_chain['corr']:.2f} x "
-                f"health={_chain['health']:.2f} x tier={_chain['tier']:.2f} x "
+                f"health={_chain['health']:.2f} x vol_mag={_chain.get('vol_mag', 1.0):.2f} x "
+                f"tier={_chain['tier']:.2f} x "
                 f"kelly={kelly_f:.4f} -> final=${final_usd:.2f}"
             )
 
@@ -4758,10 +4834,15 @@ class RenaissanceTradingBot:
                 # EXTRA HARDENING: Ensure signals dictionary is all floats for boost calculation
                 signals = {str(k): float(self._force_float(v)) for k, v in signals.items()}
                 # Record signals for scorecard evaluation next cycle
+                _vol_mag_bps = 100.0  # default
+                _vol_pred_inner = (market_data or {}).get('volatility_prediction')
+                if _vol_pred_inner and isinstance(_vol_pred_inner, dict):
+                    _vol_mag_bps = _vol_pred_inner.get('predicted_magnitude_bps', 100.0)
                 self._pending_predictions[product_id] = {
                     'price': current_price,
                     'signals': {k: float(v) for k, v in signals.items()},
                     'cycle': getattr(self, 'scan_cycle_count', 0),
+                    'predicted_magnitude_bps': _vol_mag_bps,
                 }
 
                 market_data['ml_package'] = ml_package
@@ -6092,6 +6173,84 @@ class RenaissanceTradingBot:
             self.logger.error(f"Fast reversion scanner error: {e}")
 
     # ──────────────────────────────────────────────
+    #  Sub-Bar Early Exit Scanner (10s loop)
+    # ──────────────────────────────────────────────
+    async def _run_sub_bar_scanner(self):
+        """Run the sub-bar scanner as a background task."""
+        try:
+            async def _get_positions():
+                """Get open positions for sub-bar scanner."""
+                positions = []
+                with self.position_manager._lock:
+                    for pos in self.position_manager.positions.values():
+                        if pos.status.value == 'OPEN':
+                            # Look up predicted_magnitude from pending predictions
+                            pred = self._pending_predictions.get(pos.product_id, {})
+                            positions.append({
+                                'product_id': pos.product_id,
+                                'position_id': pos.position_id,
+                                'side': pos.side.value.upper(),
+                                'entry_price': float(pos.entry_price),
+                                'size_usd': float(pos.size * pos.entry_price),
+                                'open_timestamp': pos.entry_time.timestamp() if pos.entry_time else 0,
+                                'predicted_magnitude_bps': pred.get('predicted_magnitude_bps', 100.0),
+                            })
+                return positions
+
+            async def _get_price(symbol: str) -> float:
+                """Get current price for a symbol."""
+                # Try cached prices from BinanceSpotProvider
+                try:
+                    if hasattr(self, 'binance_spot_provider') and self.binance_spot_provider:
+                        ticker = self.binance_spot_provider.get_cached_ticker(symbol)
+                        if ticker and ticker.get('last_price', 0) > 0:
+                            return float(ticker['last_price'])
+                except Exception:
+                    pass
+                # Fallback to position current_price
+                with self.position_manager._lock:
+                    for pos in self.position_manager.positions.values():
+                        if pos.product_id == symbol and pos.current_price > 0:
+                            return float(pos.current_price)
+                return 0.0
+
+            async def _exit_callback(product_id: str, reason: str, details: dict):
+                """Handle sub-bar exit trigger (only when observation_mode=False)."""
+                self.logger.warning(
+                    f"SUB-BAR EXIT: {product_id} trigger={reason} "
+                    f"pnl={details.get('pnl_bps', 0):.1f}bps"
+                )
+                try:
+                    with self.position_manager._lock:
+                        for pos in list(self.position_manager.positions.values()):
+                            if pos.product_id == product_id and pos.status.value == 'OPEN':
+                                ok, msg = self.position_manager.close_position(
+                                    pos.position_id, reason=f"sub_bar_{reason.lower()}"
+                                )
+                                if ok:
+                                    self._track_task(
+                                        self.db_manager.close_position_record(
+                                            pos.position_id,
+                                            close_price=float(pos.current_price),
+                                            realized_pnl=float(details.get('pnl_bps', 0)),
+                                            exit_reason=f"sub_bar_{reason.lower()}",
+                                        )
+                                    )
+                                break
+                except Exception as e:
+                    self.logger.error(f"Sub-bar exit execution failed: {e}")
+
+            await self.sub_bar_scanner.start(
+                position_getter=_get_positions,
+                price_getter=_get_price,
+                exit_callback=_exit_callback,
+            )
+        except asyncio.CancelledError:
+            await self.sub_bar_scanner.stop()
+        except Exception as e:
+            self.logger.error(f"Sub-bar scanner error: {e}")
+
+    # ──────────────────────────────────────────────
     #  Heartbeat Writer (Multi-Bot Coordination)
     # ──────────────────────────────────────────────
     async def _run_heartbeat_writer(self, interval: float = 5.0):
@@ -6698,6 +6857,11 @@ class RenaissanceTradingBot:
         if self.fast_reversion_scanner:
             self.logger.info("Launching fast mean reversion scanner (1s eval)...")
             self._track_task(self._run_fast_reversion_scanner())
+
+        # ── Sub-Bar Early Exit Scanner (10s eval) ──
+        if self.sub_bar_scanner:
+            self.logger.info("Launching sub-bar scanner (10s early exit monitor)...")
+            self._track_task(self._run_sub_bar_scanner())
 
         # ── Heartbeat Writer (multi-bot coordination) ──
         if self.heartbeat_writer:

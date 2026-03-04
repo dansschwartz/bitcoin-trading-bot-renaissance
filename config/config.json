@@ -581,6 +581,30 @@
         "__default_small_cap__": 0.80
     },
     "ml_signal_scale": 10.0,
+    "volatility_prediction": {
+        "enabled": true,
+        "dead_zone_action": "hold",
+        "vol_multipliers": {
+            "dead_zone": 0.0,
+            "normal": 1.0,
+            "active": 1.5,
+            "explosive": 2.0
+        }
+    },
+    "sub_bar_scanner": {
+        "enabled": true,
+        "observation_mode": true,
+        "scan_interval_seconds": 10,
+        "edge_consumed_pct": 0.80,
+        "stop_loss_bps": 100,
+        "reversal_threshold_bps": 30,
+        "reversal_window_seconds": 60,
+        "vol_spike_multiplier": 3.0,
+        "vol_window_seconds": 120,
+        "min_position_age_seconds": 30,
+        "max_exits_per_scan": 3,
+        "cooldown_after_exit_seconds": 60
+    },
     "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],
     "model_retraining": {
         "enabled": true,
