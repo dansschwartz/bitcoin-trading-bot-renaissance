@@ -12,8 +12,6 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, List
 
-import aiohttp
-
 from ..exchanges.base import OrderBook, OrderBookLevel, OrderSide
 
 logger = logging.getLogger("arb.orderbook")
@@ -367,128 +365,151 @@ class UnifiedBookManager:
         except Exception as e:
             logger.debug(f"Binance validation error {pair}: {e}")
 
+    @staticmethod
+    def _fetch_book_sync(exchange: str, pair: str, timeout: float = 5.0) -> Optional[dict]:
+        """Fetch order book via synchronous urllib — OS-level socket timeout.
+
+        Unlike aiohttp, urllib's timeout is enforced by the kernel via
+        setsockopt(SO_RCVTIMEO), so it fires even when the event loop is
+        CPU-starved. Returns parsed JSON on success, None on failure.
+        """
+        import json as _json
+        import urllib.request
+        import urllib.error
+
+        try:
+            if exchange == "mexc":
+                sym = pair.replace("/", "")
+                url = f"https://api.mexc.com/api/v3/depth?symbol={sym}&limit=20"
+            elif exchange == "binance":
+                sym = pair.replace("/", "")
+                url = f"https://api.binance.com/api/v3/depth?symbol={sym}&limit=20"
+            elif exchange == "kucoin":
+                sym = pair.replace("/", "-")
+                url = f"https://api.kucoin.com/api/v1/market/orderbook/level2_20?symbol={sym}"
+            else:
+                return None
+
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return _json.loads(resp.read().decode())
+        except Exception:
+            return None
+
     async def _validation_loop(self):
         """Periodically refresh all pairs via REST.
 
-        Uses self.pairs.keys() instead of self.monitored_pairs so dynamically
-        added pairs are also refreshed.
-
-        Sequential per-pair with 150ms spacing to respect rate limits.
-        Each exchange call has a 10s hard timeout via asyncio.wait_for.
+        Uses synchronous urllib in thread pool (run_in_executor) so that
+        socket timeouts are enforced by the OS kernel — immune to event
+        loop starvation that caused aiohttp timeouts to never fire.
         """
-        PAIR_DELAY = 0.15  # 150ms between pairs
-        CALL_TIMEOUT = 10.0  # Hard timeout per exchange call (seconds)
+        PAIR_DELAY = 0.10  # 100ms between pairs
+        SOCK_TIMEOUT = 5.0  # OS-level socket timeout (seconds)
+        CYCLE_INTERVAL = 15  # seconds between cycles
 
-        logger.info("Validation loop started — will refresh every 15s")
+        logger.info("Validation loop started — urllib/thread-pool, refresh every %ds", CYCLE_INTERVAL)
 
         import time as _time
+        import concurrent.futures
+        _thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=6, thread_name_prefix="val-book"
+        )
+        loop = asyncio.get_event_loop()
 
         while self._running:
             try:
-                await asyncio.sleep(15)  # 15s between refresh cycles
+                await asyncio.sleep(CYCLE_INTERVAL)
                 pairs = list(self.pairs.keys())
                 if not pairs:
                     continue
 
                 t_start = _time.monotonic()
-                logger.info(f"Validation cycle starting — {len(pairs)} pairs")
 
-                mexc_ok = 0
-                binance_ok = 0
-                kucoin_ok = 0
-                mexc_fail = 0
-                binance_fail = 0
-                kucoin_fail = 0
+                mexc_ok = binance_ok = kucoin_ok = 0
+                mexc_fail = binance_fail = kucoin_fail = 0
+                has_kucoin = self.kucoin is not None
 
-                # Create a FRESH aiohttp session with its own connection pool
-                # and strict timeout. Using exchange clients' shared sessions
-                # causes queuing behind stuck connections in their pool.
-                _headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
-                strict_timeout = aiohttp.ClientTimeout(total=CALL_TIMEOUT)
-                val_session = aiohttp.ClientSession(
-                    timeout=strict_timeout,
-                    headers=_headers,
-                    connector=aiohttp.TCPConnector(limit=10, force_close=True),
-                )
-
-                for i, pair in enumerate(pairs):
+                for pair in pairs:
                     if not self._running:
                         break
 
-                    # MEXC — direct REST
-                    try:
-                        mexc_sym = pair.replace("/", "")
-                        url = f"https://api.mexc.com/api/v3/depth?symbol={mexc_sym}&limit=20"
-                        async with val_session.get(url) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:20]]
-                                asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get('asks', [])[:20]]
-                                rest_book = OrderBook(exchange="mexc", symbol=pair, timestamp=datetime.utcnow(), bids=bids, asks=asks)
-                                if pair in self.pairs:
-                                    self.pairs[pair].mexc_book = rest_book
-                                    self.pairs[pair].mexc_last_update = datetime.utcnow()
-                                    self.pairs[pair].mexc_update_count += 1
-                                    mexc_ok += 1
-                            else:
-                                mexc_fail += 1
-                    except Exception as e:
-                        mexc_fail += 1
-                        if i < 3:
-                            logger.debug(f"Validation MEXC fail {pair}: {type(e).__name__}")
+                    # Fire all exchange fetches for this pair in parallel threads
+                    exchanges = ["mexc", "binance"]
+                    if has_kucoin:
+                        exchanges.append("kucoin")
 
-                    # Binance — direct REST
-                    try:
-                        bn_sym = pair.replace("/", "")
-                        url = f"https://api.binance.com/api/v3/depth?symbol={bn_sym}&limit=20"
-                        async with val_session.get(url) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get('bids', [])[:20]]
-                                asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get('asks', [])[:20]]
-                                rest_book = OrderBook(exchange="binance", symbol=pair, timestamp=datetime.utcnow(), bids=bids, asks=asks)
-                                if pair in self.pairs:
-                                    self.pairs[pair].binance_book = rest_book
-                                    self.pairs[pair].binance_last_update = datetime.utcnow()
-                                    self.pairs[pair].binance_update_count += 1
-                                    binance_ok += 1
-                            else:
-                                binance_fail += 1
-                    except Exception as e:
-                        binance_fail += 1
-                        if i < 3:
-                            logger.debug(f"Validation Binance fail {pair}: {type(e).__name__}")
-
-                    # KuCoin — direct REST
-                    if self.kucoin:
+                    futures = {
+                        ex: loop.run_in_executor(
+                            _thread_pool,
+                            self._fetch_book_sync, ex, pair, SOCK_TIMEOUT,
+                        )
+                        for ex in exchanges
+                    }
+                    results = {}
+                    for ex, fut in futures.items():
                         try:
-                            kc_sym = pair.replace("/", "-")
-                            url = f"https://api.kucoin.com/api/v1/market/orderbook/level2_20?symbol={kc_sym}"
-                            async with val_session.get(url) as resp:
-                                if resp.status == 200:
-                                    data = await resp.json()
-                                    if data.get("code") == "200000":
-                                        rest_book = self.kucoin._parse_rest_book(pair, data["data"])
-                                        if pair in self.pairs:
-                                            self.pairs[pair].kucoin_book = rest_book
-                                            self.pairs[pair].kucoin_last_update = datetime.utcnow()
-                                            self.pairs[pair].kucoin_update_count += 1
-                                            kucoin_ok += 1
-                                    else:
-                                        kucoin_fail += 1
-                                else:
-                                    kucoin_fail += 1
-                        except Exception as e:
+                            results[ex] = await fut
+                        except Exception:
+                            results[ex] = None
+
+                    # Process MEXC result
+                    data = results.get("mexc")
+                    if data and "bids" in data:
+                        try:
+                            bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data['bids'][:20]]
+                            asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data['asks'][:20]]
+                            book = OrderBook(exchange="mexc", symbol=pair, timestamp=datetime.utcnow(), bids=bids, asks=asks)
+                            if pair in self.pairs:
+                                self.pairs[pair].mexc_book = book
+                                self.pairs[pair].mexc_last_update = datetime.utcnow()
+                                self.pairs[pair].mexc_update_count += 1
+                                mexc_ok += 1
+                        except Exception:
+                            mexc_fail += 1
+                    else:
+                        mexc_fail += 1
+
+                    # Process Binance result
+                    data = results.get("binance")
+                    if data and "bids" in data:
+                        try:
+                            bids = [OrderBookLevel(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data['bids'][:20]]
+                            asks = [OrderBookLevel(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data['asks'][:20]]
+                            book = OrderBook(exchange="binance", symbol=pair, timestamp=datetime.utcnow(), bids=bids, asks=asks)
+                            if pair in self.pairs:
+                                self.pairs[pair].binance_book = book
+                                self.pairs[pair].binance_last_update = datetime.utcnow()
+                                self.pairs[pair].binance_update_count += 1
+                                binance_ok += 1
+                        except Exception:
+                            binance_fail += 1
+                    else:
+                        binance_fail += 1
+
+                    # Process KuCoin result
+                    if has_kucoin:
+                        data = results.get("kucoin")
+                        if data and data.get("code") == "200000" and "data" in data:
+                            try:
+                                rest_book = self.kucoin._parse_rest_book(pair, data["data"])
+                                if pair in self.pairs:
+                                    self.pairs[pair].kucoin_book = rest_book
+                                    self.pairs[pair].kucoin_last_update = datetime.utcnow()
+                                    self.pairs[pair].kucoin_update_count += 1
+                                    kucoin_ok += 1
+                            except Exception:
+                                kucoin_fail += 1
+                        else:
                             kucoin_fail += 1
-                            if i < 3:
-                                logger.debug(f"Validation KuCoin fail {pair}: {type(e).__name__}")
 
                     await asyncio.sleep(PAIR_DELAY)
 
-                await val_session.close()
                 elapsed = _time.monotonic() - t_start
                 tradeable = sum(1 for v in self.pairs.values() if v.is_tradeable)
-                kc_str = f" | KuCoin {kucoin_ok}ok/{kucoin_fail}fail" if self.kucoin else ""
+                kc_str = f" | KuCoin {kucoin_ok}ok/{kucoin_fail}fail" if has_kucoin else ""
                 logger.info(
                     f"Book refresh: {len(pairs)} pairs | "
                     f"MEXC {mexc_ok}ok/{mexc_fail}fail | "
@@ -501,6 +522,8 @@ class UnifiedBookManager:
             except Exception as e:
                 logger.error(f"Validation loop error: {type(e).__name__}: {e}")
                 await asyncio.sleep(5)
+
+        _thread_pool.shutdown(wait=False)
 
     def get_status(self) -> dict:
         fresh = sum(1 for v in self.pairs.values() if v.is_tradeable)
