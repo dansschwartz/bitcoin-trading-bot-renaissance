@@ -5158,6 +5158,8 @@ class RenaissanceTradingBot:
                 current_price = market_data.get('ticker', {}).get('price', 0.0)
 
                 # ── BTC Straddle: open paired LONG+SHORT (runs before sanity gates) ──
+                import sys as _sys_trace
+                print(f"STRADDLE_TRACE: pid={product_id} pair={getattr(self.straddle_engine, 'pair', 'NO_ENGINE')} price={current_price} engine={self.straddle_engine is not None}", file=_sys_trace.stderr, flush=True)
                 if self.straddle_engine and product_id == self.straddle_engine.pair and current_price > 0:
                     try:
                         _vol_pred_bps = None
