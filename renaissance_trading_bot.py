@@ -6812,13 +6812,16 @@ class RenaissanceTradingBot:
     async def _get_straddle_price(self) -> Dict[str, float]:
         """Fetch current BTC price for straddle exit checks.
 
-        Returns dict like {'BTCUSDT': price}.
+        Returns dict like {'BTC-USD': price}.
         """
-        pair = self.straddle_engine.pair if self.straddle_engine else 'BTCUSDT'
+        pair = self.straddle_engine.pair if self.straddle_engine else 'BTC-USD'
+        # Map internal pair format (BTC-USD) to Binance symbol (BTCUSDT)
+        pair_map = getattr(self, '_pair_binance_symbols', {})
+        binance_sym = pair_map.get(pair, pair.replace('-USD', 'USDT'))
         provider = getattr(self, 'binance_spot', None)
         if provider:
             try:
-                ticker = await provider.fetch_ticker(pair)
+                ticker = await provider.fetch_ticker(binance_sym)
                 if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
                     return {pair: float(ticker['price'])}
             except Exception:

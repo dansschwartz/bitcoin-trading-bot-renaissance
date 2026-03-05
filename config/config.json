@@ -653,7 +653,7 @@
     "straddle": {
         "enabled": true,
         "observation_mode": true,
-        "pair": "BTCUSDT",
+        "pair": "BTC-USD",
         "size_usd": 5,
         "interval_seconds": 60,
         "max_open": 1,
