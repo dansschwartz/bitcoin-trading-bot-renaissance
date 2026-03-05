@@ -3854,7 +3854,8 @@ class RenaissanceTradingBot:
                     else:
                         self.logger.info(f"STRADDLE SKIP: price=${_stp:.2f} cooldown/max_open/daily_loss")
             except Exception as _se:
-                self.logger.error(f"STRADDLE ERROR: {_se}")
+                import traceback
+                self.logger.error(f"STRADDLE ERROR: {type(_se).__name__}: {_se}\n{traceback.format_exc()}")
 
         try:
             # Council S6: Check bar pipeline liveness at start of each cycle
