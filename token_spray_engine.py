@@ -33,17 +33,18 @@ DEFAULT_PAIR_EXIT = {
     "stop_loss_bps": 8,
     "trail_activation_bps": 3,
     "trail_distance_bps": 5,
+    "min_hold_for_trail_seconds": 30,  # trail can't activate before this age
 }
 
 # Loaded from config; these are the defaults
 PAIR_EXIT_DEFAULTS: Dict[str, Dict[str, float]] = {
-    "BTC": {"stop_loss_bps": 7, "trail_activation_bps": 3, "trail_distance_bps": 5},
-    "ETH": {"stop_loss_bps": 8, "trail_activation_bps": 3, "trail_distance_bps": 5},
-    "SOL": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6},
-    "AVAX": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6},
-    "LINK": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6},
-    "DOGE": {"stop_loss_bps": 12, "trail_activation_bps": 4, "trail_distance_bps": 7},
-    "XRP": {"stop_loss_bps": 9, "trail_activation_bps": 3, "trail_distance_bps": 5},
+    "BTC": {"stop_loss_bps": 7, "trail_activation_bps": 3, "trail_distance_bps": 5, "min_hold_for_trail_seconds": 20},
+    "ETH": {"stop_loss_bps": 8, "trail_activation_bps": 3, "trail_distance_bps": 5, "min_hold_for_trail_seconds": 20},
+    "SOL": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6, "min_hold_for_trail_seconds": 30},
+    "AVAX": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6, "min_hold_for_trail_seconds": 30},
+    "LINK": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6, "min_hold_for_trail_seconds": 30},
+    "DOGE": {"stop_loss_bps": 12, "trail_activation_bps": 4, "trail_distance_bps": 7, "min_hold_for_trail_seconds": 30},
+    "XRP": {"stop_loss_bps": 9, "trail_activation_bps": 3, "trail_distance_bps": 5, "min_hold_for_trail_seconds": 25},
 }
 
 
@@ -62,6 +63,7 @@ def _get_pair_exit_config(pair: str, cfg_overrides: Dict[str, Any]) -> Dict[str,
             "stop_loss_bps": pair_cfg.get("stop_loss_bps", DEFAULT_PAIR_EXIT["stop_loss_bps"]),
             "trail_activation_bps": pair_cfg.get("trail_activation_bps", DEFAULT_PAIR_EXIT["trail_activation_bps"]),
             "trail_distance_bps": pair_cfg.get("trail_distance_bps", DEFAULT_PAIR_EXIT["trail_distance_bps"]),
+            "min_hold_for_trail_seconds": pair_cfg.get("min_hold_for_trail_seconds", DEFAULT_PAIR_EXIT["min_hold_for_trail_seconds"]),
         }
 
     # Fall back to built-in defaults for known assets
@@ -105,6 +107,7 @@ class SprayToken:
     stop_loss_bps: float            # per-pair hard stop
     trail_activation_bps: float     # bps profit before trail activates
     trail_distance_bps: float       # bps below peak to trigger exit
+    min_hold_for_trail: float       # seconds before trail can activate
     max_hold_seconds: float
     observation_mode: bool
     weighted_signal: float = 0.0
@@ -194,7 +197,9 @@ class TokenSprayEngine:
             f"TokenSprayEngine v2: size=${self.token_size_usd} | "
             f"budget=${self.max_budget_usd} | max_tokens={self.max_open_tokens} | "
             f"stop={self.default_stop_loss_bps}bps trail_act={self.default_trail_activation_bps}bps "
-            f"trail_dist={self.default_trail_distance_bps}bps timeout={self.max_hold_seconds}s | "
+            f"trail_dist={self.default_trail_distance_bps}bps "
+            f"min_hold_trail={DEFAULT_PAIR_EXIT['min_hold_for_trail_seconds']}s "
+            f"timeout={self.max_hold_seconds}s | "
             f"obs_mode={self.observation_mode}"
         )
 
@@ -290,6 +295,7 @@ class TokenSprayEngine:
         stop_loss_bps = pair_exit["stop_loss_bps"]
         trail_activation_bps = pair_exit["trail_activation_bps"]
         trail_distance_bps = pair_exit["trail_distance_bps"]
+        min_hold_for_trail = pair_exit.get("min_hold_for_trail_seconds", 30)
 
         # ── Build token ──
         token = SprayToken(
@@ -305,6 +311,7 @@ class TokenSprayEngine:
             stop_loss_bps=stop_loss_bps,
             trail_activation_bps=trail_activation_bps,
             trail_distance_bps=trail_distance_bps,
+            min_hold_for_trail=min_hold_for_trail,
             max_hold_seconds=self.max_hold_seconds,
             observation_mode=self.observation_mode,
             weighted_signal=weighted_signal,
@@ -519,6 +526,7 @@ class TokenSprayEngine:
             stop_loss_bps=pair_exit["stop_loss_bps"],
             trail_activation_bps=pair_exit["trail_activation_bps"],
             trail_distance_bps=pair_exit["trail_distance_bps"],
+            min_hold_for_trail=pair_exit.get("min_hold_for_trail_seconds", 30),
             max_hold_seconds=self.max_hold_seconds,
             observation_mode=self.observation_mode,
             weighted_signal=prediction,
@@ -595,9 +603,10 @@ class TokenSprayEngine:
                 token.peak_pnl_bps = pnl_bps
                 token.peak_price = price
 
-            # ── Activate trail when threshold crossed ──
+            # ── Activate trail when threshold crossed AND min hold met ──
             if not token.trail_active and pnl_bps >= token.trail_activation_bps:
-                token.trail_active = True
+                if age >= token.min_hold_for_trail:
+                    token.trail_active = True
 
             exit_reason: Optional[str] = None
 
