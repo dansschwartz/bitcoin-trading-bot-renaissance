@@ -2503,10 +2503,12 @@ class RenaissanceTradingBot:
             except Exception as e:
                 self.logger.debug(f"GARCH vol signal failed: {e}")
 
+            self.logger.warning(f"TRACE_INSIDE_GENSIG: about to return signals for {market_data.get('product_id', '?')}")
             return signals
 
         except Exception as e:
             self.logger.error(f"Signal generation failed: {e}")
+            self.logger.warning(f"TRACE_INSIDE_GENSIG_EXCEPT: {e}")
             return {key: 0.0 for key in self.signal_weights.keys()}
 
     def calculate_weighted_signal(self, signals: Dict[str, float]) -> Tuple[float, Dict[str, float]]:
