@@ -389,10 +389,13 @@ class StrategyAExecutor:
             ).fetchone()
             total_pnl = pnl_row[0] if pnl_row else 0
             open_exposure = open_row[0] if open_row else 0
-            self.bankroll = self.initial_bankroll + total_pnl - open_exposure
+            raw_bankroll = self.initial_bankroll + total_pnl - open_exposure
+            # Cap at MAX_SIZING_BANKROLL to prevent runaway compounding
+            self.bankroll = min(raw_bankroll, self.MAX_SIZING_BANKROLL)
             logger.info(f"BANKROLL RECONCILED: ${self.bankroll:.2f} "
-                        f"(initial=${self.initial_bankroll:.2f} + pnl=${total_pnl:.2f} "
-                        f"- open=${open_exposure:.2f})")
+                        f"(raw=${raw_bankroll:.2f} = initial=${self.initial_bankroll:.2f} "
+                        f"+ pnl=${total_pnl:.2f} - open=${open_exposure:.2f}, "
+                        f"capped at ${self.MAX_SIZING_BANKROLL:.0f})")
         except Exception as e:
             # Fallback to bankroll_log if polymarket_bets doesn't exist yet
             row = conn.execute(
