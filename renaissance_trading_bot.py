@@ -5156,6 +5156,22 @@ class RenaissanceTradingBot:
 
                 # 4.5 Statistical Arbitrage & Fractal Intelligence
                 current_price = market_data.get('ticker', {}).get('price', 0.0)
+
+                # ── BTC Straddle: open paired LONG+SHORT (runs before sanity gates) ──
+                if self.straddle_engine and product_id == self.straddle_engine.pair and current_price > 0:
+                    try:
+                        _vol_pred_bps = None
+                        _vp = (market_data or {}).get('volatility_prediction')
+                        if _vp and isinstance(_vp, dict):
+                            _vol_pred_bps = _vp.get('predicted_magnitude_bps')
+                        _straddle_result = self.straddle_engine.open_straddle(current_price, _vol_pred_bps)
+                        if _straddle_result:
+                            self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${current_price:.2f} vol={_vol_pred_bps}")
+                        else:
+                            self.logger.info(f"STRADDLE SKIP: price={current_price} vol={_vol_pred_bps} open={len(self.straddle_engine.open_straddles)}")
+                    except Exception as _straddle_err:
+                        self.logger.error(f"STRADDLE ERROR: {_straddle_err}")
+
                 self.stat_arb_engine.update_price(product_id, current_price)
                 
                 # 🏛️ Basis Trading Signal
@@ -5263,23 +5279,6 @@ class RenaissanceTradingBot:
                         f"SANITY: Weekly loss ${self._weekly_pnl:,.2f} exceeds limit ${-weekly_loss_limit:,.2f} — holding"
                     )
                     continue
-
-                # ── BTC Straddle: open paired LONG+SHORT (independent of spray) ──
-                if self.straddle_engine and product_id.startswith('BTC'):
-                    import sys; print(f"STRADDLE GATE: pid={product_id} eng_pair={self.straddle_engine.pair} eq={product_id == self.straddle_engine.pair} price={current_price}", file=sys.stderr, flush=True)
-                if self.straddle_engine and product_id == self.straddle_engine.pair:
-                    try:
-                        _vol_pred_bps = None
-                        _vp = (market_data or {}).get('volatility_prediction')
-                        if _vp and isinstance(_vp, dict):
-                            _vol_pred_bps = _vp.get('predicted_magnitude_bps')
-                        _straddle_result = self.straddle_engine.open_straddle(current_price, _vol_pred_bps)
-                        if _straddle_result:
-                            self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${current_price:.2f} vol={_vol_pred_bps}")
-                        else:
-                            self.logger.info(f"STRADDLE SKIP: price={current_price} vol={_vol_pred_bps} open={len(self.straddle_engine.open_straddles)}")
-                    except Exception as _straddle_err:
-                        self.logger.error(f"STRADDLE ERROR: {_straddle_err}")
 
                 # ── Token Spray Path ──
                 # When spray is active, bypass the legacy decision path entirely.
