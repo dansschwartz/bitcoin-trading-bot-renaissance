@@ -4574,7 +4574,7 @@ class RenaissanceTradingBot:
 
                 # 2. Generate signals from all components
                 signals = await self.generate_signals(market_data)
-                import sys as _sys_t2; print(f"TRACE_A: pid={product_id} after_generate_signals", file=_sys_t2.stderr, flush=True)
+                self.logger.warning(f"TRACE_A: pid={product_id} after_generate_signals")
 
                 # HARDENING: Ensure all signals are floats
                 signals = {k: self._force_float(v) for k, v in signals.items()}
@@ -4907,7 +4907,7 @@ class RenaissanceTradingBot:
                     self.random_baseline.maybe_enter(product_id, current_price)
 
                 # 3.15 Polymarket Bridge — emit BTC signal for binary bet markets
-                import sys as _sys_t3; print(f"TRACE_B: pid={product_id} before_polymarket_block", file=_sys_t3.stderr, flush=True)
+                self.logger.warning(f"TRACE_B: pid={product_id} before_polymarket_block")
                 if product_id == 'BTC-USD':
                     try:
                         _pm_model_preds = {}
@@ -5114,7 +5114,7 @@ class RenaissanceTradingBot:
                         }
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
-                import sys as _sys_t4; print(f"TRACE_C: pid={product_id} before_dynamic_thresholds", file=_sys_t4.stderr, flush=True)
+                self.logger.warning(f"TRACE_C: pid={product_id} before_dynamic_thresholds")
                 self._update_dynamic_thresholds(product_id, market_data)
 
                 # 4. Real-time pipeline cycle (Step 12)
@@ -5161,8 +5161,7 @@ class RenaissanceTradingBot:
                 current_price = market_data.get('ticker', {}).get('price', 0.0)
 
                 # ── BTC Straddle: open paired LONG+SHORT (runs before sanity gates) ──
-                import sys as _sys_trace
-                print(f"STRADDLE_TRACE: pid={product_id} pair={getattr(self.straddle_engine, 'pair', 'NO_ENGINE')} price={current_price} engine={self.straddle_engine is not None}", file=_sys_trace.stderr, flush=True)
+                self.logger.warning(f"STRADDLE_TRACE: pid={product_id} pair={getattr(self.straddle_engine, 'pair', 'NO_ENGINE')} price={current_price} engine={self.straddle_engine is not None}")
                 if self.straddle_engine and product_id == self.straddle_engine.pair and current_price > 0:
                     try:
                         _vol_pred_bps = None
