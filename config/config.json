@@ -608,8 +608,8 @@
     "token_spray": {
         "enabled": true,
         "observation_mode": false,
-        "token_size_usd": 20,
-        "max_budget_usd": 2000,
+        "token_size_usd": 100,
+        "max_budget_usd": 10000,
         "max_open_tokens": 100,
         "max_tokens_per_pair": 5,
         "min_signal_strength": 0.02,
