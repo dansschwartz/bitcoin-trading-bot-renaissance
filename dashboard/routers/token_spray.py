@@ -71,6 +71,49 @@ async def spray_status(request: Request) -> dict[str, Any]:
     }
 
 
+@router.get("/wallets")
+async def wallet_stats(request: Request) -> list[dict]:
+    """Per-wallet (per-model) P&L and win rate breakdown."""
+    db = request.app.state.dashboard_config.db_path
+
+    # Try live status from bot
+    bot = getattr(request.app.state, "bot", None)
+    if bot and hasattr(bot, "token_spray") and getattr(bot.token_spray, "wallets", None):
+        try:
+            wallets = bot.token_spray.wallets
+            result = []
+            for wid, w in wallets.items():
+                wr = (w.total_winners / w.total_closed * 100) if w.total_closed > 0 else 0.0
+                result.append({
+                    "wallet_id": wid,
+                    "budget_usd": w.budget_usd,
+                    "deployed_usd": round(w.deployed_usd, 2),
+                    "total_sprayed": w.total_sprayed,
+                    "total_closed": w.total_closed,
+                    "total_pnl_usd": round(w.total_pnl_usd, 4),
+                    "win_rate": round(wr, 1),
+                })
+            result.sort(key=lambda x: x["total_pnl_usd"], reverse=True)
+            return result
+        except Exception:
+            pass
+
+    # Fallback: DB aggregate
+    return _safe_query(
+        db,
+        """SELECT wallet_id,
+                  COUNT(*) as total_tokens,
+                  SUM(CASE WHEN exit_pnl_usd IS NOT NULL THEN exit_pnl_usd ELSE 0 END) as total_pnl_usd,
+                  SUM(CASE WHEN exit_pnl_bps > 0 THEN 1 ELSE 0 END) as winners,
+                  SUM(CASE WHEN exit_pnl_bps IS NOT NULL THEN 1 ELSE 0 END) as closed,
+                  ROUND(AVG(exit_pnl_bps), 2) as avg_pnl_bps
+           FROM token_spray_log
+           WHERE wallet_id != 'default' AND observation_mode = 0
+           GROUP BY wallet_id
+           ORDER BY total_pnl_usd DESC""",
+    )
+
+
 @router.get("/live-feed")
 async def live_feed(request: Request) -> list[dict]:
     """Last 50 token events (sprayed + closed) for the live feed table."""
@@ -79,7 +122,7 @@ async def live_feed(request: Request) -> list[dict]:
         db,
         """SELECT timestamp, pair, direction, token_size_usd, entry_price,
                   direction_rule, vol_regime, exit_pnl_bps, exit_pnl_usd,
-                  exit_reason, hold_time_seconds, observation_mode
+                  exit_reason, hold_time_seconds, observation_mode, wallet_id
            FROM token_spray_log
            ORDER BY timestamp DESC
            LIMIT 50""",

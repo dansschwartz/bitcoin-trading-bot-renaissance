@@ -76,6 +76,21 @@ def _get_pair_exit_config(pair: str, cfg_overrides: Dict[str, Any]) -> Dict[str,
 # ---------------------------------------------------------------------------
 
 @dataclass
+class Wallet:
+    """Per-model budget + tracking for independent A/B testing."""
+    wallet_id: str                  # model name: 'lightgbm', 'cnn', 'weighted_signal', etc.
+    enabled: bool = True
+    budget_usd: float = 0.0
+    deployed_usd: float = 0.0
+    total_pnl_usd: float = 0.0
+    total_sprayed: int = 0
+    total_closed: int = 0
+    total_winners: int = 0
+    max_tokens_per_pair: int = 1
+    pair_last_spray: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
 class SprayToken:
     """A single micro-position opened by the spray engine."""
     token_id: str
@@ -94,6 +109,7 @@ class SprayToken:
     observation_mode: bool
     weighted_signal: float = 0.0
     confidence: float = 0.0
+    wallet_id: str = "default"
     # Trailing stop tracking
     peak_pnl_bps: float = 0.0
     peak_price: float = 0.0
@@ -184,6 +200,12 @@ class TokenSprayEngine:
 
         # Close orphaned tokens from previous runs
         self._close_orphaned_tokens()
+
+        # Per-model wallets (optional; backward compat when absent)
+        self.wallets: Dict[str, Wallet] = {}
+        wallets_cfg = config.get("wallets", {})
+        if wallets_cfg.get("enabled", False):
+            self._init_wallets(wallets_cfg)
 
     # ------------------------------------------------------------------
     # spray() — Entry point called from per-pair trading loop
@@ -313,6 +335,221 @@ class TokenSprayEngine:
         return token
 
     # ------------------------------------------------------------------
+    # Per-model wallets
+    # ------------------------------------------------------------------
+
+    def _init_wallets(self, wallets_cfg: Dict[str, Any]) -> None:
+        """Create one Wallet per enabled model, splitting budget equally."""
+        models_cfg = wallets_cfg.get("models", {})
+        enabled_ids = [mid for mid, mcfg in models_cfg.items()
+                       if mcfg.get("enabled", True)]
+        if not enabled_ids:
+            self.log.warning("Wallets enabled but no models enabled — skipping")
+            return
+
+        per_wallet_budget = self.max_budget_usd / len(enabled_ids)
+        for mid in enabled_ids:
+            self.wallets[mid] = Wallet(
+                wallet_id=mid,
+                enabled=True,
+                budget_usd=round(per_wallet_budget, 2),
+                max_tokens_per_pair=1,
+            )
+        self.log.info(
+            f"Wallets initialized: {len(self.wallets)} models × "
+            f"${per_wallet_budget:.0f}/wallet = ${self.max_budget_usd:.0f} total | "
+            f"models={list(self.wallets.keys())}"
+        )
+
+    # Mapping from CrashRegime keys to wallet IDs
+    _CRASH_KEY_MAP = {
+        "CrashRegime_2bar": "crash_2bar",
+        "CrashRegime_1bar": "crash_1bar",
+        "CrashRegime": "crash_2bar",
+    }
+
+    async def spray_wallets(
+        self,
+        pair: str,
+        ml_predictions: list,
+        crash_predictions: Dict[str, float],
+        weighted_signal: float,
+        contributions: Dict[str, float],
+        market_data: Dict[str, Any],
+        fresh_price: Optional[float] = None,
+    ) -> List[SprayToken]:
+        """Spray independent tokens per enabled wallet/model.
+
+        Each model's raw prediction is used as its signal (no ensemble fusion).
+        The 'weighted_signal' wallet uses the fused blend as a control.
+        Returns list of tokens opened (may be empty).
+        """
+        if not self.wallets:
+            return []
+
+        # Build lookup: {wallet_id: (prediction, confidence)}
+        model_signals: Dict[str, tuple] = {}
+
+        # ML base models + meta_ensemble from ml_predictions list
+        if ml_predictions:
+            for mp in ml_predictions:
+                if isinstance(mp, dict):
+                    name = mp.get("model", "")
+                    pred = mp.get("prediction", 0.0)
+                    conf = mp.get("confidence")
+                elif isinstance(mp, tuple) and len(mp) >= 2:
+                    name = mp[0]
+                    pred = mp[1]
+                    conf = mp[2] if len(mp) > 2 else None
+                else:
+                    continue
+                if name and name in self.wallets:
+                    model_signals[name] = (float(pred), float(conf) if conf else 0.5)
+
+        # Crash model predictions
+        for crash_key, crash_pred in crash_predictions.items():
+            wallet_id = self._CRASH_KEY_MAP.get(crash_key)
+            if wallet_id and wallet_id in self.wallets:
+                model_signals[wallet_id] = (float(crash_pred), 0.5)
+
+        # Control wallet: use the fused weighted_signal
+        if "weighted_signal" in self.wallets:
+            conf_val = 0.5
+            if contributions:
+                # Use the confidence from contributions as proxy
+                conf_val = min(1.0, abs(weighted_signal) * 10)
+            model_signals["weighted_signal"] = (weighted_signal, conf_val)
+
+        # Spray for each wallet that has a signal
+        tokens: List[SprayToken] = []
+        for wallet_id, (prediction, confidence) in model_signals.items():
+            wallet = self.wallets.get(wallet_id)
+            if not wallet or not wallet.enabled:
+                continue
+            token = await self._spray_for_wallet(
+                wallet=wallet,
+                pair=pair,
+                prediction=prediction,
+                confidence=confidence,
+                market_data=market_data,
+                fresh_price=fresh_price,
+            )
+            if token:
+                tokens.append(token)
+
+        return tokens
+
+    async def _spray_for_wallet(
+        self,
+        wallet: Wallet,
+        pair: str,
+        prediction: float,
+        confidence: float,
+        market_data: Dict[str, Any],
+        fresh_price: Optional[float] = None,
+    ) -> Optional[SprayToken]:
+        """Evaluate and open a token for one wallet. Same gates as spray() but wallet-scoped."""
+
+        # ── Gate 1: signal strength ──
+        if abs(prediction) < self.min_signal_strength:
+            return None
+
+        # ── Gate 2: confidence ──
+        if confidence < self.min_confidence:
+            return None
+
+        # ── Gate 3: global capacity ──
+        if len(self.open_tokens) >= self.max_open_tokens:
+            return None
+
+        # ── Gate 4: per-wallet per-pair limit ──
+        pair_count = sum(
+            1 for t in self.open_tokens.values()
+            if t.pair == pair and t.wallet_id == wallet.wallet_id
+        )
+        if pair_count >= wallet.max_tokens_per_pair:
+            return None
+
+        # ── Gate 5: per-wallet cooldown ──
+        now = time.time()
+        last = wallet.pair_last_spray.get(pair, 0.0)
+        if now - last < self.cooldown_seconds:
+            return None
+
+        # ── Direction ──
+        side = "LONG" if prediction > 0 else "SHORT"
+
+        # ── Volatility regime & size scaling ──
+        vol_regime = self._calc_vol_regime(market_data)
+        vol_scale = self.vol_scaling.get(vol_regime, 1.0)
+        size_usd = self.token_size_usd * vol_scale
+
+        # ── Gate 6: wallet budget check ──
+        if wallet.deployed_usd + size_usd > wallet.budget_usd:
+            return None
+
+        # ── Entry price: prefer fresh_price > exit-loop cache > ticker ──
+        current_price = 0.0
+        if fresh_price and fresh_price > 0:
+            current_price = fresh_price
+        elif self.last_prices.get(pair, 0) > 0:
+            current_price = self.last_prices[pair]
+        else:
+            ticker = market_data.get("ticker", {})
+            current_price = float(ticker.get("price", 0.0))
+        if current_price <= 0:
+            return None
+
+        size_units = size_usd / current_price
+
+        # ── Per-pair exit parameters ──
+        pair_exit = _get_pair_exit_config(pair, self._pair_exit_config)
+
+        # ── Build token ──
+        token = SprayToken(
+            token_id=uuid.uuid4().hex[:12],
+            pair=pair,
+            side=side,
+            entry_price=current_price,
+            entry_time=now,
+            size_usd=size_usd,
+            size_units=size_units,
+            direction_rule=wallet.wallet_id,
+            vol_regime=vol_regime,
+            stop_loss_bps=pair_exit["stop_loss_bps"],
+            trail_activation_bps=pair_exit["trail_activation_bps"],
+            trail_distance_bps=pair_exit["trail_distance_bps"],
+            max_hold_seconds=self.max_hold_seconds,
+            observation_mode=self.observation_mode,
+            weighted_signal=prediction,
+            confidence=confidence,
+            wallet_id=wallet.wallet_id,
+            peak_pnl_bps=0.0,
+            peak_price=current_price,
+            trail_active=False,
+        )
+
+        # Register in global + wallet state
+        self.open_tokens[token.token_id] = token
+        self.budget_deployed_usd += size_usd
+        wallet.deployed_usd += size_usd
+        wallet.pair_last_spray[pair] = now
+        wallet.total_sprayed += 1
+        self._total_sprayed += 1
+
+        # Persist entry
+        self._log_to_db(token)
+
+        self.log.info(
+            f"SPRAY [{wallet.wallet_id}] {'(OBS) ' if self.observation_mode else ''}"
+            f"{side} {pair} ${size_usd:.0f} @ {current_price:.4f} | "
+            f"pred={prediction:.4f} conf={confidence:.3f} "
+            f"[{len(self.open_tokens)} open, wallet ${wallet.deployed_usd:.0f}/"
+            f"${wallet.budget_usd:.0f}]"
+        )
+        return token
+
+    # ------------------------------------------------------------------
     # check_exits() — called every N seconds (v2 trailing stop logic)
     # ------------------------------------------------------------------
 
@@ -429,7 +666,7 @@ class TokenSprayEngine:
     def get_status(self) -> Dict[str, Any]:
         """Return engine status dict for the /api/token-spray/status endpoint."""
         open_count = len(self.open_tokens)
-        return {
+        status: Dict[str, Any] = {
             "active": True,
             "observation_mode": self.observation_mode,
             "spray_interval_seconds": self.exit_check_interval,
@@ -454,6 +691,20 @@ class TokenSprayEngine:
                 "max_hold_seconds": self.max_hold_seconds,
             },
         }
+        if self.wallets:
+            wallet_status = {}
+            for wid, w in self.wallets.items():
+                wr = (w.total_winners / w.total_closed * 100) if w.total_closed > 0 else 0.0
+                wallet_status[wid] = {
+                    "budget_usd": w.budget_usd,
+                    "deployed_usd": round(w.deployed_usd, 2),
+                    "total_sprayed": w.total_sprayed,
+                    "total_closed": w.total_closed,
+                    "total_pnl_usd": round(w.total_pnl_usd, 4),
+                    "win_rate": round(wr, 1),
+                }
+            status["wallets"] = wallet_status
+        return status
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -492,6 +743,16 @@ class TokenSprayEngine:
         self._total_closed += 1
         if not token.observation_mode:
             self._total_pnl_usd += pnl_usd
+
+        # Update wallet stats if applicable
+        wallet = self.wallets.get(token.wallet_id)
+        if wallet:
+            wallet.deployed_usd = max(0.0, wallet.deployed_usd - token.size_usd)
+            wallet.total_closed += 1
+            if not token.observation_mode:
+                wallet.total_pnl_usd += pnl_usd
+                if pnl_usd > 0:
+                    wallet.total_winners += 1
 
         # Remove from open
         self.open_tokens.pop(token.token_id, None)
@@ -609,8 +870,8 @@ class TokenSprayEngine:
                     token_size_usd, entry_price, vol_regime,
                     expected_move_bps, target_bps, stop_bps,
                     max_hold_seconds, observation_mode,
-                    weighted_signal, confidence)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    weighted_signal, confidence, wallet_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     datetime.now(timezone.utc).isoformat(),
                     token.token_id,
@@ -627,6 +888,7 @@ class TokenSprayEngine:
                     1 if token.observation_mode else 0,
                     token.weighted_signal,
                     token.confidence,
+                    token.wallet_id,
                 ),
             )
             conn.commit()

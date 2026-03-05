@@ -365,7 +365,8 @@ class DatabaseManager:
                 hold_time_seconds REAL,
                 weighted_signal REAL,
                 confidence REAL,
-                peak_pnl_bps REAL
+                peak_pnl_bps REAL,
+                wallet_id TEXT DEFAULT 'default'
             )''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_spray_token ON token_spray_log(token_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_spray_pair ON token_spray_log(pair)')
@@ -376,6 +377,13 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE token_spray_log ADD COLUMN peak_pnl_bps REAL")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+            # Migration: add wallet_id column for per-model wallet tracking
+            try:
+                cursor.execute("ALTER TABLE token_spray_log ADD COLUMN wallet_id TEXT DEFAULT 'default'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_spray_wallet ON token_spray_log(wallet_id)')
 
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")

@@ -5268,15 +5268,37 @@ class RenaissanceTradingBot:
                         if _spray_has_price_feed else None
                     )
 
-                    spray_token = await self.token_spray.spray(
-                        pair=product_id,
-                        weighted_signal=weighted_signal,
-                        contributions=contributions,
-                        ml_package=ml_package,
-                        market_data=market_data,
-                        confidence=None,
-                        fresh_price=_spray_fresh_price,
-                    ) if _spray_has_price_feed else None
+                    if _spray_has_price_feed and self.token_spray.wallets:
+                        # Per-model wallet mode: spray each model independently
+                        _wallet_crash_preds: Dict[str, float] = {}
+                        if rt_result:
+                            for _ck in ('CrashRegime_2bar', 'CrashRegime_1bar', 'CrashRegime'):
+                                _cv = rt_result.get(_ck)
+                                if _cv is not None:
+                                    _wallet_crash_preds[_ck] = float(_cv) if not isinstance(_cv, dict) else 0.0
+
+                        _spray_tokens = await self.token_spray.spray_wallets(
+                            pair=product_id,
+                            ml_predictions=ml_package.ml_predictions if ml_package else [],
+                            crash_predictions=_wallet_crash_preds,
+                            weighted_signal=weighted_signal,
+                            contributions=contributions,
+                            market_data=market_data,
+                            fresh_price=_spray_fresh_price,
+                        )
+                        spray_token = _spray_tokens[0] if _spray_tokens else None
+                    elif _spray_has_price_feed:
+                        spray_token = await self.token_spray.spray(
+                            pair=product_id,
+                            weighted_signal=weighted_signal,
+                            contributions=contributions,
+                            ml_package=ml_package,
+                            market_data=market_data,
+                            confidence=None,
+                            fresh_price=_spray_fresh_price,
+                        )
+                    else:
+                        spray_token = None
 
                     # Determine spray action label
                     _spray_action = "HOLD"

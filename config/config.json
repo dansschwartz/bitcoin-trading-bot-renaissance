@@ -632,6 +632,22 @@
             "LINK": { "stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8 },
             "DOGE": { "stop_loss_bps": 18, "trail_activation_bps": 5, "trail_distance_bps": 10 },
             "XRP": { "stop_loss_bps": 14, "trail_activation_bps": 4, "trail_distance_bps": 7 }
+        },
+        "wallets": {
+            "enabled": true,
+            "budget_mode": "equal",
+            "models": {
+                "quantum_transformer": { "enabled": true },
+                "cnn": { "enabled": true },
+                "lightgbm": { "enabled": true },
+                "meta_ensemble": { "enabled": true },
+                "crash_2bar": { "enabled": true },
+                "crash_1bar": { "enabled": true },
+                "bidirectional_lstm": { "enabled": false },
+                "dilated_cnn": { "enabled": false },
+                "gru": { "enabled": false },
+                "weighted_signal": { "enabled": true }
+            }
         }
     },
     "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],
