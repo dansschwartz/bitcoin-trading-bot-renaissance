@@ -106,6 +106,8 @@ class StrategyAExecutor:
     COOLDOWN_AFTER_LOSS = 120         # 2 min (was 5min — too long for 5min markets)
     MIN_BET = 5.0                     # Floor for Kelly sizing
     MAX_BET_PCT = 0.05                # Ceiling: 5% of bankroll per bet (was 15%, reduced after 72% drawdown on 2026-03-02)
+    MAX_BET_USD = 50.0                # Hard dollar cap per bet regardless of bankroll
+    MAX_SIZING_BANKROLL = 1000.0      # Cap effective bankroll for sizing (prevents runaway compounding)
     MIN_BANKROLL_TO_TRADE = 200.0     # Stop betting below this bankroll level
     DAILY_LOSS_LIMIT_PCT = 0.20       # Max 20% of start-of-day bankroll loss per day
     DAILY_LOSS_LIMIT_5M_PCT = 0.10   # Max 10% of start-of-day bankroll loss for 5m markets alone
@@ -123,7 +125,12 @@ class StrategyAExecutor:
 
         self.instruments = INSTRUMENTS
         enabled = [k for k, v in self.instruments.items() if v.enabled]
-        self.logger.info(f"Strategy A v3: {len(enabled)} instruments enabled: {enabled}")
+        self.logger.info(f"Strategy A v4: {len(enabled)} instruments enabled: {enabled}")
+        self.logger.info(
+            f"Strategy A sizing caps: MAX_BET_USD=${self.MAX_BET_USD}, "
+            f"MAX_SIZING_BANKROLL=${self.MAX_SIZING_BANKROLL}, "
+            f"MAX_BET_PCT={self.MAX_BET_PCT*100:.0f}%"
+        )
 
         self.bankroll = self.initial_bankroll
         self._market_cache: Dict[str, Tuple[dict, float]] = {}
@@ -639,8 +646,9 @@ class StrategyAExecutor:
                 "SELECT COALESCE(SUM(total_invested), 0) FROM polymarket_bets WHERE status = 'OPEN'"
             ).fetchone()[0]
             conn.close()
-            if total_open + self.MIN_BET > self.bankroll * 0.8:
-                self._log_skip(inst.asset, slug, "max_exposure",
+            max_exposure = min(self.bankroll, self.MAX_SIZING_BANKROLL) * 0.8
+            if total_open + self.MIN_BET > max_exposure:
+                self._log_skip(inst.asset, slug, f"max_exposure (open=${total_open:.0f} > ${max_exposure:.0f})",
                                ml_conf, token_cost, ml_direction, minutes_left,
                                timeframe=inst.timeframe)
                 continue
@@ -846,11 +854,14 @@ class StrategyAExecutor:
         # Fractional Kelly for safety
         frac_kelly = kelly * kelly_fraction
 
+        # Use capped bankroll for sizing to prevent runaway compounding
+        sizing_bankroll = min(self.bankroll, self.MAX_SIZING_BANKROLL)
+
         # Dollar bet
-        bet = self.bankroll * frac_kelly
+        bet = sizing_bankroll * frac_kelly
 
         # Floor and ceiling
-        ceiling = self.bankroll * self.MAX_BET_PCT
+        ceiling = min(sizing_bankroll * self.MAX_BET_PCT, self.MAX_BET_USD)
         if max_bet_usd > 0:
             ceiling = min(ceiling, max_bet_usd)
         bet = max(self.MIN_BET, min(bet, ceiling))
