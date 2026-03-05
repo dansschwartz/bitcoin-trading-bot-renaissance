@@ -3839,6 +3839,7 @@ class RenaissanceTradingBot:
         """Execute one complete trading cycle across all products"""
         cycle_start = time.time()
         decisions = []
+        self.logger.info(f"CYCLE_ENTRY: straddle_engine={self.straddle_engine is not None} type={type(self.straddle_engine).__name__}")
 
         try:
             # Council S6: Check bar pipeline liveness at start of each cycle
@@ -4301,6 +4302,7 @@ class RenaissanceTradingBot:
             _ml_inference_count = 0  # Council S2 P1: track ML inferences for heartbeat
 
             # ── BTC Straddle: open paired LONG+SHORT (called once per cycle, before per-pair loop) ──
+            self.logger.info(f"PRE_STRADDLE: engine={self.straddle_engine is not None} pairs={len(cycle_pairs)} md_keys={list(market_data_all.keys())[:5]}")
             if self.straddle_engine:
                 try:
                     _straddle_pair = self.straddle_engine.pair
