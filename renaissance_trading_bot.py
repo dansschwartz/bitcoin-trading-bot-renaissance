@@ -5264,6 +5264,21 @@ class RenaissanceTradingBot:
                     )
                     continue
 
+                # ── BTC Straddle: open paired LONG+SHORT (independent of spray) ──
+                if self.straddle_engine and product_id == self.straddle_engine.pair:
+                    try:
+                        _vol_pred_bps = None
+                        _vp = (market_data or {}).get('volatility_prediction')
+                        if _vp and isinstance(_vp, dict):
+                            _vol_pred_bps = _vp.get('predicted_magnitude_bps')
+                        _straddle_result = self.straddle_engine.open_straddle(current_price, _vol_pred_bps)
+                        if _straddle_result:
+                            self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${current_price:.2f} vol={_vol_pred_bps}")
+                        else:
+                            self.logger.info(f"STRADDLE SKIP: price={current_price} vol={_vol_pred_bps} open={len(self.straddle_engine.open_straddles)}")
+                    except Exception as _straddle_err:
+                        self.logger.error(f"STRADDLE ERROR: {_straddle_err}")
+
                 # ── Token Spray Path ──
                 # When spray is active, bypass the legacy decision path entirely.
                 # Open micro-positions and persist ML predictions, then continue.
@@ -5376,24 +5391,6 @@ class RenaissanceTradingBot:
                     if not hasattr(self, '_last_prices'):
                         self._last_prices = {}
                     self._last_prices[product_id] = current_price
-
-                    # ── BTC Straddle: open paired LONG+SHORT if this is the straddle pair ──
-                    if self.straddle_engine:
-                        try:
-                            _straddle_match = (product_id == self.straddle_engine.pair)
-                            self.logger.info(f"STRADDLE CHECK: product_id={product_id} engine_pair={self.straddle_engine.pair} match={_straddle_match} price={current_price}")
-                            if _straddle_match:
-                                _vol_pred_bps = None
-                                _vp = (market_data or {}).get('volatility_prediction')
-                                if _vp and isinstance(_vp, dict):
-                                    _vol_pred_bps = _vp.get('predicted_magnitude_bps')
-                                _straddle_result = self.straddle_engine.open_straddle(current_price, _vol_pred_bps)
-                                if _straddle_result:
-                                    self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${current_price:.2f}")
-                                else:
-                                    self.logger.info(f"STRADDLE SKIPPED: price={current_price} vol={_vol_pred_bps} open={len(self.straddle_engine.open_straddles)}")
-                        except Exception as _straddle_err:
-                            self.logger.error(f"STRADDLE ERROR: {_straddle_err}")
 
                     # Skip legacy decision path — move to next pair
                     pair_elapsed = time.time() - pair_start_time
