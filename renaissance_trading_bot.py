@@ -5255,6 +5255,19 @@ class RenaissanceTradingBot:
                 # When spray is active, bypass the legacy decision path entirely.
                 # Open micro-positions and persist ML predictions, then continue.
                 if self.token_spray:
+                    # Fix 5: Skip pairs without Binance symbol mapping
+                    # (no exit-loop price feed → 0 P&L on every token)
+                    _spray_has_price_feed = (
+                        not self._universe_built
+                        or product_id in self._pair_binance_symbols
+                    )
+                    # Fix 4: Use fresh price from exit-loop cache instead of
+                    # stale market_data ticker (15-45s old from ML processing)
+                    _spray_fresh_price = (
+                        self.token_spray.last_prices.get(product_id)
+                        if _spray_has_price_feed else None
+                    )
+
                     spray_token = await self.token_spray.spray(
                         pair=product_id,
                         weighted_signal=weighted_signal,
@@ -5262,7 +5275,8 @@ class RenaissanceTradingBot:
                         ml_package=ml_package,
                         market_data=market_data,
                         confidence=None,
-                    )
+                        fresh_price=_spray_fresh_price,
+                    ) if _spray_has_price_feed else None
 
                     # Determine spray action label
                     _spray_action = "HOLD"

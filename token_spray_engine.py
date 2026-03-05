@@ -1,9 +1,16 @@
 """Token Spray Engine — rapid-fire small positions with fast exits.
 
 Replaces the legacy ML decision path (large positions, long holds) with many
-small ($10-50) tokens that enter on signal and exit fast at 50% of expected
-move or within 5 minutes.  Edge decays exponentially with hold time — this
-engine harvests the <5-minute sweet spot.
+small ($10-100) tokens that enter on signal and exit fast via trailing stop.
+Edge decays exponentially with hold time — this engine harvests the
+<5-minute sweet spot.
+
+Exit logic v2 (3 rules, priority order):
+  1. Hard stop:  pnl <= -stop_loss_bps  → cut immediately
+  2. Trailing stop: once pnl >= trail_activation_bps, track peak and close
+     when pnl drops trail_distance_bps below peak
+  3. Opportunity cost timeout: after max_hold_seconds, exit and sub-classify
+     as timeout_flat / timeout_profitable / timeout_loss
 """
 
 import asyncio
@@ -16,6 +23,52 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-pair exit config (tighter for low-vol majors, wider for alts)
+# ---------------------------------------------------------------------------
+
+DEFAULT_PAIR_EXIT = {
+    "stop_loss_bps": 12,
+    "trail_activation_bps": 3,
+    "trail_distance_bps": 5,
+}
+
+# Loaded from config; these are the defaults
+PAIR_EXIT_DEFAULTS: Dict[str, Dict[str, float]] = {
+    "BTC": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 5},
+    "ETH": {"stop_loss_bps": 12, "trail_activation_bps": 3, "trail_distance_bps": 6},
+    "SOL": {"stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8},
+    "AVAX": {"stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8},
+    "LINK": {"stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8},
+    "DOGE": {"stop_loss_bps": 18, "trail_activation_bps": 5, "trail_distance_bps": 10},
+    "XRP": {"stop_loss_bps": 14, "trail_activation_bps": 4, "trail_distance_bps": 7},
+}
+
+
+def _get_pair_exit_config(pair: str, cfg_overrides: Dict[str, Any]) -> Dict[str, float]:
+    """Resolve exit parameters for a specific pair.
+
+    Priority: config/config.json pair_exit_config > PAIR_EXIT_DEFAULTS > DEFAULT_PAIR_EXIT
+    """
+    # Extract base asset from pair like "BTC-USD" or "BTCUSDT"
+    base = pair.split("-")[0].upper() if "-" in pair else pair.replace("USDT", "").replace("USD", "").upper()
+
+    # Check config overrides first
+    pair_cfg = cfg_overrides.get(base, {})
+    if pair_cfg:
+        return {
+            "stop_loss_bps": pair_cfg.get("stop_loss_bps", DEFAULT_PAIR_EXIT["stop_loss_bps"]),
+            "trail_activation_bps": pair_cfg.get("trail_activation_bps", DEFAULT_PAIR_EXIT["trail_activation_bps"]),
+            "trail_distance_bps": pair_cfg.get("trail_distance_bps", DEFAULT_PAIR_EXIT["trail_distance_bps"]),
+        }
+
+    # Fall back to built-in defaults for known assets
+    if base in PAIR_EXIT_DEFAULTS:
+        return dict(PAIR_EXIT_DEFAULTS[base])
+
+    return dict(DEFAULT_PAIR_EXIT)
 
 
 # ---------------------------------------------------------------------------
@@ -32,15 +85,23 @@ class SprayToken:
     entry_time: float               # time.time() epoch
     size_usd: float
     size_units: float
-    direction_rule: str             # "ml_ensemble" / "momentum" / "mean_reversion" / "stat_arb" / "mixed"
+    direction_rule: str             # top contributor key or "mixed"
     vol_regime: str                 # "low" / "medium" / "high"
-    expected_move_bps: float
-    target_bps: float
-    stop_bps: float
+    stop_loss_bps: float            # per-pair hard stop
+    trail_activation_bps: float     # bps profit before trail activates
+    trail_distance_bps: float       # bps below peak to trigger exit
     max_hold_seconds: float
     observation_mode: bool
     weighted_signal: float = 0.0
     confidence: float = 0.0
+    # Trailing stop tracking
+    peak_pnl_bps: float = 0.0
+    peak_price: float = 0.0
+    trail_active: bool = False
+    # Legacy compat (kept for DB; always 0 now)
+    expected_move_bps: float = 0.0
+    target_bps: float = 0.0
+    stop_bps: float = 0.0          # deprecated, use stop_loss_bps
     # Exit fields — filled on close
     status: str = "open"            # "open" / "closed"
     exit_price: Optional[float] = None
@@ -60,7 +121,7 @@ class TokenSprayEngine:
 
     Entry: called once per pair per cycle via ``spray()``.
     Exit:  background loop every ``exit_check_interval_seconds`` via
-           ``check_exits()`` which evaluates target / stop / time / edge.
+           ``check_exits()`` which evaluates hard stop / trailing stop / timeout.
     """
 
     def __init__(
@@ -80,16 +141,23 @@ class TokenSprayEngine:
         self.max_tokens_per_pair: int = config.get("max_tokens_per_pair", 5)
         self.min_signal_strength: float = config.get("min_signal_strength", 0.02)
         self.min_confidence: float = config.get("min_confidence", 0.42)
-        self.target_fraction: float = config.get("target_fraction", 0.5)
-        self.stop_bps: float = config.get("stop_bps", 50.0)
-        self.max_hold_seconds: float = config.get("max_hold_seconds", 300.0)
-        self.edge_consumed_min_age: float = config.get("edge_consumed_min_age_seconds", 120.0)
         self.cooldown_seconds: float = config.get("cooldown_seconds", 30.0)
         self.exit_check_interval: float = config.get("exit_check_interval_seconds", 5.0)
         self.vol_scaling: Dict[str, float] = config.get("vol_scaling", {
             "low": 1.0, "medium": 0.7, "high": 0.4,
         })
         self.observation_mode: bool = config.get("observation_mode", True)
+
+        # Exit config (new v2 trailing stop)
+        exit_cfg = config.get("exit_config", {})
+        self.default_stop_loss_bps: float = exit_cfg.get("stop_loss_bps", 12.0)
+        self.default_trail_activation_bps: float = exit_cfg.get("trail_activation_bps", 3.0)
+        self.default_trail_distance_bps: float = exit_cfg.get("trail_distance_bps", 5.0)
+        self.max_hold_seconds: float = exit_cfg.get("max_hold_seconds", 600.0)
+        self.min_move_bps: float = exit_cfg.get("min_move_bps", 3.0)
+
+        # Per-pair exit config overrides from config.json
+        self._pair_exit_config: Dict[str, Any] = config.get("pair_exit_config", {})
 
         # Runtime state
         self.open_tokens: Dict[str, SprayToken] = {}
@@ -98,14 +166,19 @@ class TokenSprayEngine:
         self._exit_task: Optional[asyncio.Task] = None
         self._running = False
 
+        # Price cache populated by exit loop (used for fresh entry prices)
+        self.last_prices: Dict[str, float] = {}
+
         # Lifetime counters
         self._total_sprayed: int = 0
         self._total_closed: int = 0
         self._total_pnl_usd: float = 0.0
 
         self.log.info(
-            f"TokenSprayEngine: size=${self.token_size_usd} | "
+            f"TokenSprayEngine v2: size=${self.token_size_usd} | "
             f"budget=${self.max_budget_usd} | max_tokens={self.max_open_tokens} | "
+            f"stop={self.default_stop_loss_bps}bps trail_act={self.default_trail_activation_bps}bps "
+            f"trail_dist={self.default_trail_distance_bps}bps timeout={self.max_hold_seconds}s | "
             f"obs_mode={self.observation_mode}"
         )
 
@@ -124,10 +197,14 @@ class TokenSprayEngine:
         ml_package: Any,
         market_data: Dict[str, Any],
         confidence: Optional[float] = None,
+        fresh_price: Optional[float] = None,
     ) -> Optional[SprayToken]:
         """Evaluate whether to open a micro-position for *pair*.
 
         Returns the SprayToken if one was opened, else None.
+
+        *fresh_price*: If provided, use this instead of market_data ticker
+        price (which may be stale by 15-45s from ML processing).
         """
         # ── Gate 1: signal strength ──
         if abs(weighted_signal) < self.min_signal_strength:
@@ -141,10 +218,8 @@ class TokenSprayEngine:
         if confidence < self.min_confidence:
             return None
 
-        # ── Gate 3: budget / capacity ──
+        # ── Gate 3: capacity ──
         if len(self.open_tokens) >= self.max_open_tokens:
-            return None
-        if self.budget_deployed_usd + self.token_size_usd > self.max_budget_usd:
             return None
 
         # ── Gate 4: per-pair limit ──
@@ -169,16 +244,30 @@ class TokenSprayEngine:
         vol_scale = self.vol_scaling.get(vol_regime, 1.0)
         size_usd = self.token_size_usd * vol_scale
 
-        # ── Expected move → target ──
-        expected_move_bps = self._estimate_expected_move(weighted_signal, market_data)
-        target_bps = expected_move_bps * self.target_fraction
+        # ── Gate 3b: budget check with actual vol-scaled size (Fix 3) ──
+        if self.budget_deployed_usd + size_usd > self.max_budget_usd:
+            return None
 
-        # ── Compute size in units ──
-        ticker = market_data.get("ticker", {})
-        current_price = float(ticker.get("price", 0.0))
+        # ── Entry price: prefer fresh_price > exit-loop cache > ticker ──
+        current_price = 0.0
+        if fresh_price and fresh_price > 0:
+            current_price = fresh_price
+        elif self.last_prices.get(pair, 0) > 0:
+            current_price = self.last_prices[pair]
+        else:
+            ticker = market_data.get("ticker", {})
+            current_price = float(ticker.get("price", 0.0))
         if current_price <= 0:
             return None
+
+        # ── Compute size in units ──
         size_units = size_usd / current_price
+
+        # ── Per-pair exit parameters ──
+        pair_exit = _get_pair_exit_config(pair, self._pair_exit_config)
+        stop_loss_bps = pair_exit["stop_loss_bps"]
+        trail_activation_bps = pair_exit["trail_activation_bps"]
+        trail_distance_bps = pair_exit["trail_distance_bps"]
 
         # ── Build token ──
         token = SprayToken(
@@ -191,13 +280,16 @@ class TokenSprayEngine:
             size_units=size_units,
             direction_rule=direction_rule,
             vol_regime=vol_regime,
-            expected_move_bps=expected_move_bps,
-            target_bps=target_bps,
-            stop_bps=self.stop_bps,
+            stop_loss_bps=stop_loss_bps,
+            trail_activation_bps=trail_activation_bps,
+            trail_distance_bps=trail_distance_bps,
             max_hold_seconds=self.max_hold_seconds,
             observation_mode=self.observation_mode,
             weighted_signal=weighted_signal,
             confidence=confidence,
+            peak_pnl_bps=0.0,
+            peak_price=current_price,
+            trail_active=False,
         )
 
         # Register
@@ -213,14 +305,15 @@ class TokenSprayEngine:
             f"SPRAY {'(OBS) ' if self.observation_mode else ''}"
             f"{side} {pair} ${size_usd:.0f} @ {current_price:.4f} | "
             f"rule={direction_rule} vol={vol_regime} "
-            f"target={target_bps:.1f}bps stop={self.stop_bps:.0f}bps | "
+            f"stop={stop_loss_bps:.0f}bps trail_act={trail_activation_bps:.0f}bps "
+            f"trail_dist={trail_distance_bps:.0f}bps | "
             f"signal={weighted_signal:.4f} conf={confidence:.3f} "
             f"[{len(self.open_tokens)} open, ${self.budget_deployed_usd:.0f} deployed]"
         )
         return token
 
     # ------------------------------------------------------------------
-    # check_exits() — called every N seconds
+    # check_exits() — called every N seconds (v2 trailing stop logic)
     # ------------------------------------------------------------------
 
     async def check_exits(self, price_fetcher: Callable) -> List[SprayToken]:
@@ -228,6 +321,11 @@ class TokenSprayEngine:
 
         *price_fetcher* is ``async def(pairs: List[str]) -> Dict[str, float]``
         returning {pair: current_price}.
+
+        Exit rules (priority order):
+          1. Hard stop:  pnl_bps <= -stop_loss_bps
+          2. Trailing stop:  trail_active AND pnl_bps <= peak_pnl_bps - trail_distance_bps
+          3. Timeout:  age >= max_hold_seconds → sub-classify
         """
         if not self.open_tokens:
             return []
@@ -238,6 +336,11 @@ class TokenSprayEngine:
         except Exception as e:
             self.log.warning(f"Spray price fetch failed: {e}")
             return []
+
+        # Update price cache for fresh entry prices (Fix 4)
+        for pair, price in prices.items():
+            if price > 0:
+                self.last_prices[pair] = price
 
         closed: List[SprayToken] = []
         now = time.time()
@@ -250,20 +353,33 @@ class TokenSprayEngine:
             age = now - token.entry_time
             pnl_bps = self._calc_pnl_bps(token, price)
 
+            # ── Track peak P&L for trailing stop ──
+            if pnl_bps > token.peak_pnl_bps:
+                token.peak_pnl_bps = pnl_bps
+                token.peak_price = price
+
+            # ── Activate trail when threshold crossed ──
+            if not token.trail_active and pnl_bps >= token.trail_activation_bps:
+                token.trail_active = True
+
             exit_reason: Optional[str] = None
 
-            # Priority 1: Target hit
-            if pnl_bps >= token.target_bps:
-                exit_reason = "target"
-            # Priority 2: Stop hit
-            elif pnl_bps <= -token.stop_bps:
+            # Rule 1: Hard stop
+            if pnl_bps <= -token.stop_loss_bps:
                 exit_reason = "stop"
-            # Priority 3: Time expired
+
+            # Rule 2: Trailing stop (only if trail is active)
+            elif token.trail_active and pnl_bps <= (token.peak_pnl_bps - token.trail_distance_bps):
+                exit_reason = "trail_stop"
+
+            # Rule 3: Opportunity cost timeout
             elif age >= token.max_hold_seconds:
-                exit_reason = "time_expired"
-            # Priority 4: Edge consumed (profitable after min age)
-            elif pnl_bps > 0 and age >= self.edge_consumed_min_age:
-                exit_reason = "edge_consumed"
+                if abs(pnl_bps) < self.min_move_bps:
+                    exit_reason = "timeout_flat"
+                elif pnl_bps > 0:
+                    exit_reason = "timeout_profitable"
+                else:
+                    exit_reason = "timeout_loss"
 
             if exit_reason:
                 self._close_token(token, price, now, exit_reason, pnl_bps)
@@ -331,6 +447,12 @@ class TokenSprayEngine:
                     if self.max_budget_usd > 0 else 0, 1
                 ),
             },
+            "exit_config": {
+                "stop_loss_bps": self.default_stop_loss_bps,
+                "trail_activation_bps": self.default_trail_activation_bps,
+                "trail_distance_bps": self.default_trail_distance_bps,
+                "max_hold_seconds": self.max_hold_seconds,
+            },
         }
 
     # ------------------------------------------------------------------
@@ -380,7 +502,8 @@ class TokenSprayEngine:
         self.log.info(
             f"SPRAY EXIT {'(OBS) ' if token.observation_mode else ''}"
             f"{token.pair} {token.side} → {reason} | "
-            f"pnl={pnl_bps:+.1f}bps ${pnl_usd:+.4f} | "
+            f"pnl={pnl_bps:+.1f}bps ${pnl_usd:+.4f} peak={token.peak_pnl_bps:+.1f}bps "
+            f"trail={'ON' if token.trail_active else 'off'} | "
             f"hold={hold_seconds:.0f}s | "
             f"[{len(self.open_tokens)} open, ${self.budget_deployed_usd:.0f} deployed]"
         )
@@ -390,7 +513,12 @@ class TokenSprayEngine:
         contributions: Dict[str, float],
         weighted_signal: float,
     ) -> str:
-        """Classify trade driver for A/B testing."""
+        """Classify trade driver for A/B testing.
+
+        Fix 6: lowered dominance threshold from >50% to >30%, and returns
+        the actual top contributor key name directly (e.g. 'rsi', 'entropy',
+        'ml_ensemble') instead of bucketing into generic categories.
+        """
         if not contributions:
             return "mixed"
 
@@ -403,17 +531,9 @@ class TokenSprayEngine:
         top_val = abs_contribs[top_key]
         total_abs = sum(abs_contribs.values())
 
-        # If one signal contributes >50% of total, label it
-        if total_abs > 0 and top_val / total_abs > 0.5:
-            key_lower = top_key.lower()
-            if "ml" in key_lower or "ensemble" in key_lower or "cnn" in key_lower or "lstm" in key_lower:
-                return "ml_ensemble"
-            if "momentum" in key_lower or "trend" in key_lower:
-                return "momentum"
-            if "reversion" in key_lower or "mean" in key_lower:
-                return "mean_reversion"
-            if "arb" in key_lower or "stat" in key_lower or "basis" in key_lower:
-                return "stat_arb"
+        # If one signal contributes >30% of total, use its key name directly
+        if total_abs > 0 and top_val / total_abs > 0.30:
+            return top_key
 
         return "mixed"
 
@@ -440,26 +560,6 @@ class TokenSprayEngine:
             return "low"
 
         return "medium"
-
-    def _estimate_expected_move(
-        self,
-        weighted_signal: float,
-        market_data: Dict[str, Any],
-    ) -> float:
-        """Estimate expected move in bps from signal and vol data."""
-        # Base: signal magnitude × 100 (so signal=0.05 → 5bps expected)
-        base_bps = abs(weighted_signal) * 100.0
-
-        # Scale by GARCH if available
-        garch = market_data.get("garch_forecast", {})
-        if garch:
-            vol = garch.get("forecast_vol", 0.02)
-            # Normalize: 2% daily vol → 1.0x, scale linearly
-            vol_mult = vol / 0.02
-            base_bps *= vol_mult
-
-        # Floor at 3bps (don't set targets below noise)
-        return max(base_bps, 3.0)
 
     # ------------------------------------------------------------------
     # DB persistence
@@ -520,9 +620,9 @@ class TokenSprayEngine:
                     token.size_usd,
                     token.entry_price,
                     token.vol_regime,
-                    token.expected_move_bps,
-                    token.target_bps,
-                    token.stop_bps,
+                    0.0,                # expected_move_bps (removed)
+                    0.0,                # target_bps (removed, now trailing)
+                    token.stop_loss_bps,  # stop_bps column = hard stop
                     token.max_hold_seconds,
                     1 if token.observation_mode else 0,
                     token.weighted_signal,
@@ -541,7 +641,8 @@ class TokenSprayEngine:
             conn.execute(
                 """UPDATE token_spray_log
                    SET exit_price = ?, exit_time = ?, exit_reason = ?,
-                       exit_pnl_bps = ?, exit_pnl_usd = ?, hold_time_seconds = ?
+                       exit_pnl_bps = ?, exit_pnl_usd = ?, hold_time_seconds = ?,
+                       peak_pnl_bps = ?
                    WHERE token_id = ?""",
                 (
                     token.exit_price,
@@ -551,6 +652,7 @@ class TokenSprayEngine:
                     token.exit_pnl_bps,
                     token.exit_pnl_usd,
                     token.hold_time_seconds,
+                    round(token.peak_pnl_bps, 2),
                     token.token_id,
                 ),
             )

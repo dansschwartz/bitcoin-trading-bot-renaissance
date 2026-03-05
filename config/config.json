@@ -614,13 +614,25 @@
         "max_tokens_per_pair": 5,
         "min_signal_strength": 0.02,
         "min_confidence": 0.42,
-        "target_fraction": 0.5,
-        "stop_bps": 50,
-        "max_hold_seconds": 300,
-        "edge_consumed_min_age_seconds": 120,
         "cooldown_seconds": 30,
         "exit_check_interval_seconds": 5,
-        "vol_scaling": { "low": 1.0, "medium": 0.7, "high": 0.4 }
+        "vol_scaling": { "low": 1.0, "medium": 0.7, "high": 0.4 },
+        "exit_config": {
+            "stop_loss_bps": 12,
+            "trail_activation_bps": 3,
+            "trail_distance_bps": 5,
+            "max_hold_seconds": 600,
+            "min_move_bps": 3
+        },
+        "pair_exit_config": {
+            "BTC": { "stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 5 },
+            "ETH": { "stop_loss_bps": 12, "trail_activation_bps": 3, "trail_distance_bps": 6 },
+            "SOL": { "stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8 },
+            "AVAX": { "stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8 },
+            "LINK": { "stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8 },
+            "DOGE": { "stop_loss_bps": 18, "trail_activation_bps": 5, "trail_distance_bps": 10 },
+            "XRP": { "stop_loss_bps": 14, "trail_activation_bps": 4, "trail_distance_bps": 7 }
+        }
     },
     "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],
     "model_retraining": {
