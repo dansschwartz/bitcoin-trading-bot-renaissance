@@ -3839,7 +3839,22 @@ class RenaissanceTradingBot:
         """Execute one complete trading cycle across all products"""
         cycle_start = time.time()
         decisions = []
-        self.logger.info(f"CYCLE_ENTRY: straddle_engine={self.straddle_engine is not None} type={type(self.straddle_engine).__name__}")
+        # ── BTC Straddle: open paired LONG+SHORT ──
+        # Runs FIRST in the cycle with its own Binance price fetch,
+        # independent of the rest of the trading cycle.
+        if self.straddle_engine:
+            try:
+                _stk = await self.binance_spot.fetch_ticker('BTCUSDT')
+                _stp = float(_stk.get('price', 0)) if _stk else 0.0
+                self.logger.info(f"STRADDLE CHECK: price=${_stp:.2f} open={len(self.straddle_engine.open_straddles)}")
+                if _stp > 0:
+                    _straddle_result = self.straddle_engine.open_straddle(_stp, None)
+                    if _straddle_result:
+                        self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${_stp:.2f}")
+                    else:
+                        self.logger.info(f"STRADDLE SKIP: price=${_stp:.2f} cooldown/max_open/daily_loss")
+            except Exception as _se:
+                self.logger.error(f"STRADDLE ERROR: {_se}")
 
         try:
             # Council S6: Check bar pipeline liveness at start of each cycle
@@ -4300,29 +4315,6 @@ class RenaissanceTradingBot:
                     self.logger.debug(f"Hierarchical regime classification error: {_regime_err}")
 
             _ml_inference_count = 0  # Council S2 P1: track ML inferences for heartbeat
-
-            # ── BTC Straddle: open paired LONG+SHORT (called once per cycle, before per-pair loop) ──
-            self.logger.info(f"PRE_STRADDLE: engine={self.straddle_engine is not None} pairs={len(cycle_pairs)} md_keys={list(market_data_all.keys())[:5]}")
-            if self.straddle_engine:
-                try:
-                    _straddle_pair = self.straddle_engine.pair
-                    _straddle_md = market_data_all.get(_straddle_pair, {})
-                    _straddle_price = float(_straddle_md.get('ticker', {}).get('price', 0.0))
-                    if _straddle_price <= 0:
-                        _straddle_price = float(_straddle_md.get('current_price', 0.0))
-                    self.logger.info(f"STRADDLE CHECK: pair={_straddle_pair} price={_straddle_price}")
-                    if _straddle_price > 0:
-                        _vol_pred_bps = None
-                        _vp = _straddle_md.get('volatility_prediction')
-                        if _vp and isinstance(_vp, dict):
-                            _vol_pred_bps = _vp.get('predicted_magnitude_bps')
-                        _straddle_result = self.straddle_engine.open_straddle(_straddle_price, _vol_pred_bps)
-                        if _straddle_result:
-                            self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${_straddle_price:.2f} vol={_vol_pred_bps}")
-                        else:
-                            self.logger.info(f"STRADDLE SKIP: price={_straddle_price} vol={_vol_pred_bps} open={len(self.straddle_engine.open_straddles)}")
-                except Exception as _straddle_err:
-                    self.logger.error(f"STRADDLE ERROR: {_straddle_err}")
 
             for product_id in cycle_pairs:
                 pair_start_time = time.time()
