@@ -3840,22 +3840,23 @@ class RenaissanceTradingBot:
         cycle_start = time.time()
         decisions = []
         # ── BTC Straddle: open paired LONG+SHORT ──
-        # Runs FIRST in the cycle with its own Binance price fetch,
-        # independent of the rest of the trading cycle.
+        # Uses cached _last_prices from previous cycle (no network call needed).
+        # First cycle after restart has empty cache → straddle skips, which is fine.
         if self.straddle_engine:
             try:
-                _stk = await self.binance_spot.fetch_ticker('BTCUSDT')
-                _stp = float(_stk.get('price', 0)) if _stk else 0.0
-                self.logger.info(f"STRADDLE CHECK: price=${_stp:.2f} open={len(self.straddle_engine.open_straddles)}")
+                _sp = self.straddle_engine.pair  # e.g. 'BTC-USD'
+                _stp = float(getattr(self, '_last_prices', {}).get(_sp, 0))
                 if _stp > 0:
+                    self.logger.info(f"STRADDLE CHECK: price=${_stp:.2f} open={len(self.straddle_engine.open_straddles)}")
                     _straddle_result = self.straddle_engine.open_straddle(_stp, None)
                     if _straddle_result:
                         self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${_stp:.2f}")
                     else:
                         self.logger.info(f"STRADDLE SKIP: price=${_stp:.2f} cooldown/max_open/daily_loss")
+                else:
+                    self.logger.debug(f"STRADDLE: no cached price for {_sp} yet (first cycle?)")
             except Exception as _se:
-                import traceback
-                self.logger.error(f"STRADDLE ERROR: {type(_se).__name__}: {_se}\n{traceback.format_exc()}")
+                self.logger.error(f"STRADDLE ERROR: {type(_se).__name__}: {_se}")
 
         try:
             # Council S6: Check bar pipeline liveness at start of each cycle

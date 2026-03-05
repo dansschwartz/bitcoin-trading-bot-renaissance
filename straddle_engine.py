@@ -95,6 +95,9 @@ class StraddleEngine:
         self._total_winners: int = 0
         self._dead_zone_blocks: int = 0
 
+        # Close any stale OPEN straddles from a previous run
+        self._cleanup_stale_straddles()
+
         self.log.info(
             f"StraddleEngine init: pair={self.pair} size=${self.size_usd} "
             f"stop={self.stop_loss_bps}bp trail_act={self.trail_activation_bps}bp "
@@ -110,6 +113,35 @@ class StraddleEngine:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _cleanup_stale_straddles(self) -> None:
+        """Close any OPEN straddles left from a previous bot run."""
+        try:
+            conn = self._get_conn()
+            stale = conn.execute(
+                "SELECT id, entry_price, opened_at FROM straddle_log WHERE status = 'OPEN'"
+            ).fetchall()
+            if not stale:
+                return
+            ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            for row in stale:
+                conn.execute(
+                    "UPDATE straddle_log SET status='CLOSED', closed_at=?, "
+                    "long_exit_reason='restart', short_exit_reason='restart', "
+                    "net_pnl_bps=0, net_pnl_usd=0, duration_seconds=0 "
+                    "WHERE id=?",
+                    (ts, row['id']),
+                )
+                conn.execute(
+                    "UPDATE straddle_legs SET exit_price=entry_price, exit_reason='restart', "
+                    "pnl_bps=0, pnl_usd=0, closed_at=? WHERE straddle_id=?",
+                    (ts, row['id']),
+                )
+            conn.commit()
+            conn.close()
+            self.log.info(f"Straddle startup cleanup: closed {len(stale)} stale OPEN straddle(s)")
+        except Exception as e:
+            self.log.warning(f"Straddle startup cleanup error: {e}")
 
     def _reset_daily_if_needed(self) -> None:
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
