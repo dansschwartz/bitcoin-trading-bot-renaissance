@@ -607,7 +607,7 @@
     },
     "token_spray": {
         "enabled": true,
-        "observation_mode": true,
+        "observation_mode": false,
         "token_size_usd": 20,
         "max_budget_usd": 2000,
         "max_open_tokens": 100,
