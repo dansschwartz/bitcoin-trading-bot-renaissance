@@ -618,20 +618,20 @@
         "exit_check_interval_seconds": 5,
         "vol_scaling": { "low": 1.0, "medium": 0.7, "high": 0.4 },
         "exit_config": {
-            "stop_loss_bps": 12,
+            "stop_loss_bps": 8,
             "trail_activation_bps": 3,
             "trail_distance_bps": 5,
             "max_hold_seconds": 600,
             "min_move_bps": 3
         },
         "pair_exit_config": {
-            "BTC": { "stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 5 },
-            "ETH": { "stop_loss_bps": 12, "trail_activation_bps": 3, "trail_distance_bps": 6 },
-            "SOL": { "stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8 },
-            "AVAX": { "stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8 },
-            "LINK": { "stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8 },
-            "DOGE": { "stop_loss_bps": 18, "trail_activation_bps": 5, "trail_distance_bps": 10 },
-            "XRP": { "stop_loss_bps": 14, "trail_activation_bps": 4, "trail_distance_bps": 7 }
+            "BTC": { "stop_loss_bps": 7, "trail_activation_bps": 3, "trail_distance_bps": 5 },
+            "ETH": { "stop_loss_bps": 8, "trail_activation_bps": 3, "trail_distance_bps": 5 },
+            "SOL": { "stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6 },
+            "AVAX": { "stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6 },
+            "LINK": { "stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6 },
+            "DOGE": { "stop_loss_bps": 12, "trail_activation_bps": 4, "trail_distance_bps": 7 },
+            "XRP": { "stop_loss_bps": 9, "trail_activation_bps": 3, "trail_distance_bps": 5 }
         },
         "wallets": {
             "enabled": true,

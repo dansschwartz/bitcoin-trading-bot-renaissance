@@ -30,20 +30,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_PAIR_EXIT = {
-    "stop_loss_bps": 12,
+    "stop_loss_bps": 8,
     "trail_activation_bps": 3,
     "trail_distance_bps": 5,
 }
 
 # Loaded from config; these are the defaults
 PAIR_EXIT_DEFAULTS: Dict[str, Dict[str, float]] = {
-    "BTC": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 5},
-    "ETH": {"stop_loss_bps": 12, "trail_activation_bps": 3, "trail_distance_bps": 6},
-    "SOL": {"stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8},
-    "AVAX": {"stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8},
-    "LINK": {"stop_loss_bps": 15, "trail_activation_bps": 4, "trail_distance_bps": 8},
-    "DOGE": {"stop_loss_bps": 18, "trail_activation_bps": 5, "trail_distance_bps": 10},
-    "XRP": {"stop_loss_bps": 14, "trail_activation_bps": 4, "trail_distance_bps": 7},
+    "BTC": {"stop_loss_bps": 7, "trail_activation_bps": 3, "trail_distance_bps": 5},
+    "ETH": {"stop_loss_bps": 8, "trail_activation_bps": 3, "trail_distance_bps": 5},
+    "SOL": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6},
+    "AVAX": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6},
+    "LINK": {"stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6},
+    "DOGE": {"stop_loss_bps": 12, "trail_activation_bps": 4, "trail_distance_bps": 7},
+    "XRP": {"stop_loss_bps": 9, "trail_activation_bps": 3, "trail_distance_bps": 5},
 }
 
 
