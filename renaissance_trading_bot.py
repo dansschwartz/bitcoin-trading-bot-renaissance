@@ -5266,7 +5266,7 @@ class RenaissanceTradingBot:
 
                 # ── BTC Straddle: open paired LONG+SHORT (independent of spray) ──
                 if self.straddle_engine and product_id.startswith('BTC'):
-                    self.logger.info(f"STRADDLE GATE: pid={product_id} eng_pair={self.straddle_engine.pair} eq={product_id == self.straddle_engine.pair} price={current_price}")
+                    import sys; print(f"STRADDLE GATE: pid={product_id} eng_pair={self.straddle_engine.pair} eq={product_id == self.straddle_engine.pair} price={current_price}", file=sys.stderr, flush=True)
                 if self.straddle_engine and product_id == self.straddle_engine.pair:
                     try:
                         _vol_pred_bps = None
