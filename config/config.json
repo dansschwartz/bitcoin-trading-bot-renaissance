@@ -650,6 +650,21 @@
             }
         }
     },
+    "straddle": {
+        "enabled": true,
+        "observation_mode": true,
+        "pair": "BTCUSDT",
+        "size_usd": 5,
+        "interval_seconds": 60,
+        "max_open": 1,
+        "stop_loss_bps": 6,
+        "trail_activation_bps": 4,
+        "trail_distance_bps": 4,
+        "max_hold_seconds": 600,
+        "dead_zone_bps": 2.0,
+        "use_vol_model": true,
+        "exit_check_interval": 1.0
+    },
     "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],
     "model_retraining": {
         "enabled": true,

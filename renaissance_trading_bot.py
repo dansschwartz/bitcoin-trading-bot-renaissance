@@ -1350,6 +1350,19 @@ class RenaissanceTradingBot:
             except Exception as _spray_err:
                 self.logger.warning(f"TokenSprayEngine init failed: {_spray_err}")
 
+        # ── BTC Straddle Engine (direction-free paired LONG+SHORT) ──
+        self.straddle_engine = None
+        straddle_config = self.config.get('straddle', {})
+        if straddle_config.get('enabled', False):
+            try:
+                from straddle_engine import StraddleEngine
+                _straddle_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+                self.straddle_engine = StraddleEngine(
+                    config=straddle_config, db_path=_straddle_db, logger=self.logger,
+                )
+            except Exception as _straddle_err:
+                self.logger.warning(f"StraddleEngine init failed: {_straddle_err}")
+
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
 
@@ -5364,6 +5377,14 @@ class RenaissanceTradingBot:
                         self._last_prices = {}
                     self._last_prices[product_id] = current_price
 
+                    # ── BTC Straddle: open paired LONG+SHORT if this is the straddle pair ──
+                    if self.straddle_engine and product_id == self.straddle_engine.pair:
+                        _vol_pred_bps = None
+                        _vp = (market_data or {}).get('volatility_prediction')
+                        if _vp and isinstance(_vp, dict):
+                            _vol_pred_bps = _vp.get('predicted_magnitude_bps')
+                        self.straddle_engine.open_straddle(current_price, _vol_pred_bps)
+
                     # Skip legacy decision path — move to next pair
                     pair_elapsed = time.time() - pair_start_time
                     if pair_elapsed > 10:
@@ -6219,6 +6240,14 @@ class RenaissanceTradingBot:
                     asyncio.ensure_future(self.token_spray.stop_exit_loop())
             except Exception:
                 pass
+        # Stop straddle exit loop
+        if self.straddle_engine:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self.straddle_engine.stop_exit_loop())
+            except Exception:
+                pass
         try:
             self.position_manager.set_emergency_stop(True, reason)
         except Exception as e:
@@ -6780,6 +6809,26 @@ class RenaissanceTradingBot:
 
         return prices
 
+    async def _get_straddle_price(self) -> Dict[str, float]:
+        """Fetch current BTC price for straddle exit checks.
+
+        Returns dict like {'BTCUSDT': price}.
+        """
+        pair = self.straddle_engine.pair if self.straddle_engine else 'BTCUSDT'
+        provider = getattr(self, 'binance_spot', None)
+        if provider:
+            try:
+                ticker = await provider.fetch_ticker(pair)
+                if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
+                    return {pair: float(ticker['price'])}
+            except Exception:
+                pass
+        # Fallback to cached price
+        last = getattr(self, '_last_prices', {})
+        if last.get(pair, 0) > 0:
+            return {pair: float(last[pair])}
+        return {}
+
     async def _deduplicate_positions_on_startup(self) -> None:
         """Close duplicate and opposing positions found after DB restore.
 
@@ -6921,6 +6970,10 @@ class RenaissanceTradingBot:
         # ── Start Token Spray exit loop ──
         if self.token_spray:
             await self.token_spray.start_exit_loop(self._get_spray_prices)
+
+        # ── Start BTC Straddle exit loop ──
+        if self.straddle_engine:
+            await self.straddle_engine.start_exit_loop(self._get_straddle_price)
 
         # ── Prune old data to reduce DB size and memory pressure ──
         self._prune_old_data()

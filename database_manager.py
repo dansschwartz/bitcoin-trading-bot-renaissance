@@ -385,6 +385,43 @@ class DatabaseManager:
                 pass  # Column already exists
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_spray_wallet ON token_spray_log(wallet_id)')
 
+            # ── Straddle Engine tables ──
+            cursor.execute('''CREATE TABLE IF NOT EXISTS straddle_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opened_at TEXT NOT NULL,
+                closed_at TEXT,
+                entry_price REAL NOT NULL,
+                vol_prediction REAL,
+                status TEXT DEFAULT 'OPEN',
+                long_exit_price REAL,
+                short_exit_price REAL,
+                long_exit_reason TEXT,
+                short_exit_reason TEXT,
+                long_pnl_bps REAL,
+                short_pnl_bps REAL,
+                net_pnl_bps REAL,
+                net_pnl_usd REAL,
+                size_usd REAL,
+                duration_seconds REAL,
+                dead_zone_blocked INTEGER DEFAULT 0
+            )''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS straddle_legs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                straddle_id INTEGER NOT NULL,
+                side TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL,
+                exit_reason TEXT,
+                pnl_bps REAL,
+                pnl_usd REAL,
+                peak_favorable_bps REAL,
+                opened_at TEXT,
+                closed_at TEXT,
+                FOREIGN KEY (straddle_id) REFERENCES straddle_log(id)
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_straddle_status ON straddle_log(status)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_straddle_opened ON straddle_log(opened_at DESC)')
+
             conn.commit()
             self.logger.info("Database initialized successfully with expanded metrics support")
 

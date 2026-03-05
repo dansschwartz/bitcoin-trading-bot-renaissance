@@ -15,6 +15,7 @@ import Arbitrage from './pages/Arbitrage';
 import BreakoutScanner from './pages/BreakoutScanner';
 import Polymarket from './pages/Polymarket';
 import BreakoutBets from './pages/BreakoutBets';
+import BtcStraddle from './pages/BtcStraddle';
 
 export default function App() {
   return (
@@ -28,6 +29,7 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<CommandCenter />} />
                 <Route path="/token-spray" element={<TokenSpray />} />
+                <Route path="/straddle" element={<BtcStraddle />} />
                 <Route path="/exit-engine" element={<ExitEngine />} />
                 <Route path="/brain" element={<Brain />} />
                 <Route path="/positions" element={<Positions />} />

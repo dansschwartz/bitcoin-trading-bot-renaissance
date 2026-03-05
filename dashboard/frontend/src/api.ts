@@ -171,6 +171,12 @@ export const api = {
   sprayAbTest: () => get<Record<string, unknown>>('/api/token-spray/ab-test'),
   sprayVolatility: () => get<Record<string, unknown>>('/api/token-spray/volatility'),
 
+  // BTC Straddle
+  straddleStatus: () => get<Record<string, unknown>>('/api/straddle/status'),
+  straddleHistory: (limit = 100) => get<Record<string, unknown>[]>(`/api/straddle/history?limit=${limit}`),
+  straddleHourly: () => get<Record<string, unknown>[]>('/api/straddle/hourly'),
+  straddleStats: () => get<Record<string, unknown>>('/api/straddle/stats'),
+
   // Exit Engine
   exitSummary: () => get<Record<string, unknown>>('/api/exit-engine/summary'),
   exitRecentExits: () => get<Record<string, unknown>[]>('/api/exit-engine/recent-exits'),
