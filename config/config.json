@@ -615,7 +615,7 @@
         "min_signal_strength": 0.02,
         "min_confidence": 0.42,
         "cooldown_seconds": 30,
-        "exit_check_interval_seconds": 5,
+        "exit_check_interval_seconds": 1,
         "vol_scaling": { "low": 1.0, "medium": 0.7, "high": 0.4 },
         "exit_config": {
             "stop_loss_bps": 8,
