@@ -2503,12 +2503,10 @@ class RenaissanceTradingBot:
             except Exception as e:
                 self.logger.debug(f"GARCH vol signal failed: {e}")
 
-            self.logger.warning(f"TRACE_INSIDE_GENSIG: about to return signals for {market_data.get('product_id', '?')}")
             return signals
 
         except Exception as e:
             self.logger.error(f"Signal generation failed: {e}")
-            self.logger.warning(f"TRACE_INSIDE_GENSIG_EXCEPT: {e}")
             return {key: 0.0 for key in self.signal_weights.keys()}
 
     def calculate_weighted_signal(self, signals: Dict[str, float]) -> Tuple[float, Dict[str, float]]:
@@ -4302,6 +4300,28 @@ class RenaissanceTradingBot:
 
             _ml_inference_count = 0  # Council S2 P1: track ML inferences for heartbeat
 
+            # ── BTC Straddle: open paired LONG+SHORT (called once per cycle, before per-pair loop) ──
+            if self.straddle_engine:
+                try:
+                    _straddle_pair = self.straddle_engine.pair
+                    _straddle_md = market_data_all.get(_straddle_pair, {})
+                    _straddle_price = float(_straddle_md.get('ticker', {}).get('price', 0.0))
+                    if _straddle_price <= 0:
+                        _straddle_price = float(_straddle_md.get('current_price', 0.0))
+                    self.logger.info(f"STRADDLE CHECK: pair={_straddle_pair} price={_straddle_price}")
+                    if _straddle_price > 0:
+                        _vol_pred_bps = None
+                        _vp = _straddle_md.get('volatility_prediction')
+                        if _vp and isinstance(_vp, dict):
+                            _vol_pred_bps = _vp.get('predicted_magnitude_bps')
+                        _straddle_result = self.straddle_engine.open_straddle(_straddle_price, _vol_pred_bps)
+                        if _straddle_result:
+                            self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${_straddle_price:.2f} vol={_vol_pred_bps}")
+                        else:
+                            self.logger.info(f"STRADDLE SKIP: price={_straddle_price} vol={_vol_pred_bps} open={len(self.straddle_engine.open_straddles)}")
+                except Exception as _straddle_err:
+                    self.logger.error(f"STRADDLE ERROR: {_straddle_err}")
+
             for product_id in cycle_pairs:
                 pair_start_time = time.time()
 
@@ -4576,7 +4596,7 @@ class RenaissanceTradingBot:
 
                 # 2. Generate signals from all components
                 signals = await self.generate_signals(market_data)
-                self.logger.warning(f"TRACE_A: pid={product_id} after_generate_signals")
+
 
                 # HARDENING: Ensure all signals are floats
                 signals = {k: self._force_float(v) for k, v in signals.items()}
@@ -4909,7 +4929,7 @@ class RenaissanceTradingBot:
                     self.random_baseline.maybe_enter(product_id, current_price)
 
                 # 3.15 Polymarket Bridge — emit BTC signal for binary bet markets
-                self.logger.warning(f"TRACE_B: pid={product_id} before_polymarket_block")
+
                 if product_id == 'BTC-USD':
                     try:
                         _pm_model_preds = {}
@@ -5116,7 +5136,7 @@ class RenaissanceTradingBot:
                         }
 
                 # 3.2 Update Dynamic Thresholds (Step 8)
-                self.logger.warning(f"TRACE_C: pid={product_id} before_dynamic_thresholds")
+
                 self._update_dynamic_thresholds(product_id, market_data)
 
                 # 4. Real-time pipeline cycle (Step 12)
@@ -5162,21 +5182,7 @@ class RenaissanceTradingBot:
                 # 4.5 Statistical Arbitrage & Fractal Intelligence
                 current_price = market_data.get('ticker', {}).get('price', 0.0)
 
-                # ── BTC Straddle: open paired LONG+SHORT (runs before sanity gates) ──
-                self.logger.warning(f"STRADDLE_TRACE: pid={product_id} pair={getattr(self.straddle_engine, 'pair', 'NO_ENGINE')} price={current_price} engine={self.straddle_engine is not None}")
-                if self.straddle_engine and product_id == self.straddle_engine.pair and current_price > 0:
-                    try:
-                        _vol_pred_bps = None
-                        _vp = (market_data or {}).get('volatility_prediction')
-                        if _vp and isinstance(_vp, dict):
-                            _vol_pred_bps = _vp.get('predicted_magnitude_bps')
-                        _straddle_result = self.straddle_engine.open_straddle(current_price, _vol_pred_bps)
-                        if _straddle_result:
-                            self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${current_price:.2f} vol={_vol_pred_bps}")
-                        else:
-                            self.logger.info(f"STRADDLE SKIP: price={current_price} vol={_vol_pred_bps} open={len(self.straddle_engine.open_straddles)}")
-                    except Exception as _straddle_err:
-                        self.logger.error(f"STRADDLE ERROR: {_straddle_err}")
+                # (straddle open moved to pre-loop at line ~4303)
 
                 self.stat_arb_engine.update_price(product_id, current_price)
                 
