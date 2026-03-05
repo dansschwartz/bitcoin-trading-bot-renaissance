@@ -5383,7 +5383,11 @@ class RenaissanceTradingBot:
                         _vp = (market_data or {}).get('volatility_prediction')
                         if _vp and isinstance(_vp, dict):
                             _vol_pred_bps = _vp.get('predicted_magnitude_bps')
-                        self.straddle_engine.open_straddle(current_price, _vol_pred_bps)
+                        _straddle_result = self.straddle_engine.open_straddle(current_price, _vol_pred_bps)
+                        if _straddle_result:
+                            self.logger.info(f"STRADDLE OPENED from main loop: id={_straddle_result.straddle_id} price=${current_price:.2f}")
+                        else:
+                            self.logger.info(f"STRADDLE SKIPPED: pair={product_id} price={current_price} vol={_vol_pred_bps} open={len(self.straddle_engine.open_straddles)}")
 
                     # Skip legacy decision path — move to next pair
                     pair_elapsed = time.time() - pair_start_time
