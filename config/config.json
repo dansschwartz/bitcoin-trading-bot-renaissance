@@ -658,9 +658,9 @@
         "interval_seconds": 60,
         "max_open": 1,
         "stop_loss_bps": 6,
-        "trail_activation_bps": 4,
-        "trail_distance_bps": 4,
-        "max_hold_seconds": 600,
+        "trail_activation_bps": 12,
+        "trail_distance_bps": 15,
+        "max_hold_seconds": 900,
         "dead_zone_bps": 2.0,
         "use_vol_model": true,
         "exit_check_interval": 1.0
