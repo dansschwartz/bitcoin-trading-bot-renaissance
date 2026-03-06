@@ -661,16 +661,24 @@ class StraddleEngine:
         self.log.info(f"StraddleEngine[{self.asset}] exit loop stopped")
 
     async def _exit_loop(self, price_fn: Callable) -> None:
-        """Internal loop: fetch price + check exits every interval."""
+        """Internal loop: fetch price, check exits, and open new straddles.
+
+        Runs every exit_check_interval (2s). The entry cooldown (interval_seconds=10s)
+        is enforced inside open_straddle() so entries happen at the right cadence.
+        """
         while self._running:
             try:
-                if self.open_straddles:
-                    prices = await price_fn()
-                    price = prices.get(self.pair)
-                    if price and price > 0:
-                        self.check_exits(float(price))
+                prices = await price_fn()
+                price = prices.get(self.pair)
+                if price and price > 0:
+                    p = float(price)
+                    # Check exits on all open straddles
+                    if self.open_straddles:
+                        self.check_exits(p)
+                    # Try to open a new straddle (cooldown gate inside)
+                    self.open_straddle(p, vol_pred=None)
             except Exception as e:
-                self.log.warning(f"Straddle[{self.asset}] exit loop error: {e}")
+                self.log.warning(f"Straddle[{self.asset}] loop error: {e}")
             await asyncio.sleep(self.exit_check_interval)
 
     # ------------------------------------------------------------------

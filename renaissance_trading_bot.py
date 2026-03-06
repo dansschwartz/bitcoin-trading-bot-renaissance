@@ -3871,33 +3871,8 @@ class RenaissanceTradingBot:
         """Execute one complete trading cycle across all products"""
         cycle_start = time.time()
         decisions = []
-        # ── Multi-Asset Straddle Fleet: open paired LONG+SHORT per asset ──
-        # Uses cached _last_prices from previous cycle (no network call needed).
-        # First cycle after restart has empty cache → straddle skips, which is fine.
-        for _s_asset, _s_engine in self.straddle_engines.items():
-            try:
-                _sp = _s_engine.pair  # e.g. 'BTC-USD' or 'ETH-USD'
-                _stp = float(getattr(self, '_last_prices', {}).get(_sp, 0))
-                if _stp > 0:
-                    self.logger.info(
-                        f"STRADDLE[{_s_asset}] CHECK: price=${_stp:.2f} "
-                        f"open={len(_s_engine.open_straddles)}"
-                    )
-                    _straddle_result = _s_engine.open_straddle(_stp, None)
-                    if _straddle_result:
-                        self.logger.info(
-                            f"STRADDLE[{_s_asset}] OPENED: id={_straddle_result.straddle_id} "
-                            f"price=${_stp:.2f} vol_r={_straddle_result.vol_ratio:.2f}"
-                        )
-                    else:
-                        self.logger.info(
-                            f"STRADDLE[{_s_asset}] SKIP: price=${_stp:.2f} "
-                            f"cooldown/max_open/daily_loss"
-                        )
-                else:
-                    self.logger.debug(f"STRADDLE[{_s_asset}]: no cached price for {_sp} yet")
-            except Exception as _se:
-                self.logger.error(f"STRADDLE[{_s_asset}] ERROR: {type(_se).__name__}: {_se}")
+        # Straddle opens are handled by each engine's _exit_loop (every 2s).
+        # No need to open straddles in the main bot cycle.
 
         try:
             # Council S6: Check bar pipeline liveness at start of each cycle
