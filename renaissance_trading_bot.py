@@ -1350,18 +1350,50 @@ class RenaissanceTradingBot:
             except Exception as _spray_err:
                 self.logger.warning(f"TokenSprayEngine init failed: {_spray_err}")
 
-        # ── BTC Straddle Engine (direction-free paired LONG+SHORT) ──
-        self.straddle_engine = None
-        straddle_config = self.config.get('straddle', {})
-        if straddle_config.get('enabled', False):
+        # ── Multi-Asset Straddle Fleet (direction-free paired LONG+SHORT) ──
+        self.straddle_engine = None  # Legacy compat — points to first engine
+        self.straddle_engines: Dict[str, Any] = {}
+        self.straddle_fleet = None
+        straddles_config = self.config.get('straddles', {})
+        if straddles_config.get('enabled', False):
             try:
-                from straddle_engine import StraddleEngine
+                from straddle_engine import StraddleEngine, StraddleFleetController
                 _straddle_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
-                self.straddle_engine = StraddleEngine(
-                    config=straddle_config, db_path=_straddle_db, logger=self.logger,
+                self.straddle_fleet = StraddleFleetController(
+                    fleet_daily_loss_limit=float(straddles_config.get('fleet_daily_loss_limit', 1500)),
+                    fleet_max_deployed=float(straddles_config.get('fleet_max_deployed', 15000)),
+                    logger=self.logger,
                 )
+                for asset_key, asset_cfg in straddles_config.get('assets', {}).items():
+                    if not asset_cfg.get('enabled', False):
+                        continue
+                    eng = StraddleEngine(
+                        config=asset_cfg,
+                        db_path=_straddle_db,
+                        logger=self.logger,
+                        fleet_controller=self.straddle_fleet,
+                    )
+                    self.straddle_fleet.register(eng)
+                    self.straddle_engines[asset_key] = eng
+                # Legacy compat: point straddle_engine to first engine
+                if self.straddle_engines:
+                    self.straddle_engine = next(iter(self.straddle_engines.values()))
+                self.logger.info(f"StraddleFleet initialized: {list(self.straddle_engines.keys())}")
             except Exception as _straddle_err:
-                self.logger.warning(f"StraddleEngine init failed: {_straddle_err}")
+                self.logger.warning(f"StraddleFleet init failed: {_straddle_err}")
+        # Legacy fallback: old single-straddle config
+        if not self.straddle_engines:
+            old_straddle_config = self.config.get('straddle', {})
+            if old_straddle_config.get('enabled', False):
+                try:
+                    from straddle_engine import StraddleEngine
+                    _straddle_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+                    self.straddle_engine = StraddleEngine(
+                        config=old_straddle_config, db_path=_straddle_db, logger=self.logger,
+                    )
+                    self.straddle_engines[self.straddle_engine.asset] = self.straddle_engine
+                except Exception as _straddle_err:
+                    self.logger.warning(f"StraddleEngine init failed: {_straddle_err}")
 
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
@@ -3839,24 +3871,33 @@ class RenaissanceTradingBot:
         """Execute one complete trading cycle across all products"""
         cycle_start = time.time()
         decisions = []
-        # ── BTC Straddle: open paired LONG+SHORT ──
+        # ── Multi-Asset Straddle Fleet: open paired LONG+SHORT per asset ──
         # Uses cached _last_prices from previous cycle (no network call needed).
         # First cycle after restart has empty cache → straddle skips, which is fine.
-        if self.straddle_engine:
+        for _s_asset, _s_engine in self.straddle_engines.items():
             try:
-                _sp = self.straddle_engine.pair  # e.g. 'BTC-USD'
+                _sp = _s_engine.pair  # e.g. 'BTC-USD' or 'ETH-USD'
                 _stp = float(getattr(self, '_last_prices', {}).get(_sp, 0))
                 if _stp > 0:
-                    self.logger.info(f"STRADDLE CHECK: price=${_stp:.2f} open={len(self.straddle_engine.open_straddles)}")
-                    _straddle_result = self.straddle_engine.open_straddle(_stp, None)
+                    self.logger.info(
+                        f"STRADDLE[{_s_asset}] CHECK: price=${_stp:.2f} "
+                        f"open={len(_s_engine.open_straddles)}"
+                    )
+                    _straddle_result = _s_engine.open_straddle(_stp, None)
                     if _straddle_result:
-                        self.logger.info(f"STRADDLE OPENED: id={_straddle_result.straddle_id} price=${_stp:.2f}")
+                        self.logger.info(
+                            f"STRADDLE[{_s_asset}] OPENED: id={_straddle_result.straddle_id} "
+                            f"price=${_stp:.2f} vol_r={_straddle_result.vol_ratio:.2f}"
+                        )
                     else:
-                        self.logger.info(f"STRADDLE SKIP: price=${_stp:.2f} cooldown/max_open/daily_loss")
+                        self.logger.info(
+                            f"STRADDLE[{_s_asset}] SKIP: price=${_stp:.2f} "
+                            f"cooldown/max_open/daily_loss"
+                        )
                 else:
-                    self.logger.debug(f"STRADDLE: no cached price for {_sp} yet (first cycle?)")
+                    self.logger.debug(f"STRADDLE[{_s_asset}]: no cached price for {_sp} yet")
             except Exception as _se:
-                self.logger.error(f"STRADDLE ERROR: {type(_se).__name__}: {_se}")
+                self.logger.error(f"STRADDLE[{_s_asset}] ERROR: {type(_se).__name__}: {_se}")
 
         try:
             # Council S6: Check bar pipeline liveness at start of each cycle
@@ -6256,12 +6297,12 @@ class RenaissanceTradingBot:
                     asyncio.ensure_future(self.token_spray.stop_exit_loop())
             except Exception:
                 pass
-        # Stop straddle exit loop
-        if self.straddle_engine:
+        # Stop straddle exit loops (all assets)
+        for _s_asset, _s_engine in self.straddle_engines.items():
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    asyncio.ensure_future(self.straddle_engine.stop_exit_loop())
+                    asyncio.ensure_future(_s_engine.stop_exit_loop())
             except Exception:
                 pass
         try:
@@ -6825,28 +6866,39 @@ class RenaissanceTradingBot:
 
         return prices
 
-    async def _get_straddle_price(self) -> Dict[str, float]:
-        """Fetch current BTC price for straddle exit checks.
+    async def _get_straddle_price(self, pair: str = '') -> Dict[str, float]:
+        """Fetch current price for straddle exit checks.
 
-        Returns dict like {'BTC-USD': price}.
+        When called without args from a per-engine exit loop, pair is set by
+        the lambda closure. Returns dict like {'BTC-USD': price}.
         """
-        pair = self.straddle_engine.pair if self.straddle_engine else 'BTC-USD'
-        # Map internal pair format (BTC-USD) to Binance symbol (BTCUSDT)
-        pair_map = getattr(self, '_pair_binance_symbols', {})
-        binance_sym = pair_map.get(pair, pair.replace('-USD', 'USDT'))
+        # Collect all straddle pairs we need
+        pairs_needed = set()
+        if pair:
+            pairs_needed.add(pair)
+        for eng in self.straddle_engines.values():
+            pairs_needed.add(eng.pair)
+
+        result: Dict[str, float] = {}
         provider = getattr(self, 'binance_spot', None)
-        if provider:
-            try:
-                ticker = await provider.fetch_ticker(binance_sym)
-                if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
-                    return {pair: float(ticker['price'])}
-            except Exception:
-                pass
-        # Fallback to cached price
-        last = getattr(self, '_last_prices', {})
-        if last.get(pair, 0) > 0:
-            return {pair: float(last[pair])}
-        return {}
+        pair_map = getattr(self, '_pair_binance_symbols', {})
+
+        for p in pairs_needed:
+            binance_sym = pair_map.get(p, p.replace('-USD', 'USDT'))
+            if provider:
+                try:
+                    ticker = await provider.fetch_ticker(binance_sym)
+                    if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
+                        result[p] = float(ticker['price'])
+                        continue
+                except Exception:
+                    pass
+            # Fallback to cached price
+            last = getattr(self, '_last_prices', {})
+            if last.get(p, 0) > 0:
+                result[p] = float(last[p])
+
+        return result
 
     async def _deduplicate_positions_on_startup(self) -> None:
         """Close duplicate and opposing positions found after DB restore.
@@ -6990,9 +7042,9 @@ class RenaissanceTradingBot:
         if self.token_spray:
             await self.token_spray.start_exit_loop(self._get_spray_prices)
 
-        # ── Start BTC Straddle exit loop ──
-        if self.straddle_engine:
-            await self.straddle_engine.start_exit_loop(self._get_straddle_price)
+        # ── Start Straddle exit loops (all assets) ──
+        for _s_asset, _s_engine in self.straddle_engines.items():
+            await _s_engine.start_exit_loop(self._get_straddle_price)
 
         # ── Prune old data to reduce DB size and memory pressure ──
         self._prune_old_data()
