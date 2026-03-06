@@ -36,41 +36,55 @@ async def straddle_fleet(request: Request) -> dict[str, Any]:
         except Exception:
             pass
 
-    # Fallback: derive from database
+    # Fallback: derive from database (includes OPEN + CLOSED)
     db = request.app.state.dashboard_config.db_path
     assets = _safe_query(
         db,
         """SELECT COALESCE(asset, 'BTC') as asset,
-                  COUNT(*) as total,
-                  SUM(CASE WHEN net_pnl_bps > 0 THEN 1 ELSE 0 END) as winners,
-                  ROUND(SUM(net_pnl_usd), 4) as pnl
-           FROM straddle_log WHERE status = 'CLOSED'
+                  SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END) as open_count,
+                  SUM(CASE WHEN status = 'OPEN' THEN COALESCE(size_usd, 500) * 2 ELSE 0 END) as deployed,
+                  SUM(CASE WHEN status = 'CLOSED' THEN 1 ELSE 0 END) as closed_count,
+                  SUM(CASE WHEN status = 'CLOSED' AND net_pnl_bps > 0 THEN 1 ELSE 0 END) as winners,
+                  ROUND(COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN net_pnl_usd ELSE 0 END), 0), 4) as pnl
+           FROM straddle_log
+           WHERE status IN ('OPEN', 'CLOSED')
            GROUP BY COALESCE(asset, 'BTC')""",
     )
     engines: dict[str, Any] = {}
     total_pnl = 0.0
+    total_open = 0
+    total_deployed = 0.0
     for row in assets:
         a = row.get('asset', 'BTC')
-        total = row.get('total', 0) or 0
+        open_c = row.get('open_count', 0) or 0
+        deployed = row.get('deployed', 0) or 0
+        closed_c = row.get('closed_count', 0) or 0
         winners = row.get('winners', 0) or 0
         pnl = row.get('pnl', 0) or 0
         total_pnl += pnl
+        total_open += open_c
+        total_deployed += deployed
         engines[a] = {
-            'open': 0,
-            'deployed': 0,
+            'open': open_c,
+            'deployed': round(deployed, 0),
             'pnl_usd': round(pnl, 4),
             'daily_loss': 0,
-            'win_rate': round(winners / total * 100, 1) if total > 0 else 0,
-            'total_closed': total,
+            'win_rate': round(winners / closed_c * 100, 1) if closed_c > 0 else 0,
+            'total_closed': closed_c,
         }
+
+    # If no data yet, show both engines as placeholders
+    for a in ('BTC', 'ETH'):
+        if a not in engines:
+            engines[a] = {'open': 0, 'deployed': 0, 'pnl_usd': 0, 'daily_loss': 0, 'win_rate': 0, 'total_closed': 0}
 
     return {
         'halted': False,
         'fleet_daily_loss': 0,
         'fleet_daily_loss_limit': 1500,
         'fleet_max_deployed': 70000,
-        'total_deployed': 0,
-        'total_open': 0,
+        'total_deployed': round(total_deployed, 0),
+        'total_open': total_open,
         'total_pnl': round(total_pnl, 4),
         'engines': engines,
     }
@@ -123,9 +137,12 @@ def _db_status(db_path: str, asset: str) -> dict:
         "SELECT COUNT(*) as cnt FROM straddle_log WHERE status != 'BLOCKED' AND COALESCE(asset, 'BTC') = ?",
         (asset,),
     )
-    open_count = _safe_query(
+    open_rows = _safe_query(
         db_path,
-        "SELECT COUNT(*) as cnt FROM straddle_log WHERE status = 'OPEN' AND COALESCE(asset, 'BTC') = ?",
+        """SELECT id, entry_price, vol_ratio, effective_stop_bps, effective_activation_bps,
+                  effective_trail_bps, opened_at, size_usd
+           FROM straddle_log WHERE status = 'OPEN' AND COALESCE(asset, 'BTC') = ?
+           ORDER BY opened_at DESC""",
         (asset,),
     )
     closed = _safe_query(
@@ -139,24 +156,56 @@ def _db_status(db_path: str, asset: str) -> dict:
     c = closed[0] if closed else {'cnt': 0, 'winners': 0, 'pnl': 0}
     wr = (c['winners'] / c['cnt'] * 100) if c['cnt'] > 0 else 0
 
+    import time
+    now = time.time()
+    open_straddles = []
+    for row in open_rows:
+        # Parse opened_at to get age
+        age = 0.0
+        try:
+            from datetime import datetime, timezone
+            opened = datetime.strptime(row['opened_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            age = now - opened.timestamp()
+        except Exception:
+            pass
+        open_straddles.append({
+            'straddle_id': row['id'],
+            'asset': asset,
+            'entry_price': row.get('entry_price', 0),
+            'vol_prediction': None,
+            'vol_ratio': row.get('vol_ratio', 1.0),
+            'effective_stop_bps': row.get('effective_stop_bps', 5.0),
+            'effective_activation_bps': row.get('effective_activation_bps', 3.0),
+            'effective_trail_bps': row.get('effective_trail_bps', 2.0),
+            'age_seconds': round(age, 1),
+            'long_trail_active': False,
+            'short_trail_active': False,
+            'long_peak_bps': 0,
+            'short_peak_bps': 0,
+        })
+
+    has_activity = len(open_rows) > 0 or (c['cnt'] or 0) > 0
+
     return {
-        'active': False,
-        'observation_mode': True,
+        'active': has_activity,
+        'observation_mode': False,
         'asset': asset,
-        'pair': f'{asset}USDT',
+        'pair': f'{asset}-USD',
         'size_usd': 500,
         'wallet_usd': 35000,
         'interval_seconds': 10,
         'max_open': 35,
-        'open_count': open_count[0]['cnt'] if open_count else 0,
-        'open_straddles': [],
+        'open_count': len(open_rows),
+        'open_straddles': open_straddles,
         'total_opened': total[0]['cnt'] if total else 0,
         'total_closed': c['cnt'],
         'total_winners': c['winners'],
         'win_rate': round(wr, 1),
         'total_pnl_usd': round(c['pnl'], 4),
         'daily_loss_usd': 0,
+        'max_daily_loss_usd': 700,
         'dead_zone_blocks': 0,
+        'vol_scaling': 'none',
         'config': {},
     }
 
