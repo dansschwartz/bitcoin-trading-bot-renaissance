@@ -1,11 +1,11 @@
-"""Multi-Asset Straddle Engine — Direction-Free Trading via Paired LONG+SHORT Positions.
+"""Multi-Asset Straddle Engine — Dollar-Denominated Exits.
 
-Opens simultaneous LONG and SHORT legs on an asset every interval.  One side always
-wins.  Edge comes from exit asymmetry: tight stop on the loser, trailing stop on
-the winner.  Vol-proportional scaling adapts stop/activation/trail to realized volatility.
+Opens simultaneous LONG and SHORT legs on an asset every interval. One side always
+wins. Edge comes from exit asymmetry: tight stop on the loser ($1 loss), trailing
+stop on the winner ($1 giveback from peak).
 
-Supports BTC, ETH, or any asset — each instance operates independently with its
-own wallet, limits, and config.
+All exit decisions are in DOLLARS, not basis points.
+BPS are computed for logging/reference only.
 """
 
 from __future__ import annotations
@@ -27,11 +27,16 @@ class StraddleLeg:
     entry_price: float
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None             # stop_loss, trail_stop, timeout
-    pnl_bps: float = 0.0
+
+    # Dollar P&L — used for exit decisions
     pnl_usd: float = 0.0
-    peak_favorable_bps: float = 0.0
+    peak_pnl_usd: float = 0.0                    # highest dollar gain seen
     trail_active: bool = False
-    trail_peak_bps: float = 0.0                   # best pnl since trail activated
+
+    # BPS — for logging/reference only (NOT used for exit decisions)
+    pnl_bps: float = 0.0
+    peak_favorable_bps: float = 0.0
+
     opened_at: float = 0.0                        # time.time()
     closed_at: Optional[float] = None
     closed: bool = False
@@ -43,23 +48,23 @@ class Straddle:
 
     straddle_id: int                              # DB row id
     entry_price: float
-    asset: str = "BTC"                            # asset tag for DB/logging
+    asset: str = "BTC"
     long_leg: StraddleLeg = field(default_factory=StraddleLeg)
     short_leg: StraddleLeg = field(default_factory=StraddleLeg)
     opened_at: float = 0.0
-    size_usd: float = 0.0
-    vol_prediction: Optional[float] = None
-    vol_ratio: float = 1.0                        # vol-scaling ratio applied
-    effective_stop_bps: float = 0.0
-    effective_activation_bps: float = 0.0
-    effective_trail_bps: float = 0.0
+    size_usd: float = 0.0                         # per-leg size
+
+    # Dollar thresholds stored per-straddle
+    stop_loss_usd: float = 1.0
+    trail_activation_usd: float = 1.0
+    trail_distance_usd: float = 1.0
 
 
 class StraddleEngine:
-    """Core straddle engine with paired entry/exit logic.
+    """Core straddle engine with dollar-denominated exits.
 
     Each instance manages one asset (e.g. BTC or ETH) with its own wallet,
-    safety limits, and vol-scaling config.
+    safety limits, and config.
     """
 
     def __init__(
@@ -78,8 +83,8 @@ class StraddleEngine:
         self.pair: str = config.get('pair', f'{self.asset}-USD')
 
         # Sizing
-        self.size_usd: float = float(config.get('size_usd', 500))
-        self.wallet_usd: float = float(config.get('wallet_usd', 35000))
+        self.size_usd: float = float(config.get('size_usd', 1000))
+        self.wallet_usd: float = float(config.get('wallet_usd', 70000))
 
         # Timing
         self.interval_seconds: float = float(config.get('interval_seconds', 10))
@@ -87,27 +92,17 @@ class StraddleEngine:
         self.max_hold_seconds: float = float(config.get('max_hold_seconds', 300))
         self.exit_check_interval: float = float(config.get('exit_check_interval', 2.0))
 
-        # Base exit params (before vol scaling)
-        self.stop_loss_bps: float = float(config.get('stop_loss_bps', 5))
-        self.trail_activation_bps: float = float(config.get('trail_activation_bps', 3))
-        self.trail_distance_bps: float = float(config.get('trail_distance_bps', 2))
-
-        # Vol-proportional scaling
-        self.vol_scaling: str = config.get('vol_scaling', 'none')
-        self.vol_baseline_bps: float = float(config.get('vol_baseline_bps', 15.0))
-        self.vol_floor: float = float(config.get('vol_floor', 0.3))
-        self.vol_ceiling: float = float(config.get('vol_ceiling', 3.0))
-
-        # Dead zone
-        self.dead_zone_bps: float = float(config.get('dead_zone_bps', 2.0))
-        self.use_vol_model: bool = config.get('use_vol_model', True)
+        # Exit params — IN DOLLARS (not bps)
+        self.stop_loss_usd: float = float(config.get('stop_loss_usd', 1.00))
+        self.trail_activation_usd: float = float(config.get('trail_activation_usd', 1.00))
+        self.trail_distance_usd: float = float(config.get('trail_distance_usd', 1.00))
 
         # Mode
         self.observation_mode: bool = config.get('observation_mode', False)
 
         # Safety limits (per-asset)
         self.max_deployed_usd: float = self.wallet_usd
-        self.max_daily_loss_usd: float = float(config.get('daily_loss_limit_usd', 700))
+        self.max_daily_loss_usd: float = float(config.get('daily_loss_limit_usd', 7000))
 
         # Runtime state
         self.open_straddles: List[Straddle] = []
@@ -122,12 +117,6 @@ class StraddleEngine:
         self._total_closed: int = 0
         self._total_pnl_usd: float = 0.0
         self._total_winners: int = 0
-        self._dead_zone_blocks: int = 0
-
-        # Rolling vol tracker (60s window of recent 1s returns in bps)
-        self._recent_returns: List[float] = []
-        self._last_price: float = 0.0
-        self._last_price_time: float = 0.0
 
         # Ensure tables exist
         self._ensure_schema()
@@ -136,11 +125,12 @@ class StraddleEngine:
         self._cleanup_stale_straddles()
 
         self.log.info(
-            f"StraddleEngine[{self.asset}] init: pair={self.pair} size=${self.size_usd} "
-            f"wallet=${self.wallet_usd} stop={self.stop_loss_bps}bp "
-            f"trail_act={self.trail_activation_bps}bp trail_dist={self.trail_distance_bps}bp "
-            f"max_hold={self.max_hold_seconds}s max_open={self.max_open} "
-            f"vol_scaling={self.vol_scaling} obs_mode={self.observation_mode}"
+            f"StraddleEngine[{self.asset}] init: pair={self.pair} "
+            f"leg=${self.size_usd:.0f} wallet=${self.wallet_usd:.0f} "
+            f"stop=${self.stop_loss_usd:.2f} trail_at=${self.trail_activation_usd:.2f} "
+            f"trail_dist=${self.trail_distance_usd:.2f} "
+            f"max_hold={self.max_hold_seconds:.0f}s max_open={self.max_open} "
+            f"obs_mode={self.observation_mode}"
         )
 
     # ------------------------------------------------------------------
@@ -163,25 +153,32 @@ class StraddleEngine:
                     opened_at TEXT,
                     closed_at TEXT,
                     entry_price REAL,
+                    status TEXT DEFAULT 'OPEN',
+                    size_usd REAL,
+                    stop_loss_usd REAL,
+                    trail_activation_usd REAL,
+                    trail_distance_usd REAL,
+                    concurrent_at_entry INTEGER,
+                    long_exit_price REAL,
+                    short_exit_price REAL,
+                    long_exit_reason TEXT,
+                    short_exit_reason TEXT,
+                    long_pnl_usd REAL,
+                    short_pnl_usd REAL,
+                    long_peak_usd REAL,
+                    short_peak_usd REAL,
+                    long_pnl_bps REAL,
+                    short_pnl_bps REAL,
+                    net_pnl_usd REAL,
+                    net_pnl_bps REAL,
+                    duration_seconds REAL,
+                    dead_zone_blocked INTEGER DEFAULT 0,
                     vol_prediction REAL,
                     vol_ratio REAL DEFAULT 1.0,
                     effective_stop_bps REAL,
                     effective_activation_bps REAL,
                     effective_trail_bps REAL,
-                    entry_spread_bps REAL,
-                    concurrent_at_entry INTEGER,
-                    status TEXT DEFAULT 'OPEN',
-                    long_exit_price REAL,
-                    short_exit_price REAL,
-                    long_exit_reason TEXT,
-                    short_exit_reason TEXT,
-                    long_pnl_bps REAL,
-                    short_pnl_bps REAL,
-                    net_pnl_bps REAL,
-                    net_pnl_usd REAL,
-                    size_usd REAL,
-                    duration_seconds REAL,
-                    dead_zone_blocked INTEGER DEFAULT 0
+                    entry_spread_bps REAL
                 )
             """)
             conn.execute("""
@@ -192,8 +189,9 @@ class StraddleEngine:
                     entry_price REAL,
                     exit_price REAL,
                     exit_reason TEXT,
-                    pnl_bps REAL,
                     pnl_usd REAL,
+                    pnl_bps REAL,
+                    peak_pnl_usd REAL,
                     peak_favorable_bps REAL,
                     opened_at TEXT,
                     closed_at TEXT,
@@ -203,17 +201,33 @@ class StraddleEngine:
             # Migration: add columns if missing (for existing DBs)
             for col, default in [
                 ('asset', "'BTC'"),
+                ('stop_loss_usd', 'NULL'),
+                ('trail_activation_usd', 'NULL'),
+                ('trail_distance_usd', 'NULL'),
+                ('long_pnl_usd', 'NULL'),
+                ('short_pnl_usd', 'NULL'),
+                ('long_peak_usd', 'NULL'),
+                ('short_peak_usd', 'NULL'),
                 ('vol_ratio', '1.0'),
                 ('effective_stop_bps', 'NULL'),
                 ('effective_activation_bps', 'NULL'),
                 ('effective_trail_bps', 'NULL'),
                 ('entry_spread_bps', 'NULL'),
                 ('concurrent_at_entry', 'NULL'),
+                ('vol_prediction', 'NULL'),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE straddle_log ADD COLUMN {col} DEFAULT {default}")
                 except sqlite3.OperationalError:
-                    pass  # column already exists
+                    pass
+            # Legs migration
+            for col, default in [
+                ('peak_pnl_usd', 'NULL'),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE straddle_legs ADD COLUMN {col} DEFAULT {default}")
+                except sqlite3.OperationalError:
+                    pass
 
             conn.commit()
             conn.close()
@@ -237,7 +251,7 @@ class StraddleEngine:
                 conn.execute(
                     "UPDATE straddle_log SET status='CLOSED', closed_at=?, "
                     "long_exit_reason='restart', short_exit_reason='restart', "
-                    "net_pnl_bps=0, net_pnl_usd=0, duration_seconds=0 "
+                    "net_pnl_usd=0, net_pnl_bps=0, duration_seconds=0 "
                     "WHERE id=?",
                     (ts, row['id']),
                 )
@@ -261,56 +275,6 @@ class StraddleEngine:
             self._daily_date = today
 
     # ------------------------------------------------------------------
-    # Vol-proportional scaling
-    # ------------------------------------------------------------------
-
-    def _compute_vol_ratio(self, vol_pred: Optional[float] = None) -> float:
-        """Compute vol scaling ratio.
-
-        ratio = clamp(vol / baseline, floor, ceiling)
-        In calm markets (mean vol ~0.73 bps), ratio clamps at floor (0.3x)
-        effectively tightening params. During spikes, params widen up to ceiling.
-        """
-        if self.vol_scaling != 'proportional':
-            return 1.0
-
-        vol = vol_pred
-        if vol is None or vol <= 0:
-            # Use rolling realized vol from recent returns
-            if len(self._recent_returns) >= 10:
-                import math
-                vol = (sum(r * r for r in self._recent_returns[-60:]) / len(self._recent_returns[-60:])) ** 0.5
-            else:
-                vol = self.vol_baseline_bps  # Default to baseline = ratio 1.0
-
-        ratio = vol / self.vol_baseline_bps
-        return max(self.vol_floor, min(ratio, self.vol_ceiling))
-
-    def _scaled_params(self, vol_ratio: float) -> tuple[float, float, float]:
-        """Return (stop, activation, trail) scaled by vol ratio."""
-        return (
-            self.stop_loss_bps * vol_ratio,
-            self.trail_activation_bps * vol_ratio,
-            self.trail_distance_bps * vol_ratio,
-        )
-
-    # ------------------------------------------------------------------
-    # Price tracking for vol estimation
-    # ------------------------------------------------------------------
-
-    def update_price(self, price: float) -> None:
-        """Feed a price tick for rolling vol estimation."""
-        now = time.time()
-        if self._last_price > 0 and price > 0:
-            ret_bps = (price - self._last_price) / self._last_price * 10000
-            self._recent_returns.append(ret_bps)
-            # Keep last 120 returns (~2 min at 1s)
-            if len(self._recent_returns) > 120:
-                self._recent_returns = self._recent_returns[-120:]
-        self._last_price = price
-        self._last_price_time = now
-
-    # ------------------------------------------------------------------
     # Open straddle
     # ------------------------------------------------------------------
 
@@ -326,25 +290,6 @@ class StraddleEngine:
         self._reset_daily_if_needed()
         now = time.time()
         ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-
-        # Gate: dead zone
-        if self.use_vol_model and vol_pred is not None and vol_pred < self.dead_zone_bps:
-            self._dead_zone_blocks += 1
-            self.log.debug(
-                f"STRADDLE[{self.asset}] DEAD-ZONE: vol_pred={vol_pred:.1f}bps < {self.dead_zone_bps}bps — skip"
-            )
-            try:
-                conn = self._get_conn()
-                conn.execute(
-                    "INSERT INTO straddle_log (asset, opened_at, entry_price, vol_prediction, status, dead_zone_blocked, size_usd) "
-                    "VALUES (?, ?, ?, ?, 'BLOCKED', 1, ?)",
-                    (self.asset, ts, price, vol_pred, self.size_usd),
-                )
-                conn.commit()
-                conn.close()
-            except Exception as e:
-                self.log.warning(f"Straddle[{self.asset}] DB dead-zone log error: {e}")
-            return None
 
         # Gate: max open
         if len(self.open_straddles) >= self.max_open:
@@ -375,14 +320,9 @@ class StraddleEngine:
             self.log.warning(f"STRADDLE[{self.asset}] FLEET LIMIT: blocked by fleet controller")
             return None
 
-        # Compute vol scaling
-        vol_ratio = self._compute_vol_ratio(vol_pred)
-        eff_stop, eff_activation, eff_trail = self._scaled_params(vol_ratio)
-
         # Create legs
         long_leg = StraddleLeg(side="LONG", entry_price=price, opened_at=now)
         short_leg = StraddleLeg(side="SHORT", entry_price=price, opened_at=now)
-
         concurrent = len(self.open_straddles)
 
         # Insert into DB
@@ -391,14 +331,14 @@ class StraddleEngine:
             conn = self._get_conn()
             cur = conn.execute(
                 """INSERT INTO straddle_log
-                    (asset, opened_at, entry_price, vol_prediction, vol_ratio,
-                     effective_stop_bps, effective_activation_bps, effective_trail_bps,
-                     concurrent_at_entry, status, size_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)""",
+                    (asset, opened_at, entry_price, size_usd,
+                     stop_loss_usd, trail_activation_usd, trail_distance_usd,
+                     concurrent_at_entry, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')""",
                 (
-                    self.asset, ts, price, vol_pred, round(vol_ratio, 4),
-                    round(eff_stop, 2), round(eff_activation, 2), round(eff_trail, 2),
-                    concurrent, self.size_usd,
+                    self.asset, ts, price, self.size_usd,
+                    self.stop_loss_usd, self.trail_activation_usd, self.trail_distance_usd,
+                    concurrent,
                 ),
             )
             straddle_id = cur.lastrowid
@@ -424,11 +364,9 @@ class StraddleEngine:
             short_leg=short_leg,
             opened_at=now,
             size_usd=self.size_usd,
-            vol_prediction=vol_pred,
-            vol_ratio=vol_ratio,
-            effective_stop_bps=eff_stop,
-            effective_activation_bps=eff_activation,
-            effective_trail_bps=eff_trail,
+            stop_loss_usd=self.stop_loss_usd,
+            trail_activation_usd=self.trail_activation_usd,
+            trail_distance_usd=self.trail_distance_usd,
         )
 
         self.open_straddles.append(straddle)
@@ -437,75 +375,75 @@ class StraddleEngine:
 
         mode_label = "OBS" if self.observation_mode else "LIVE"
         self.log.info(
-            f"STRADDLE[{self.asset}] OPEN [{mode_label}] id={straddle_id} price=${price:.2f} "
-            f"size=${self.size_usd} vol_r={vol_ratio:.2f} "
-            f"eff_stop={eff_stop:.1f} eff_act={eff_activation:.1f} eff_trail={eff_trail:.1f} "
+            f"STRADDLE[{self.asset}] OPEN [{mode_label}] id={straddle_id} "
+            f"price=${price:,.2f} leg=${self.size_usd:.0f} "
+            f"stop=${self.stop_loss_usd:.2f} trail_at=${self.trail_activation_usd:.2f} "
+            f"trail_dist=${self.trail_distance_usd:.2f} "
             f"concurrent={concurrent}"
         )
         return straddle
 
     # ------------------------------------------------------------------
-    # Exit checks
+    # Exit checks — ALL IN DOLLARS
     # ------------------------------------------------------------------
-
-    def _compute_leg_pnl_bps(self, leg: StraddleLeg, current_price: float) -> float:
-        """Compute P&L in basis points for a leg."""
-        if leg.side == "LONG":
-            return (current_price - leg.entry_price) / leg.entry_price * 10000
-        else:  # SHORT
-            return (leg.entry_price - current_price) / leg.entry_price * 10000
 
     def _check_leg_exit(
         self, leg: StraddleLeg, current_price: float, now: float,
-        eff_stop: float, eff_activation: float, eff_trail: float,
+        straddle: Straddle,
     ) -> None:
-        """Check and apply exit rules to a single leg using effective (vol-scaled) params."""
+        """Check and apply exit rules to a single leg. All decisions in DOLLARS."""
         if leg.closed:
             return
 
-        pnl_bps = self._compute_leg_pnl_bps(leg, current_price)
+        # Compute P&L in DOLLARS
+        if leg.side == "LONG":
+            leg.pnl_usd = (current_price - leg.entry_price) / leg.entry_price * straddle.size_usd
+        else:
+            leg.pnl_usd = (leg.entry_price - current_price) / leg.entry_price * straddle.size_usd
 
-        # Track peak favorable
-        if pnl_bps > leg.peak_favorable_bps:
-            leg.peak_favorable_bps = pnl_bps
+        # Also compute bps for logging (NOT for decisions)
+        if leg.side == "LONG":
+            leg.pnl_bps = (current_price - leg.entry_price) / leg.entry_price * 10000
+        else:
+            leg.pnl_bps = (leg.entry_price - current_price) / leg.entry_price * 10000
 
-        # Stop loss (uses effective stop)
-        if pnl_bps <= -eff_stop:
+        # Track peak in dollars
+        if leg.pnl_usd > leg.peak_pnl_usd:
+            leg.peak_pnl_usd = leg.pnl_usd
+        if leg.pnl_bps > leg.peak_favorable_bps:
+            leg.peak_favorable_bps = leg.pnl_bps
+
+        # ═══ RULE 1: STOP LOSS — down $X → close immediately ═══
+        if leg.pnl_usd <= -straddle.stop_loss_usd:
             leg.exit_reason = "stop_loss"
-            leg.pnl_bps = pnl_bps
             leg.exit_price = current_price
             leg.closed = True
             leg.closed_at = now
             return
 
-        # Trail activation (uses effective activation)
-        if not leg.trail_active and pnl_bps >= eff_activation:
+        # ═══ RULE 2: TRAIL ACTIVATION — up $X → start trailing ═══
+        if not leg.trail_active and leg.pnl_usd >= straddle.trail_activation_usd:
             leg.trail_active = True
-            leg.trail_peak_bps = pnl_bps
 
-        # Trail peak update
-        if leg.trail_active and pnl_bps > leg.trail_peak_bps:
-            leg.trail_peak_bps = pnl_bps
+        # ═══ RULE 3: TRAIL STOP — gave back $X from peak → close ═══
+        if leg.trail_active:
+            drawdown_usd = leg.peak_pnl_usd - leg.pnl_usd
+            if drawdown_usd >= straddle.trail_distance_usd:
+                leg.exit_reason = "trail_stop"
+                leg.exit_price = current_price
+                leg.closed = True
+                leg.closed_at = now
+                return
 
-        # Trail stop (uses effective trail distance)
-        if leg.trail_active and (leg.trail_peak_bps - pnl_bps) >= eff_trail:
-            leg.exit_reason = "trail_stop"
-            leg.pnl_bps = pnl_bps
-            leg.exit_price = current_price
-            leg.closed = True
-            leg.closed_at = now
-            return
-
-        # Timeout
+        # ═══ RULE 4: TIMEOUT — 5 minutes ═══
         age = now - leg.opened_at
         if age >= self.max_hold_seconds:
-            if abs(leg.peak_favorable_bps) < self.dead_zone_bps:
-                leg.exit_reason = "timeout_flat"
-            elif pnl_bps > 0:
+            if leg.pnl_usd > 0.01:
                 leg.exit_reason = "timeout_profitable"
-            else:
+            elif leg.pnl_usd < -0.01:
                 leg.exit_reason = "timeout_loss"
-            leg.pnl_bps = pnl_bps
+            else:
+                leg.exit_reason = "timeout_flat"
             leg.exit_price = current_price
             leg.closed = True
             leg.closed_at = now
@@ -519,28 +457,16 @@ class StraddleEngine:
         now = time.time()
         closed_straddles: List[Straddle] = []
 
-        # Update price tracker for vol estimation
-        self.update_price(current_price)
-
         for straddle in list(self.open_straddles):
-            # Use the straddle's stored effective params
-            eff_stop = straddle.effective_stop_bps
-            eff_activation = straddle.effective_activation_bps
-            eff_trail = straddle.effective_trail_bps
-
-            # Check both legs with effective params
-            self._check_leg_exit(straddle.long_leg, current_price, now, eff_stop, eff_activation, eff_trail)
-            self._check_leg_exit(straddle.short_leg, current_price, now, eff_stop, eff_activation, eff_trail)
+            # Check both legs with dollar thresholds
+            self._check_leg_exit(straddle.long_leg, current_price, now, straddle)
+            self._check_leg_exit(straddle.short_leg, current_price, now, straddle)
 
             # Both legs closed → straddle is done
             if straddle.long_leg.closed and straddle.short_leg.closed:
-                # Compute net P&L
+                # Net P&L — simple dollar sum
+                net_pnl_usd = straddle.long_leg.pnl_usd + straddle.short_leg.pnl_usd
                 net_pnl_bps = straddle.long_leg.pnl_bps + straddle.short_leg.pnl_bps
-                net_pnl_usd = net_pnl_bps / 10000 * straddle.size_usd
-
-                # Compute per-leg USD P&L
-                straddle.long_leg.pnl_usd = straddle.long_leg.pnl_bps / 10000 * straddle.size_usd
-                straddle.short_leg.pnl_usd = straddle.short_leg.pnl_bps / 10000 * straddle.size_usd
 
                 duration = max(
                     (straddle.long_leg.closed_at or now) - straddle.opened_at,
@@ -550,7 +476,7 @@ class StraddleEngine:
                 # Update counters
                 self._total_closed += 1
                 self._total_pnl_usd += net_pnl_usd
-                if net_pnl_bps > 0:
+                if net_pnl_usd > 0:
                     self._total_winners += 1
                 if net_pnl_usd < 0:
                     self._daily_loss_usd += abs(net_pnl_usd)
@@ -568,8 +494,10 @@ class StraddleEngine:
                             closed_at = ?, status = 'CLOSED',
                             long_exit_price = ?, short_exit_price = ?,
                             long_exit_reason = ?, short_exit_reason = ?,
+                            long_pnl_usd = ?, short_pnl_usd = ?,
+                            long_peak_usd = ?, short_peak_usd = ?,
                             long_pnl_bps = ?, short_pnl_bps = ?,
-                            net_pnl_bps = ?, net_pnl_usd = ?,
+                            net_pnl_usd = ?, net_pnl_bps = ?,
                             duration_seconds = ?
                         WHERE id = ?""",
                         (
@@ -578,10 +506,14 @@ class StraddleEngine:
                             straddle.short_leg.exit_price,
                             straddle.long_leg.exit_reason,
                             straddle.short_leg.exit_reason,
+                            round(straddle.long_leg.pnl_usd, 4),
+                            round(straddle.short_leg.pnl_usd, 4),
+                            round(straddle.long_leg.peak_pnl_usd, 4),
+                            round(straddle.short_leg.peak_pnl_usd, 4),
                             round(straddle.long_leg.pnl_bps, 2),
                             round(straddle.short_leg.pnl_bps, 2),
-                            round(net_pnl_bps, 2),
                             round(net_pnl_usd, 4),
+                            round(net_pnl_bps, 2),
                             round(duration, 1),
                             straddle.straddle_id,
                         ),
@@ -595,14 +527,16 @@ class StraddleEngine:
                         conn.execute(
                             """UPDATE straddle_legs SET
                                 exit_price = ?, exit_reason = ?,
-                                pnl_bps = ?, pnl_usd = ?,
-                                peak_favorable_bps = ?, closed_at = ?
+                                pnl_usd = ?, pnl_bps = ?,
+                                peak_pnl_usd = ?, peak_favorable_bps = ?,
+                                closed_at = ?
                             WHERE straddle_id = ? AND side = ?""",
                             (
                                 leg.exit_price,
                                 leg.exit_reason,
-                                round(leg.pnl_bps, 2),
                                 round(leg.pnl_usd, 4),
+                                round(leg.pnl_bps, 2),
+                                round(leg.peak_pnl_usd, 4),
                                 round(leg.peak_favorable_bps, 2),
                                 leg_closed_ts,
                                 straddle.straddle_id,
@@ -617,10 +551,10 @@ class StraddleEngine:
                 mode_label = "OBS" if self.observation_mode else "LIVE"
                 self.log.info(
                     f"STRADDLE[{self.asset}] CLOSED [{mode_label}] id={straddle.straddle_id} "
-                    f"net={net_pnl_bps:+.1f}bp ${net_pnl_usd:+.4f} "
-                    f"L={straddle.long_leg.exit_reason}/{straddle.long_leg.pnl_bps:+.1f}bp "
-                    f"S={straddle.short_leg.exit_reason}/{straddle.short_leg.pnl_bps:+.1f}bp "
-                    f"dur={duration:.0f}s vol_r={straddle.vol_ratio:.2f}"
+                    f"net=${net_pnl_usd:+.2f} "
+                    f"L={straddle.long_leg.exit_reason}/${straddle.long_leg.pnl_usd:+.2f} "
+                    f"S={straddle.short_leg.exit_reason}/${straddle.short_leg.pnl_usd:+.2f} "
+                    f"dur={duration:.0f}s"
                 )
 
                 self.open_straddles.remove(straddle)
@@ -633,12 +567,7 @@ class StraddleEngine:
     # ------------------------------------------------------------------
 
     async def start_exit_loop(self, price_fn: Callable) -> None:
-        """Start the background exit check loop.
-
-        Args:
-            price_fn: async callable that returns Dict[str, float] of prices.
-                      Expected key is self.pair (e.g. 'BTC-USD').
-        """
+        """Start the background exit check loop."""
         if self._running:
             return
         self._running = True
@@ -696,16 +625,17 @@ class StraddleEngine:
                 'straddle_id': s.straddle_id,
                 'asset': s.asset,
                 'entry_price': s.entry_price,
-                'vol_prediction': s.vol_prediction,
-                'vol_ratio': round(s.vol_ratio, 3),
-                'effective_stop_bps': round(s.effective_stop_bps, 1),
-                'effective_activation_bps': round(s.effective_activation_bps, 1),
-                'effective_trail_bps': round(s.effective_trail_bps, 1),
+                'size_usd': s.size_usd,
+                'stop_loss_usd': s.stop_loss_usd,
+                'trail_activation_usd': s.trail_activation_usd,
+                'trail_distance_usd': s.trail_distance_usd,
                 'age_seconds': round(now - s.opened_at, 1),
+                'long_pnl_usd': round(s.long_leg.pnl_usd, 4),
+                'short_pnl_usd': round(s.short_leg.pnl_usd, 4),
+                'long_peak_usd': round(s.long_leg.peak_pnl_usd, 4),
+                'short_peak_usd': round(s.short_leg.peak_pnl_usd, 4),
                 'long_trail_active': s.long_leg.trail_active,
                 'short_trail_active': s.short_leg.trail_active,
-                'long_peak_bps': round(s.long_leg.peak_favorable_bps, 1),
-                'short_peak_bps': round(s.short_leg.peak_favorable_bps, 1),
             })
 
         win_rate = (self._total_winners / self._total_closed * 100) if self._total_closed > 0 else 0.0
@@ -725,39 +655,25 @@ class StraddleEngine:
             'total_closed': self._total_closed,
             'total_winners': self._total_winners,
             'win_rate': round(win_rate, 1),
-            'total_pnl_usd': round(self._total_pnl_usd, 4),
-            'daily_loss_usd': round(self._daily_loss_usd, 4),
+            'total_pnl_usd': round(self._total_pnl_usd, 2),
+            'daily_loss_usd': round(self._daily_loss_usd, 2),
             'max_daily_loss_usd': self.max_daily_loss_usd,
-            'dead_zone_blocks': self._dead_zone_blocks,
-            'vol_scaling': self.vol_scaling,
             'config': {
-                'stop_loss_bps': self.stop_loss_bps,
-                'trail_activation_bps': self.trail_activation_bps,
-                'trail_distance_bps': self.trail_distance_bps,
+                'stop_loss_usd': self.stop_loss_usd,
+                'trail_activation_usd': self.trail_activation_usd,
+                'trail_distance_usd': self.trail_distance_usd,
                 'max_hold_seconds': self.max_hold_seconds,
-                'dead_zone_bps': self.dead_zone_bps,
-                'use_vol_model': self.use_vol_model,
-                'vol_scaling': self.vol_scaling,
-                'vol_baseline_bps': self.vol_baseline_bps,
-                'vol_floor': self.vol_floor,
-                'vol_ceiling': self.vol_ceiling,
             },
         }
 
 
 class StraddleFleetController:
-    """Coordinates multiple StraddleEngine instances for fleet-wide safety.
-
-    Enforces:
-    - Fleet-wide daily loss limit ($1,500)
-    - Fleet-wide max deployed capital ($15,000)
-    - Cross-asset circuit breaker
-    """
+    """Coordinates multiple StraddleEngine instances for fleet-wide safety."""
 
     def __init__(
         self,
-        fleet_daily_loss_limit: float = 1500.0,
-        fleet_max_deployed: float = 15000.0,
+        fleet_daily_loss_limit: float = 15000.0,
+        fleet_max_deployed: float = 150000.0,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.log = logger or logging.getLogger(__name__)
@@ -787,7 +703,6 @@ class StraddleFleetController:
         if self._halted:
             return False
 
-        # Check fleet daily loss
         if self._fleet_daily_loss >= self.fleet_daily_loss_limit:
             self.log.warning(
                 f"StraddleFleet HALT: daily loss ${self._fleet_daily_loss:.2f} "
@@ -796,7 +711,6 @@ class StraddleFleetController:
             self._halted = True
             return False
 
-        # Check fleet-wide deployed capital
         total_deployed = 0.0
         for eng in self.engines.values():
             total_deployed += sum(s.size_usd * 2 for s in eng.open_straddles)
@@ -831,9 +745,9 @@ class StraddleFleetController:
             total_pnl += eng._total_pnl_usd
             per_asset[asset] = {
                 'open': len(eng.open_straddles),
-                'deployed': round(deployed, 2),
-                'pnl_usd': round(eng._total_pnl_usd, 4),
-                'daily_loss': round(eng._daily_loss_usd, 4),
+                'deployed': round(deployed, 0),
+                'pnl_usd': round(eng._total_pnl_usd, 2),
+                'daily_loss': round(eng._daily_loss_usd, 2),
                 'win_rate': round(
                     (eng._total_winners / eng._total_closed * 100) if eng._total_closed > 0 else 0, 1
                 ),
@@ -842,11 +756,11 @@ class StraddleFleetController:
 
         return {
             'halted': self._halted,
-            'fleet_daily_loss': round(self._fleet_daily_loss, 4),
+            'fleet_daily_loss': round(self._fleet_daily_loss, 2),
             'fleet_daily_loss_limit': self.fleet_daily_loss_limit,
             'fleet_max_deployed': self.fleet_max_deployed,
-            'total_deployed': round(total_deployed, 2),
+            'total_deployed': round(total_deployed, 0),
             'total_open': total_open,
-            'total_pnl': round(total_pnl, 4),
+            'total_pnl': round(total_pnl, 2),
             'engines': per_asset,
         }

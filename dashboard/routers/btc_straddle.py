@@ -1,7 +1,12 @@
-"""Multi-Asset Straddle endpoints — fleet status, per-asset status, history, hourly P&L, stats."""
+"""Multi-Asset Straddle endpoints — fleet status, per-asset status, history, hourly P&L, stats.
+
+All P&L is in DOLLARS. BPS is secondary/reference only.
+"""
 
 import logging
 import sqlite3
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -42,10 +47,10 @@ async def straddle_fleet(request: Request) -> dict[str, Any]:
         db,
         """SELECT COALESCE(asset, 'BTC') as asset,
                   SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END) as open_count,
-                  SUM(CASE WHEN status = 'OPEN' THEN COALESCE(size_usd, 500) * 2 ELSE 0 END) as deployed,
+                  SUM(CASE WHEN status = 'OPEN' THEN COALESCE(size_usd, 1000) * 2 ELSE 0 END) as deployed,
                   SUM(CASE WHEN status = 'CLOSED' THEN 1 ELSE 0 END) as closed_count,
-                  SUM(CASE WHEN status = 'CLOSED' AND net_pnl_bps > 0 THEN 1 ELSE 0 END) as winners,
-                  ROUND(COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN net_pnl_usd ELSE 0 END), 0), 4) as pnl
+                  SUM(CASE WHEN status = 'CLOSED' AND net_pnl_usd > 0 THEN 1 ELSE 0 END) as winners,
+                  ROUND(COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN net_pnl_usd ELSE 0 END), 0), 2) as pnl
            FROM straddle_log
            WHERE status IN ('OPEN', 'CLOSED')
            GROUP BY COALESCE(asset, 'BTC')""",
@@ -67,13 +72,12 @@ async def straddle_fleet(request: Request) -> dict[str, Any]:
         engines[a] = {
             'open': open_c,
             'deployed': round(deployed, 0),
-            'pnl_usd': round(pnl, 4),
+            'pnl_usd': round(pnl, 2),
             'daily_loss': 0,
             'win_rate': round(winners / closed_c * 100, 1) if closed_c > 0 else 0,
             'total_closed': closed_c,
         }
 
-    # If no data yet, show both engines as placeholders
     for a in ('BTC', 'ETH'):
         if a not in engines:
             engines[a] = {'open': 0, 'deployed': 0, 'pnl_usd': 0, 'daily_loss': 0, 'win_rate': 0, 'total_closed': 0}
@@ -81,23 +85,21 @@ async def straddle_fleet(request: Request) -> dict[str, Any]:
     return {
         'halted': False,
         'fleet_daily_loss': 0,
-        'fleet_daily_loss_limit': 1500,
-        'fleet_max_deployed': 70000,
+        'fleet_daily_loss_limit': 15000,
+        'fleet_max_deployed': 150000,
         'total_deployed': round(total_deployed, 0),
         'total_open': total_open,
-        'total_pnl': round(total_pnl, 4),
+        'total_pnl': round(total_pnl, 2),
         'engines': engines,
     }
 
 
 @router.get("/status")
 async def straddle_status(request: Request, asset: str = "") -> dict[str, Any] | list[dict]:
-    """Straddle engine status. If asset specified, returns that engine's status.
-    Otherwise returns all engines."""
+    """Straddle engine status."""
     bot = getattr(request.app.state, "bot", None)
 
     if asset:
-        # Single asset
         if bot and hasattr(bot, "straddle_engines"):
             eng = bot.straddle_engines.get(asset.upper())
             if eng:
@@ -105,10 +107,8 @@ async def straddle_status(request: Request, asset: str = "") -> dict[str, Any] |
                     return eng.get_status()
                 except Exception:
                     pass
-        # Fallback from DB
         return _db_status(request.app.state.dashboard_config.db_path, asset.upper())
 
-    # All engines
     if bot and hasattr(bot, "straddle_engines") and bot.straddle_engines:
         result = []
         for eng in bot.straddle_engines.values():
@@ -119,14 +119,13 @@ async def straddle_status(request: Request, asset: str = "") -> dict[str, Any] |
         if result:
             return result
 
-    # DB fallback — list all known assets
     db = request.app.state.dashboard_config.db_path
     assets = _safe_query(
         db,
         "SELECT DISTINCT COALESCE(asset, 'BTC') as asset FROM straddle_log",
     )
     if not assets:
-        assets = [{'asset': 'BTC'}]
+        assets = [{'asset': 'BTC'}, {'asset': 'ETH'}]
     return [_db_status(db, row['asset']) for row in assets]
 
 
@@ -139,8 +138,8 @@ def _db_status(db_path: str, asset: str) -> dict:
     )
     open_rows = _safe_query(
         db_path,
-        """SELECT id, entry_price, vol_ratio, effective_stop_bps, effective_activation_bps,
-                  effective_trail_bps, opened_at, size_usd
+        """SELECT id, entry_price, size_usd, stop_loss_usd, trail_activation_usd,
+                  trail_distance_usd, opened_at
            FROM straddle_log WHERE status = 'OPEN' AND COALESCE(asset, 'BTC') = ?
            ORDER BY opened_at DESC""",
         (asset,),
@@ -148,7 +147,7 @@ def _db_status(db_path: str, asset: str) -> dict:
     closed = _safe_query(
         db_path,
         """SELECT COUNT(*) as cnt,
-                  COALESCE(SUM(CASE WHEN net_pnl_bps > 0 THEN 1 ELSE 0 END), 0) as winners,
+                  COALESCE(SUM(CASE WHEN net_pnl_usd > 0 THEN 1 ELSE 0 END), 0) as winners,
                   COALESCE(SUM(net_pnl_usd), 0) as pnl
            FROM straddle_log WHERE status = 'CLOSED' AND COALESCE(asset, 'BTC') = ?""",
         (asset,),
@@ -156,14 +155,11 @@ def _db_status(db_path: str, asset: str) -> dict:
     c = closed[0] if closed else {'cnt': 0, 'winners': 0, 'pnl': 0}
     wr = (c['winners'] / c['cnt'] * 100) if c['cnt'] > 0 else 0
 
-    import time
     now = time.time()
     open_straddles = []
     for row in open_rows:
-        # Parse opened_at to get age
         age = 0.0
         try:
-            from datetime import datetime, timezone
             opened = datetime.strptime(row['opened_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
             age = now - opened.timestamp()
         except Exception:
@@ -172,16 +168,14 @@ def _db_status(db_path: str, asset: str) -> dict:
             'straddle_id': row['id'],
             'asset': asset,
             'entry_price': row.get('entry_price', 0),
-            'vol_prediction': None,
-            'vol_ratio': row.get('vol_ratio', 1.0),
-            'effective_stop_bps': row.get('effective_stop_bps', 5.0),
-            'effective_activation_bps': row.get('effective_activation_bps', 3.0),
-            'effective_trail_bps': row.get('effective_trail_bps', 2.0),
+            'size_usd': row.get('size_usd', 1000),
+            'stop_loss_usd': row.get('stop_loss_usd', 1.0),
+            'trail_activation_usd': row.get('trail_activation_usd', 1.0),
+            'trail_distance_usd': row.get('trail_distance_usd', 1.0),
             'age_seconds': round(age, 1),
-            'long_trail_active': False,
-            'short_trail_active': False,
-            'long_peak_bps': 0,
-            'short_peak_bps': 0,
+            'long_pnl_usd': 0, 'short_pnl_usd': 0,
+            'long_peak_usd': 0, 'short_peak_usd': 0,
+            'long_trail_active': False, 'short_trail_active': False,
         })
 
     has_activity = len(open_rows) > 0 or (c['cnt'] or 0) > 0
@@ -191,8 +185,8 @@ def _db_status(db_path: str, asset: str) -> dict:
         'observation_mode': False,
         'asset': asset,
         'pair': f'{asset}-USD',
-        'size_usd': 500,
-        'wallet_usd': 35000,
+        'size_usd': 1000,
+        'wallet_usd': 70000,
         'interval_seconds': 10,
         'max_open': 35,
         'open_count': len(open_rows),
@@ -201,28 +195,32 @@ def _db_status(db_path: str, asset: str) -> dict:
         'total_closed': c['cnt'],
         'total_winners': c['winners'],
         'win_rate': round(wr, 1),
-        'total_pnl_usd': round(c['pnl'], 4),
+        'total_pnl_usd': round(c['pnl'], 2),
         'daily_loss_usd': 0,
-        'max_daily_loss_usd': 700,
-        'dead_zone_blocks': 0,
-        'vol_scaling': 'none',
-        'config': {},
+        'max_daily_loss_usd': 7000,
+        'config': {
+            'stop_loss_usd': 1.0,
+            'trail_activation_usd': 1.0,
+            'trail_distance_usd': 1.0,
+            'max_hold_seconds': 300,
+        },
     }
 
 
 @router.get("/history")
 async def straddle_history(request: Request, limit: int = 100, asset: str = "") -> list[dict]:
-    """Recent closed straddles. Optional asset filter."""
+    """Recent closed straddles. Dollar P&L primary."""
     db = request.app.state.dashboard_config.db_path
     if asset:
         return _safe_query(
             db,
             """SELECT id, COALESCE(asset, 'BTC') as asset, opened_at, closed_at, entry_price,
-                      vol_prediction, vol_ratio, effective_stop_bps, effective_activation_bps,
-                      effective_trail_bps, status,
-                      long_exit_price, short_exit_price, long_exit_reason, short_exit_reason,
-                      long_pnl_bps, short_pnl_bps, net_pnl_bps, net_pnl_usd,
-                      size_usd, duration_seconds
+                      size_usd, stop_loss_usd, trail_activation_usd, trail_distance_usd,
+                      status, long_exit_price, short_exit_price,
+                      long_exit_reason, short_exit_reason,
+                      long_pnl_usd, short_pnl_usd, long_peak_usd, short_peak_usd,
+                      long_pnl_bps, short_pnl_bps, net_pnl_usd, net_pnl_bps,
+                      duration_seconds
                FROM straddle_log
                WHERE status = 'CLOSED' AND COALESCE(asset, 'BTC') = ?
                ORDER BY closed_at DESC
@@ -232,11 +230,12 @@ async def straddle_history(request: Request, limit: int = 100, asset: str = "") 
     return _safe_query(
         db,
         """SELECT id, COALESCE(asset, 'BTC') as asset, opened_at, closed_at, entry_price,
-                  vol_prediction, vol_ratio, effective_stop_bps, effective_activation_bps,
-                  effective_trail_bps, status,
-                  long_exit_price, short_exit_price, long_exit_reason, short_exit_reason,
-                  long_pnl_bps, short_pnl_bps, net_pnl_bps, net_pnl_usd,
-                  size_usd, duration_seconds
+                  size_usd, stop_loss_usd, trail_activation_usd, trail_distance_usd,
+                  status, long_exit_price, short_exit_price,
+                  long_exit_reason, short_exit_reason,
+                  long_pnl_usd, short_pnl_usd, long_peak_usd, short_peak_usd,
+                  long_pnl_bps, short_pnl_bps, net_pnl_usd, net_pnl_bps,
+                  duration_seconds
            FROM straddle_log
            WHERE status = 'CLOSED'
            ORDER BY closed_at DESC
@@ -247,7 +246,7 @@ async def straddle_history(request: Request, limit: int = 100, asset: str = "") 
 
 @router.get("/hourly")
 async def straddle_hourly(request: Request, asset: str = "") -> list[dict]:
-    """Hourly P&L aggregation for charting. Optional asset filter."""
+    """Hourly P&L aggregation. Dollar amounts."""
     db = request.app.state.dashboard_config.db_path
     asset_filter = "AND COALESCE(asset, 'BTC') = ?" if asset else ""
     params = (asset.upper(), 48) if asset else (48,)
@@ -256,10 +255,10 @@ async def straddle_hourly(request: Request, asset: str = "") -> list[dict]:
         f"""SELECT strftime('%Y-%m-%d %H:00', closed_at) as hour,
                   COALESCE(asset, 'BTC') as asset,
                   COUNT(*) as straddles,
-                  SUM(CASE WHEN net_pnl_bps > 0 THEN 1 ELSE 0 END) as winners,
-                  ROUND(SUM(net_pnl_usd), 4) as pnl_usd,
-                  ROUND(AVG(net_pnl_bps), 1) as avg_pnl_bps,
-                  ROUND(SUM(CASE WHEN net_pnl_bps > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+                  SUM(CASE WHEN net_pnl_usd > 0 THEN 1 ELSE 0 END) as winners,
+                  ROUND(SUM(net_pnl_usd), 2) as pnl_usd,
+                  ROUND(AVG(net_pnl_usd), 2) as avg_pnl_usd,
+                  ROUND(SUM(CASE WHEN net_pnl_usd > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
            FROM straddle_log
            WHERE status = 'CLOSED' AND closed_at IS NOT NULL {asset_filter}
            GROUP BY hour, COALESCE(asset, 'BTC')
@@ -271,7 +270,7 @@ async def straddle_hourly(request: Request, asset: str = "") -> list[dict]:
 
 @router.get("/stats")
 async def straddle_stats(request: Request, asset: str = "") -> dict[str, Any]:
-    """Aggregate statistics: totals, win rate, avg P&L, exit reason breakdown."""
+    """Aggregate statistics — all dollar-denominated."""
     db = request.app.state.dashboard_config.db_path
     asset_filter = "AND COALESCE(asset, 'BTC') = ?" if asset else ""
     params = (asset.upper(),) if asset else ()
@@ -279,13 +278,14 @@ async def straddle_stats(request: Request, asset: str = "") -> dict[str, Any]:
     agg = _safe_query(
         db,
         f"""SELECT COUNT(*) as total,
-                  SUM(CASE WHEN net_pnl_bps > 0 THEN 1 ELSE 0 END) as winners,
-                  ROUND(SUM(net_pnl_usd), 4) as total_pnl_usd,
-                  ROUND(AVG(net_pnl_bps), 2) as avg_net_bps,
+                  SUM(CASE WHEN net_pnl_usd > 0 THEN 1 ELSE 0 END) as winners,
+                  ROUND(SUM(net_pnl_usd), 2) as total_pnl_usd,
+                  ROUND(AVG(net_pnl_usd), 2) as avg_net_usd,
+                  ROUND(AVG(CASE WHEN net_pnl_usd > 0 THEN net_pnl_usd END), 2) as avg_winner_usd,
+                  ROUND(AVG(CASE WHEN net_pnl_usd < 0 THEN net_pnl_usd END), 2) as avg_loser_usd,
                   ROUND(AVG(duration_seconds), 1) as avg_duration,
-                  ROUND(MAX(net_pnl_bps), 2) as best_bps,
-                  ROUND(MIN(net_pnl_bps), 2) as worst_bps,
-                  ROUND(AVG(vol_ratio), 3) as avg_vol_ratio
+                  ROUND(MAX(net_pnl_usd), 2) as best_usd,
+                  ROUND(MIN(net_pnl_usd), 2) as worst_usd
            FROM straddle_log WHERE status = 'CLOSED' {asset_filter}""",
         params,
     )
@@ -311,20 +311,14 @@ async def straddle_stats(request: Request, asset: str = "") -> dict[str, Any]:
         r = row.get('reason', 'unknown') or 'unknown'
         reasons[r] = reasons.get(r, 0) + row.get('cnt', 0)
 
-    dead_zone = _safe_query(
-        db,
-        f"SELECT COUNT(*) as cnt FROM straddle_log WHERE dead_zone_blocked = 1 {asset_filter}",
-        params,
-    )
-
     # Per-asset breakdown
     per_asset = _safe_query(
         db,
         """SELECT COALESCE(asset, 'BTC') as asset,
                   COUNT(*) as total,
-                  SUM(CASE WHEN net_pnl_bps > 0 THEN 1 ELSE 0 END) as winners,
-                  ROUND(SUM(net_pnl_usd), 4) as pnl_usd,
-                  ROUND(AVG(net_pnl_bps), 2) as avg_bps
+                  SUM(CASE WHEN net_pnl_usd > 0 THEN 1 ELSE 0 END) as winners,
+                  ROUND(SUM(net_pnl_usd), 2) as pnl_usd,
+                  ROUND(AVG(net_pnl_usd), 2) as avg_usd
            FROM straddle_log WHERE status = 'CLOSED'
            GROUP BY COALESCE(asset, 'BTC')""",
     )
@@ -336,12 +330,12 @@ async def straddle_stats(request: Request, asset: str = "") -> dict[str, Any]:
         'winners': winners,
         'win_rate': round(winners / total * 100, 1) if total > 0 else 0,
         'total_pnl_usd': a.get('total_pnl_usd', 0),
-        'avg_net_bps': a.get('avg_net_bps', 0),
+        'avg_net_usd': a.get('avg_net_usd', 0),
+        'avg_winner_usd': a.get('avg_winner_usd', 0),
+        'avg_loser_usd': a.get('avg_loser_usd', 0),
         'avg_duration': a.get('avg_duration', 0),
-        'best_bps': a.get('best_bps', 0),
-        'worst_bps': a.get('worst_bps', 0),
-        'avg_vol_ratio': a.get('avg_vol_ratio', 1.0),
+        'best_usd': a.get('best_usd', 0),
+        'worst_usd': a.get('worst_usd', 0),
         'exit_reasons': reasons,
-        'dead_zone_blocks': dead_zone[0]['cnt'] if dead_zone else 0,
         'per_asset': per_asset,
     }

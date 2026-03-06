@@ -661,44 +661,40 @@
     },
     "straddles": {
         "enabled": true,
-        "fleet_daily_loss_limit": 1500,
-        "fleet_max_deployed": 70000,
+        "fleet_daily_loss_limit": 15000,
+        "fleet_max_deployed": 150000,
         "assets": {
             "BTC": {
                 "enabled": true,
                 "asset": "BTC",
                 "pair": "BTC-USD",
                 "observation_mode": false,
-                "size_usd": 500,
-                "wallet_usd": 35000,
+                "size_usd": 1000,
+                "wallet_usd": 70000,
                 "interval_seconds": 10,
                 "max_open": 35,
-                "stop_loss_bps": 5,
-                "trail_activation_bps": 3,
-                "trail_distance_bps": 2,
+                "stop_loss_usd": 1.00,
+                "trail_activation_usd": 1.00,
+                "trail_distance_usd": 1.00,
                 "max_hold_seconds": 300,
                 "exit_check_interval": 2.0,
-                "dead_zone_bps": 1.0,
-                "vol_scaling": "none",
-                "daily_loss_limit_usd": 700
+                "daily_loss_limit_usd": 7000
             },
             "ETH": {
                 "enabled": true,
                 "asset": "ETH",
                 "pair": "ETH-USD",
                 "observation_mode": false,
-                "size_usd": 500,
-                "wallet_usd": 35000,
+                "size_usd": 1000,
+                "wallet_usd": 70000,
                 "interval_seconds": 10,
                 "max_open": 35,
-                "stop_loss_bps": 5,
-                "trail_activation_bps": 3,
-                "trail_distance_bps": 2,
+                "stop_loss_usd": 1.00,
+                "trail_activation_usd": 1.00,
+                "trail_distance_usd": 1.00,
                 "max_hold_seconds": 300,
                 "exit_check_interval": 2.0,
-                "dead_zone_bps": 1.0,
-                "vol_scaling": "none",
-                "daily_loss_limit_usd": 700
+                "daily_loss_limit_usd": 7000
             }
         }
     },

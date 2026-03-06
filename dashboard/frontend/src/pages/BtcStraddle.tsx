@@ -35,16 +35,17 @@ interface EngineStatus {
     straddle_id: number;
     asset: string;
     entry_price: number;
-    vol_prediction: number | null;
-    vol_ratio: number;
-    effective_stop_bps: number;
-    effective_activation_bps: number;
-    effective_trail_bps: number;
+    size_usd: number;
+    stop_loss_usd: number;
+    trail_activation_usd: number;
+    trail_distance_usd: number;
     age_seconds: number;
+    long_pnl_usd: number;
+    short_pnl_usd: number;
+    long_peak_usd: number;
+    short_peak_usd: number;
     long_trail_active: boolean;
     short_trail_active: boolean;
-    long_peak_bps: number;
-    short_peak_bps: number;
   }[];
   total_opened: number;
   total_closed: number;
@@ -53,8 +54,6 @@ interface EngineStatus {
   total_pnl_usd: number;
   daily_loss_usd: number;
   max_daily_loss_usd: number;
-  dead_zone_blocks: number;
-  vol_scaling: string;
   config: Record<string, number | boolean | string>;
 }
 
@@ -64,16 +63,14 @@ interface StraddleHistory {
   opened_at: string;
   closed_at: string;
   entry_price: number;
-  vol_prediction: number | null;
-  vol_ratio: number;
-  effective_stop_bps: number;
+  size_usd: number;
   long_exit_reason: string;
   short_exit_reason: string;
-  long_pnl_bps: number;
-  short_pnl_bps: number;
-  net_pnl_bps: number;
+  long_pnl_usd: number;
+  short_pnl_usd: number;
+  long_peak_usd: number;
+  short_peak_usd: number;
   net_pnl_usd: number;
-  size_usd: number;
   duration_seconds: number;
 }
 
@@ -83,7 +80,7 @@ interface HourlyPnl {
   straddles: number;
   winners: number;
   pnl_usd: number;
-  avg_pnl_bps: number;
+  avg_pnl_usd: number;
   win_rate: number;
 }
 
@@ -92,14 +89,14 @@ interface StraddleStats {
   winners: number;
   win_rate: number;
   total_pnl_usd: number;
-  avg_net_bps: number;
+  avg_net_usd: number;
+  avg_winner_usd: number;
+  avg_loser_usd: number;
   avg_duration: number;
-  best_bps: number;
-  worst_bps: number;
-  avg_vol_ratio: number;
+  best_usd: number;
+  worst_usd: number;
   exit_reasons: Record<string, number>;
-  dead_zone_blocks: number;
-  per_asset: { asset: string; total: number; winners: number; pnl_usd: number; avg_bps: number }[];
+  per_asset: { asset: string; total: number; winners: number; pnl_usd: number; avg_usd: number }[];
 }
 
 function formatTime(ts: string | null): string {
@@ -108,6 +105,12 @@ function formatTime(ts: string | null): string {
     const parts = ts.split(' ');
     return parts[1]?.substring(0, 8) || ts.substring(11, 19) || '--';
   } catch { return '--'; }
+}
+
+function fmtUsd(v: number | null | undefined, sign = true): string {
+  const n = v ?? 0;
+  const prefix = sign && n >= 0 ? '+' : '';
+  return `${prefix}$${n.toFixed(2)}`;
 }
 
 const ASSET_COLORS: Record<string, string> = {
@@ -143,7 +146,7 @@ export default function BtcStraddle() {
   const totalReasons = Object.values(exitReasons).reduce((a, b) => a + b, 0);
 
   return (
-    <PageShell title="Straddle Fleet" subtitle="Multi-asset direction-free paired LONG+SHORT — $500/leg, 5min hold, 35 concurrent">
+    <PageShell title="Straddle Fleet" subtitle="Multi-asset direction-free paired LONG+SHORT — $1,000/leg, dollar exits, 35 concurrent">
       {/* Fleet Status Bar */}
       <div className={`border rounded-xl p-3 ${fleet?.halted ? 'bg-accent-red/10 border-accent-red/40' : 'bg-surface-1 border-surface-3'}`}>
         <div className="flex flex-wrap items-center gap-4 text-sm">
@@ -153,14 +156,14 @@ export default function BtcStraddle() {
             </span>
           )}
           <span className="text-gray-400">Fleet P&L: <strong className={`${(fleet?.total_pnl ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-            {(fleet?.total_pnl ?? 0) >= 0 ? '+' : ''}${(fleet?.total_pnl ?? 0).toFixed(2)}
+            {fmtUsd(fleet?.total_pnl)}
           </strong></span>
           <span className="text-gray-400">Deployed: <strong className="text-gray-200">
-            ${(fleet?.total_deployed ?? 0).toLocaleString()} / ${(fleet?.fleet_max_deployed ?? 70000).toLocaleString()}
+            ${(fleet?.total_deployed ?? 0).toLocaleString()} / ${(fleet?.fleet_max_deployed ?? 150000).toLocaleString()}
           </strong></span>
           <span className="text-gray-400">Open: <strong className="text-gray-200">{fleet?.total_open ?? 0}</strong></span>
           <span className="text-gray-400">Daily Loss: <strong className={`${(fleet?.fleet_daily_loss ?? 0) > 0 ? 'text-accent-red' : 'text-gray-200'}`}>
-            ${(fleet?.fleet_daily_loss ?? 0).toFixed(2)} / ${(fleet?.fleet_daily_loss_limit ?? 1500).toFixed(0)}
+            ${(fleet?.fleet_daily_loss ?? 0).toFixed(2)} / ${(fleet?.fleet_daily_loss_limit ?? 15000).toFixed(0)}
           </strong></span>
         </div>
       </div>
@@ -177,24 +180,19 @@ export default function BtcStraddle() {
                 <span className={`inline-block px-2 py-0.5 rounded text-xs font-mono ${
                   eng.observation_mode ? 'bg-accent-yellow/20 text-accent-yellow' : 'bg-accent-green/20 text-accent-green'
                 }`}>{eng.observation_mode ? 'OBS' : 'LIVE'}</span>
-                {eng.vol_scaling === 'proportional' && (
-                  <span className="inline-block px-2 py-0.5 rounded text-xs font-mono bg-accent-blue/20 text-accent-blue">
-                    VOL-SCALED
-                  </span>
-                )}
               </div>
               <span className={`text-lg font-mono font-semibold ${(eng.total_pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                {(eng.total_pnl_usd ?? 0) >= 0 ? '+' : ''}${(eng.total_pnl_usd ?? 0).toFixed(2)}
+                {fmtUsd(eng.total_pnl_usd)}
               </span>
             </div>
             <div className="grid grid-cols-3 gap-2 text-xs font-mono">
               <div><span className="text-gray-500">Size:</span> <span className="text-gray-300">${eng.size_usd}/leg</span></div>
-              <div><span className="text-gray-500">Wallet:</span> <span className="text-gray-300">${(eng.wallet_usd ?? 7000).toLocaleString()}</span></div>
+              <div><span className="text-gray-500">Wallet:</span> <span className="text-gray-300">${(eng.wallet_usd ?? 70000).toLocaleString()}</span></div>
               <div><span className="text-gray-500">Open:</span> <span className="text-gray-300">{eng.open_count}/{eng.max_open}</span></div>
               <div><span className="text-gray-500">Closed:</span> <span className="text-gray-300">{eng.total_closed}</span></div>
               <div><span className="text-gray-500">Win Rate:</span> <span className={`${eng.win_rate >= 50 ? 'text-accent-green' : 'text-gray-300'}`}>{eng.win_rate?.toFixed(1)}%</span></div>
               <div><span className="text-gray-500">Daily Loss:</span> <span className={`${eng.daily_loss_usd > 0 ? 'text-accent-red' : 'text-gray-300'}`}>
-                ${(eng.daily_loss_usd ?? 0).toFixed(2)}/{(eng.max_daily_loss_usd ?? 700).toFixed(0)}
+                ${(eng.daily_loss_usd ?? 0).toFixed(2)}/{(eng.max_daily_loss_usd ?? 7000).toFixed(0)}
               </span></div>
             </div>
 
@@ -210,14 +208,17 @@ export default function BtcStraddle() {
                     <div>
                       <span className="text-gray-500">Age:</span>{' '}
                       <span className="text-gray-300">{s.age_seconds.toFixed(0)}s</span>
-                      {' '}<span className="text-gray-600">vol_r={s.vol_ratio?.toFixed(2)}</span>
                     </div>
                     <div>
-                      <span className="text-accent-green">L</span> {s.long_peak_bps.toFixed(1)}bp
+                      <span className="text-accent-green">L</span>{' '}
+                      <span className={s.long_pnl_usd >= 0 ? 'text-accent-green' : 'text-accent-red'}>{fmtUsd(s.long_pnl_usd)}</span>
+                      {' '}<span className="text-gray-600">pk {fmtUsd(s.long_peak_usd)}</span>
                       {s.long_trail_active && <span className="ml-1 text-accent-yellow">TRAIL</span>}
                     </div>
                     <div>
-                      <span className="text-accent-red">S</span> {s.short_peak_bps.toFixed(1)}bp
+                      <span className="text-accent-red">S</span>{' '}
+                      <span className={s.short_pnl_usd >= 0 ? 'text-accent-green' : 'text-accent-red'}>{fmtUsd(s.short_pnl_usd)}</span>
+                      {' '}<span className="text-gray-600">pk {fmtUsd(s.short_peak_usd)}</span>
                       {s.short_trail_active && <span className="ml-1 text-accent-yellow">TRAIL</span>}
                     </div>
                   </div>
@@ -233,11 +234,11 @@ export default function BtcStraddle() {
         {[
           { label: 'Total', value: stats?.total ?? 0, fmt: (v: number) => v.toLocaleString() },
           { label: 'Win Rate', value: stats?.win_rate ?? 0, fmt: (v: number) => `${v.toFixed(1)}%`, color: (v: number) => v >= 50 ? 'text-accent-green' : 'text-accent-red' },
-          { label: 'Net P&L', value: stats?.total_pnl_usd ?? 0, fmt: (v: number) => `${v >= 0 ? '+' : ''}$${v.toFixed(2)}`, color: (v: number) => v >= 0 ? 'text-accent-green' : 'text-accent-red' },
-          { label: 'Avg Net', value: stats?.avg_net_bps ?? 0, fmt: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}bp`, color: (v: number) => v >= 0 ? 'text-accent-green' : 'text-accent-red' },
-          { label: 'Avg Duration', value: stats?.avg_duration ?? 0, fmt: (v: number) => `${v.toFixed(0)}s` },
-          { label: 'Avg Vol Ratio', value: stats?.avg_vol_ratio ?? 1, fmt: (v: number) => `${v.toFixed(2)}x` },
-          { label: 'Best / Worst', value: 0, fmt: () => `${(stats?.best_bps ?? 0).toFixed(1)} / ${(stats?.worst_bps ?? 0).toFixed(1)}bp` },
+          { label: 'Net P&L', value: stats?.total_pnl_usd ?? 0, fmt: (v: number) => fmtUsd(v), color: (v: number) => v >= 0 ? 'text-accent-green' : 'text-accent-red' },
+          { label: 'Avg Net', value: stats?.avg_net_usd ?? 0, fmt: (v: number) => fmtUsd(v), color: (v: number) => v >= 0 ? 'text-accent-green' : 'text-accent-red' },
+          { label: 'Avg Winner', value: stats?.avg_winner_usd ?? 0, fmt: (v: number) => fmtUsd(v), color: () => 'text-accent-green' },
+          { label: 'Avg Loser', value: stats?.avg_loser_usd ?? 0, fmt: (v: number) => fmtUsd(v), color: () => 'text-accent-red' },
+          { label: 'Best / Worst', value: 0, fmt: () => `${fmtUsd(stats?.best_usd)} / ${fmtUsd(stats?.worst_usd)}` },
         ].map((card, i) => (
           <div key={i} className="bg-surface-1 border border-surface-3 rounded-xl p-3 text-center">
             <div className="text-xs text-gray-500 mb-1">{card.label}</div>
@@ -259,11 +260,11 @@ export default function BtcStraddle() {
               </div>
               <div className="flex items-center justify-between mt-1">
                 <span className={`text-sm font-mono ${(a.pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                  {(a.pnl_usd ?? 0) >= 0 ? '+' : ''}${(a.pnl_usd ?? 0).toFixed(2)}
+                  {fmtUsd(a.pnl_usd)}
                 </span>
                 <span className="text-xs text-gray-400">
                   WR: {a.total > 0 ? ((a.winners / a.total) * 100).toFixed(1) : '0.0'}%
-                  | Avg: {(a.avg_bps ?? 0) >= 0 ? '+' : ''}{(a.avg_bps ?? 0).toFixed(1)}bp
+                  | Avg: {fmtUsd(a.avg_usd)}
                 </span>
               </div>
             </div>
@@ -346,7 +347,6 @@ export default function BtcStraddle() {
                     <th className="text-left py-2 px-1">Asset</th>
                     <th className="text-left py-2 px-1">Time</th>
                     <th className="text-right py-2 px-1">Entry</th>
-                    <th className="text-right py-2 px-1">Vol-R</th>
                     <th className="text-left py-2 px-1">L Exit</th>
                     <th className="text-right py-2 px-1">L P&L</th>
                     <th className="text-left py-2 px-1">S Exit</th>
@@ -365,27 +365,24 @@ export default function BtcStraddle() {
                       <td className="py-1.5 px-1 text-right text-gray-300">
                         ${s.entry_price?.toLocaleString(undefined, { minimumFractionDigits: 0 })}
                       </td>
-                      <td className="py-1.5 px-1 text-right text-gray-500">
-                        {s.vol_ratio != null ? `${Number(s.vol_ratio).toFixed(2)}x` : '--'}
-                      </td>
                       <td className="py-1.5 px-1">
                         <span className="px-1.5 py-0.5 rounded bg-surface-2 text-gray-400">
                           {s.long_exit_reason || '?'}
                         </span>
                       </td>
-                      <td className={`py-1.5 px-1 text-right ${s.long_pnl_bps >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                        {s.long_pnl_bps >= 0 ? '+' : ''}{s.long_pnl_bps?.toFixed(1)}bp
+                      <td className={`py-1.5 px-1 text-right ${(s.long_pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                        {fmtUsd(s.long_pnl_usd)}
                       </td>
                       <td className="py-1.5 px-1">
                         <span className="px-1.5 py-0.5 rounded bg-surface-2 text-gray-400">
                           {s.short_exit_reason || '?'}
                         </span>
                       </td>
-                      <td className={`py-1.5 px-1 text-right ${s.short_pnl_bps >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                        {s.short_pnl_bps >= 0 ? '+' : ''}{s.short_pnl_bps?.toFixed(1)}bp
+                      <td className={`py-1.5 px-1 text-right ${(s.short_pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                        {fmtUsd(s.short_pnl_usd)}
                       </td>
-                      <td className={`py-1.5 px-1 text-right font-semibold ${s.net_pnl_bps >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                        {s.net_pnl_bps >= 0 ? '+' : ''}{s.net_pnl_bps?.toFixed(1)}bp
+                      <td className={`py-1.5 px-1 text-right font-semibold ${(s.net_pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                        {fmtUsd(s.net_pnl_usd)}
                       </td>
                       <td className="py-1.5 px-1 text-right text-gray-500">{s.duration_seconds?.toFixed(0)}s</td>
                     </tr>
