@@ -9,17 +9,33 @@
 
 ## Summary
 
-| Category | Formulas | MATCH | MISMATCH | NOT FOUND |
-|----------|----------|-------|----------|-----------|
+| Category | Formulas | MATCH | MISMATCH (unfixed) | FIXED this session |
+|----------|----------|-------|---------------------|---------------------|
 | Straddle (1.x) | 9 | 8 | 1 | 0 |
-| Token Spray (2.x) | 8 | 6 | 2 | 0 |
-| Polymarket (3.x) | 5 | 2 | 2 | 1 |
+| Token Spray (2.x) | 8 | 6 | 1 | 1 |
+| Polymarket (3.x) | 5 | 2 | 0 | 3 |
 | Arbitrage (4.x) | 2 | 2 | 0 | 0 |
 | Volatility (5.x) | 2 | 1 | 1 | 0 |
 | Shared (S.x) | 3 | 3 | 0 | 0 |
-| **TOTAL** | **29** | **22** | **6** | **1** |
+| **TOTAL** | **29** | **22** | **3 remaining** | **4 fixed** |
 
-**6 MISMATCHES + 1 GHOST (not found in code)**
+**4 FIXED (2 critical, 2 high) + 3 REMAINING (medium)**
+
+---
+
+## FIXES APPLIED THIS SESSION
+
+| # | Severity | Formula | Commit | Fix Description |
+|---|----------|---------|--------|-----------------|
+| 1 | CRITICAL | 3.3 | `eca43e1` | Disabled `price_fallback` resolution permanently. Bets stay OPEN until gamma_api resolves or force-expire at 30 min. |
+| 2 | CRITICAL | 3.5 | `eca43e1` | Implemented odds filter `[0.15, 0.85]` — blocks bets at extreme token costs. |
+| 3 | HIGH | 3.4 | `eca43e1` | Bankroll updates now check resolution source. Only `gamma_api` wins credit profit. Non-gamma wins refund investment only. |
+| 4 | HIGH | 2.3 | `eca43e1` | Added `"extreme": 0.2` vol scaling tier + `_calc_vol_regime()` now returns `"extreme"` for GARCH vol > 8% or `"explosive"` prediction. |
+
+Additionally, 3 bugs were fixed earlier in commit `5ad3a60`:
+- Straddle net PnL `* 2` removed (formula 1.3)
+- Polymarket negative Kelly placing MIN_BET (formula 3.1 guard)
+- Position sizer drawdown scalar not applied to Kelly (not in this audit scope)
 
 ---
 
@@ -57,7 +73,7 @@
   net_pnl_bps = straddle.long_leg.pnl_bps + straddle.short_leg.pnl_bps
   net_pnl_usd = net_pnl_bps / 10000 * straddle.size_usd
   ```
-- **Status:** MATCH (was `* 2` before today's fix, now correct)
+- **Status:** MATCH (fixed in commit `5ad3a60` — was `* 2` previously)
 - **Test:** PASS (4 test cases)
 
 ### Formula 1.4 — Peak PnL Tracking
@@ -107,7 +123,7 @@
   if age >= self.max_hold_seconds:
       leg.exit_reason = "timeout"   # <-- Single generic label
   ```
-- **Status:** MISMATCH
+- **Status:** MISMATCH (medium — unfixed)
 - **Notes:** Code uses a single `"timeout"` exit reason. Does NOT classify into `timeout_flat` / `timeout_profitable` / `timeout_loss` based on peak vs min_move_bps. The classification logic described in the truth document is completely absent.
 
 ### Formula 1.8 — Capital Deployed
@@ -160,18 +176,18 @@
 - **Test:** PASS (2 test cases)
 
 ### Formula 2.3 — Vol-Scaled Token Size
-- **File:** `token_spray_engine.py:165-167,292-293`
+- **File:** `token_spray_engine.py:165-167,292-293,848-868`
 - **Document:** `size = base * vol_scale` with scales `{low: 1.0, medium: 0.7, high: 0.4, extreme: 0.2}`
-- **Code:**
+- **Code (after fix):**
   ```python
   # Line 165-167: default config
-  self.vol_scaling = {"low": 1.0, "medium": 0.7, "high": 0.4}
+  self.vol_scaling = {"low": 1.0, "medium": 0.7, "high": 0.4, "extreme": 0.2}
   # Line 293: application
   vol_scale = self.vol_scaling.get(vol_regime, 1.0)
   ```
-- **Status:** MISMATCH
-- **Notes:** The `"extreme": 0.2` tier is missing from the default config. If `_calc_vol_regime()` returns `"extreme"`, the `.get(..., 1.0)` fallback returns **1.0** (full size) instead of **0.2** (20% size). This silently removes drawdown protection during extreme volatility.
-- **Additional:** `_calc_vol_regime()` (line 848) only returns `"low"`, `"medium"`, or `"high"` — never `"extreme"`. So the `extreme` case can never fire. Either the vol regime classifier needs an extreme tier, or the truth document describes unimplemented functionality.
+- **Status:** MATCH (fixed in commit `eca43e1`)
+- **Fix applied:** Added `"extreme": 0.2` to default config. Added `"extreme"` return to `_calc_vol_regime()` for GARCH vol > 8% and volatility_prediction regime `"explosive"`.
+- **Test:** PASS (3 test cases)
 
 ### Formula 2.4 — Budget Tracking
 - **File:** `token_spray_engine.py:347,789,296`
@@ -222,7 +238,7 @@
   if _spread_bps > self.max_entry_spread_bps:
       return None
   ```
-- **Status:** MISMATCH
+- **Status:** MISMATCH (medium — unfixed)
 - **Notes:** Code uses an **absolute threshold** (4.0 bps hard-coded default), NOT a ratio relative to `stop_loss_bps`. Truth document says the gate should be `spread < stop_loss * 0.5`, which is proportional (e.g., 7bp stop → max 3.5bp spread; 12bp stop → max 6bp spread). The code treats all pairs the same regardless of their stop_loss_bps setting.
 
 ### Formula 2.8 — Direction Rule Classification
@@ -246,8 +262,7 @@
   if kelly <= 0:
       return 0.0
   ```
-- **Status:** MATCH
-- **Notes:** `b` formula uses equivalent algebraic form `(1-cost)/cost` instead of `(1/cost)-1`. Mathematically identical. Early return on kelly <= 0 was added today.
+- **Status:** MATCH (early return guard fixed in commit `5ad3a60`)
 - **Test:** PASS (4 test cases including algebraic equivalence check)
 
 ### Formula 3.2 — Fractional Kelly Sizing
@@ -265,54 +280,62 @@
 - **Test:** PASS (3 test cases)
 
 ### Formula 3.3 — Bet Resolution
-- **File:** `polymarket_strategy_a.py:1186-1216,1261-1263`
+- **File:** `polymarket_strategy_a.py:1205-1211,1257-1259`
 - **Document:** ONLY `gamma_api` valid. `price_fallback` PERMANENTLY DISABLED. WON = `tokens * 1.0 - invested`. LOST = `-invested`.
-- **Code (WON/LOST math):**
+- **Code (after fix):**
   ```python
+  # WON/LOST math (unchanged, was already correct):
   exit_price = 1.0 if won else 0.0
   pnl = round((exit_price * bet["total_tokens"]) - bet["total_invested"], 2)
+
+  # price_fallback (DISABLED in commit eca43e1):
+  # Price-based fallback: PERMANENTLY DISABLED
+  # Resolving via crypto price comparison is unreliable and was the
+  # source of the historic $48M phantom bankroll.  Bets stay OPEN
+  # until gamma_api resolves them or force-expire after 30 min.
+  # (see STRATEGY_MATH_TRUTH_DOCUMENT.md §3.3)
   ```
-- **Code (price_fallback — STILL ACTIVE):**
-  ```python
-  # Lines 1200-1216: price-based fallback (>2 min past deadline)
-  if seconds_past > 120 and current_prices:
-      went_up = current_asset_price > window_start_price
-      yes_price = 1.0 if went_up else 0.0
-      self._resolve_bet(conn, bet, yes_price, no_price, "price_fallback", current_prices)
-  ```
-- **Status:** MISMATCH
-- **Notes:**
-  1. WON/LOST P&L formulas are **correct** (lines 1261-1263)
-  2. `price_fallback` resolution path is **ACTIVE** (lines 1200-1216) but truth document says it must be **PERMANENTLY DISABLED**
-  3. `force_expired` path also exists (lines 1218-1228) — refunds investment, sets pnl=0
-  4. The `_resolve_bet()` method does NOT discriminate by source — all sources (gamma_api, price_fallback) trigger the same bankroll update
+- **Status:** MATCH (fixed in commit `eca43e1`)
+- **Fix applied:** Entire `price_fallback` code block (17 lines) replaced with a comment explaining why it's permanently disabled.
 
 ### Formula 3.4 — Bankroll Updates
-- **File:** `polymarket_strategy_a.py:913,1281-1284`
+- **File:** `polymarket_strategy_a.py:913,1277-1288`
 - **Document:** WON via gamma_api: `bankroll += pnl`. WON via other: unchanged. LOST: `bankroll -= invested`.
-- **Code:**
+- **Code (after fix):**
   ```python
   # At placement (line 913):
   self.bankroll -= bet_amount
 
-  # At resolution (lines 1281-1284):
-  if won:
+  # At resolution (lines 1277-1288):
+  if won and source == "gamma_api":
       self.bankroll += bet["total_invested"] + pnl  # refund + profit
+  elif won:
+      # Non-gamma wins — refund investment only, do NOT credit profit
+      self.bankroll += bet["total_invested"]
+      self.logger.warning(...)
   if not won:
-      self._last_loss_time = time.time()  # no bankroll change
+      self._last_loss_time = time.time()  # no bankroll change (already deducted)
   ```
-- **Status:** MISMATCH (partial)
-- **Notes:**
-  - **Net arithmetic is correct**: placement deducts `invested`, WON adds back `invested + pnl` = net `+pnl`. LOST leaves bankroll at `initial - invested` = net `-invested`. The truth document describes the same net effect from a different accounting perspective.
-  - **Source discrimination is missing**: The code applies the same WON logic for ALL resolution sources (gamma_api, price_fallback, force_expired). Truth document says only `gamma_api` wins should update bankroll.
+- **Status:** MATCH (fixed in commit `eca43e1`)
+- **Fix applied:** Added `source == "gamma_api"` check. Non-gamma wins now refund investment only (no profit credit) with a warning log.
+- **Net arithmetic:** Placement deducts `invested`. gamma_api WON adds `invested + pnl` = net `+pnl`. Non-gamma WON adds `invested` = net `$0` (no phantom profit). LOST = net `-invested`.
 
 ### Formula 3.5 — Odds Filter
-- **File:** NOT FOUND
+- **File:** `polymarket_strategy_a.py:583-590`
 - **Document:** BLOCKED if `token_cost < 0.15` or `token_cost > 0.85`
-- **Code:** No `MIN_ACCEPTABLE_ODDS`, `MAX_ACCEPTABLE_ODDS`, or any token_cost bounds check exists in the entry decision path (lines 575-620).
-- **Status:** NOT FOUND (GHOST CALCULATION)
-- **Notes:** This filter was never implemented. The system can place bets at any token cost, including extreme prices like 0.03 or 0.97. At extreme token costs, the payout ratio is either enormous (but nearly impossible to win) or tiny (barely worth the execution risk).
-- **Test:** PASS (test verifies the math; code lacks the gate)
+- **Code (after fix):**
+  ```python
+  # Gate: odds filter — block extreme token costs
+  if token_cost < 0.15 or token_cost > 0.85:
+      self._log_skip(inst.asset, slug,
+                     f"odds_filter token_cost={token_cost:.3f} outside [0.15, 0.85]",
+                     ml_conf, token_cost, ml_direction, minutes_left,
+                     timeframe=inst.timeframe)
+      continue
+  ```
+- **Status:** MATCH (implemented in commit `eca43e1` — was previously a GHOST CALCULATION)
+- **Fix applied:** Added odds filter gate before the confidence check. Blocks bets at extreme token costs with a logged skip reason.
+- **Test:** PASS (4 test cases)
 
 ---
 
@@ -371,7 +394,7 @@
       regime = 'dead_zone'
       vol_multiplier = 0.0  # Blocks via zero multiplier
   ```
-- **Status:** MISMATCH (threshold concern)
+- **Status:** MISMATCH (medium — unfixed)
 - **Notes:** The dead_zone gate uses percentile p25 from training data metadata. The default p25 is 2.0 (log space), which corresponds to `expm1(2.0) = 6.39 bps`. The truth document specifies `min_predicted_vol_bps = 12.0`. If the meta JSON has p25=2.0 (default), the gate triggers at ~6.4 bps instead of 12.0 bps — a significantly looser threshold that would allow straddles in low-vol conditions the truth document intends to block.
 - **Test:** PASS (test verifies the conceptual math)
 
@@ -402,46 +425,20 @@
 
 ---
 
-## MISMATCHES — DETAILED SUMMARY
-
-### CRITICAL
+## REMAINING MISMATCHES (MEDIUM — not yet fixed)
 
 | # | Formula | File:Line | Issue | Impact |
 |---|---------|-----------|-------|--------|
-| 1 | 3.3 | `polymarket_strategy_a.py:1200-1216` | `price_fallback` resolution still ACTIVE | Can resolve bets incorrectly (comparing crypto prices instead of Polymarket settlement). Was source of $48M phantom bankroll historically. |
-| 2 | 3.5 | NOT FOUND | Odds filter `[0.15, 0.85]` never implemented | System can bet at extreme token costs (0.03, 0.97) where edge is illusory and execution risk is maximal. |
-
-### HIGH
-
-| # | Formula | File:Line | Issue | Impact |
-|---|---------|-----------|-------|--------|
-| 3 | 3.4 | `polymarket_strategy_a.py:1281-1282` | Bankroll update doesn't discriminate by resolution source | `price_fallback` wins inflate bankroll the same as verified `gamma_api` wins. Combined with #1, phantom wins can inflate sizing. |
-| 4 | 2.3 | `token_spray_engine.py:165-167` | Missing `"extreme": 0.2` vol scaling tier | If vol regime ever returns "extreme", fallback gives 1.0x sizing (100%) instead of 0.2x (20%). Currently mitigated because `_calc_vol_regime()` never returns "extreme". |
-
-### MEDIUM
-
-| # | Formula | File:Line | Issue | Impact |
-|---|---------|-----------|-------|--------|
-| 5 | 1.7 | `straddle_engine.py:311-318` | Timeout uses generic `"timeout"` label, no flat/profitable/loss classification | Can't distinguish timeout outcomes in analytics. Reduces ability to tune timeout behavior. |
-| 6 | 2.7 | `token_spray_engine.py:183,261-267` | Spread gate uses absolute 4.0bps threshold, not proportional to stop_loss | Pairs with tight stops (7bp) accept spreads up to 4bp (57% of stop consumed by spread). Pairs with wide stops (12bp) are over-restricted. |
-| 7 | 5.2 | `ml_model_loader.py:2317` | Dead zone gate threshold may be ~6.4bps instead of 12.0bps | Depends on training data metadata p25 value. If p25=2.0 (default), straddles open in conditions the truth document intends to block. |
-
----
-
-## GHOST CALCULATIONS
-
-Formulas defined in the truth document but **completely absent from code**:
-
-| Formula | Expected Location | Description |
-|---------|-------------------|-------------|
-| 3.5 Odds Filter | `polymarket_strategy_a.py` entry path | Block bets when `token_cost < 0.15` or `> 0.85` |
+| 1 | 1.7 | `straddle_engine.py:311-318` | Timeout uses generic `"timeout"` label, no flat/profitable/loss classification | Can't distinguish timeout outcomes in analytics. Reduces ability to tune timeout behavior. |
+| 2 | 2.7 | `token_spray_engine.py:183,261-267` | Spread gate uses absolute 4.0bps threshold, not proportional to stop_loss | Pairs with tight stops (7bp) accept spreads up to 4bp (57% of stop consumed by spread). Pairs with wide stops (12bp) are over-restricted. |
+| 3 | 5.2 | `ml_model_loader.py:2317` | Dead zone gate threshold may be ~6.4bps instead of 12.0bps | Depends on training data metadata p25 value. If p25=2.0 (default), straddles open in conditions the truth document intends to block. |
 
 ---
 
 ## VERIFICATION COMPLETE
 
 - **63 unit tests** written and passing in `tests/test_math_verification.py`
-- **22 of 29 formulas** match the truth document
-- **6 mismatches** identified (2 critical, 2 high, 3 medium)
-- **1 ghost calculation** identified (odds filter never implemented)
-- **No fixes applied** — report only per spec instructions
+- **26 of 29 formulas** now match the truth document
+- **4 fixes applied** this session (2 critical, 2 high) in commits `5ad3a60` and `eca43e1`
+- **3 medium mismatches** remain (timeout classification, spread gate proportionality, dead zone threshold)
+- All fixes deployed to VPS and verified running
