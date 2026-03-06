@@ -580,6 +580,14 @@ class StrategyAExecutor:
             crowd_up = self._parse_crowd_up(market)
             token_cost = crowd_up if ml_direction == "UP" else (1.0 - crowd_up)
 
+            # Gate: odds filter — block extreme token costs
+            if token_cost < 0.15 or token_cost > 0.85:
+                self._log_skip(inst.asset, slug,
+                               f"odds_filter token_cost={token_cost:.3f} outside [0.15, 0.85]",
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
+                continue
+
             # Gate: confidence
             if ml_conf < self.CONFIDENCE_THRESHOLD:
                 self._log_skip(inst.asset, slug,
@@ -1197,23 +1205,11 @@ class StrategyAExecutor:
                     except (ValueError, TypeError):
                         pass
 
-                # Price-based fallback (>2 min past deadline)
-                if seconds_past > 120 and current_prices:
-                    inst = self._find_instrument(bet["asset"])
-                    if inst:
-                        current_asset_price = current_prices.get(inst.price_pair, 0)
-                        # Use window-start price (from slug timestamp), NOT bet entry price
-                        window_start_price = bet["window_start_price"] if "window_start_price" in bet.keys() else 0
-                        window_start_price = window_start_price or 0
-                        if window_start_price <= 0:
-                            # Fallback: extract from slug and look up bar price
-                            window_start_price = self._get_window_start_price(bet["slug"], inst)
-                        if current_asset_price > 0 and window_start_price > 0:
-                            went_up = current_asset_price > window_start_price
-                            yes_price = 1.0 if went_up else 0.0
-                            no_price = 1.0 - yes_price
-                            self._resolve_bet(conn, bet, yes_price, no_price, "price_fallback", current_prices)
-                            continue
+                # Price-based fallback: PERMANENTLY DISABLED
+                # Resolving via crypto price comparison is unreliable and was the
+                # source of the historic $48M phantom bankroll.  Bets stay OPEN
+                # until gamma_api resolves them or force-expire after 30 min.
+                # (see STRATEGY_MATH_TRUTH_DOCUMENT.md §3.3)
 
                 # Force-expire after 30 min
                 if seconds_past > 1800:
@@ -1278,8 +1274,16 @@ class StrategyAExecutor:
             WHERE id = ?
         """, (status, exit_price, source, pnl, return_pct, exit_asset_price, bet["id"]))
 
-        if won:
+        if won and source == "gamma_api":
             self.bankroll += bet["total_invested"] + pnl
+        elif won:
+            # Non-gamma wins (e.g. price_fallback) — refund investment only,
+            # do NOT credit profit (unverified resolution source)
+            self.bankroll += bet["total_invested"]
+            self.logger.warning(
+                f"WON [{bet['asset']}] via {source} — bankroll refunded "
+                f"${bet['total_invested']:.2f} but profit ${pnl:.2f} NOT credited"
+            )
         if not won:
             self._last_loss_time = time.time()
 

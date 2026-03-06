@@ -163,7 +163,7 @@ class TokenSprayEngine:
         self.cooldown_seconds: float = config.get("cooldown_seconds", 30.0)
         self.exit_check_interval: float = config.get("exit_check_interval_seconds", 5.0)
         self.vol_scaling: Dict[str, float] = config.get("vol_scaling", {
-            "low": 1.0, "medium": 0.7, "high": 0.4,
+            "low": 1.0, "medium": 0.7, "high": 0.4, "extreme": 0.2,
         })
         self.observation_mode: bool = config.get("observation_mode", True)
 
@@ -851,6 +851,8 @@ class TokenSprayEngine:
         garch = market_data.get("garch_forecast", {})
         if garch:
             vol = garch.get("forecast_vol", 0.0)
+            if vol > 0.08:
+                return "extreme"
             if vol > 0.04:
                 return "high"
             if vol > 0.015:
@@ -861,7 +863,9 @@ class TokenSprayEngine:
         vp = market_data.get("volatility_prediction", {})
         if vp:
             regime = vp.get("vol_regime", "normal")
-            if regime in ("explosive", "high_volatility"):
+            if regime in ("explosive",):
+                return "extreme"
+            if regime in ("high_volatility",):
                 return "high"
             if regime in ("active",):
                 return "medium"
