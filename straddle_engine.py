@@ -78,13 +78,13 @@ class StraddleEngine:
         self.pair: str = config.get('pair', f'{self.asset}-USD')
 
         # Sizing
-        self.size_usd: float = float(config.get('size_usd', 1000))
+        self.size_usd: float = float(config.get('size_usd', 100))
         self.wallet_usd: float = float(config.get('wallet_usd', 7000))
 
         # Timing
         self.interval_seconds: float = float(config.get('interval_seconds', 10))
-        self.max_open: int = int(config.get('max_open', 5))
-        self.max_hold_seconds: float = float(config.get('max_hold_seconds', 120))
+        self.max_open: int = int(config.get('max_open', 35))
+        self.max_hold_seconds: float = float(config.get('max_hold_seconds', 300))
         self.exit_check_interval: float = float(config.get('exit_check_interval', 2.0))
 
         # Base exit params (before vol scaling)
@@ -93,7 +93,7 @@ class StraddleEngine:
         self.trail_distance_bps: float = float(config.get('trail_distance_bps', 2))
 
         # Vol-proportional scaling
-        self.vol_scaling: str = config.get('vol_scaling', 'proportional')
+        self.vol_scaling: str = config.get('vol_scaling', 'none')
         self.vol_baseline_bps: float = float(config.get('vol_baseline_bps', 15.0))
         self.vol_floor: float = float(config.get('vol_floor', 0.3))
         self.vol_ceiling: float = float(config.get('vol_ceiling', 3.0))
