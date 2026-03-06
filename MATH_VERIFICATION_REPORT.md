@@ -9,17 +9,17 @@
 
 ## Summary
 
-| Category | Formulas | MATCH | MISMATCH (unfixed) | FIXED this session |
-|----------|----------|-------|---------------------|---------------------|
-| Straddle (1.x) | 9 | 8 | 1 | 0 |
-| Token Spray (2.x) | 8 | 6 | 1 | 1 |
-| Polymarket (3.x) | 5 | 2 | 0 | 3 |
-| Arbitrage (4.x) | 2 | 2 | 0 | 0 |
-| Volatility (5.x) | 2 | 1 | 1 | 0 |
-| Shared (S.x) | 3 | 3 | 0 | 0 |
-| **TOTAL** | **29** | **22** | **3 remaining** | **4 fixed** |
+| Category | Formulas | MATCH | FIXED this session |
+|----------|----------|-------|--------------------|
+| Straddle (1.x) | 9 | 9 | 1 |
+| Token Spray (2.x) | 8 | 8 | 2 |
+| Polymarket (3.x) | 5 | 5 | 3 |
+| Arbitrage (4.x) | 2 | 2 | 0 |
+| Volatility (5.x) | 2 | 2 | 1 |
+| Shared (S.x) | 3 | 3 | 0 |
+| **TOTAL** | **29** | **29** | **7 fixed** |
 
-**4 FIXED (2 critical, 2 high) + 3 REMAINING (medium)**
+**29/29 MATCH — all 7 mismatches fixed (2 critical, 2 high, 3 medium)**
 
 ---
 
@@ -31,6 +31,9 @@
 | 2 | CRITICAL | 3.5 | `eca43e1` | Implemented odds filter `[0.15, 0.85]` — blocks bets at extreme token costs. |
 | 3 | HIGH | 3.4 | `eca43e1` | Bankroll updates now check resolution source. Only `gamma_api` wins credit profit. Non-gamma wins refund investment only. |
 | 4 | HIGH | 2.3 | `eca43e1` | Added `"extreme": 0.2` vol scaling tier + `_calc_vol_regime()` now returns `"extreme"` for GARCH vol > 8% or `"explosive"` prediction. |
+| 5 | MEDIUM | 1.7 | `4f878e0` | Straddle timeout now classifies as `timeout_flat` / `timeout_profitable` / `timeout_loss` based on peak vs `dead_zone_bps`. |
+| 6 | MEDIUM | 2.7 | `4f878e0` | Token spray spread gate now proportional: `stop_loss_bps * 0.5` instead of absolute 4.0bps. |
+| 7 | MEDIUM | 5.2 | `4f878e0` | Added explicit `min_predicted_vol_bps = 12.0` floor alongside percentile-based p25 check. |
 
 Additionally, 3 bugs were fixed earlier in commit `5ad3a60`:
 - Straddle net PnL `* 2` removed (formula 1.3)
@@ -123,8 +126,8 @@ Additionally, 3 bugs were fixed earlier in commit `5ad3a60`:
   if age >= self.max_hold_seconds:
       leg.exit_reason = "timeout"   # <-- Single generic label
   ```
-- **Status:** MISMATCH (medium — unfixed)
-- **Notes:** Code uses a single `"timeout"` exit reason. Does NOT classify into `timeout_flat` / `timeout_profitable` / `timeout_loss` based on peak vs min_move_bps. The classification logic described in the truth document is completely absent.
+- **Status:** MATCH (fixed in commit `4f878e0`)
+- **Fix applied:** Timeout now classifies using `dead_zone_bps` as the min_move threshold: `timeout_flat` when `abs(peak) < dead_zone_bps`, `timeout_profitable` when `current > 0`, otherwise `timeout_loss`.
 
 ### Formula 1.8 — Capital Deployed
 - **File:** `straddle_engine.py:199`
@@ -238,8 +241,8 @@ Additionally, 3 bugs were fixed earlier in commit `5ad3a60`:
   if _spread_bps > self.max_entry_spread_bps:
       return None
   ```
-- **Status:** MISMATCH (medium — unfixed)
-- **Notes:** Code uses an **absolute threshold** (4.0 bps hard-coded default), NOT a ratio relative to `stop_loss_bps`. Truth document says the gate should be `spread < stop_loss * 0.5`, which is proportional (e.g., 7bp stop → max 3.5bp spread; 12bp stop → max 6bp spread). The code treats all pairs the same regardless of their stop_loss_bps setting.
+- **Status:** MATCH (fixed in commit `4f878e0`)
+- **Fix applied:** Spread gate now computes `_proportional_limit = stop_loss_bps * 0.5` using per-pair stop_loss from `_get_pair_exit_config()`. BTC (7bp stop) → max 3.5bp spread, DOGE (12bp stop) → max 6bp spread. Fixed in both `_spray_for_pair` and `_spray_for_wallet`.
 
 ### Formula 2.8 — Direction Rule Classification
 - **File:** `token_spray_engine.py:288,330,819-846`
@@ -394,8 +397,8 @@ Additionally, 3 bugs were fixed earlier in commit `5ad3a60`:
       regime = 'dead_zone'
       vol_multiplier = 0.0  # Blocks via zero multiplier
   ```
-- **Status:** MISMATCH (medium — unfixed)
-- **Notes:** The dead_zone gate uses percentile p25 from training data metadata. The default p25 is 2.0 (log space), which corresponds to `expm1(2.0) = 6.39 bps`. The truth document specifies `min_predicted_vol_bps = 12.0`. If the meta JSON has p25=2.0 (default), the gate triggers at ~6.4 bps instead of 12.0 bps — a significantly looser threshold that would allow straddles in low-vol conditions the truth document intends to block.
+- **Status:** MATCH (fixed in commit `4f878e0`)
+- **Fix applied:** Added explicit `min_predicted_vol_bps = 12.0` floor. Dead zone now triggers when `pred_log < p25 OR magnitude_bps < 12.0`, ensuring straddles are blocked below 12bps regardless of training percentile values.
 - **Test:** PASS (test verifies the conceptual math)
 
 ---
@@ -425,20 +428,10 @@ Additionally, 3 bugs were fixed earlier in commit `5ad3a60`:
 
 ---
 
-## REMAINING MISMATCHES (MEDIUM — not yet fixed)
-
-| # | Formula | File:Line | Issue | Impact |
-|---|---------|-----------|-------|--------|
-| 1 | 1.7 | `straddle_engine.py:311-318` | Timeout uses generic `"timeout"` label, no flat/profitable/loss classification | Can't distinguish timeout outcomes in analytics. Reduces ability to tune timeout behavior. |
-| 2 | 2.7 | `token_spray_engine.py:183,261-267` | Spread gate uses absolute 4.0bps threshold, not proportional to stop_loss | Pairs with tight stops (7bp) accept spreads up to 4bp (57% of stop consumed by spread). Pairs with wide stops (12bp) are over-restricted. |
-| 3 | 5.2 | `ml_model_loader.py:2317` | Dead zone gate threshold may be ~6.4bps instead of 12.0bps | Depends on training data metadata p25 value. If p25=2.0 (default), straddles open in conditions the truth document intends to block. |
-
----
-
 ## VERIFICATION COMPLETE
 
 - **63 unit tests** written and passing in `tests/test_math_verification.py`
-- **26 of 29 formulas** now match the truth document
-- **4 fixes applied** this session (2 critical, 2 high) in commits `5ad3a60` and `eca43e1`
-- **3 medium mismatches** remain (timeout classification, spread gate proportionality, dead zone threshold)
+- **29 of 29 formulas** match the truth document
+- **7 fixes applied** this session in commits `5ad3a60`, `eca43e1`, and `4f878e0`
+- **0 mismatches remain**
 - All fixes deployed to VPS and verified running
