@@ -335,7 +335,7 @@ class StraddleEngine:
             if straddle.long_leg.closed and straddle.short_leg.closed:
                 # Compute net P&L
                 net_pnl_bps = straddle.long_leg.pnl_bps + straddle.short_leg.pnl_bps
-                net_pnl_usd = net_pnl_bps / 10000 * straddle.size_usd * 2
+                net_pnl_usd = net_pnl_bps / 10000 * straddle.size_usd
 
                 # Compute per-leg USD P&L
                 straddle.long_leg.pnl_usd = straddle.long_leg.pnl_bps / 10000 * straddle.size_usd

@@ -284,7 +284,8 @@ class RenaissancePositionSizer:
         # ── Step 3: Kelly optimal size (as USD) ──
         kelly_f = self._kelly_criterion(net_edge, win_prob)
         kelly_usd = balance * kelly_f * self.kelly_fraction
-        reasons.append(f"Kelly={kelly_f:.4f}, FracKelly({self.kelly_fraction:.0%})=${kelly_usd:,.0f}")
+        kelly_usd *= drawdown_scalar
+        reasons.append(f"Kelly={kelly_f:.4f}, FracKelly({self.kelly_fraction:.0%})=${kelly_usd:,.0f}, DD_scalar={drawdown_scalar:.2f}")
 
         # ── Step 4: Capacity-optimal size (market impact ceiling) ──
         #

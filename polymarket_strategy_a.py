@@ -853,6 +853,8 @@ class StrategyAExecutor:
         # Full Kelly fraction
         kelly = (p * b - q) / (b + 1e-10)
         kelly = max(0.0, kelly)
+        if kelly <= 0:
+            return 0.0
 
         # Fractional Kelly for safety
         frac_kelly = kelly * kelly_fraction
