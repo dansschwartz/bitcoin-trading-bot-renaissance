@@ -2313,7 +2313,8 @@ def predict_volatility(
         p75 = percentiles.get('p75', 4.5)
         p90 = percentiles.get('p90', 5.5)
 
-        if pred_log < p25:
+        min_predicted_vol_bps = 12.0
+        if pred_log < p25 or magnitude_bps < min_predicted_vol_bps:
             regime = 'dead_zone'
             vol_multiplier = 0.0  # Skip trading
         elif pred_log < p75:

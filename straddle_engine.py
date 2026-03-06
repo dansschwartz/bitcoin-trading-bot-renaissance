@@ -311,7 +311,12 @@ class StraddleEngine:
         # Timeout
         age = now - leg.opened_at
         if age >= self.max_hold_seconds:
-            leg.exit_reason = "timeout"
+            if abs(leg.peak_favorable_bps) < self.dead_zone_bps:
+                leg.exit_reason = "timeout_flat"
+            elif pnl_bps > 0:
+                leg.exit_reason = "timeout_profitable"
+            else:
+                leg.exit_reason = "timeout_loss"
             leg.pnl_bps = pnl_bps
             leg.exit_price = current_price
             leg.closed = True

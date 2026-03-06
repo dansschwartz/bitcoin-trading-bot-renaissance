@@ -253,16 +253,19 @@ class TokenSprayEngine:
         if pair in self.blacklisted_pairs:
             return None
 
-        # ── Gate 2c: spread check at entry time ──
+        # ── Gate 2c: spread check at entry time (proportional to stop_loss) ──
+        _pair_exit = _get_pair_exit_config(pair, self._pair_exit_config)
+        _pair_stop = _pair_exit["stop_loss_bps"]
+        _proportional_limit = _pair_stop * 0.5
         _ticker = market_data.get("ticker", {})
         _bid = float(_ticker.get("bid", 0) or 0)
         _ask = float(_ticker.get("ask", 0) or 0)
         if _bid > 0 and _ask > 0:
             _spread_bps = ((_ask - _bid) / ((_ask + _bid) / 2)) * 10000
-            if _spread_bps > self.max_entry_spread_bps:
+            if _spread_bps > _proportional_limit:
                 self.log.debug(
                     f"SPRAY SPREAD GATE: {pair} spread={_spread_bps:.1f}bps "
-                    f"> {self.max_entry_spread_bps}bps — skip"
+                    f"> {_proportional_limit:.1f}bps (stop={_pair_stop}bp * 0.5) — skip"
                 )
                 return None
 
@@ -490,16 +493,19 @@ class TokenSprayEngine:
         if pair in self.blacklisted_pairs:
             return None
 
-        # ── Gate 2c: spread check at entry time ──
+        # ── Gate 2c: spread check at entry time (proportional to stop_loss) ──
+        _pair_exit = _get_pair_exit_config(pair, self._pair_exit_config)
+        _pair_stop = _pair_exit["stop_loss_bps"]
+        _proportional_limit = _pair_stop * 0.5
         _ticker = market_data.get("ticker", {})
         _bid = float(_ticker.get("bid", 0) or 0)
         _ask = float(_ticker.get("ask", 0) or 0)
         if _bid > 0 and _ask > 0:
             _spread_bps = ((_ask - _bid) / ((_ask + _bid) / 2)) * 10000
-            if _spread_bps > self.max_entry_spread_bps:
+            if _spread_bps > _proportional_limit:
                 self.log.debug(
                     f"SPRAY SPREAD GATE: {pair} spread={_spread_bps:.1f}bps "
-                    f"> {self.max_entry_spread_bps}bps — skip"
+                    f"> {_proportional_limit:.1f}bps (stop={_pair_stop}bp * 0.5) — skip"
                 )
                 return None
 
