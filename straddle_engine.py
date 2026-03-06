@@ -78,8 +78,8 @@ class StraddleEngine:
         self.pair: str = config.get('pair', f'{self.asset}-USD')
 
         # Sizing
-        self.size_usd: float = float(config.get('size_usd', 100))
-        self.wallet_usd: float = float(config.get('wallet_usd', 7000))
+        self.size_usd: float = float(config.get('size_usd', 500))
+        self.wallet_usd: float = float(config.get('wallet_usd', 35000))
 
         # Timing
         self.interval_seconds: float = float(config.get('interval_seconds', 10))

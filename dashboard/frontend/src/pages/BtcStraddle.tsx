@@ -143,7 +143,7 @@ export default function BtcStraddle() {
   const totalReasons = Object.values(exitReasons).reduce((a, b) => a + b, 0);
 
   return (
-    <PageShell title="Straddle Fleet" subtitle="Multi-asset direction-free paired LONG+SHORT with vol-proportional scaling">
+    <PageShell title="Straddle Fleet" subtitle="Multi-asset direction-free paired LONG+SHORT — $500/leg, 5min hold, 35 concurrent">
       {/* Fleet Status Bar */}
       <div className={`border rounded-xl p-3 ${fleet?.halted ? 'bg-accent-red/10 border-accent-red/40' : 'bg-surface-1 border-surface-3'}`}>
         <div className="flex flex-wrap items-center gap-4 text-sm">
@@ -153,10 +153,10 @@ export default function BtcStraddle() {
             </span>
           )}
           <span className="text-gray-400">Fleet P&L: <strong className={`${(fleet?.total_pnl ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-            {(fleet?.total_pnl ?? 0) >= 0 ? '+' : ''}${(fleet?.total_pnl ?? 0).toFixed(4)}
+            {(fleet?.total_pnl ?? 0) >= 0 ? '+' : ''}${(fleet?.total_pnl ?? 0).toFixed(2)}
           </strong></span>
           <span className="text-gray-400">Deployed: <strong className="text-gray-200">
-            ${(fleet?.total_deployed ?? 0).toLocaleString()} / ${(fleet?.fleet_max_deployed ?? 15000).toLocaleString()}
+            ${(fleet?.total_deployed ?? 0).toLocaleString()} / ${(fleet?.fleet_max_deployed ?? 70000).toLocaleString()}
           </strong></span>
           <span className="text-gray-400">Open: <strong className="text-gray-200">{fleet?.total_open ?? 0}</strong></span>
           <span className="text-gray-400">Daily Loss: <strong className={`${(fleet?.fleet_daily_loss ?? 0) > 0 ? 'text-accent-red' : 'text-gray-200'}`}>
@@ -184,7 +184,7 @@ export default function BtcStraddle() {
                 )}
               </div>
               <span className={`text-lg font-mono font-semibold ${(eng.total_pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                {(eng.total_pnl_usd ?? 0) >= 0 ? '+' : ''}${(eng.total_pnl_usd ?? 0).toFixed(4)}
+                {(eng.total_pnl_usd ?? 0) >= 0 ? '+' : ''}${(eng.total_pnl_usd ?? 0).toFixed(2)}
               </span>
             </div>
             <div className="grid grid-cols-3 gap-2 text-xs font-mono">
@@ -233,7 +233,7 @@ export default function BtcStraddle() {
         {[
           { label: 'Total', value: stats?.total ?? 0, fmt: (v: number) => v.toLocaleString() },
           { label: 'Win Rate', value: stats?.win_rate ?? 0, fmt: (v: number) => `${v.toFixed(1)}%`, color: (v: number) => v >= 50 ? 'text-accent-green' : 'text-accent-red' },
-          { label: 'Net P&L', value: stats?.total_pnl_usd ?? 0, fmt: (v: number) => `${v >= 0 ? '+' : ''}$${v.toFixed(4)}`, color: (v: number) => v >= 0 ? 'text-accent-green' : 'text-accent-red' },
+          { label: 'Net P&L', value: stats?.total_pnl_usd ?? 0, fmt: (v: number) => `${v >= 0 ? '+' : ''}$${v.toFixed(2)}`, color: (v: number) => v >= 0 ? 'text-accent-green' : 'text-accent-red' },
           { label: 'Avg Net', value: stats?.avg_net_bps ?? 0, fmt: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}bp`, color: (v: number) => v >= 0 ? 'text-accent-green' : 'text-accent-red' },
           { label: 'Avg Duration', value: stats?.avg_duration ?? 0, fmt: (v: number) => `${v.toFixed(0)}s` },
           { label: 'Avg Vol Ratio', value: stats?.avg_vol_ratio ?? 1, fmt: (v: number) => `${v.toFixed(2)}x` },
@@ -259,7 +259,7 @@ export default function BtcStraddle() {
               </div>
               <div className="flex items-center justify-between mt-1">
                 <span className={`text-sm font-mono ${(a.pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                  {(a.pnl_usd ?? 0) >= 0 ? '+' : ''}${(a.pnl_usd ?? 0).toFixed(4)}
+                  {(a.pnl_usd ?? 0) >= 0 ? '+' : ''}${(a.pnl_usd ?? 0).toFixed(2)}
                 </span>
                 <span className="text-xs text-gray-400">
                   WR: {a.total > 0 ? ((a.winners / a.total) * 100).toFixed(1) : '0.0'}%
