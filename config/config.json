@@ -617,6 +617,12 @@
         "cooldown_seconds": 30,
         "exit_check_interval_seconds": 1,
         "vol_scaling": { "low": 1.0, "medium": 0.7, "high": 0.4 },
+        "max_entry_spread_bps": 4.0,
+        "blacklisted_pairs": [
+            "BARD-USD", "MANTRA-USD", "GIGGLE-USD", "SAHARA-USD",
+            "ZEC-USD", "OPN-USD", "KITE-USD", "BANK-USD",
+            "USDE-USD", "COW-USD", "SIGN-USD"
+        ],
         "exit_config": {
             "stop_loss_bps": 8,
             "trail_activation_bps": 3,

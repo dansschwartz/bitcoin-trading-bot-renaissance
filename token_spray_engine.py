@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,10 @@ class TokenSprayEngine:
         # Per-pair exit config overrides from config.json
         self._pair_exit_config: Dict[str, Any] = config.get("pair_exit_config", {})
 
+        # Blacklist + spread gate (blocks wide-spread micro-cap pairs)
+        self.blacklisted_pairs: Set[str] = set(config.get("blacklisted_pairs", []))
+        self.max_entry_spread_bps: float = config.get("max_entry_spread_bps", 4.0)
+
         # Runtime state
         self.open_tokens: Dict[str, SprayToken] = {}
         self.budget_deployed_usd: float = 0.0
@@ -244,6 +248,23 @@ class TokenSprayEngine:
             confidence = 0.5
         if confidence < self.min_confidence:
             return None
+
+        # ── Gate 2b: blacklist ──
+        if pair in self.blacklisted_pairs:
+            return None
+
+        # ── Gate 2c: spread check at entry time ──
+        _ticker = market_data.get("ticker", {})
+        _bid = float(_ticker.get("bid", 0) or 0)
+        _ask = float(_ticker.get("ask", 0) or 0)
+        if _bid > 0 and _ask > 0:
+            _spread_bps = ((_ask - _bid) / ((_ask + _bid) / 2)) * 10000
+            if _spread_bps > self.max_entry_spread_bps:
+                self.log.debug(
+                    f"SPRAY SPREAD GATE: {pair} spread={_spread_bps:.1f}bps "
+                    f"> {self.max_entry_spread_bps}bps — skip"
+                )
+                return None
 
         # ── Gate 3: capacity ──
         if len(self.open_tokens) >= self.max_open_tokens:
@@ -464,6 +485,23 @@ class TokenSprayEngine:
         # ── Gate 2: confidence ──
         if confidence < self.min_confidence:
             return None
+
+        # ── Gate 2b: blacklist ──
+        if pair in self.blacklisted_pairs:
+            return None
+
+        # ── Gate 2c: spread check at entry time ──
+        _ticker = market_data.get("ticker", {})
+        _bid = float(_ticker.get("bid", 0) or 0)
+        _ask = float(_ticker.get("ask", 0) or 0)
+        if _bid > 0 and _ask > 0:
+            _spread_bps = ((_ask - _bid) / ((_ask + _bid) / 2)) * 10000
+            if _spread_bps > self.max_entry_spread_bps:
+                self.log.debug(
+                    f"SPRAY SPREAD GATE: {pair} spread={_spread_bps:.1f}bps "
+                    f"> {self.max_entry_spread_bps}bps — skip"
+                )
+                return None
 
         # ── Gate 3: global capacity ──
         if len(self.open_tokens) >= self.max_open_tokens:
