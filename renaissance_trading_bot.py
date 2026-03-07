@@ -1395,6 +1395,16 @@ class RenaissanceTradingBot:
                 except Exception as _straddle_err:
                     self.logger.warning(f"StraddleEngine init failed: {_straddle_err}")
 
+        # ── 4-Hour Neural Network Oracle ──
+        self.oracle = None
+        try:
+            from oracle.oracle_service import OracleService
+            _oracle_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+            self.oracle = OracleService(db_path=_oracle_db)
+            self.logger.info(f"Oracle service initialized with {len(self.oracle.models)} models")
+        except Exception as _oracle_err:
+            self.logger.warning(f"Oracle init failed (will run without oracle): {_oracle_err}")
+
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
 
@@ -7021,6 +7031,15 @@ class RenaissanceTradingBot:
         # ── Start Straddle exit loops (all assets) ──
         for _s_asset, _s_engine in self.straddle_engines.items():
             await _s_engine.start_exit_loop(self._get_straddle_price)
+
+        # ── Start Oracle 4H prediction loop ──
+        if self.oracle:
+            try:
+                self.oracle.predict_now()
+                self.logger.info("Oracle: initial prediction completed")
+            except Exception as _e:
+                self.logger.warning(f"Oracle initial prediction failed: {_e}")
+            asyncio.create_task(self.oracle.run_forever())
 
         # ── Prune old data to reduce DB size and memory pressure ──
         self._prune_old_data()

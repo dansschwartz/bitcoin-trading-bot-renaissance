@@ -18,7 +18,7 @@ from dashboard.config import DashboardConfig
 from dashboard.event_emitter import DashboardEventEmitter
 from dashboard.ws_manager import ConnectionManager
 
-from dashboard.routers import system, decisions, trades, analytics, brain, risk, backtest, medallion, devil, agents, arbitrage, breakout, polymarket, audit, council, breakout_strategy, token_spray, exit_engine, btc_straddle
+from dashboard.routers import system, decisions, trades, analytics, brain, risk, backtest, medallion, devil, agents, arbitrage, breakout, polymarket, audit, council, breakout_strategy, token_spray, exit_engine, btc_straddle, oracle
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,7 @@ def create_app(
     app.include_router(token_spray.router)
     app.include_router(exit_engine.router)
     app.include_router(btc_straddle.router)
+    app.include_router(oracle.router)
 
     # WebSocket endpoint
     @app.websocket("/ws")

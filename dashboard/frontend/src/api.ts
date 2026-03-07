@@ -183,4 +183,9 @@ export const api = {
   exitSummary: () => get<Record<string, unknown>>('/api/exit-engine/summary'),
   exitRecentExits: () => get<Record<string, unknown>[]>('/api/exit-engine/recent-exits'),
   exitHoldTimeDist: () => get<Record<string, unknown>[]>('/api/exit-engine/hold-time-distribution'),
+
+  // Oracle (4H Neural Network)
+  oracleStatus: () => get<Record<string, unknown>>('/api/oracle/status'),
+  oracleHistory: (asset = 'BTCUSDT', hours = 168) =>
+    get<Record<string, unknown>[]>(`/api/oracle/history?asset=${asset}&hours=${hours}`),
 };

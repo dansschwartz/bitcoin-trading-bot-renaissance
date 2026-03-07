@@ -76,6 +76,44 @@ function StrategyCard({ name, data }: { name: string; data: StrategyData }) {
   );
 }
 
+// ─── Oracle Signal Bar ───────────────────────────────────────────────────────
+
+interface OracleSignal {
+  signal: string;
+  confidence: number;
+  candle_close: number;
+  age_minutes: number;
+}
+
+function signalBadge(sig: OracleSignal | null) {
+  if (!sig || !sig.signal || sig.signal === 'HOLD') {
+    return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-600/40 text-gray-400">HOLD</span>;
+  }
+  if (sig.signal === 'BUY') {
+    return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-green/20 text-accent-green">BUY {(sig.confidence * 100).toFixed(0)}%</span>;
+  }
+  return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-red/20 text-accent-red">SELL {(sig.confidence * 100).toFixed(0)}%</span>;
+}
+
+function OracleBar({ signals }: { signals: Record<string, OracleSignal | null> }) {
+  const assets = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT'];
+  const labels: Record<string, string> = { BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL', XRPUSDT: 'XRP' };
+  const hasAny = Object.values(signals).some(s => s !== null);
+  if (!hasAny) return null;
+
+  return (
+    <div className="bg-surface-1 border border-surface-3 rounded-xl px-4 py-2 flex items-center gap-4">
+      <span className="text-xs text-gray-500 uppercase tracking-wider">4H Oracle</span>
+      {assets.map(a => (
+        <div key={a} className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-400 font-mono">{labels[a]}</span>
+          {signalBadge(signals[a])}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── CommandCenter ───────────────────────────────────────────────────────────
 
 export default function CommandCenter() {
@@ -83,6 +121,7 @@ export default function CommandCenter() {
   const [pm, setPm] = useState<StrategyData>(EMPTY);
   const [ml, setMl] = useState<StrategyData>(EMPTY);
   const [straddle, setStraddle] = useState<StrategyData>(EMPTY);
+  const [oracleSignals, setOracleSignals] = useState<Record<string, OracleSignal | null>>({});
 
   const fetchAll = useCallback(async () => {
     // Arbitrage
@@ -142,6 +181,16 @@ export default function CommandCenter() {
         loaded: true,
       });
     }).catch(() => {});
+
+    // Oracle signals
+    api.oracleStatus().then((d: any) => {
+      const sigs: Record<string, OracleSignal | null> = {};
+      const signals = d.signals ?? {};
+      for (const asset of ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT']) {
+        sigs[asset] = signals[asset]?.current ?? null;
+      }
+      setOracleSignals(sigs);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -183,6 +232,9 @@ export default function CommandCenter() {
         <StrategyCard name="ML Trading" data={ml} />
         <StrategyCard name="Straddles" data={straddle} />
       </div>
+
+      {/* Oracle Signal Bar */}
+      <OracleBar signals={oracleSignals} />
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
