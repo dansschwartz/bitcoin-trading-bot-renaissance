@@ -1401,7 +1401,7 @@ class RenaissanceTradingBot:
             from oracle.oracle_service import OracleService
             _oracle_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
             self.oracle = OracleService(db_path=_oracle_db)
-            self.logger.info(f"Oracle service initialized with {len(self.oracle.models)} models")
+            self.logger.info(f"Oracle service initialized with {self.oracle.model_count} models (lazy-load)")
         except Exception as _oracle_err:
             self.logger.warning(f"Oracle init failed (will run without oracle): {_oracle_err}")
 

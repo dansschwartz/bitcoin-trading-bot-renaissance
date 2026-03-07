@@ -62,13 +62,24 @@ MIN_CANDLES_NEEDED = 120
 
 
 class OracleService:
-    """4-hour neural network oracle — shared signal service."""
+    """4-hour neural network oracle — shared signal service.
+
+    Models are loaded lazily during prediction and unloaded after
+    to save memory on constrained VPS (2GB RAM).
+    """
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
         self._init_db()
         self._load_scaler()
-        self._load_models()
+        # Count available models but DON'T load them yet (saves ~500MB RAM)
+        self.model_count = sum(
+            1 for m in MODELS
+            if os.path.exists(os.path.join(MODEL_DIR, m['file']))
+        )
+        if self.model_count == 0:
+            raise RuntimeError("No oracle model files found!")
+        logger.info(f"Oracle: {self.model_count} model files available (lazy-load)")
 
     def _init_db(self) -> None:
         """Create oracle tables."""
@@ -104,31 +115,41 @@ class OracleService:
             self.scaler = pickle.load(f)
         logger.info(f"Oracle scaler loaded: {len(self.scaler.mean_)} features")
 
-    def _load_models(self) -> None:
-        """Load all pretrained Keras models."""
+    def _load_models_for_prediction(self) -> List[Dict[str, Any]]:
+        """Load all pretrained Keras models (called only during prediction)."""
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
         import keras
 
-        self.models: List[Dict[str, Any]] = []
+        loaded: List[Dict[str, Any]] = []
         for m in MODELS:
             path = os.path.join(MODEL_DIR, m['file'])
             if os.path.exists(path):
                 model = keras.models.load_model(path)
-                self.models.append({
+                loaded.append({
                     'model': model,
                     'weight': m['weight'],
                     'name': m['file'],
                     'bw': m['bw'],
                     'fw': m['fw'],
                 })
-                logger.info(f"Oracle model loaded: {m['file']} "
-                           f"(bw={m['bw']}, fw={m['fw']}, weight={m['weight']})")
             else:
                 logger.warning(f"Oracle model not found: {path}")
 
-        if not self.models:
+        if not loaded:
             raise RuntimeError("No oracle models loaded!")
-        logger.info(f"Oracle: {len(self.models)} models loaded")
+        logger.info(f"Oracle: {len(loaded)} models loaded for prediction")
+        return loaded
+
+    @staticmethod
+    def _unload_models() -> None:
+        """Free Keras/TF memory after prediction."""
+        try:
+            import keras
+            keras.backend.clear_session()
+        except Exception:
+            pass
+        import gc
+        gc.collect()
 
     # ── Data fetching ─────────────────────────────────────────────────────────
 
@@ -179,7 +200,8 @@ class OracleService:
 
     # ── Prediction ────────────────────────────────────────────────────────────
 
-    def _predict_ensemble(self, features_scaled: np.ndarray):
+    def _predict_ensemble(self, features_scaled: np.ndarray,
+                          models: List[Dict[str, Any]]):
         """
         Run all models and produce weighted ensemble prediction.
         Each model outputs class probabilities for 3 classes.
@@ -188,7 +210,7 @@ class OracleService:
         votes: Dict[str, float] = {'BUY': 0.0, 'HOLD': 0.0, 'SELL': 0.0}
         individual_votes = []
 
-        for m in self.models:
+        for m in models:
             raw_pred = m['model'].predict(features_scaled, verbose=0)
             pred_class = int(np.argmax(raw_pred, axis=1)[0]) - 1
             signal = SIGNAL_MAP[pred_class]
@@ -207,66 +229,88 @@ class OracleService:
     # ── Main prediction ──────────────────────────────────────────────────────
 
     def predict_now(self) -> Dict[str, Dict[str, Any]]:
-        """Run prediction for all assets right now."""
+        """Run prediction for all assets right now.
+
+        Loads models into memory, runs predictions, then unloads
+        to keep memory usage low between 4-hour prediction cycles.
+        """
         results = {}
-        conn = sqlite3.connect(self.db_path, timeout=30)
 
+        # Fetch data + compute features first (before loading heavy models)
+        asset_features = {}
         for symbol in ASSETS:
-            logger.info(f"Oracle predicting {symbol}...")
-
+            logger.info(f"Oracle fetching data for {symbol}...")
             df = self._fetch_recent_candles(symbol)
             if df is None or len(df) < 50:
                 logger.warning(f"Insufficient data for {symbol}")
                 continue
-
             result = self._compute_features(df)
             if result is None:
                 logger.warning(f"Feature computation failed for {symbol}")
                 continue
+            asset_features[symbol] = result
 
-            features_scaled, latest_row = result
-            signal, confidence, votes = self._predict_ensemble(features_scaled)
-            candle_close = float(latest_row['Close'].iloc[0])
-            candle_time = str(latest_row['Date'].iloc[0])
+        if not asset_features:
+            logger.warning("No assets had sufficient data for prediction")
+            return results
 
-            try:
-                conn.execute("""
-                    INSERT INTO oracle_signals
-                    (timestamp, asset, signal, confidence, model_votes,
-                     candle_close, candle_time, features_json)
-                    VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(asset, candle_time) DO UPDATE SET
-                        signal = excluded.signal,
-                        confidence = excluded.confidence,
-                        model_votes = excluded.model_votes,
-                        timestamp = excluded.timestamp
-                """, (
-                    symbol, signal, confidence,
-                    json.dumps(votes),
-                    candle_close, candle_time,
-                    json.dumps(dict(zip(FEATURE_COLS,
-                                        features_scaled[0].tolist()))),
-                ))
-                conn.commit()
-            except Exception as e:
-                logger.error(f"DB write failed: {e}")
+        # Load models, predict, then immediately unload
+        try:
+            models = self._load_models_for_prediction()
+        except Exception as e:
+            logger.error(f"Failed to load oracle models: {e}")
+            return results
 
-            results[symbol] = {
-                'signal': signal,
-                'confidence': confidence,
-                'votes': votes,
-                'candle_close': candle_close,
-                'candle_time': candle_time,
-            }
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        try:
+            for symbol, (features_scaled, latest_row) in asset_features.items():
+                signal, confidence, votes = self._predict_ensemble(
+                    features_scaled, models)
+                candle_close = float(latest_row['Close'].iloc[0])
+                candle_time = str(latest_row['Date'].iloc[0])
 
-            logger.info(
-                f"ORACLE[{symbol}] -> {signal} "
-                f"(confidence={confidence:.0%}) "
-                f"close=${candle_close:,.2f} "
-                f"candle={candle_time}"
-            )
+                try:
+                    conn.execute("""
+                        INSERT INTO oracle_signals
+                        (timestamp, asset, signal, confidence, model_votes,
+                         candle_close, candle_time, features_json)
+                        VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(asset, candle_time) DO UPDATE SET
+                            signal = excluded.signal,
+                            confidence = excluded.confidence,
+                            model_votes = excluded.model_votes,
+                            timestamp = excluded.timestamp
+                    """, (
+                        symbol, signal, confidence,
+                        json.dumps(votes),
+                        candle_close, candle_time,
+                        json.dumps(dict(zip(FEATURE_COLS,
+                                            features_scaled[0].tolist()))),
+                    ))
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"DB write failed: {e}")
 
-        conn.close()
+                results[symbol] = {
+                    'signal': signal,
+                    'confidence': confidence,
+                    'votes': votes,
+                    'candle_close': candle_close,
+                    'candle_time': candle_time,
+                }
+
+                logger.info(
+                    f"ORACLE[{symbol}] -> {signal} "
+                    f"(confidence={confidence:.0%}) "
+                    f"close=${candle_close:,.2f} "
+                    f"candle={candle_time}"
+                )
+        finally:
+            conn.close()
+            # Free Keras/TF memory after prediction
+            self._unload_models()
+            logger.info("Oracle models unloaded to free memory")
+
         return results
 
     # ── Public API ────────────────────────────────────────────────────────────
