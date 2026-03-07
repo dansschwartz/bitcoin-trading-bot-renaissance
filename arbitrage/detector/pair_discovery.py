@@ -37,6 +37,16 @@ EXCLUDED_BASES: Set[str] = {
     'PAXG', 'XAUT',
 }
 
+# APPEND-ONLY — tokens permanently blocked due to insufficient orderbook depth.
+# Paper trader fills these at theoretical prices but real execution would fail.
+# NEVER remove entries from this set. Only add new ones.
+DEPTH_BLOCKED_BASES: Set[str] = {
+    'VANRY',   # ~$180K daily volume, orderbook too thin
+    'COTI',    # Orderbook depth cannot support trade volume
+    'DUSK',    # Orderbook depth cannot support trade volume
+    'ALGO',    # Orderbook depth cannot support trade volume
+}
+
 
 class PairDiscoveryEngine:
     """Discovers profitable cross-exchange pairs by scanning all overlapping
@@ -67,9 +77,9 @@ class PairDiscoveryEngine:
         self.demotion_grace_scans = cfg.get('demotion_grace_scans', 3)
         self.max_gross_spread_bps = Decimal(str(cfg.get('max_gross_spread_bps', 500.0)))  # 5% cap — beyond this is bogus
 
-        # Merge config exclusions with hardcoded set
+        # Merge config exclusions with hardcoded sets (DEPTH_BLOCKED is append-only)
         extra_excluded = cfg.get('excluded_bases', [])
-        self.excluded_bases = EXCLUDED_BASES | set(extra_excluded)
+        self.excluded_bases = EXCLUDED_BASES | DEPTH_BLOCKED_BASES | set(extra_excluded)
 
         self._running = False
         self._scan_count = 0

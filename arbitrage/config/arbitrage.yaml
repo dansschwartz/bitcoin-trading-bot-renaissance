@@ -33,16 +33,12 @@ pairs:
     - LINK/USDT
     - DOT/USDT
   phase_2:                              # Mid-cap — wider spreads, cross-exchange edge
-    - VANRY/USDT
     - NTRN/USDT
     - G/USDT
-    - DUSK/USDT
     - ZKP/USDT
-    - COTI/USDT
     - POL/USDT
     - SONIC/USDT
     - NEAR/USDT
-    - ALGO/USDT
     - ATOM/USDT
     - FIL/USDT
     - IMX/USDT
@@ -81,6 +77,11 @@ pair_discovery:
     - FDUSD
     - WBTC
     - WETH
+    # Depth-blocked — orderbooks too thin for real execution (APPEND-ONLY)
+    - VANRY
+    - COTI
+    - DUSK
+    - ALGO
 
 funding_rate:
   enabled: true
@@ -166,7 +167,11 @@ risk:
 
 safety:
   max_price_divergence_pct: 5.0     # Block if prices differ >5% between exchanges
-  blocked_tokens: []                # Manual blocklist: ["LUNC", "WBTC"] etc.
+  blocked_tokens:                    # Manual blocklist — APPEND-ONLY, never remove entries
+    - VANRY                          # Insufficient orderbook depth — phantom fills
+    - COTI                           # Insufficient orderbook depth — phantom fills
+    - DUSK                           # Insufficient orderbook depth — phantom fills
+    - ALGO                           # Insufficient orderbook depth — phantom fills
   cache_ttl_hours: 24               # How often to refresh contract data
 
 volume_participation:

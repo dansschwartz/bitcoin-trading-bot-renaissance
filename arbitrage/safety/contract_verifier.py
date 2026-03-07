@@ -26,6 +26,11 @@ logger = logging.getLogger("arb.safety")
 # Native chain tokens that have no contract address
 NATIVE_TOKENS: Set[str] = {"BTC", "ETH", "SOL", "DOT", "ATOM", "XRP", "ADA", "ALGO", "NEAR"}
 
+# APPEND-ONLY — tokens permanently blocked due to insufficient orderbook depth.
+# Paper trader fills at theoretical prices but real execution would fail.
+# NEVER remove entries from this set. Only add new ones.
+DEPTH_BLOCKED: Set[str] = {"VANRY", "COTI", "DUSK", "ALGO"}
+
 
 class ContractVerifier:
     """Verifies cross-exchange token identity before arb execution."""
@@ -47,9 +52,9 @@ class ContractVerifier:
         self.cache_ttl = cache_ttl_hours * 3600
         self._config = config or {}
 
-        # Token blocklist from config (manually maintained)
+        # Token blocklist: hardcoded DEPTH_BLOCKED (append-only) + config (manually maintained)
         safety_cfg = self._config.get("safety", {})
-        self._blocklist: Set[str] = set(safety_cfg.get("blocked_tokens", []))
+        self._blocklist: Set[str] = DEPTH_BLOCKED | set(safety_cfg.get("blocked_tokens", []))
         self._price_divergence_pct: float = safety_cfg.get("max_price_divergence_pct", 5.0)
 
         # Cache: {exchange_name: {symbol: {network: {contract, deposit, withdraw}}}}
