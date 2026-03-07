@@ -3,8 +3,6 @@ import PageShell from '../components/layout/PageShell';
 import MetricCard from '../components/cards/MetricCard';
 import EquityCurve from '../components/charts/EquityCurve';
 import PriceChart from '../components/charts/PriceChart';
-import AssetSummaryPanel from '../components/panels/AssetSummaryPanel';
-import ActivityFeed from '../components/panels/ActivityFeed';
 import SystemHealthBar from '../components/panels/SystemHealthBar';
 import { api } from '../api';
 
@@ -187,17 +185,9 @@ export default function CommandCenter() {
       </div>
 
       {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-        <div className="lg:col-span-2">
-          <EquityCurve />
-        </div>
-        <PriceChart />
-      </div>
-
-      {/* Bottom Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <AssetSummaryPanel compact />
-        <ActivityFeed />
+        <EquityCurve />
+        <PriceChart />
       </div>
     </PageShell>
   );
