@@ -98,8 +98,6 @@ function signalBadge(sig: OracleSignal | null) {
 function OracleBar({ signals }: { signals: Record<string, OracleSignal | null> }) {
   const assets = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT'];
   const labels: Record<string, string> = { BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL', XRPUSDT: 'XRP' };
-  const hasAny = Object.values(signals).some(s => s !== null);
-  if (!hasAny) return null;
 
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl px-4 py-2 flex items-center gap-4">
@@ -185,12 +183,14 @@ export default function CommandCenter() {
     // Oracle signals
     api.oracleStatus().then((d: any) => {
       const sigs: Record<string, OracleSignal | null> = {};
-      const signals = d.signals ?? {};
+      const signals = d?.signals ?? {};
       for (const asset of ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT']) {
         sigs[asset] = signals[asset]?.current ?? null;
       }
       setOracleSignals(sigs);
-    }).catch(() => {});
+    }).catch((err) => {
+      console.error('Oracle fetch failed:', err);
+    });
   }, []);
 
   useEffect(() => {
