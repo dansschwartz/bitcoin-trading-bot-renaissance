@@ -80,7 +80,7 @@
         "multi_exchange": 0.028,
         "ml_ensemble": 0.20,
         "ml_cnn": 0.0,
-        "breakout": 0.08
+        "breakout": 0.0
     },
     "weight_lock": true,
     "mean_reversion": {
@@ -148,7 +148,7 @@
         "whale_min_value": 500000
     },
     "breakout_scanner": {
-        "enabled": true,
+        "enabled": false,
         "exchanges": [
             "coinbase",
             "kraken"
