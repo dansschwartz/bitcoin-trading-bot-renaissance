@@ -206,24 +206,46 @@ class OracleService:
         Run all models and produce weighted ensemble prediction.
         Each model outputs class probabilities for 3 classes.
         Class mapping: 0→BUY(-1), 1→HOLD(0), 2→SELL(1)
+
+        Uses weighted probability averaging (not hard argmax) so that
+        moderate BUY/SELL probabilities across models can accumulate
+        into actionable signals instead of always losing to HOLD.
         """
-        votes: Dict[str, float] = {'BUY': 0.0, 'HOLD': 0.0, 'SELL': 0.0}
+        # Weighted average of raw probabilities across all models
+        avg_probs = np.zeros(3)  # [BUY, HOLD, SELL]
+        total_weight = 0.0
         individual_votes = []
 
         for m in models:
             raw_pred = m['model'].predict(features_scaled, verbose=0)
-            pred_class = int(np.argmax(raw_pred, axis=1)[0]) - 1
+            probs = raw_pred[0]  # shape (3,)
+            avg_probs += probs * m['weight']
+            total_weight += m['weight']
+
+            # Individual model vote (for logging)
+            pred_class = int(np.argmax(probs)) - 1
             signal = SIGNAL_MAP[pred_class]
-            votes[signal] += m['weight']
             individual_votes.append({
                 'model': m['name'],
                 'signal': signal,
                 'weight': m['weight'],
-                'probs': [round(float(p), 4) for p in raw_pred[0]],
+                'probs': [round(float(p), 4) for p in probs],
             })
 
-        winner = max(votes, key=lambda k: votes[k])
-        confidence = votes[winner] / sum(votes.values())
+        if total_weight > 0:
+            avg_probs /= total_weight
+
+        # Pick signal from averaged probabilities
+        # avg_probs[0]=BUY, avg_probs[1]=HOLD, avg_probs[2]=SELL
+        ensemble_class = int(np.argmax(avg_probs)) - 1
+        winner = SIGNAL_MAP[ensemble_class]
+        confidence = float(avg_probs[np.argmax(avg_probs)])
+
+        logger.info(
+            f"Oracle ensemble probs: BUY={avg_probs[0]:.3f} "
+            f"HOLD={avg_probs[1]:.3f} SELL={avg_probs[2]:.3f} "
+            f"-> {winner} ({confidence:.1%})"
+        )
         return winner, confidence, individual_votes
 
     # ── Main prediction ──────────────────────────────────────────────────────
