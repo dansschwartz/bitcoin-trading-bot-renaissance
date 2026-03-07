@@ -8,7 +8,7 @@ All exit DECISIONS are in BASIS POINTS (validated by optimizer over 52,650 simul
 Dollar amounts are computed for logging and dashboard display only.
 
 Optimizer parameters (do not change without re-running optimizer):
-  stop_loss_bps=4, trail_activation_bps=2, trail_distance_bps=1
+  stop_loss_bps=3, trail_activation_bps=1, trail_distance_bps=1
   leg_size_usd=100, max_hold=120s, entry_interval=10s, check_interval=1s
   vol_scaling=proportional (0.3x-3.0x base on 15bps)
 """
