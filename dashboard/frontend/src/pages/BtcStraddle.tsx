@@ -147,7 +147,7 @@ export default function BtcStraddle() {
   const totalReasons = Object.values(exitReasons).reduce((a, b) => a + b, 0);
 
   return (
-    <PageShell title="Straddle Fleet" subtitle="$100/leg, BPS exits (4/2/1), 120s hold, 10s entry, vol-scaled, 35 concurrent">
+    <PageShell title="Straddle Fleet" subtitle="$100/leg, BPS exits (3/1/1), 120s hold, 10s entry, vol-scaled, 35 concurrent">
       {/* Fleet Status Bar */}
       <div className={`border rounded-xl p-3 ${fleet?.halted ? 'bg-accent-red/10 border-accent-red/40' : 'bg-surface-1 border-surface-3'}`}>
         <div className="flex flex-wrap items-center gap-4 text-sm">

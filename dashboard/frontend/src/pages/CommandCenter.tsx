@@ -11,23 +11,22 @@ import SystemHealthBar from '../components/panels/SystemHealthBar';
 import { useDashboard } from '../context/DashboardContext';
 import { api } from '../api';
 
-interface SpraySnapshot {
-  total_sprayed: number;
-  total_open: number;
-  today_pnl_usd: number;
-  today_tokens: number;
-  budget?: { deployed_usd: number; total_capital: number; deployed_pct: number };
+interface ArbSnapshot {
+  total_profit_usd: number;
+  filled_trades: number;
+  win_rate: number;
+  daily_pnl_usd: number;
 }
 
 export default function CommandCenter() {
   const { state } = useDashboard();
-  const { status, pnl } = state;
-  const [spray, setSpray] = useState<SpraySnapshot | null>(null);
+  const { pnl } = state;
+  const [arb, setArb] = useState<ArbSnapshot | null>(null);
 
   useEffect(() => {
-    api.sprayStatus().then(d => setSpray(d as unknown as SpraySnapshot)).catch(() => {});
+    api.arbSummary().then(d => setArb(d as unknown as ArbSnapshot)).catch(() => {});
     const id = setInterval(() => {
-      api.sprayStatus().then(d => setSpray(d as unknown as SpraySnapshot)).catch(() => {});
+      api.arbSummary().then(d => setArb(d as unknown as ArbSnapshot)).catch(() => {});
     }, 10_000);
     return () => clearInterval(id);
   }, []);
@@ -42,14 +41,14 @@ export default function CommandCenter() {
         <PnLCard />
         <RegimeCard />
         <MetricCard
-          title="Tokens Sprayed"
-          value={spray ? `${spray.today_tokens ?? 0}` : '--'}
-          subtitle={`${spray?.total_open ?? 0} open | ${(spray?.total_sprayed ?? 0).toLocaleString()} lifetime`}
+          title="Arb P&L"
+          value={arb ? `$${(arb.total_profit_usd ?? 0).toFixed(2)}` : '--'}
+          subtitle={arb ? `${arb.filled_trades ?? 0} fills | ${(arb.win_rate ?? 0).toFixed(0)}% win` : 'loading...'}
         />
         <MetricCard
-          title="Deployed Capital"
-          value={spray?.budget ? `$${spray.budget.deployed_usd.toFixed(0)}` : '--'}
-          subtitle={spray?.budget ? `${spray.budget.deployed_pct.toFixed(0)}% of $${spray.budget.total_capital.toFixed(0)}` : `${pnl?.total_trades ?? 0} trades (24h)`}
+          title="Arb Today"
+          value={arb ? `$${(arb.daily_pnl_usd ?? 0).toFixed(2)}` : '--'}
+          subtitle={`${pnl?.total_trades ?? 0} ML trades (24h)`}
         />
       </div>
 

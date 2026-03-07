@@ -49,6 +49,7 @@ function SignalWeightsChart() {
   }, []);
 
   const data = Object.entries(weights)
+    .filter(([, weight]) => weight > 0)
     .map(([name, weight]) => ({ name, weight }))
     .sort((a, b) => b.weight - a.weight);
 
