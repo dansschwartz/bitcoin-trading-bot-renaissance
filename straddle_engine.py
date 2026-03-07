@@ -617,6 +617,7 @@ class StraddleEngine:
 
     def _sync_open_pnl_to_db(self) -> None:
         """Write live P&L for all open straddles to DB so dashboard can read it."""
+        n = len(self.open_straddles)
         try:
             conn = sqlite3.connect(self.db_path, timeout=5)
             for s in self.open_straddles:
@@ -640,8 +641,9 @@ class StraddleEngine:
                 )
             conn.commit()
             conn.close()
+            self.log.info(f"Straddle[{self.asset}] synced {n} open P&L to DB")
         except Exception as e:
-            self.log.warning(f"Straddle[{self.asset}] pnl sync error: {e}")
+            self.log.warning(f"Straddle[{self.asset}] pnl sync error ({n} straddles): {e}")
 
     # ------------------------------------------------------------------
     # Status (for dashboard)
