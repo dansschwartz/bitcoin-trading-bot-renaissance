@@ -66,7 +66,7 @@ MODEL_CONFIGS = [
     {'bw': 5, 'fw': 2},
 ]
 
-TRAIN_CUTOFF = '2025-01-01'
+TRAIN_CUTOFF = '2022-06-01'  # Data range: 2020-12 to 2022-12
 EPOCHS = 50
 BATCH_SIZE = 512
 
