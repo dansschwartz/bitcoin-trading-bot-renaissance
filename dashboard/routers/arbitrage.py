@@ -256,6 +256,37 @@ async def arb_daily_pnl(request: Request):
         return {"error": str(e)}
 
 
+@router.get("/hourly-pnl")
+async def arb_hourly_pnl(request: Request):
+    """Hourly P&L for the last N hours (default 48)."""
+    hours = int(request.query_params.get("hours", 48))
+    try:
+        with _arb_conn() as c:
+            rows = c.execute(
+                """SELECT strftime('%Y-%m-%d %H:00', timestamp) as hour,
+                          COALESCE(SUM(actual_profit_usd), 0) as pnl,
+                          COUNT(*) as trades,
+                          SUM(CASE WHEN actual_profit_usd > 0 THEN 1 ELSE 0 END) as wins
+                   FROM arb_trades
+                   WHERE status = 'filled'
+                     AND timestamp >= datetime('now', ?)
+                   GROUP BY strftime('%Y-%m-%d %H:00', timestamp)
+                   ORDER BY hour""",
+                (f"-{hours} hours",),
+            ).fetchall()
+            return [
+                {
+                    "hour": r["hour"],
+                    "pnl": round(float(r["pnl"]), 4),
+                    "trades": r["trades"],
+                    "wins": r["wins"],
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.get("/wallet")
 async def arb_wallet(request: Request):
     """Arbitrage wallet balance and allocation."""

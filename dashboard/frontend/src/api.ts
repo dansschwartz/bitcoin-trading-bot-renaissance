@@ -107,6 +107,7 @@ export const api = {
   arbSummary: () => get<ArbSummary>('/api/arbitrage/summary'),
   arbWallet: () => get<ArbWallet>('/api/arbitrage/wallet'),
   arbDailyPnl: (days = 10) => get<ArbDailyPnl[]>(`/api/arbitrage/daily-pnl?days=${days}`),
+  arbHourlyPnl: (hours = 48) => get<{ hour: string; pnl: number; trades: number; wins: number }[]>(`/api/arbitrage/hourly-pnl?hours=${hours}`),
 
   // Breakout Scanner
   breakoutSummary: () => get<Record<string, unknown>>('/api/breakout/summary'),
