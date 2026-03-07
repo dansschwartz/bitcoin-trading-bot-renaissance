@@ -110,7 +110,8 @@ function formatTime(ts: string | null): string {
 function fmtUsd(v: number | null | undefined, sign = true): string {
   const n = v ?? 0;
   const prefix = sign && n >= 0 ? '+' : '';
-  return `${prefix}$${n.toFixed(2)}`;
+  const digits = Math.abs(n) < 0.1 ? 4 : 2;
+  return `${prefix}$${n.toFixed(digits)}`;
 }
 
 const ASSET_COLORS: Record<string, string> = {
@@ -146,7 +147,7 @@ export default function BtcStraddle() {
   const totalReasons = Object.values(exitReasons).reduce((a, b) => a + b, 0);
 
   return (
-    <PageShell title="Straddle Fleet" subtitle="Multi-asset direction-free paired LONG+SHORT — $1,000/leg, dollar exits, 35 concurrent">
+    <PageShell title="Straddle Fleet" subtitle="$100/leg, BPS exits (4/2/1), 120s hold, 10s entry, vol-scaled, 35 concurrent">
       {/* Fleet Status Bar */}
       <div className={`border rounded-xl p-3 ${fleet?.halted ? 'bg-accent-red/10 border-accent-red/40' : 'bg-surface-1 border-surface-3'}`}>
         <div className="flex flex-wrap items-center gap-4 text-sm">
