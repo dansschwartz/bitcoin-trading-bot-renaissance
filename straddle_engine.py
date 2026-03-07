@@ -676,21 +676,36 @@ class StraddleEngine:
 
         Runs every check_interval (1s). The entry cooldown (straddle_interval=10s)
         is enforced inside open_straddle() so entries happen at the right cadence.
+
+        Each engine fetches ONLY its own pair (not all pairs) to avoid serial
+        API calls blocking other engines. Caches last good price so timeout
+        exits still fire even when the price fetch is slow.
         """
+        last_price: float = 0.0
         while self._running:
             try:
-                prices = await price_fn()
-                price = prices.get(self.pair)
-                if price and price > 0:
-                    p = float(price)
+                # Fetch ONLY our pair's price, with a 3s timeout
+                try:
+                    prices = await asyncio.wait_for(
+                        price_fn(self.pair), timeout=3.0
+                    )
+                    p = prices.get(self.pair)
+                    if p and float(p) > 0:
+                        last_price = float(p)
+                except asyncio.TimeoutError:
+                    pass  # use last_price — timeout exits still work
+                except Exception:
+                    pass  # use last_price
+
+                if last_price > 0:
                     # Record price for vol computation
-                    self._record_price(p)
+                    self._record_price(last_price)
                     # Check exits on all open straddles
                     if self.open_straddles:
-                        self.check_exits(p)
+                        self.check_exits(last_price)
                         self._sync_open_pnl_to_db()
                     # Try to open a new straddle (cooldown gate inside)
-                    self.open_straddle(p, vol_pred=None)
+                    self.open_straddle(last_price, vol_pred=None)
             except Exception as e:
                 self.log.warning(f"Straddle[{self.asset}] loop error: {e}")
             await asyncio.sleep(self.exit_check_interval)

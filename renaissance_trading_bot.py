@@ -6844,15 +6844,16 @@ class RenaissanceTradingBot:
     async def _get_straddle_price(self, pair: str = '') -> Dict[str, float]:
         """Fetch current price for straddle exit checks.
 
-        When called without args from a per-engine exit loop, pair is set by
-        the lambda closure. Returns dict like {'BTC-USD': price}.
+        When called with a specific pair, fetches ONLY that pair (fast path
+        for per-engine exit loops). Without args, fetches all engine pairs.
         """
-        # Collect all straddle pairs we need
+        # Collect pairs we need — only the requested one, or all if none specified
         pairs_needed = set()
         if pair:
             pairs_needed.add(pair)
-        for eng in self.straddle_engines.values():
-            pairs_needed.add(eng.pair)
+        else:
+            for eng in self.straddle_engines.values():
+                pairs_needed.add(eng.pair)
 
         result: Dict[str, float] = {}
         provider = getattr(self, 'binance_spot', None)
