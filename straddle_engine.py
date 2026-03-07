@@ -638,7 +638,7 @@ class StraddleEngine:
                 )
             conn.commit()
             conn.close()
-            self.log.info(f"Straddle[{self.asset}] synced {n} open P&L to DB")
+            self.log.debug(f"Straddle[{self.asset}] synced {n} open P&L to DB")
         except Exception as e:
             self.log.warning(f"Straddle[{self.asset}] pnl sync error ({n} straddles): {e}")
 
