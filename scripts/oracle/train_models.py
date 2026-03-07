@@ -99,28 +99,30 @@ def build_model(n_features: int = 36, n_classes: int = 3):
 def main():
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # Load data
+    # Load data — only needed columns to save memory on VPS
     data_path = DATA_PATH if os.path.exists(DATA_PATH) else ALT_DATA_PATH
     if not os.path.exists(data_path):
         print(f"ERROR: Training data not found at {DATA_PATH} or {ALT_DATA_PATH}")
         print("Copy raw_data_4_hour_train_test_data.csv to data/oracle/")
         sys.exit(1)
 
+    label_cols = [f'lab_{c["bw"]}_{c["fw"]}' for c in MODEL_CONFIGS]
+    use_cols = ['Date'] + FEATURE_COLS + label_cols
+
     print(f"Loading data from: {data_path}")
-    df = pd.read_csv(data_path)
+    print(f"  (reading only {len(use_cols)} columns to save memory)")
+    df = pd.read_csv(data_path, usecols=use_cols, dtype={c: np.float32 for c in FEATURE_COLS})
     print(f"Loaded {len(df):,} rows")
 
-    # Clean features
-    features = df[FEATURE_COLS].copy()
-    features.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # Clean features — work in-place to save memory
+    for col in FEATURE_COLS:
+        df[col] = df[col].replace([np.inf, -np.inf], np.nan)
 
-    # Keep rows where features are valid
-    valid_mask = features.notna().all(axis=1)
-    df = df[valid_mask].copy()
-    features = features[valid_mask].copy()
+    valid_mask = df[FEATURE_COLS].notna().all(axis=1)
+    df = df[valid_mask].reset_index(drop=True)
     print(f"After cleaning: {len(df):,} rows")
 
-    # Load or fit scaler
+    # Load scaler
     if os.path.exists(SCALER_PATH):
         print(f"Loading existing scaler from {SCALER_PATH}")
         with open(SCALER_PATH, 'rb') as f:
@@ -128,21 +130,18 @@ def main():
     else:
         print("Fitting new scaler...")
         scaler = StandardScaler()
-        scaler.fit(features.values)
+        scaler.fit(df[FEATURE_COLS].values)
         with open(SCALER_PATH, 'wb') as f:
             pickle.dump(scaler, f)
         print(f"Scaler saved to {SCALER_PATH}")
 
-    # Scale features
-    X_all = scaler.transform(features.values)
-
-    # Split by date
+    # Split by date BEFORE scaling (saves memory — only scale what we need)
     dates = pd.to_datetime(df['Date'])
-    train_mask = dates < TRAIN_CUTOFF
-    test_mask = dates >= TRAIN_CUTOFF
+    train_mask = (dates < TRAIN_CUTOFF).values
+    test_mask = (dates >= TRAIN_CUTOFF).values
 
-    X_train = X_all[train_mask]
-    X_test = X_all[test_mask]
+    X_train = scaler.transform(df.loc[train_mask, FEATURE_COLS].values).astype(np.float32)
+    X_test = scaler.transform(df.loc[test_mask, FEATURE_COLS].values).astype(np.float32)
 
     print(f"Train: {len(X_train):,} | Test: {len(X_test):,}")
 
@@ -161,9 +160,8 @@ def main():
         print(f"{'='*60}")
 
         # Get labels — map {-1, 0, 1} → {0, 1, 2} for sparse categorical
-        y_all = df[label_col].values
-        y_train = y_all[train_mask] + 1  # -1→0, 0→1, 1→2
-        y_test = y_all[test_mask] + 1
+        y_train = (df.loc[train_mask, label_col].values + 1).astype(np.int8)
+        y_test = (df.loc[test_mask, label_col].values + 1).astype(np.int8)
 
         # Class weights for imbalanced data (SRS approach)
         from sklearn.utils.class_weight import compute_class_weight
