@@ -1405,6 +1405,25 @@ class RenaissanceTradingBot:
         except Exception as _oracle_err:
             self.logger.warning(f"Oracle init failed (will run without oracle): {_oracle_err}")
 
+        # ── Oracle Trading Engine (paper-exact strategy) ──
+        self.oracle_trader = None
+        _ot_config = self.config.get('oracle_trading', {})
+        if _ot_config.get('enabled', False) and self.oracle:
+            try:
+                from oracle.oracle_trading_engine import OracleTradingEngine
+                _ot_db = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
+                self.oracle_trader = OracleTradingEngine(
+                    config=_ot_config,
+                    oracle=self.oracle,
+                    db_path=_ot_db,
+                )
+                self.logger.info(
+                    f"Oracle Trading Engine: {len(self.oracle_trader.wallets)} pairs, "
+                    f"${_ot_config.get('wallet_size', 5000):,}/pair"
+                )
+            except Exception as _ot_err:
+                self.logger.warning(f"Oracle Trading Engine init failed: {_ot_err}")
+
         self.logger.info("Renaissance Trading Bot initialized with research-optimized weights")
         self.logger.info(f"Signal weights: {self.signal_weights}")
 
@@ -7040,6 +7059,10 @@ class RenaissanceTradingBot:
             except Exception as _e:
                 self.logger.warning(f"Oracle initial prediction failed: {_e}")
             asyncio.create_task(self.oracle.run_forever())
+
+        # ── Start Oracle Trading Engine loop ──
+        if self.oracle_trader:
+            asyncio.create_task(self.oracle_trader.run_forever())
 
         # ── Prune old data to reduce DB size and memory pressure ──
         self._prune_old_data()

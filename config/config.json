@@ -708,6 +708,18 @@
             }
         }
     },
+    "oracle_trading": {
+        "enabled": true,
+        "commission_fee": 0.001,
+        "stop_loss": 0.10,
+        "wallet_size": 5000,
+        "initial_status": "observation",
+        "max_daily_loss_pct": 0.15,
+        "pairs": [
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "AVAXUSDT",
+            "LINKUSDT", "ADAUSDT", "XRPUSDT", "DOTUSDT", "MATICUSDT"
+        ]
+    },
     "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],
     "model_retraining": {
         "enabled": true,

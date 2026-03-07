@@ -1,0 +1,282 @@
+import { useEffect, useState, useCallback } from 'react';
+import PageShell from '../components/layout/PageShell';
+import MetricCard from '../components/cards/MetricCard';
+import { api } from '../api';
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface WalletData {
+  pair: string;
+  capital: number;
+  initial: number;
+  pnl_usd: number;
+  pnl_pct: number;
+  position_open: boolean;
+  entry_price: number;
+  stop_loss_price: number;
+  current_price: number;
+  unrealized_pnl: number;
+  total_trades: number;
+  winning_trades: number;
+  win_rate: number;
+  max_drawdown_pct: number;
+  status: string;
+  last_signal: string;
+}
+
+interface Summary {
+  total_capital: number;
+  total_initial: number;
+  total_pnl: number;
+  total_return_pct: number;
+  positions_open: number;
+  total_pairs: number;
+  active_pairs: number;
+}
+
+interface TradeRow {
+  pair: string;
+  action: string;
+  price: number;
+  capital_before: number;
+  capital_after: number;
+  pnl_usd: number;
+  pnl_pct: number;
+  exit_reason: string;
+  hold_bars: number;
+  signal: string;
+  confidence: number;
+  timestamp: string;
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function fmtDollar(n: number): string {
+  const abs = Math.abs(n);
+  const sign = n >= 0 ? '+' : '-';
+  if (abs >= 1000) return `${sign}$${abs.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+  return `${sign}$${abs.toFixed(2)}`;
+}
+
+function pnlColor(n: number): string {
+  if (n > 0) return 'text-accent-green';
+  if (n < 0) return 'text-accent-red';
+  return 'text-gray-400';
+}
+
+function signalBadge(signal: string) {
+  if (signal === 'BUY')
+    return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-green/20 text-accent-green">BUY</span>;
+  if (signal === 'SELL')
+    return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-red/20 text-accent-red">SELL</span>;
+  return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-600/40 text-gray-400">HOLD</span>;
+}
+
+function statusBadge(status: string) {
+  if (status === 'live')
+    return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-green/20 text-accent-green">LIVE</span>;
+  if (status === 'halted')
+    return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-red/20 text-accent-red">HALTED</span>;
+  return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-yellow/20 text-accent-yellow">OBS</span>;
+}
+
+// ─── Component ──────────────────────────────────────────────────────────────
+
+export default function OracleTrading() {
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [wallets, setWallets] = useState<WalletData[]>([]);
+  const [trades, setTrades] = useState<TradeRow[]>([]);
+
+  const fetchAll = useCallback(async () => {
+    api.oracleTradingStatus().then((d: any) => {
+      setSummary(d.summary || null);
+      const w = Object.values(d.wallets || {}) as WalletData[];
+      w.sort((a, b) => (b.pnl_usd || 0) - (a.pnl_usd || 0));
+      setWallets(w);
+    }).catch(() => {});
+
+    api.oracleTradingTrades('', 30).then((d: any) => {
+      setTrades(d || []);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 10_000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
+
+  return (
+    <PageShell title="Oracle Trades" subtitle="Paper-exact strategy replication (Parente et al. 2023)">
+      {/* Fleet Summary */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <MetricCard
+          title="Total Capital"
+          value={summary ? `$${summary.total_capital.toLocaleString()}` : '--'}
+          subtitle={summary ? `${summary.total_pairs} pairs` : ''}
+        />
+        <MetricCard
+          title="Total P&L"
+          value={summary ? fmtDollar(summary.total_pnl) : '--'}
+          valueColor={summary ? pnlColor(summary.total_pnl) : 'text-gray-100'}
+        />
+        <MetricCard
+          title="Return"
+          value={summary ? `${summary.total_return_pct >= 0 ? '+' : ''}${summary.total_return_pct.toFixed(2)}%` : '--'}
+          valueColor={summary ? pnlColor(summary.total_return_pct) : 'text-gray-100'}
+        />
+        <MetricCard
+          title="Open Positions"
+          value={summary ? String(summary.positions_open) : '--'}
+        />
+        <MetricCard
+          title="Active Pairs"
+          value={summary ? `${summary.active_pairs}/${summary.total_pairs}` : '--'}
+        />
+      </div>
+
+      {/* Wallet Table */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-surface-3">
+          <h3 className="text-sm font-medium text-gray-300">Oracle Wallets</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-500 border-b border-surface-3">
+                <th className="px-3 py-2 text-left font-medium">Pair</th>
+                <th className="px-3 py-2 text-left font-medium">Signal</th>
+                <th className="px-3 py-2 text-right font-medium">Capital</th>
+                <th className="px-3 py-2 text-right font-medium">P&L</th>
+                <th className="px-3 py-2 text-right font-medium">Return</th>
+                <th className="px-3 py-2 text-right font-medium">Trades</th>
+                <th className="px-3 py-2 text-right font-medium">Win Rate</th>
+                <th className="px-3 py-2 text-left font-medium">Position</th>
+                <th className="px-3 py-2 text-right font-medium">Max DD</th>
+                <th className="px-3 py-2 text-left font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {wallets.length === 0 && (
+                <tr><td colSpan={10} className="px-3 py-6 text-center text-gray-500">
+                  Waiting for first cycle...
+                </td></tr>
+              )}
+              {wallets.map(w => (
+                <tr key={w.pair} className="border-b border-surface-3/50 hover:bg-surface-2/30">
+                  <td className="px-3 py-2 font-mono font-medium text-gray-200">
+                    {w.pair.replace('USDT', '')}
+                  </td>
+                  <td className="px-3 py-2">{signalBadge(w.last_signal)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-300">
+                    ${w.capital.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </td>
+                  <td className={`px-3 py-2 text-right font-mono ${pnlColor(w.pnl_usd)}`}>
+                    {fmtDollar(w.pnl_usd)}
+                  </td>
+                  <td className={`px-3 py-2 text-right font-mono ${pnlColor(w.pnl_pct)}`}>
+                    {w.pnl_pct >= 0 ? '+' : ''}{w.pnl_pct.toFixed(2)}%
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-400">
+                    {w.total_trades}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-400">
+                    {w.win_rate.toFixed(0)}%
+                  </td>
+                  <td className="px-3 py-2 text-gray-400">
+                    {w.position_open ? (
+                      <span className="text-accent-blue">
+                        LONG @ ${w.entry_price.toLocaleString()}
+                        {w.unrealized_pnl !== 0 && (
+                          <span className={`ml-1 ${pnlColor(w.unrealized_pnl)}`}>
+                            ({w.unrealized_pnl >= 0 ? '+' : ''}{w.unrealized_pnl}%)
+                          </span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-gray-600">flat</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-400">
+                    {w.max_drawdown_pct.toFixed(1)}%
+                  </td>
+                  <td className="px-3 py-2">{statusBadge(w.status)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Recent Trades */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-surface-3">
+          <h3 className="text-sm font-medium text-gray-300">Recent Trades</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-500 border-b border-surface-3">
+                <th className="px-3 py-2 text-left font-medium">Time</th>
+                <th className="px-3 py-2 text-left font-medium">Pair</th>
+                <th className="px-3 py-2 text-left font-medium">Action</th>
+                <th className="px-3 py-2 text-right font-medium">Price</th>
+                <th className="px-3 py-2 text-right font-medium">P&L</th>
+                <th className="px-3 py-2 text-right font-medium">Return</th>
+                <th className="px-3 py-2 text-left font-medium">Reason</th>
+                <th className="px-3 py-2 text-right font-medium">Held</th>
+                <th className="px-3 py-2 text-right font-medium">Capital</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trades.length === 0 && (
+                <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-500">
+                  No trades yet — waiting for BUY signals
+                </td></tr>
+              )}
+              {trades.map((t, i) => (
+                <tr key={i} className="border-b border-surface-3/50 hover:bg-surface-2/30">
+                  <td className="px-3 py-2 text-gray-500 font-mono">
+                    {t.timestamp?.slice(5, 16)}
+                  </td>
+                  <td className="px-3 py-2 font-mono font-medium text-gray-300">
+                    {t.pair?.replace('USDT', '')}
+                  </td>
+                  <td className="px-3 py-2">
+                    {t.action === 'OPEN' ? (
+                      <span className="text-accent-blue font-medium">OPEN</span>
+                    ) : (
+                      <span className="text-gray-300 font-medium">CLOSE</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-300">
+                    ${t.price?.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </td>
+                  <td className={`px-3 py-2 text-right font-mono ${t.action === 'CLOSE' ? pnlColor(t.pnl_usd || 0) : 'text-gray-600'}`}>
+                    {t.action === 'CLOSE' ? fmtDollar(t.pnl_usd || 0) : '--'}
+                  </td>
+                  <td className={`px-3 py-2 text-right font-mono ${t.action === 'CLOSE' ? pnlColor(t.pnl_pct || 0) : 'text-gray-600'}`}>
+                    {t.action === 'CLOSE' ? `${(t.pnl_pct || 0) >= 0 ? '+' : ''}${((t.pnl_pct || 0) * 100).toFixed(2)}%` : '--'}
+                  </td>
+                  <td className="px-3 py-2 text-gray-400">
+                    {t.exit_reason || '--'}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-400">
+                    {t.hold_bars != null && t.action === 'CLOSE' ? `${t.hold_bars} bars` : '--'}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-gray-300">
+                    {t.action === 'CLOSE' && t.capital_after
+                      ? `$${t.capital_after.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                      : t.capital_before
+                        ? `$${t.capital_before.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                        : '--'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </PageShell>
+  );
+}

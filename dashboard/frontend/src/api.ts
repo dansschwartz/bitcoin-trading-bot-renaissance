@@ -188,4 +188,11 @@ export const api = {
   oracleStatus: () => get<Record<string, unknown>>('/api/oracle/status'),
   oracleHistory: (asset = 'BTCUSDT', hours = 168) =>
     get<Record<string, unknown>[]>(`/api/oracle/history?asset=${asset}&hours=${hours}`),
+
+  // Oracle Trading Engine
+  oracleTradingStatus: () => get<Record<string, unknown>>('/api/oracle-trading/status'),
+  oracleTradingTrades: (pair = '', limit = 50) =>
+    get<Record<string, unknown>[]>(`/api/oracle-trading/trades?pair=${pair}&limit=${limit}`),
+  oracleTradingEquity: (pair: string) =>
+    get<Record<string, unknown>[]>(`/api/oracle-trading/equity/${pair}`),
 };
