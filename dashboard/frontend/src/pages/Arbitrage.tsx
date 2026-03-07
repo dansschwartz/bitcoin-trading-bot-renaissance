@@ -181,13 +181,18 @@ export default function Arbitrage() {
                 <th className="text-left py-2 px-2">Strategy</th>
                 <th className="text-left py-2 px-2">Symbol</th>
                 <th className="text-left py-2 px-2">Buy/Sell</th>
+                <th className="text-right py-2 px-2">Size</th>
                 <th className="text-right py-2 px-2">Spread (bps)</th>
+                <th className="text-right py-2 px-2">Fees</th>
                 <th className="text-left py-2 px-2">Status</th>
                 <th className="text-right py-2 px-2">P&L</th>
               </tr>
             </thead>
             <tbody>
-              {trades.map((t) => (
+              {trades.map((t) => {
+                const size = t.trade_size_usd || (t.buy_price && t.quantity ? t.buy_price * t.quantity : 0);
+                const totalFees = (t.buy_fee ?? 0) + (t.sell_fee ?? 0) + (t.taker_fee_usd ?? 0) + (t.withdrawal_fee_usd ?? 0);
+                return (
                 <tr key={t.id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
                   <td className="py-2 px-2 text-gray-500">{formatTimestamp(t.timestamp)}</td>
                   <td className="py-2 px-2">
@@ -200,7 +205,13 @@ export default function Arbitrage() {
                     {t.buy_exchange} / {t.sell_exchange}
                   </td>
                   <td className="py-2 px-2 text-right text-gray-300">
+                    {size > 0 ? formatCurrency(size) : '--'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-300">
                     {t.net_spread_bps?.toFixed(1) ?? '--'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-400">
+                    {totalFees > 0 ? formatCurrency(totalFees) : '--'}
                   </td>
                   <td className="py-2 px-2">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] ${STATUS_COLORS[t.status] || 'bg-surface-3 text-gray-400'}`}>
@@ -213,10 +224,11 @@ export default function Arbitrage() {
                       : '--'}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
               {trades.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-4 text-center text-gray-500">
+                  <td colSpan={9} className="py-4 text-center text-gray-500">
                     No arbitrage trades recorded
                   </td>
                 </tr>

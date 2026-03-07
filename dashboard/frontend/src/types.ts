@@ -359,6 +359,11 @@ export interface ArbTrade {
   expected_profit_usd: number;
   actual_profit_usd: number;
   timestamp: string;
+  trade_size_usd?: number;
+  buy_fee?: number;
+  sell_fee?: number;
+  taker_fee_usd?: number;
+  withdrawal_fee_usd?: number;
 }
 
 export interface ArbSignal {
