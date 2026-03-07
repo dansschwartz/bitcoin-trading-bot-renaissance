@@ -595,6 +595,7 @@ class StraddleEngine:
         Runs every exit_check_interval (2s). The entry cooldown (interval_seconds=10s)
         is enforced inside open_straddle() so entries happen at the right cadence.
         """
+        tick = 0
         while self._running:
             try:
                 prices = await price_fn()
@@ -604,11 +605,58 @@ class StraddleEngine:
                     # Check exits on all open straddles
                     if self.open_straddles:
                         self.check_exits(p)
+                    # Sync live P&L to DB every ~10s so dashboard can display it
+                    tick += 1
+                    if tick % 5 == 0 and self.open_straddles:
+                        self._sync_open_pnl_to_db()
                     # Try to open a new straddle (cooldown gate inside)
                     self.open_straddle(p, vol_pred=None)
             except Exception as e:
                 self.log.warning(f"Straddle[{self.asset}] loop error: {e}")
             await asyncio.sleep(self.exit_check_interval)
+
+    def _sync_open_pnl_to_db(self) -> None:
+        """Write live P&L for all open straddles to DB so dashboard can read it."""
+        try:
+            conn = self._get_conn()
+            for s in self.open_straddles:
+                conn.execute(
+                    """UPDATE straddle_log SET
+                        long_pnl_usd = ?, short_pnl_usd = ?,
+                        long_peak_usd = ?, short_peak_usd = ?,
+                        long_pnl_bps = ?, short_pnl_bps = ?,
+                        net_pnl_usd = ?
+                    WHERE id = ? AND status = 'OPEN'""",
+                    (
+                        round(s.long_leg.pnl_usd, 4),
+                        round(s.short_leg.pnl_usd, 4),
+                        round(s.long_leg.peak_pnl_usd, 4),
+                        round(s.short_leg.peak_pnl_usd, 4),
+                        round(s.long_leg.pnl_bps, 2),
+                        round(s.short_leg.pnl_bps, 2),
+                        round(s.long_leg.pnl_usd + s.short_leg.pnl_usd, 4),
+                        s.straddle_id,
+                    ),
+                )
+                for leg in (s.long_leg, s.short_leg):
+                    conn.execute(
+                        """UPDATE straddle_legs SET
+                            pnl_usd = ?, peak_pnl_usd = ?,
+                            pnl_bps = ?, peak_favorable_bps = ?
+                        WHERE straddle_id = ? AND side = ?""",
+                        (
+                            round(leg.pnl_usd, 4),
+                            round(leg.peak_pnl_usd, 4),
+                            round(leg.pnl_bps, 2),
+                            round(leg.peak_favorable_bps, 2),
+                            s.straddle_id,
+                            leg.side,
+                        ),
+                    )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.log.debug(f"Straddle[{self.asset}] pnl sync error: {e}")
 
     # ------------------------------------------------------------------
     # Status (for dashboard)

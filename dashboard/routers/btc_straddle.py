@@ -139,7 +139,8 @@ def _db_status(db_path: str, asset: str) -> dict:
     open_rows = _safe_query(
         db_path,
         """SELECT id, entry_price, size_usd, stop_loss_usd, trail_activation_usd,
-                  trail_distance_usd, opened_at
+                  trail_distance_usd, opened_at,
+                  long_pnl_usd, short_pnl_usd, long_peak_usd, short_peak_usd
            FROM straddle_log WHERE status = 'OPEN' AND COALESCE(asset, 'BTC') = ?
            ORDER BY opened_at DESC""",
         (asset,),
@@ -173,8 +174,10 @@ def _db_status(db_path: str, asset: str) -> dict:
             'trail_activation_usd': row.get('trail_activation_usd', 1.0),
             'trail_distance_usd': row.get('trail_distance_usd', 1.0),
             'age_seconds': round(age, 1),
-            'long_pnl_usd': 0, 'short_pnl_usd': 0,
-            'long_peak_usd': 0, 'short_peak_usd': 0,
+            'long_pnl_usd': row.get('long_pnl_usd') or 0,
+            'short_pnl_usd': row.get('short_pnl_usd') or 0,
+            'long_peak_usd': row.get('long_peak_usd') or 0,
+            'short_peak_usd': row.get('short_peak_usd') or 0,
             'long_trail_active': False, 'short_trail_active': False,
         })
 
