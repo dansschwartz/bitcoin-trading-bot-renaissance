@@ -74,7 +74,7 @@ function signalBadge(signal: string) {
 
 function statusBadge(status: string) {
   if (status === 'live')
-    return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-green/20 text-accent-green">LIVE</span>;
+    return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-green/20 text-accent-green">PAPER</span>;
   if (status === 'halted')
     return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-red/20 text-accent-red">HALTED</span>;
   return <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-accent-yellow/20 text-accent-yellow">OBS</span>;
