@@ -595,7 +595,6 @@ class StraddleEngine:
         Runs every exit_check_interval (2s). The entry cooldown (interval_seconds=10s)
         is enforced inside open_straddle() so entries happen at the right cadence.
         """
-        tick = 0
         while self._running:
             try:
                 prices = await price_fn()
@@ -605,9 +604,7 @@ class StraddleEngine:
                     # Check exits on all open straddles
                     if self.open_straddles:
                         self.check_exits(p)
-                    # Sync live P&L to DB every ~10s so dashboard can display it
-                    tick += 1
-                    if tick % 5 == 0 and self.open_straddles:
+                        # Sync live P&L to DB so dashboard can display it
                         self._sync_open_pnl_to_db()
                     # Try to open a new straddle (cooldown gate inside)
                     self.open_straddle(p, vol_pred=None)
