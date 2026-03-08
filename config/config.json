@@ -671,7 +671,7 @@
                 "binance_symbol": "BTCUSDT",
                 "leg_size_usd": 100,
                 "max_capital_deployed": 7000,
-                "max_open_straddles": 35,
+                "max_open_straddles": 10,
                 "max_daily_loss_usd": 700,
                 "stop_loss_bps": 3,
                 "trail_activation_bps": 1,
@@ -683,6 +683,7 @@
                 "vol_scaling_base_vol": 15.0,
                 "vol_scaling_min_ratio": 0.3,
                 "vol_scaling_max_ratio": 3.0,
+                "blocked_hours_utc": [0, 1],
                 "observation_mode": false
             },
             "ETH": {
@@ -692,7 +693,7 @@
                 "binance_symbol": "ETHUSDT",
                 "leg_size_usd": 100,
                 "max_capital_deployed": 7000,
-                "max_open_straddles": 35,
+                "max_open_straddles": 10,
                 "max_daily_loss_usd": 700,
                 "stop_loss_bps": 3,
                 "trail_activation_bps": 1,
@@ -704,6 +705,7 @@
                 "vol_scaling_base_vol": 15.0,
                 "vol_scaling_min_ratio": 0.3,
                 "vol_scaling_max_ratio": 3.0,
+                "blocked_hours_utc": [0, 1],
                 "observation_mode": false
             }
         }

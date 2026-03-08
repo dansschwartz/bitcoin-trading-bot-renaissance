@@ -49,6 +49,26 @@ interface TradeRow {
   timestamp: string;
 }
 
+// ─── Countdown helpers ──────────────────────────────────────────────────────
+
+function getNextPredictionTime(): Date {
+  const now = new Date();
+  const hour = now.getUTCHours();
+  const nextBoundary = (Math.floor(hour / 4) + 1) * 4;
+  const next = new Date(now);
+  next.setUTCHours(nextBoundary % 24, 0, 30, 0); // +30s like the service
+  if (nextBoundary >= 24) next.setUTCDate(next.getUTCDate() + 1);
+  return next;
+}
+
+function formatCountdown(ms: number): string {
+  if (ms <= 0) return 'Running now...';
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return `${h}h ${m}m ${s}s`;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function fmtDollar(n: number): string {
@@ -86,6 +106,9 @@ export default function OracleTrading() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [wallets, setWallets] = useState<WalletData[]>([]);
   const [trades, setTrades] = useState<TradeRow[]>([]);
+  const [predictions, setPredictions] = useState<any[]>([]);
+  const [countdown, setCountdown] = useState<string>('');
+  const [lastRun, setLastRun] = useState<string>('');
 
   const fetchAll = useCallback(async () => {
     api.oracleTradingStatus().then((d: any) => {
@@ -98,6 +121,23 @@ export default function OracleTrading() {
     api.oracleTradingTrades('', 30).then((d: any) => {
       setTrades(d || []);
     }).catch(() => {});
+
+    api.oracleStatus().then((d: any) => {
+      const allPreds: any[] = [];
+      let latestTs = '';
+      for (const [asset, data] of Object.entries(d.signals || {})) {
+        const assetData = data as any;
+        const current = assetData.current;
+        if (current) {
+          allPreds.push({ asset, ...current });
+          const ts = current.timestamp || current.candle_time || '';
+          if (ts > latestTs) latestTs = ts;
+        }
+      }
+      allPreds.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+      setPredictions(allPreds);
+      if (latestTs) setLastRun(latestTs);
+    }).catch((err) => console.error('Oracle status fetch failed:', err));
   }, []);
 
   useEffect(() => {
@@ -105,6 +145,18 @@ export default function OracleTrading() {
     const id = setInterval(fetchAll, 10_000);
     return () => clearInterval(id);
   }, [fetchAll]);
+
+  // Countdown timer — ticks every second
+  useEffect(() => {
+    const tick = () => {
+      const next = getNextPredictionTime();
+      const ms = next.getTime() - Date.now();
+      setCountdown(formatCountdown(ms));
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <PageShell title="Oracle Trades" subtitle="Paper-exact strategy replication (Parente et al. 2023)">
@@ -133,6 +185,111 @@ export default function OracleTrading() {
           title="Active Pairs"
           value={summary ? `${summary.active_pairs}/${summary.total_pairs}` : '--'}
         />
+      </div>
+
+      {/* Countdown Timer + Last Run Info */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-6">
+          <div>
+            <span className="text-xs text-gray-500 mr-2">Next Prediction</span>
+            <span className="text-sm font-mono font-medium text-gray-100">{countdown}</span>
+          </div>
+          <div>
+            <span className="text-xs text-gray-500 mr-2">Last Run</span>
+            <span className="text-sm font-mono text-gray-300">
+              {lastRun ? lastRun.replace('T', ' ').slice(0, 19) + ' UTC' : '--'}
+            </span>
+          </div>
+        </div>
+        <div className="text-xs text-gray-600">4H boundaries: 00:00 / 04:00 / 08:00 / 12:00 / 16:00 / 20:00 UTC</div>
+      </div>
+
+      {/* Prediction Log */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-surface-3">
+          <h3 className="text-sm font-medium text-gray-300">Prediction Log</h3>
+        </div>
+        <div className="divide-y divide-surface-3/50">
+          {predictions.length === 0 && (
+            <div className="px-4 py-6 text-center text-gray-500 text-xs">
+              Waiting for oracle predictions...
+            </div>
+          )}
+          {predictions.map((pred, idx) => {
+            const signal = (pred.signal || pred.action || 'HOLD').toUpperCase();
+            const confidence = pred.confidence != null ? (pred.confidence * 100).toFixed(1) : '--';
+            const closePrice = pred.close_price || pred.candle_close || pred.price;
+            const candleTime = pred.candle_time || pred.timestamp || '';
+            const modelVotes: any[] = Array.isArray(pred.model_votes) ? pred.model_votes : [];
+
+            return (
+              <div key={idx} className="px-4 py-3">
+                {/* Asset header row */}
+                <div className="flex items-center gap-3 mb-2">
+                  <span className="font-mono font-medium text-gray-200 text-sm">
+                    {(pred.asset || '').replace('USDT', '')}
+                  </span>
+                  {signalBadge(signal)}
+                  <span className="text-xs text-gray-400">
+                    Confidence: <span className="font-mono text-gray-200">{confidence}%</span>
+                  </span>
+                  {closePrice != null && (
+                    <span className="text-xs text-gray-400">
+                      Close: <span className="font-mono text-gray-300">
+                        ${Number(closePrice).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </span>
+                    </span>
+                  )}
+                  {candleTime && (
+                    <span className="text-xs text-gray-500 font-mono ml-auto">
+                      {candleTime.replace('T', ' ').slice(0, 19)}
+                    </span>
+                  )}
+                </div>
+
+                {/* Model vote breakdown */}
+                {modelVotes.length > 0 && (
+                  <div className="space-y-1 ml-1">
+                    {modelVotes.map((vote: any, vi: number) => {
+                      const shortName = (vote.model || '')
+                        .replace('model_final_', '')
+                        .replace('.h5', '')
+                        .replace(/_/g, '\u00D7');
+                      const weight = vote.weight != null ? (vote.weight * 100).toFixed(0) : '?';
+                      const mSignal = (vote.signal || 'HOLD').toUpperCase();
+                      const probs = vote.probs || [0, 0, 0];
+                      const buyPct = (probs[0] || 0) * 100;
+                      const holdPct = (probs[1] || 0) * 100;
+                      const sellPct = (probs[2] || 0) * 100;
+
+                      return (
+                        <div key={vi} className="flex items-center gap-2 text-xs">
+                          <span className="font-mono text-gray-400 w-12 text-right">{shortName}</span>
+                          <span className="text-gray-500 w-10 text-right">({weight}%)</span>
+                          <span className={`w-8 text-center font-medium ${
+                            mSignal === 'BUY' ? 'text-accent-green' :
+                            mSignal === 'SELL' ? 'text-accent-red' :
+                            'text-gray-400'
+                          }`}>
+                            {mSignal}
+                          </span>
+                          <div className="flex h-1.5 rounded-full overflow-hidden bg-surface-3 w-24">
+                            <div className="bg-accent-green" style={{ width: `${buyPct}%` }} />
+                            <div className="bg-gray-500" style={{ width: `${holdPct}%` }} />
+                            <div className="bg-accent-red" style={{ width: `${sellPct}%` }} />
+                          </div>
+                          <span className="font-mono text-gray-500">
+                            B:{buyPct.toFixed(1)}% H:{holdPct.toFixed(1)}% S:{sellPct.toFixed(1)}%
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {/* Wallet Table */}

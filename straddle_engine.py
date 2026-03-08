@@ -113,6 +113,9 @@ class StraddleEngine:
         # Mode
         self.observation_mode: bool = config.get('observation_mode', False)
 
+        # Store config for blocked_hours lookup
+        self.config = config
+
         # Runtime state
         self.open_straddles: List[Straddle] = []
         self._last_open_time: float = 0.0
@@ -388,6 +391,13 @@ class StraddleEngine:
         # Gate: fleet-wide limits
         if self.fleet and not self.fleet.allow_open(self.asset, self.leg_size_usd):
             return None
+
+        # Time-of-day block (00:00-02:00 UTC loses money empirically)
+        blocked_hours = self.config.get('blocked_hours_utc', [])
+        if blocked_hours:
+            current_hour = datetime.now(timezone.utc).hour
+            if current_hour in blocked_hours:
+                return None
 
         # Compute vol-scaled thresholds for this straddle
         vol_ratio = self._get_vol_ratio()
