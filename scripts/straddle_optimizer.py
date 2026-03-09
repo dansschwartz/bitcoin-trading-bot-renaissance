@@ -35,7 +35,10 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_DIR / "data"
 
 TOTAL_CAPITAL = 1000
-BINANCE_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_URLS = [
+    "https://api.binance.com/api/v3/klines",
+    "https://api.binance.us/api/v3/klines",
+]
 
 # Per-asset vol scaling base (must match config.json vol_scaling_base_vol)
 VOL_BASE: dict[str, float] = {
@@ -159,24 +162,37 @@ def fetch_prices(
         prices: list[tuple[int, float]] = []
         cur = start_ms
         reqs = 0
+        # Try each Binance endpoint until one works
+        api_url = BINANCE_URLS[0]
+        geo_blocked = False
         print(f"Fetching {hours}h of {label} {symbol} from Binance...")
 
         while cur < end_ms:
             try:
-                r = requests.get(BINANCE_URL, params={
+                r = requests.get(api_url, params={
                     "symbol": symbol, "interval": interval,
                     "startTime": cur, "endTime": min(cur + 999 * step, end_ms),
                     "limit": 1000,
                 }, timeout=10)
 
-                if r.status_code == 400 and interval == "1s":
-                    print(f"  1s not supported for this range, falling back...")
+                if r.status_code in (400, 451) and interval == "1s":
+                    print(f"  1s not available (HTTP {r.status_code}), falling back to 1m...")
                     prices = []
                     break
                 if r.status_code == 429:
                     print("  Rate limited, waiting 10s...")
                     time.sleep(10)
                     continue
+                if r.status_code == 451:
+                    # Try Binance US fallback
+                    if api_url == BINANCE_URLS[0] and len(BINANCE_URLS) > 1:
+                        api_url = BINANCE_URLS[1]
+                        print(f"  Geo-restricted, trying Binance US...")
+                        continue
+                    print(f"  All Binance endpoints geo-restricted for {symbol} {interval}")
+                    prices = []
+                    geo_blocked = True
+                    break
                 r.raise_for_status()
 
                 data = r.json()
