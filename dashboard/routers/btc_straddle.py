@@ -78,15 +78,15 @@ async def straddle_fleet(request: Request) -> dict[str, Any]:
             'total_closed': closed_c,
         }
 
-    for a in ('BTC', 'ETH'):
+    for a in ('BTC', 'ETH', 'SOL'):
         if a not in engines:
             engines[a] = {'open': 0, 'deployed': 0, 'pnl_usd': 0, 'daily_loss': 0, 'win_rate': 0, 'total_closed': 0}
 
     return {
         'halted': False,
         'fleet_daily_loss': 0,
-        'fleet_daily_loss_limit': 1400,
-        'fleet_max_deployed': 14000,
+        'fleet_daily_loss_limit': 2100,
+        'fleet_max_deployed': 21000,
         'total_deployed': round(total_deployed, 0),
         'total_open': total_open,
         'total_pnl': round(total_pnl, 2),
@@ -125,7 +125,7 @@ async def straddle_status(request: Request, asset: str = "") -> dict[str, Any] |
         "SELECT DISTINCT COALESCE(asset, 'BTC') as asset FROM straddle_log",
     )
     if not assets:
-        assets = [{'asset': 'BTC'}, {'asset': 'ETH'}]
+        assets = [{'asset': 'BTC'}, {'asset': 'ETH'}, {'asset': 'SOL'}]
     return [_db_status(db, row['asset']) for row in assets]
 
 

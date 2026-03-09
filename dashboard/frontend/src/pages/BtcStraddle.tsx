@@ -126,6 +126,7 @@ function fmtUsd(v: number | null | undefined, sign = true): string {
 const ASSET_COLORS: Record<string, string> = {
   BTC: 'text-accent-yellow',
   ETH: 'text-accent-blue',
+  SOL: 'text-purple-400',
 };
 
 export default function BtcStraddle() {
