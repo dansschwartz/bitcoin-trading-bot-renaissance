@@ -264,21 +264,18 @@ export default function BtcStraddle() {
 
       {/* Per-Asset P&L Breakdown */}
       {stats?.per_asset && stats.per_asset.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="grid grid-cols-3 gap-3">
           {stats.per_asset.map(a => (
-            <div key={a.asset} className="bg-surface-1 border border-surface-3 rounded-xl p-3">
+            <div key={a.asset} className="bg-surface-1 border border-surface-3 rounded-xl p-2.5">
               <div className="flex items-center justify-between">
-                <span className={`font-bold ${ASSET_COLORS[a.asset] || 'text-gray-200'}`}>{a.asset}</span>
-                <span className="text-xs text-gray-500">{a.total} trades</span>
-              </div>
-              <div className="flex items-center justify-between mt-1">
-                <span className={`text-sm font-mono ${(a.pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                <span className={`text-sm font-bold ${ASSET_COLORS[a.asset] || 'text-gray-200'}`}>{a.asset}</span>
+                <span className={`text-sm font-mono font-semibold ${(a.pnl_usd ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
                   {fmtUsd(a.pnl_usd)}
                 </span>
-                <span className="text-xs text-gray-400">
-                  WR: {a.total > 0 ? ((a.winners / a.total) * 100).toFixed(1) : '0.0'}%
-                  | Avg: {fmtUsd(a.avg_usd)}
-                </span>
+              </div>
+              <div className="flex items-center justify-between mt-1 text-xs text-gray-400 font-mono">
+                <span>{a.total > 0 ? ((a.winners / a.total) * 100).toFixed(1) : '0.0'}% WR</span>
+                <span>{a.total} trades</span>
               </div>
             </div>
           ))}
