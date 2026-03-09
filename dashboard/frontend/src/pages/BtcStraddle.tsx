@@ -312,20 +312,29 @@ export default function BtcStraddle() {
         )}
       </div>
 
-      {/* Daily P&L Chart */}
+      {/* Daily P&L Chart — rolling 31 days */}
       <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
-        <h3 className="text-sm font-medium text-gray-300 mb-3">Daily P&L + Win Rate</h3>
-        {daily.length === 0 ? (
-          <div className="text-sm text-gray-600 py-8 text-center">No daily data yet -- waiting for closed straddles</div>
-        ) : (
+        <h3 className="text-sm font-medium text-gray-300 mb-3">Daily P&L + Win Rate (31 days)</h3>
+        {(() => {
+          // Build 31-day grid, fill missing days with zeros
+          const dailyMap = new Map(daily.map(d => [d.day, d]));
+          const grid: DailyPnl[] = [];
+          const now = new Date();
+          for (let i = 30; i >= 0; i--) {
+            const dt = new Date(now);
+            dt.setDate(dt.getDate() - i);
+            const key = dt.toISOString().substring(0, 10);
+            grid.push(dailyMap.get(key) ?? { day: key, straddles: 0, winners: 0, pnl_usd: 0, avg_pnl_usd: 0, win_rate: 0 });
+          }
+          return (
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={daily} margin={{ left: 10, right: 10, top: 5, bottom: 5 }}>
+              <ComposedChart data={grid} margin={{ left: 10, right: 10, top: 5, bottom: 5 }}>
                 <XAxis dataKey="day" tick={{ fontSize: 10, fill: '#6b7280' }}
                        tickFormatter={d => d?.substring(5) || d} />
                 <YAxis yAxisId="left" tick={{ fontSize: 10, fill: '#6b7280' }}
                        tickFormatter={v => `$${v}`} />
-                <YAxis yAxisId="right" orientation="right" domain={[30, 70]}
+                <YAxis yAxisId="right" orientation="right" domain={[0, 100]}
                        tick={{ fontSize: 10, fill: '#fbbf24' }}
                        tickFormatter={v => `${v}%`} />
                 <Tooltip contentStyle={{
@@ -333,16 +342,16 @@ export default function BtcStraddle() {
                   borderRadius: 8, fontSize: 12, color: '#e5e7eb',
                 }} />
                 <Bar yAxisId="left" dataKey="pnl_usd" name="P&L ($)" radius={[3, 3, 0, 0]}>
-                  {daily.map((entry, idx) => (
-                    <Cell key={idx} fill={entry.pnl_usd >= 0 ? '#22c55e' : '#ef4444'} />
+                  {grid.map((entry, idx) => (
+                    <Cell key={idx} fill={entry.pnl_usd > 0 ? '#22c55e' : entry.pnl_usd < 0 ? '#ef4444' : '#374151'} />
                   ))}
                 </Bar>
                 <Line yAxisId="right" dataKey="win_rate" name="Win Rate %"
-                      stroke="#fbbf24" strokeWidth={2} dot={false} />
+                      stroke="#fbbf24" strokeWidth={2} dot={false} connectNulls />
               </ComposedChart>
             </ResponsiveContainer>
-          </div>
-        )}
+          </div>);
+        })()}
       </div>
 
       {/* Exit Reasons + History */}
