@@ -177,6 +177,7 @@ export const api = {
   straddleStatus: () => get<Record<string, unknown>[]>('/api/straddle/status'),
   straddleHistory: (limit = 100, asset = '') => get<Record<string, unknown>[]>(`/api/straddle/history?limit=${limit}${asset ? `&asset=${asset}` : ''}`),
   straddleHourly: (asset = '') => get<Record<string, unknown>[]>(`/api/straddle/hourly${asset ? `?asset=${asset}` : ''}`),
+  straddleDaily: (days = 30, asset = '') => get<Record<string, unknown>[]>(`/api/straddle/daily?days=${days}${asset ? `&asset=${asset}` : ''}`),
   straddleStats: () => get<Record<string, unknown>>('/api/straddle/stats'),
 
   // Exit Engine

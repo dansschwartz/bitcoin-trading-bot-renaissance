@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import PageShell from '../components/layout/PageShell';
 import { api } from '../api';
-import { Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Line, ComposedChart } from 'recharts';
+import { Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, Line, ComposedChart } from 'recharts';
 
 interface FleetStatus {
   halted: boolean;
@@ -84,6 +84,15 @@ interface HourlyPnl {
   win_rate: number;
 }
 
+interface DailyPnl {
+  day: string;
+  straddles: number;
+  winners: number;
+  pnl_usd: number;
+  avg_pnl_usd: number;
+  win_rate: number;
+}
+
 interface StraddleStats {
   total: number;
   winners: number;
@@ -124,6 +133,7 @@ export default function BtcStraddle() {
   const [engines, setEngines] = useState<EngineStatus[]>([]);
   const [history, setHistory] = useState<StraddleHistory[]>([]);
   const [hourly, setHourly] = useState<HourlyPnl[]>([]);
+  const [daily, setDaily] = useState<DailyPnl[]>([]);
   const [stats, setStats] = useState<StraddleStats | null>(null);
 
   const refresh = () => {
@@ -134,6 +144,7 @@ export default function BtcStraddle() {
     }).catch(() => {});
     api.straddleHistory(50).then(d => setHistory(d as unknown as StraddleHistory[])).catch(() => {});
     api.straddleHourly().then(d => setHourly([...(d as unknown as HourlyPnl[])].reverse())).catch(() => {});
+    api.straddleDaily().then(d => setDaily([...(d as unknown as DailyPnl[])].reverse())).catch(() => {});
     api.straddleStats().then(d => setStats(d as unknown as StraddleStats)).catch(() => {});
   };
 
@@ -295,6 +306,39 @@ export default function BtcStraddle() {
                 }} />
                 <Bar yAxisId="left" dataKey="pnl_usd" name="P&L ($)" radius={[3, 3, 0, 0]}
                      fill="#3b82f6" />
+                <Line yAxisId="right" dataKey="win_rate" name="Win Rate %"
+                      stroke="#fbbf24" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      {/* Daily P&L Chart */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-gray-300 mb-3">Daily P&L + Win Rate</h3>
+        {daily.length === 0 ? (
+          <div className="text-sm text-gray-600 py-8 text-center">No daily data yet -- waiting for closed straddles</div>
+        ) : (
+          <div className="h-56">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={daily} margin={{ left: 10, right: 10, top: 5, bottom: 5 }}>
+                <XAxis dataKey="day" tick={{ fontSize: 10, fill: '#6b7280' }}
+                       tickFormatter={d => d?.substring(5) || d} />
+                <YAxis yAxisId="left" tick={{ fontSize: 10, fill: '#6b7280' }}
+                       tickFormatter={v => `$${v}`} />
+                <YAxis yAxisId="right" orientation="right" domain={[30, 70]}
+                       tick={{ fontSize: 10, fill: '#fbbf24' }}
+                       tickFormatter={v => `${v}%`} />
+                <Tooltip contentStyle={{
+                  backgroundColor: '#1a2235', border: '1px solid #243049',
+                  borderRadius: 8, fontSize: 12, color: '#e5e7eb',
+                }} />
+                <Bar yAxisId="left" dataKey="pnl_usd" name="P&L ($)" radius={[3, 3, 0, 0]}>
+                  {daily.map((entry, idx) => (
+                    <Cell key={idx} fill={entry.pnl_usd >= 0 ? '#22c55e' : '#ef4444'} />
+                  ))}
+                </Bar>
                 <Line yAxisId="right" dataKey="win_rate" name="Win Rate %"
                       stroke="#fbbf24" strokeWidth={2} dot={false} />
               </ComposedChart>

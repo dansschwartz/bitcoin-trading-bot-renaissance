@@ -85,8 +85,8 @@ async def straddle_fleet(request: Request) -> dict[str, Any]:
     return {
         'halted': False,
         'fleet_daily_loss': 0,
-        'fleet_daily_loss_limit': 15000,
-        'fleet_max_deployed': 150000,
+        'fleet_daily_loss_limit': 1400,
+        'fleet_max_deployed': 14000,
         'total_deployed': round(total_deployed, 0),
         'total_open': total_open,
         'total_pnl': round(total_pnl, 2),
@@ -276,6 +276,29 @@ async def straddle_hourly(request: Request, asset: str = "") -> list[dict]:
            WHERE status = 'CLOSED' AND closed_at IS NOT NULL {asset_filter}
            GROUP BY hour, COALESCE(asset, 'BTC')
            ORDER BY hour DESC
+           LIMIT ?""",
+        params,
+    )
+
+
+@router.get("/daily")
+async def straddle_daily(request: Request, days: int = 30, asset: str = "") -> list[dict]:
+    """Daily P&L aggregation. Dollar amounts."""
+    db = request.app.state.dashboard_config.db_path
+    asset_filter = "AND COALESCE(asset, 'BTC') = ?" if asset else ""
+    params = (asset.upper(), days) if asset else (days,)
+    return _safe_query(
+        db,
+        f"""SELECT DATE(closed_at) as day,
+                  COUNT(*) as straddles,
+                  SUM(CASE WHEN net_pnl_usd > 0 THEN 1 ELSE 0 END) as winners,
+                  ROUND(SUM(net_pnl_usd), 2) as pnl_usd,
+                  ROUND(AVG(net_pnl_usd), 4) as avg_pnl_usd,
+                  ROUND(SUM(CASE WHEN net_pnl_usd > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+           FROM straddle_log
+           WHERE status = 'CLOSED' AND closed_at IS NOT NULL {asset_filter}
+           GROUP BY day
+           ORDER BY day DESC
            LIMIT ?""",
         params,
     )
