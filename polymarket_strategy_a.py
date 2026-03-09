@@ -108,7 +108,7 @@ class StrategyAExecutor:
     MAX_BET_PCT = 0.05                # Ceiling: 5% of bankroll per bet (was 15%, reduced after 72% drawdown on 2026-03-02)
     MAX_BET_USD = 50.0                # Hard dollar cap per bet regardless of bankroll
     MAX_SIZING_BANKROLL = 1000.0      # Cap effective bankroll for sizing (prevents runaway compounding)
-    MIN_BANKROLL_TO_TRADE = 200.0     # Stop betting below this bankroll level
+    MIN_BANKROLL_TO_TRADE = 50.0      # Stop betting below this bankroll level
     DAILY_LOSS_LIMIT_PCT = 0.20       # Max 20% of start-of-day bankroll loss per day
     DAILY_LOSS_LIMIT_5M_PCT = 0.10   # Max 10% of start-of-day bankroll loss for 5m markets alone
     MAX_ASSET_CONCENTRATION = 0.50    # Max 50% of open exposure in any single asset
