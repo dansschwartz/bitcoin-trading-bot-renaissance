@@ -45,6 +45,7 @@ interface OpenTrade {
   signal: string;
   confidence: number;
   capital: number;
+  position_size: number;
 }
 
 interface TradeRow {
@@ -218,6 +219,7 @@ export default function OracleTrading() {
               <thead>
                 <tr className="text-gray-500 border-b border-surface-3">
                   <th className="px-3 py-2 text-left font-medium">Pair</th>
+                  <th className="px-3 py-2 text-right font-medium">Invested</th>
                   <th className="px-3 py-2 text-right font-medium">Entry</th>
                   <th className="px-3 py-2 text-right font-medium">Current</th>
                   <th className="px-3 py-2 text-right font-medium">Unreal P&L</th>
@@ -239,6 +241,9 @@ export default function OracleTrading() {
                     <tr key={t.pair} className="border-b border-surface-3/50 hover:bg-surface-2/30">
                       <td className="px-3 py-2 font-mono font-medium text-gray-200">
                         {t.pair.replace('USDT', '')}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-gray-300">
+                        ${t.position_size.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                       </td>
                       <td className="px-3 py-2 text-right font-mono text-gray-300">
                         ${t.entry_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}

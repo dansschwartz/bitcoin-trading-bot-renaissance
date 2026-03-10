@@ -238,6 +238,7 @@ async def oracle_open_trades():
                 'signal': entry_info.get('signal', ''),
                 'confidence': entry_info.get('confidence', 0),
                 'capital': round(capital, 2),
+                'position_size': round(position_size, 2),
             })
 
         result.sort(key=lambda x: x['unrealized_pnl_usd'], reverse=True)
