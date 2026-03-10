@@ -549,7 +549,7 @@
         "auto_deploy": false,
         "human_approval_required": true,
         "schedule_day": "sunday",
-        "schedule_hour_utc": 2,
+        "schedule_hour_utc": 6,
         "max_session_minutes": 120,
         "max_proposals_per_week": 15,
         "model": "sonnet",
@@ -563,7 +563,7 @@
         "council_max_turns": 50,
         "council_max_minutes": 25,
         "daily_scan_enabled": false,
-        "daily_scan_hour_utc": 0,
+        "daily_scan_hour_utc": 6,
         "trigger_cooldown_hours": 6,
         "max_triggers_per_day": 3
     },
