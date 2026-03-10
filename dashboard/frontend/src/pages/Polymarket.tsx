@@ -348,11 +348,26 @@ function OpenPositions({ bets }: { bets: Bet[] }) {
                 <th className="text-right py-2 px-2">Tokens</th>
                 <th className="text-center py-2 px-2">Adds</th>
                 <th className="text-right py-2 px-2">Conf</th>
-                <th className="text-left py-2 px-2">Age</th>
+                <th className="text-right py-2 px-2">Expires</th>
               </tr>
             </thead>
             <tbody>
-              {bets.map((b) => (
+              {bets.map((b) => {
+                // Parse expiry from slug: e.g. "sol-updown-15m-1773153900"
+                const slugParts = (b.slug || '').split('-');
+                const expiryTs = parseInt(slugParts[slugParts.length - 1], 10);
+                let expiryLabel = '—';
+                if (expiryTs > 1e9) {
+                  const diffSec = expiryTs - Math.floor(Date.now() / 1000);
+                  if (diffSec <= 0) {
+                    expiryLabel = 'Expired';
+                  } else if (diffSec < 60) {
+                    expiryLabel = `${diffSec}s`;
+                  } else {
+                    expiryLabel = `${Math.floor(diffSec / 60)}m ${diffSec % 60}s`;
+                  }
+                }
+                return (
                 <tr key={b.id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
                   <td className="py-2 px-2 text-gray-200 font-medium">{b.asset}</td>
                   <td className="py-2 px-2">
@@ -365,9 +380,10 @@ function OpenPositions({ bets }: { bets: Bet[] }) {
                   <td className="py-2 px-2 text-right text-gray-400">{b.total_tokens.toFixed(1)}</td>
                   <td className="py-2 px-2 text-center text-gray-400">{b.adds_count}</td>
                   <td className="py-2 px-2 text-right text-gray-300">{b.entry_confidence.toFixed(0)}%</td>
-                  <td className="py-2 px-2 text-gray-500">{formatTimestamp(b.opened_at)}</td>
+                  <td className={`py-2 px-2 text-right ${expiryLabel === 'Expired' ? 'text-accent-red' : 'text-yellow-400'}`}>{expiryLabel}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
