@@ -58,21 +58,24 @@ class InstrumentConfig:
 
 INSTRUMENTS: Dict[str, InstrumentConfig] = {
     # 15-minute direction markets (2-bar / 10-min ML horizon, 53.3% acc)
-    "btc_15m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-15m-{ts}"),
+    # Optimizer: SOL profitable, BTC marginal (cheap tokens only), XRP zero edge
+    "btc_15m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-15m-{ts}",
+                                kelly_fraction=0.25, max_bet_usd=20.0),
     "eth_15m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-15m-{ts}", enabled=False),
-    "sol_15m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-15m-{ts}"),
+    "sol_15m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-15m-{ts}",
+                                kelly_fraction=0.65, max_bet_usd=30.0),
     "doge_15m": InstrumentConfig("DOGE", "DOGE-USD", "DOGE-USD", "doge-updown-15m-{ts}", enabled=False),
-    "xrp_15m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-15m-{ts}"),
+    "xrp_15m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-15m-{ts}", enabled=False),
     # 5-minute direction markets (1-bar / 5-min ML horizon, 52.4% acc)
-    # Tighter sizing: 40% Kelly, $25 max bet, altcoins require BTC lead agreement
+    # Optimizer: SOL 5m profitable, BTC 5m zero edge, XRP zero edge
     "btc_5m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-5m-{ts}",
-                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0),
+                               timeframe=5, kelly_fraction=0.25, max_bet_usd=10.0, enabled=False),
     "eth_5m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-5m-{ts}",
-                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC", enabled=False),
+                               timeframe=5, kelly_fraction=0.4, max_bet_usd=20.0, lead_asset="BTC", enabled=False),
     "sol_5m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-5m-{ts}",
-                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC"),
+                               timeframe=5, kelly_fraction=0.65, max_bet_usd=20.0, lead_asset="BTC"),
     "xrp_5m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-5m-{ts}",
-                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC"),
+                               timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC", enabled=False),
 }
 
 
@@ -95,8 +98,9 @@ class StrategyAExecutor:
     Sizing: Half-Kelly based on model probability and token price.
     """
 
-    # Thresholds — calibrated for multi-asset crash LightGBM (52-55% sweet spot)
+    # Thresholds — optimizer-tuned: only 52.0-52.5% confidence band is profitable
     CONFIDENCE_THRESHOLD = 52.0       # Model prob >= 0.52 (or <= 0.48)
+    CONFIDENCE_CAP = 52.5             # Max confidence; higher is overfit/destructive (optimizer finding)
     BET_AMOUNT = 50.0                 # Fallback; overridden by Kelly sizing
     EXIT_CONFIDENCE = 50.0            # Exit when model is pure coin-flip
     ADD_CONFIDENCE = 52.0             # Same as entry threshold
@@ -106,11 +110,11 @@ class StrategyAExecutor:
     COOLDOWN_AFTER_LOSS = 120         # 2 min (was 5min — too long for 5min markets)
     MIN_BET = 5.0                     # Floor for Kelly sizing
     MAX_BET_PCT = 0.05                # Ceiling: 5% of bankroll per bet (was 15%, reduced after 72% drawdown on 2026-03-02)
-    MAX_BET_USD = 50.0                # Hard dollar cap per bet regardless of bankroll
+    MAX_BET_USD = 20.0                # Hard dollar cap per bet (was $50; optimizer found smaller bets lose less)
     MAX_SIZING_BANKROLL = 1000.0      # Cap effective bankroll for sizing (prevents runaway compounding)
     MIN_BANKROLL_TO_TRADE = 50.0      # Stop betting below this bankroll level
-    DAILY_LOSS_LIMIT_PCT = 0.20       # Max 20% of start-of-day bankroll loss per day
-    DAILY_LOSS_LIMIT_5M_PCT = 0.10   # Max 10% of start-of-day bankroll loss for 5m markets alone
+    DAILY_LOSS_LIMIT_PCT = 0.10       # Max 10% daily loss (was 20%; optimizer recommended tighter)
+    DAILY_LOSS_LIMIT_5M_PCT = 0.05   # Max 5% daily loss for 5m markets (was 10%)
     MAX_ASSET_CONCENTRATION = 0.50    # Max 50% of open exposure in any single asset
     MAX_OPEN_BETS = 8                 # Max total concurrent open bets across all instruments
 
@@ -580,18 +584,27 @@ class StrategyAExecutor:
             crowd_up = self._parse_crowd_up(market)
             token_cost = crowd_up if ml_direction == "UP" else (1.0 - crowd_up)
 
-            # Gate: odds filter — block extreme token costs
-            if token_cost < 0.15 or token_cost > 0.85:
+            # Gate: odds filter — block extreme/expensive token costs
+            # Optimizer: cheap tokens (<0.50) are profitable, expensive tokens bleed
+            if token_cost < 0.15 or token_cost > 0.50:
                 self._log_skip(inst.asset, slug,
-                               f"odds_filter token_cost={token_cost:.3f} outside [0.15, 0.85]",
+                               f"odds_filter token_cost={token_cost:.3f} outside [0.15, 0.50]",
                                ml_conf, token_cost, ml_direction, minutes_left,
                                timeframe=inst.timeframe)
                 continue
 
-            # Gate: confidence
+            # Gate: confidence floor
             if ml_conf < self.CONFIDENCE_THRESHOLD:
                 self._log_skip(inst.asset, slug,
                                f"conf {ml_conf:.0f}% < {self.CONFIDENCE_THRESHOLD}%",
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
+                continue
+
+            # Gate: confidence cap — optimizer found >52.5% is destructive
+            if ml_conf > self.CONFIDENCE_CAP:
+                self._log_skip(inst.asset, slug,
+                               f"conf {ml_conf:.1f}% > cap {self.CONFIDENCE_CAP}%",
                                ml_conf, token_cost, ml_direction, minutes_left,
                                timeframe=inst.timeframe)
                 continue
