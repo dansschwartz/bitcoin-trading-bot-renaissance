@@ -713,7 +713,7 @@
                 "asset": "SOL",
                 "pair": "SOL-USD",
                 "binance_symbol": "SOLUSDT",
-                "leg_size_usd": 100,
+                "leg_size_usd": 50,
                 "max_capital_deployed": 7000,
                 "max_open_straddles": 10,
                 "max_daily_loss_usd": 700,
