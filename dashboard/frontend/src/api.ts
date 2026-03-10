@@ -196,4 +196,6 @@ export const api = {
     get<Record<string, unknown>[]>(`/api/oracle-trading/trades?pair=${pair}&limit=${limit}`),
   oracleTradingEquity: (pair: string) =>
     get<Record<string, unknown>[]>(`/api/oracle-trading/equity/${pair}`),
+  oracleTradingOpenTrades: () =>
+    get<Record<string, unknown>[]>('/api/oracle-trading/open-trades'),
 };

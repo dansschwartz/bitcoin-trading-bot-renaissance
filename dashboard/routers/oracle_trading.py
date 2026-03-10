@@ -152,6 +152,102 @@ async def oracle_trading_trades(pair: str = '', limit: int = 50):
         return []
 
 
+@router.get("/open-trades")
+async def oracle_open_trades():
+    """Open positions with current price and unrealized P&L."""
+    try:
+        conn = _db()
+        # Get wallets with open positions
+        snapshots = conn.execute("""
+            SELECT pair, capital, entry_price, total_trades, winning_trades,
+                   win_rate, status, timestamp
+            FROM oracle_wallet_snapshots
+            WHERE position_open = 1
+            AND timestamp = (
+                SELECT MAX(timestamp) FROM oracle_wallet_snapshots s2
+                WHERE s2.pair = oracle_wallet_snapshots.pair
+            )
+            ORDER BY pair
+        """).fetchall()
+
+        # Get entry times from the most recent OPEN trade per pair
+        open_times = {}
+        for snap in snapshots:
+            row = conn.execute("""
+                SELECT timestamp, signal, signal_confidence
+                FROM oracle_trades
+                WHERE pair = ? AND action = 'OPEN'
+                ORDER BY timestamp DESC LIMIT 1
+            """, (snap['pair'],)).fetchone()
+            if row:
+                open_times[snap['pair']] = {
+                    'entry_time': row['timestamp'],
+                    'signal': row['signal'],
+                    'confidence': row['signal_confidence'],
+                }
+        conn.close()
+
+        # Fetch current prices from Binance
+        import urllib.request
+        prices = {}
+        try:
+            req = urllib.request.Request(
+                'https://api.binance.com/api/v3/ticker/price',
+                headers={'User-Agent': 'Mozilla/5.0'},
+            )
+            resp = urllib.request.urlopen(req, timeout=5)
+            for item in json.loads(resp.read()):
+                prices[item['symbol']] = float(item['price'])
+        except Exception as pe:
+            logger.debug(f"Binance price fetch error: {pe}")
+
+        result = []
+        for snap in snapshots:
+            pair = snap['pair']
+            entry_price = snap['entry_price'] or 0
+            current_price = prices.get(pair, 0)
+            unrealized_pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 and current_price > 0 else 0
+            # Estimate unrealized $ using 10% of wallet capital as position size (Parente paper)
+            capital = snap['capital'] or 5000
+            position_size = capital * 0.10
+            unrealized_pnl_usd = position_size * (unrealized_pnl_pct / 100) if entry_price > 0 else 0
+
+            entry_info = open_times.get(pair, {})
+            entry_time = entry_info.get('entry_time', '')
+
+            # Calculate duration
+            hours_open = 0
+            if entry_time:
+                try:
+                    from datetime import datetime, timezone
+                    et = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+                    if et.tzinfo is None:
+                        et = et.replace(tzinfo=timezone.utc)
+                    hours_open = (datetime.now(timezone.utc) - et).total_seconds() / 3600
+                except Exception:
+                    pass
+
+            result.append({
+                'pair': pair,
+                'entry_price': round(entry_price, 6),
+                'current_price': round(current_price, 6),
+                'unrealized_pnl_usd': round(unrealized_pnl_usd, 2),
+                'unrealized_pnl_pct': round(unrealized_pnl_pct, 2),
+                'entry_time': entry_time,
+                'hours_open': round(hours_open, 1),
+                'signal': entry_info.get('signal', ''),
+                'confidence': entry_info.get('confidence', 0),
+                'capital': round(capital, 2),
+            })
+
+        result.sort(key=lambda x: x['unrealized_pnl_usd'], reverse=True)
+        return result
+
+    except Exception as e:
+        logger.debug(f"Oracle open trades error: {e}")
+        return []
+
+
 @router.get("/equity/{pair}")
 async def oracle_equity_curve(pair: str):
     """Equity curve data for one pair."""

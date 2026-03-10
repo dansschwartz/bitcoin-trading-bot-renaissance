@@ -34,6 +34,19 @@ interface Summary {
   active_pairs: number;
 }
 
+interface OpenTrade {
+  pair: string;
+  entry_price: number;
+  current_price: number;
+  unrealized_pnl_usd: number;
+  unrealized_pnl_pct: number;
+  entry_time: string;
+  hours_open: number;
+  signal: string;
+  confidence: number;
+  capital: number;
+}
+
 interface TradeRow {
   pair: string;
   action: string;
@@ -106,6 +119,7 @@ export default function OracleTrading() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [wallets, setWallets] = useState<WalletData[]>([]);
   const [trades, setTrades] = useState<TradeRow[]>([]);
+  const [openTrades, setOpenTrades] = useState<OpenTrade[]>([]);
   const [predictions, setPredictions] = useState<any[]>([]);
   const [countdown, setCountdown] = useState<string>('');
   const [lastRun, setLastRun] = useState<string>('');
@@ -120,6 +134,10 @@ export default function OracleTrading() {
 
     api.oracleTradingTrades('', 30).then((d: any) => {
       setTrades(d || []);
+    }).catch(() => {});
+
+    api.oracleTradingOpenTrades().then((d: any) => {
+      setOpenTrades(d || []);
     }).catch(() => {});
 
     api.oracleStatus().then((d: any) => {
@@ -186,6 +204,69 @@ export default function OracleTrading() {
           value={summary ? `${summary.active_pairs}/${summary.total_pairs}` : '--'}
         />
       </div>
+
+      {/* Open Trades */}
+      {openTrades.length > 0 && (
+        <div className="bg-surface-1 border border-surface-3 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-surface-3">
+            <h3 className="text-sm font-medium text-gray-300">
+              Open Positions <span className="text-gray-500 font-normal">({openTrades.length})</span>
+            </h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 border-b border-surface-3">
+                  <th className="px-3 py-2 text-left font-medium">Pair</th>
+                  <th className="px-3 py-2 text-right font-medium">Entry</th>
+                  <th className="px-3 py-2 text-right font-medium">Current</th>
+                  <th className="px-3 py-2 text-right font-medium">Unreal P&L</th>
+                  <th className="px-3 py-2 text-right font-medium">Return</th>
+                  <th className="px-3 py-2 text-right font-medium">Duration</th>
+                  <th className="px-3 py-2 text-left font-medium">Signal</th>
+                  <th className="px-3 py-2 text-right font-medium">Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {openTrades.map(t => {
+                  const dur = t.hours_open;
+                  const durStr = dur >= 24
+                    ? `${Math.floor(dur / 24)}d ${Math.floor(dur % 24)}h`
+                    : dur >= 1
+                      ? `${Math.floor(dur)}h ${Math.floor((dur % 1) * 60)}m`
+                      : `${Math.floor(dur * 60)}m`;
+                  return (
+                    <tr key={t.pair} className="border-b border-surface-3/50 hover:bg-surface-2/30">
+                      <td className="px-3 py-2 font-mono font-medium text-gray-200">
+                        {t.pair.replace('USDT', '')}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-gray-300">
+                        ${t.entry_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-gray-300">
+                        ${t.current_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </td>
+                      <td className={`px-3 py-2 text-right font-mono ${pnlColor(t.unrealized_pnl_usd)}`}>
+                        {fmtDollar(t.unrealized_pnl_usd)}
+                      </td>
+                      <td className={`px-3 py-2 text-right font-mono ${pnlColor(t.unrealized_pnl_pct)}`}>
+                        {t.unrealized_pnl_pct >= 0 ? '+' : ''}{t.unrealized_pnl_pct.toFixed(2)}%
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-gray-400">
+                        {durStr}
+                      </td>
+                      <td className="px-3 py-2">{signalBadge(t.signal)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-gray-400">
+                        {t.confidence ? `${(t.confidence * 100).toFixed(0)}%` : '--'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Countdown Timer + Last Run Info */}
       <div className="bg-surface-1 border border-surface-3 rounded-xl px-4 py-3 flex items-center justify-between">
