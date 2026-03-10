@@ -893,6 +893,9 @@ class StrategyAExecutor:
             kelly_fraction=inst.kelly_fraction,
             max_bet_usd=inst.max_bet_usd,
         )
+        if bet_amount <= 0:
+            self.logger.debug(f"SKIP [{inst.asset}]: Kelly returned $0 (no edge at {token_cost:.3f})")
+            return
         tokens = bet_amount / token_cost if token_cost > 0 else 0
         slug = market.get("slug", "")
 

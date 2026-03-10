@@ -80,6 +80,7 @@ async def polymarket_overview(request: Request):
                            SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins
                     FROM polymarket_bets
                     WHERE status IN ('WON', 'LOST', 'CLOSED')
+                      AND total_invested > 0
                       AND exit_at >= date('now')
                 """).fetchone()
 
@@ -92,6 +93,7 @@ async def polymarket_overview(request: Request):
                            COALESCE(SUM(total_invested), 0) as total_wagered
                     FROM polymarket_bets
                     WHERE status IN ('WON', 'LOST', 'CLOSED')
+                    AND total_invested > 0
                 """).fetchone()
 
                 total = overall["total"] or 0
@@ -260,6 +262,7 @@ async def polymarket_history(request: Request, limit: int = 100, asset: str | No
                            regime, opened_at, question
                     FROM polymarket_bets
                     WHERE status IN ('WON', 'LOST', 'CLOSED')
+                    AND total_invested > 0
                 """
                 params: list = []
                 if asset:
@@ -340,6 +343,7 @@ async def polymarket_stats(request: Request):
                            MIN(pnl) as worst
                     FROM polymarket_bets
                     WHERE status IN ('WON', 'LOST', 'CLOSED')
+                    AND total_invested > 0
                 """).fetchone()
 
                 per_asset = c.execute("""
@@ -350,6 +354,7 @@ async def polymarket_stats(request: Request):
                            COALESCE(AVG(pnl), 0) as avg_pnl
                     FROM polymarket_bets
                     WHERE status IN ('WON', 'LOST', 'CLOSED')
+                    AND total_invested > 0
                     GROUP BY asset ORDER BY pnl DESC
                 """).fetchall()
 
