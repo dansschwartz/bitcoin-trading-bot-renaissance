@@ -340,7 +340,7 @@ export default function BtcStraddle() {
                 <Tooltip contentStyle={{
                   backgroundColor: '#1a2235', border: '1px solid #243049',
                   borderRadius: 8, fontSize: 12, color: '#4ade80',
-                }} />
+                }} itemStyle={{ color: '#4ade80' }} labelStyle={{ color: '#9ca3af' }} />
                 <Bar yAxisId="left" dataKey="pnl_usd" name="P&L ($)" radius={[3, 3, 0, 0]}>
                   {grid.map((entry, idx) => (
                     <Cell key={idx} fill={entry.pnl_usd > 0 ? '#22c55e' : entry.pnl_usd < 0 ? '#ef4444' : '#374151'} />
