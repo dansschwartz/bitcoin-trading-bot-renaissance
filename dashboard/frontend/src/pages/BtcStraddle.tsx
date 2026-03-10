@@ -339,7 +339,7 @@ export default function BtcStraddle() {
                        tickFormatter={v => `${v}%`} />
                 <Tooltip contentStyle={{
                   backgroundColor: '#1a2235', border: '1px solid #243049',
-                  borderRadius: 8, fontSize: 12, color: '#e5e7eb',
+                  borderRadius: 8, fontSize: 12, color: '#4ade80',
                 }} />
                 <Bar yAxisId="left" dataKey="pnl_usd" name="P&L ($)" radius={[3, 3, 0, 0]}>
                   {grid.map((entry, idx) => (
