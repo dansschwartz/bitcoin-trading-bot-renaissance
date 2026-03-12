@@ -21,7 +21,7 @@ def _db():
 
 
 @router.get("/status")
-async def oracle_trading_status():
+def oracle_trading_status():
     """Full status of all oracle trading wallets."""
     try:
         conn = _db()
@@ -102,7 +102,7 @@ async def oracle_trading_status():
 
 
 @router.get("/trades")
-async def oracle_trading_trades(pair: str = '', limit: int = 50):
+def oracle_trading_trades(pair: str = '', limit: int = 50):
     """Trade history, optionally filtered by pair."""
     try:
         conn = _db()
@@ -153,7 +153,7 @@ async def oracle_trading_trades(pair: str = '', limit: int = 50):
 
 
 @router.get("/open-trades")
-async def oracle_open_trades():
+def oracle_open_trades():
     """Open positions with current price and unrealized P&L."""
     try:
         conn = _db()
@@ -250,7 +250,7 @@ async def oracle_open_trades():
 
 
 @router.get("/equity/{pair}")
-async def oracle_equity_curve(pair: str):
+def oracle_equity_curve(pair: str):
     """Equity curve data for one pair."""
     try:
         conn = _db()
