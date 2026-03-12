@@ -106,19 +106,21 @@ async def arb_status(request: Request):
 async def arb_trades(
     request: Request, limit: int = 50, offset: int = 0, strategy: Optional[str] = None
 ):
-    """Recent arbitrage trades from arb_trades table."""
+    """Recent arbitrage trades from arb_trades table (excludes skipped)."""
     try:
         with _arb_conn() as c:
             if strategy:
                 rows = c.execute(
                     """SELECT * FROM arb_trades
-                       WHERE strategy = ?
+                       WHERE strategy = ? AND status != 'skipped'
                        ORDER BY id DESC LIMIT ? OFFSET ?""",
                     (strategy, min(limit, 500), offset),
                 ).fetchall()
             else:
                 rows = c.execute(
-                    "SELECT * FROM arb_trades ORDER BY id DESC LIMIT ? OFFSET ?",
+                    """SELECT * FROM arb_trades
+                       WHERE status != 'skipped'
+                       ORDER BY id DESC LIMIT ? OFFSET ?""",
                     (min(limit, 500), offset),
                 ).fetchall()
             return _rows_to_dicts(rows)
