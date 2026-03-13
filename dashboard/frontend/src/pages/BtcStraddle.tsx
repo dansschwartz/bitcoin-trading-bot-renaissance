@@ -141,9 +141,9 @@ export default function BtcStraddle() {
     api.straddleFleet().then(d => setFleet(d as unknown as FleetStatus)).catch(() => {});
     api.straddleStatus().then(d => {
       const arr = Array.isArray(d) ? d : [d];
-      setEngines(arr as unknown as EngineStatus[]);
+      setEngines((arr as unknown as EngineStatus[]).filter(e => e.asset !== 'SOL'));
     }).catch(() => {});
-    api.straddleHistory(50).then(d => setHistory(d as unknown as StraddleHistory[])).catch(() => {});
+    api.straddleHistory(50).then(d => setHistory((d as unknown as StraddleHistory[]).filter(s => s.asset !== 'SOL'))).catch(() => {});
     api.straddleHourly().then(d => setHourly([...(d as unknown as HourlyPnl[])].reverse())).catch(() => {});
     api.straddleDaily().then(d => setDaily([...(d as unknown as DailyPnl[])].reverse())).catch(() => {});
     api.straddleStats().then(d => setStats(d as unknown as StraddleStats)).catch(() => {});
@@ -263,9 +263,9 @@ export default function BtcStraddle() {
       </div>
 
       {/* Per-Asset P&L Breakdown */}
-      {stats?.per_asset && stats.per_asset.length > 0 && (
+      {stats?.per_asset && stats.per_asset.filter(a => a.asset !== 'SOL').length > 0 && (
         <div className="grid grid-cols-3 gap-3">
-          {stats.per_asset.map(a => (
+          {stats.per_asset.filter(a => a.asset !== 'SOL').map(a => (
             <div key={a.asset} className="bg-surface-1 border border-surface-3 rounded-xl p-2.5">
               <div className="flex items-center justify-between">
                 <span className={`text-sm font-bold ${ASSET_COLORS[a.asset] || 'text-gray-200'}`}>{a.asset}</span>
