@@ -78,7 +78,7 @@
         "correlation_divergence": 0.0,
         "garch_vol": 0.045,
         "multi_exchange": 0.028,
-        "ml_ensemble": 0.20,
+        "ml_ensemble": 0.2,
         "ml_cnn": 0.0,
         "breakout": 0.0
     },
@@ -574,11 +574,15 @@
         "max_positions": 10
     },
     "adverse_selection_bps": {
-        "BTCUSDT": 0.05, "ETHUSDT": 0.10, "SOLUSDT": 0.30,
-        "XRPUSDT": 0.25, "LINKUSDT": 0.30, "DOGEUSDT": 0.50,
+        "BTCUSDT": 0.05,
+        "ETHUSDT": 0.1,
+        "SOLUSDT": 0.3,
+        "XRPUSDT": 0.25,
+        "LINKUSDT": 0.3,
+        "DOGEUSDT": 0.5,
         "AVAXUSDT": 0.35,
-        "__default_large_cap__": 0.20,
-        "__default_small_cap__": 0.80
+        "__default_large_cap__": 0.2,
+        "__default_small_cap__": 0.8
     },
     "ml_signal_scale": 10.0,
     "volatility_prediction": {
@@ -595,7 +599,7 @@
         "enabled": true,
         "observation_mode": true,
         "scan_interval_seconds": 10,
-        "edge_consumed_pct": 0.80,
+        "edge_consumed_pct": 0.8,
         "stop_loss_bps": 100,
         "reversal_threshold_bps": 30,
         "reversal_window_seconds": 60,
@@ -616,12 +620,24 @@
         "min_confidence": 0.42,
         "cooldown_seconds": 30,
         "exit_check_interval_seconds": 1,
-        "vol_scaling": { "low": 1.0, "medium": 0.7, "high": 0.4 },
+        "vol_scaling": {
+            "low": 1.0,
+            "medium": 0.7,
+            "high": 0.4
+        },
         "max_entry_spread_bps": 4.0,
         "blacklisted_pairs": [
-            "BARD-USD", "MANTRA-USD", "GIGGLE-USD", "SAHARA-USD",
-            "ZEC-USD", "OPN-USD", "KITE-USD", "BANK-USD",
-            "USDE-USD", "COW-USD", "SIGN-USD"
+            "BARD-USD",
+            "MANTRA-USD",
+            "GIGGLE-USD",
+            "SAHARA-USD",
+            "ZEC-USD",
+            "OPN-USD",
+            "KITE-USD",
+            "BANK-USD",
+            "USDE-USD",
+            "COW-USD",
+            "SIGN-USD"
         ],
         "exit_config": {
             "stop_loss_bps": 8,
@@ -631,28 +647,76 @@
             "min_move_bps": 3
         },
         "pair_exit_config": {
-            "BTC": { "stop_loss_bps": 7, "trail_activation_bps": 3, "trail_distance_bps": 5 },
-            "ETH": { "stop_loss_bps": 8, "trail_activation_bps": 3, "trail_distance_bps": 5 },
-            "SOL": { "stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6 },
-            "AVAX": { "stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6 },
-            "LINK": { "stop_loss_bps": 10, "trail_activation_bps": 3, "trail_distance_bps": 6 },
-            "DOGE": { "stop_loss_bps": 12, "trail_activation_bps": 4, "trail_distance_bps": 7 },
-            "XRP": { "stop_loss_bps": 9, "trail_activation_bps": 3, "trail_distance_bps": 5 }
+            "BTC": {
+                "stop_loss_bps": 7,
+                "trail_activation_bps": 3,
+                "trail_distance_bps": 5
+            },
+            "ETH": {
+                "stop_loss_bps": 8,
+                "trail_activation_bps": 3,
+                "trail_distance_bps": 5
+            },
+            "SOL": {
+                "stop_loss_bps": 10,
+                "trail_activation_bps": 3,
+                "trail_distance_bps": 6
+            },
+            "AVAX": {
+                "stop_loss_bps": 10,
+                "trail_activation_bps": 3,
+                "trail_distance_bps": 6
+            },
+            "LINK": {
+                "stop_loss_bps": 10,
+                "trail_activation_bps": 3,
+                "trail_distance_bps": 6
+            },
+            "DOGE": {
+                "stop_loss_bps": 12,
+                "trail_activation_bps": 4,
+                "trail_distance_bps": 7
+            },
+            "XRP": {
+                "stop_loss_bps": 9,
+                "trail_activation_bps": 3,
+                "trail_distance_bps": 5
+            }
         },
         "wallets": {
             "enabled": true,
             "budget_mode": "equal",
             "models": {
-                "quantum_transformer": { "enabled": true },
-                "cnn": { "enabled": true },
-                "lightgbm": { "enabled": true },
-                "meta_ensemble": { "enabled": true },
-                "crash_2bar": { "enabled": true },
-                "crash_1bar": { "enabled": true },
-                "bidirectional_lstm": { "enabled": false },
-                "dilated_cnn": { "enabled": false },
-                "gru": { "enabled": false },
-                "weighted_signal": { "enabled": true }
+                "quantum_transformer": {
+                    "enabled": true
+                },
+                "cnn": {
+                    "enabled": true
+                },
+                "lightgbm": {
+                    "enabled": true
+                },
+                "meta_ensemble": {
+                    "enabled": true
+                },
+                "crash_2bar": {
+                    "enabled": true
+                },
+                "crash_1bar": {
+                    "enabled": true
+                },
+                "bidirectional_lstm": {
+                    "enabled": false
+                },
+                "dilated_cnn": {
+                    "enabled": false
+                },
+                "gru": {
+                    "enabled": false
+                },
+                "weighted_signal": {
+                    "enabled": true
+                }
             }
         }
     },
@@ -683,7 +747,10 @@
                 "vol_scaling_base_vol": 15.0,
                 "vol_scaling_min_ratio": 0.3,
                 "vol_scaling_max_ratio": 3.0,
-                "blocked_hours_utc": [0, 1],
+                "blocked_hours_utc": [
+                    0,
+                    1
+                ],
                 "observation_mode": false
             },
             "ETH": {
@@ -705,11 +772,14 @@
                 "vol_scaling_base_vol": 15.0,
                 "vol_scaling_min_ratio": 0.3,
                 "vol_scaling_max_ratio": 3.0,
-                "blocked_hours_utc": [0, 1],
+                "blocked_hours_utc": [
+                    0,
+                    1
+                ],
                 "observation_mode": false
             },
             "SOL": {
-                "enabled": true,
+                "enabled": false,
                 "asset": "SOL",
                 "pair": "SOL-USD",
                 "binance_symbol": "SOLUSDT",
@@ -727,7 +797,10 @@
                 "vol_scaling_base_vol": 25.0,
                 "vol_scaling_min_ratio": 0.3,
                 "vol_scaling_max_ratio": 3.0,
-                "blocked_hours_utc": [0, 1],
+                "blocked_hours_utc": [
+                    0,
+                    1
+                ],
                 "observation_mode": false
             }
         }
@@ -735,16 +808,28 @@
     "oracle_trading": {
         "enabled": true,
         "commission_fee": 0.001,
-        "stop_loss": 0.10,
+        "stop_loss": 0.1,
         "wallet_size": 5000,
         "initial_status": "live",
         "max_daily_loss_pct": 0.15,
         "pairs": [
-            "BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "AVAXUSDT",
-            "LINKUSDT", "ADAUSDT", "XRPUSDT", "DOTUSDT", "MATICUSDT"
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "DOGEUSDT",
+            "AVAXUSDT",
+            "LINKUSDT",
+            "ADAUSDT",
+            "XRPUSDT",
+            "DOTUSDT",
+            "MATICUSDT"
         ]
     },
-    "disabled_models": ["gru", "bidirectional_lstm", "dilated_cnn"],
+    "disabled_models": [
+        "gru",
+        "bidirectional_lstm",
+        "dilated_cnn"
+    ],
     "model_retraining": {
         "enabled": true,
         "schedule_day": "saturday",

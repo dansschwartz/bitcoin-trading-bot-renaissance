@@ -14,6 +14,7 @@ Challenges: tiny edges, must execute all 3 legs near-simultaneously.
 """
 import asyncio
 import logging
+import traceback
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -461,7 +462,8 @@ class TriangularArbitrage:
                     )
 
             except Exception as e:
-                logger.error(f"Triangle scan error: {e}")
+                logger.error(f"Triangle scan error: {type(e).__name__}: {e}")
+                logger.debug(traceback.format_exc())
                 data_source = "rest"  # default for interval calc on error
 
             # Dynamic interval: faster with WebSocket, slower with REST
