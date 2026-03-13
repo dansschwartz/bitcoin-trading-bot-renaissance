@@ -10,6 +10,7 @@ const STRATEGY_COLORS: Record<string, string> = {
   cross_exchange: 'bg-accent-blue/20 text-accent-blue',
   triangular: 'bg-purple-400/20 text-purple-400',
   funding_rate: 'bg-accent-green/20 text-accent-green',
+  basis_trading: 'bg-orange-400/20 text-orange-400',
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -26,6 +27,7 @@ export default function Arbitrage() {
   const [summary, setSummary] = useState<ArbSummary | null>(null);
   const [wallet, setWallet] = useState<ArbWallet | null>(null);
   const [showSignals, setShowSignals] = useState(false);
+  const [basis, setBasis] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     const load = () => {
@@ -33,6 +35,7 @@ export default function Arbitrage() {
       api.arbTrades(50).then(setTrades).catch(() => {});
       api.arbSummary().then(setSummary).catch(() => {});
       api.arbWallet().then(setWallet).catch(() => {});
+      api.arbBasis().then(setBasis).catch(() => {});
     };
     load();
     const id = setInterval(load, 10_000);
@@ -169,6 +172,70 @@ export default function Arbitrage() {
           ))}
         </div>
       )}
+
+
+      {/* Basis Trading (Spot-Futures Convergence) */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-gray-300">Basis Trading (Spot-Futures)</h3>
+          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-orange-400/20 text-orange-400">
+            {basis?.observation_mode ? 'OBSERVATION' : 'LIVE'}
+          </span>
+        </div>
+        {basis && (basis as Record<string, unknown>).current_basis && Object.keys((basis as Record<string, unknown>).current_basis as Record<string, unknown>).length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {Object.entries((basis as Record<string, unknown>).current_basis as Record<string, Record<string, unknown>>).map(([sym, data]) => {
+              const bps = Number(data.basis_bps ?? 0);
+              const dir = String(data.direction ?? 'flat');
+              const apr = Number(data.annualized_pct ?? 0);
+              const spot = Number(data.spot ?? 0);
+              const futures = Number(data.futures ?? 0);
+              return (
+                <div key={sym} className="bg-surface-2 rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-sm font-medium text-gray-200">{sym}</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                      dir === 'contango' ? 'bg-accent-green/20 text-accent-green' :
+                      dir === 'backwardation' ? 'bg-accent-red/20 text-accent-red' :
+                      'bg-gray-600/40 text-gray-400'
+                    }`}>
+                      {dir}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 text-xs">
+                    <div>
+                      <div className="text-gray-500">Basis</div>
+                      <div className={`font-mono ${bps > 0 ? 'text-accent-green' : bps < 0 ? 'text-accent-red' : 'text-gray-400'}`}>
+                        {bps > 0 ? '+' : ''}{bps.toFixed(1)} bps
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-gray-500">APR</div>
+                      <div className="font-mono text-gray-300">{apr.toFixed(1)}%</div>
+                    </div>
+                    <div>
+                      <div className="text-gray-500">Spot</div>
+                      <div className="font-mono text-gray-400">${spot.toLocaleString(undefined, {maximumFractionDigits: 2})}</div>
+                    </div>
+                    <div>
+                      <div className="text-gray-500">Futures</div>
+                      <div className="font-mono text-gray-400">${futures.toLocaleString(undefined, {maximumFractionDigits: 2})}</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-xs text-gray-500">No basis data yet — waiting for first scan...</p>
+        )}
+        {basis != null && Boolean((basis as Record<string, unknown>).stats) && (
+          <div className="mt-2 flex gap-4 text-xs text-gray-500">
+            <span>Scans: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.scans_completed ?? 0)}</span>
+            <span>Opportunities: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.opportunities_found ?? 0)}</span>
+          </div>
+        )}
+      </div>
 
       {/* Recent Trades Table */}
       <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">

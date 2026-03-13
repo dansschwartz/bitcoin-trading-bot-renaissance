@@ -1144,6 +1144,85 @@ async def arb_cross_exchange_realistic(request: Request):
     return _sanitize_for_json(result)
 
 
+
+@router.get("/basis")
+async def arb_basis(request: Request):
+    """Basis trading (spot-futures convergence) status and snapshots."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+
+    result = {
+        "observation_mode": True,
+        "current_basis": {},
+        "recent_snapshots": [],
+        "recent_opportunities": [],
+        "stats": {},
+    }
+
+    # Try live data from orchestrator
+    if orch and hasattr(orch, "basis_arb"):
+        try:
+            stats = orch.basis_arb.get_status()
+            result["stats"] = stats
+            result["observation_mode"] = stats.get("observation_mode", True)
+            result["current_basis"] = stats.get("current_basis", {})
+        except Exception as e:
+            logger.debug(f"Live basis stats error: {e}")
+
+    # DB data
+    try:
+        with _arb_conn() as c:
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+
+            if "basis_snapshots" in tables:
+                rows = c.execute(
+                    "SELECT * FROM basis_snapshots ORDER BY id DESC LIMIT 50"
+                ).fetchall()
+                result["recent_snapshots"] = _rows_to_dicts(rows)
+
+                if not result["current_basis"]:
+                    latest = c.execute(
+                        "SELECT symbol, spot_price, futures_price, basis_bps, "
+                        "direction, annualized_basis_pct, funding_rate, timestamp "
+                        "FROM basis_snapshots "
+                        "WHERE id IN (SELECT MAX(id) FROM basis_snapshots GROUP BY symbol)"
+                    ).fetchall()
+                    for r in latest:
+                        result["current_basis"][r["symbol"]] = {
+                            "spot": r["spot_price"],
+                            "futures": r["futures_price"],
+                            "basis_bps": r["basis_bps"],
+                            "direction": r["direction"],
+                            "annualized_pct": r["annualized_basis_pct"],
+                            "funding_rate": r["funding_rate"],
+                            "last_update": r["timestamp"],
+                        }
+
+                count = c.execute("SELECT COUNT(*) FROM basis_snapshots").fetchone()[0]
+                result["stats"]["total_snapshots"] = count
+
+            if "basis_opportunities" in tables:
+                rows = c.execute(
+                    "SELECT * FROM basis_opportunities ORDER BY id DESC LIMIT 20"
+                ).fetchall()
+                result["recent_opportunities"] = _rows_to_dicts(rows)
+
+                opp_count = c.execute("SELECT COUNT(*) FROM basis_opportunities").fetchone()[0]
+                result["stats"]["total_opportunities"] = opp_count
+
+            if "basis_positions" in tables:
+                open_count = c.execute(
+                    "SELECT COUNT(*) FROM basis_positions WHERE is_open=1"
+                ).fetchone()[0]
+                result["stats"]["open_positions"] = open_count
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return _sanitize_for_json(result)
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

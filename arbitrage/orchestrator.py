@@ -33,6 +33,7 @@ from arbitrage.costs.model import ArbitrageCostModel
 from arbitrage.detector.cross_exchange import CrossExchangeDetector
 from arbitrage.execution.engine import ArbitrageExecutor
 from arbitrage.funding.funding_rate_arb import FundingRateArbitrage
+from arbitrage.basis.basis_arb import BasisArbitrage
 from arbitrage.triangular.triangle_arb import TriangularArbitrage
 from arbitrage.risk.arb_risk import ArbitrageRiskEngine
 from arbitrage.inventory.manager import InventoryManager
@@ -149,6 +150,10 @@ class ArbitrageOrchestrator:
         self.funding_arb = FundingRateArbitrage(
             self.mexc, self.binance, self.risk_engine,
             config=self.config, tracker=self.tracker,
+        )
+
+        self.basis_arb = BasisArbitrage(
+            self.mexc, config=self.config, tracker=self.tracker,
         )
 
         self.triangular_arb = TriangularArbitrage(
@@ -272,6 +277,7 @@ class ArbitrageOrchestrator:
             ),
             asyncio.create_task(self._run_execution_loop(), name="executor"),
             asyncio.create_task(self._run_funding_arb(), name="funding_arb"),
+            asyncio.create_task(self._run_basis_arb(), name="basis_arb"),
             asyncio.create_task(self._run_triangular_arb(), name="triangular_arb"),
             *(
                 [asyncio.create_task(self._run_triangular_arb_bybit(), name="triangular_arb_bybit")]
@@ -297,6 +303,7 @@ class ArbitrageOrchestrator:
         self.cross_exchange_detector.stop()
         self.pair_discovery.stop()
         self.funding_arb.stop()
+        self.basis_arb.stop()
         self.triangular_arb.stop()
         if self.triangular_arb_bybit:
             self.triangular_arb_bybit.stop()
@@ -399,6 +406,14 @@ class ArbitrageOrchestrator:
             await self.funding_arb.run()
         except Exception as e:
             logger.error(f"Funding arb error: {e}")
+
+    async def _run_basis_arb(self):
+        """Run basis (spot-futures convergence) arbitrage scanner."""
+        await asyncio.sleep(15)  # Let exchange connections stabilize
+        try:
+            await self.basis_arb.run()
+        except Exception as e:
+            logger.error(f"Basis arb error: {e}")
 
     async def _run_triangular_arb(self):
         """Run triangular arbitrage scanner (MEXC)."""
@@ -548,6 +563,7 @@ class ArbitrageOrchestrator:
         executor_stats = self.executor.get_stats()
         risk_status = self.risk_engine.get_status()
         funding_stats = self.funding_arb.get_stats()
+        basis_stats = self.basis_arb.get_stats()
         tri_stats = self.triangular_arb.get_stats()
 
         logger.info("")
@@ -582,6 +598,9 @@ class ArbitrageOrchestrator:
                     f"Paper: ${paper_pnl:.2f} | "
                     f"Realistic: ${realistic_pnl:.2f} | "
                     f"Edge survival: {edge_rate*100:.0f}%")
+        logger.info(f"  Basis: {basis_stats['scans_completed']} scans | "
+                    f"{basis_stats['opportunities_found']} opportunities | "
+                    f"mode={'OBS' if basis_stats['observation_mode'] else 'LIVE'}")
         logger.info(f"  Funding: {funding_stats['open_positions']} open positions | "
                     f"Collected: ${funding_stats['total_funding_collected_usd']:.2f}")
         logger.info(f"  Triangular: {tri_stats['scan_count']} scans | "
@@ -651,6 +670,10 @@ class ArbitrageOrchestrator:
         except Exception:
             tri_bybit_stats = {}
         try:
+            basis_stats = self.basis_arb.get_stats()
+        except Exception:
+            basis_stats = {}
+        try:
             risk_status = self.risk_engine.get_status()
         except Exception:
             risk_status = {}
@@ -679,6 +702,7 @@ class ArbitrageOrchestrator:
             "funding": funding_stats,
             "triangular": tri_stats,
             "triangular_bybit": tri_bybit_stats,
+            "basis": basis_stats,
             "risk": risk_status,
             "tracker_summary": tracker_summary,
             "contract_verification": contract_stats,

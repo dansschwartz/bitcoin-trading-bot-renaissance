@@ -218,3 +218,15 @@ paper_trading:
 logging:
   level: INFO
   file: logs/arbitrage.log
+
+basis_trading:
+  enabled: true
+  observation_mode: true             # Log only, no trades — collect data first
+  min_basis_bps: 5                   # Minimum basis to flag as opportunity
+  max_position_usd: 1000            # Max per-symbol notional (when live)
+  max_total_positions: 3             # Max simultaneous basis positions
+  scan_interval_seconds: 120         # Scan every 2 minutes
+  symbols:                           # MEXC contract symbols to monitor
+    - BTC
+    - ETH
+    - SOL
