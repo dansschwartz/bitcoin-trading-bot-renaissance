@@ -54,7 +54,7 @@ class ArbitrageRiskEngine:
         sig_id = getattr(signal, 'signal_id', '?')
 
         if self._halted:
-            logger.info(f"Rejected {sig_id} — halted: {self._halt_reason}")
+            logger.debug(f"Rejected {sig_id} — halted: {self._halt_reason}")
             return False
 
         # Reset daily PnL at midnight

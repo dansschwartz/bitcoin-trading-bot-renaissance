@@ -62,6 +62,18 @@ class MedallionRegimePredictor:
             min_len = min(len(returns), len(volatility))
             current_features = np.column_stack([returns[-min_len:], volatility[-min_len:]])
             
+            # Regularize covariance matrices before prediction
+            if hasattr(self.model, "covars_"):
+                for i in range(len(self.model.covars_)):
+                    c = self.model.covars_[i]
+                    # Force symmetry
+                    c = (c + c.T) / 2
+                    # Add small diagonal to ensure positive-definiteness
+                    min_eig = np.linalg.eigvalsh(c).min()
+                    if min_eig < 1e-6:
+                        c += np.eye(c.shape[0]) * (1e-6 - min_eig)
+                    self.model.covars_[i] = c
+
             # Current regime
             hidden_states = self.model.predict(current_features)
             current_state = hidden_states[-1]
