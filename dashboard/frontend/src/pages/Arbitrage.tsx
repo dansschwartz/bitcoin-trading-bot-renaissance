@@ -231,8 +231,8 @@ export default function Arbitrage() {
         )}
         {basis != null && Boolean((basis as Record<string, unknown>).stats) && (
           <div className="mt-2 flex gap-4 text-xs text-gray-500">
-            <span>Scans: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.scans_completed ?? 0)}</span>
-            <span>Opportunities: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.opportunities_found ?? 0)}</span>
+            <span>Scans: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.scans_completed ?? ((basis as Record<string, unknown>).stats as Record<string, unknown>)?.total_snapshots ?? 0)}</span>
+            <span>Opportunities: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.opportunities_found ?? ((basis as Record<string, unknown>).stats as Record<string, unknown>)?.total_opportunities ?? 0)}</span>
           </div>
         )}
       </div>
