@@ -7,8 +7,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Request
+import yaml
 
 logger = logging.getLogger(__name__)
+
+_ARB_CFG_PATH = Path(__file__).resolve().parent.parent.parent / "arbitrage" / "config" / "arbitrage.yaml"
+
+def _read_arb_config() -> dict:
+    try:
+        with open(_ARB_CFG_PATH) as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
 
 router = APIRouter(prefix="/api/arbitrage", tags=["arbitrage"])
 
@@ -1150,8 +1160,9 @@ async def arb_basis(request: Request):
     """Basis trading (spot-futures convergence) status and snapshots."""
     orch = getattr(request.app.state, "arb_orchestrator", None)
 
+    _cfg = _read_arb_config()
     result = {
-        "observation_mode": True,
+        "observation_mode": _cfg.get("basis_trading", {}).get("observation_mode", True),
         "current_basis": {},
         "recent_snapshots": [],
         "recent_opportunities": [],
@@ -1228,8 +1239,9 @@ async def arb_listing(request: Request):
     """Listing arbitrage (new MEXC token detection) status."""
     orch = getattr(request.app.state, "arb_orchestrator", None)
 
+    _cfg = _read_arb_config()
     result = {
-        "observation_mode": True,
+        "observation_mode": _cfg.get("listing_arbitrage", {}).get("observation_mode", True),
         "listings_evaluated": 0,
         "trades_opened": 0,
         "trades_closed": 0,
@@ -1312,8 +1324,9 @@ async def arb_pairs(request: Request):
     """Statistical pairs arbitrage (cointegration) status."""
     orch = getattr(request.app.state, "arb_orchestrator", None)
 
+    _cfg = _read_arb_config()
     result = {
-        "observation_mode": True,
+        "observation_mode": _cfg.get("statistical_pairs", {}).get("observation_mode", True),
         "cycle_count": 0,
         "opportunities_detected": 0,
         "pair_states": [],

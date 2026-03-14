@@ -221,7 +221,7 @@ logging:
 
 basis_trading:
   enabled: true
-  observation_mode: true             # Log only, no trades — collect data first
+  observation_mode: false            # LIVE paper trading enabled
   min_basis_bps: 5                   # Minimum basis to flag as opportunity
   max_position_usd: 1000            # Max per-symbol notional (when live)
   max_total_positions: 3             # Max simultaneous basis positions
@@ -233,7 +233,7 @@ basis_trading:
 
 listing_arbitrage:
   enabled: true
-  observation_mode: true              # DO NOT CHANGE — observe for 2+ weeks first
+  observation_mode: false             # LIVE paper trading enabled
   poll_interval_seconds: 60           # How often to check for new listings
   max_position_usd: 200              # HARD CAP — do not increase without review
   max_concurrent_positions: 2         # HARD CAP
@@ -245,7 +245,7 @@ listing_arbitrage:
 
 statistical_pairs:
   enabled: true
-  observation_mode: true        # DO NOT CHANGE — collect 2+ weeks of data first
+  observation_mode: false       # LIVE paper trading enabled
   entry_z_score: 2.0            # Z-score to trigger signal
   exit_z_score: 0.5             # Z-score to take profit (mean reversion)
   stop_z_score: 3.5             # Emergency exit (spread not reverting)

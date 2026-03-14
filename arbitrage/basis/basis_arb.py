@@ -22,7 +22,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import uuid
+
 import aiohttp
+
+from ..exchanges.base import OrderRequest, OrderSide, OrderType, OrderStatus
 
 from .basis_calculator import (
     BasisSnapshot,
@@ -41,6 +45,11 @@ BASIS_SYMBOLS = {
     "ETH": "ETH_USDT",
     "SOL": "SOL_USDT",
 }
+
+# Position management
+MAX_HOLD_HOURS = 24
+EXIT_BASIS_BPS = Decimal("2")       # Close when basis converges below this
+STOP_LOSS_BPS = Decimal("50")       # Emergency exit if basis widens beyond this
 
 
 class BasisArbitrage:
@@ -80,6 +89,12 @@ class BasisArbitrage:
         self._opportunities_found = 0
         self._scans_completed = 0
         self._errors = 0
+        self._positions_opened = 0
+        self._positions_closed = 0
+        self._total_pnl_usd = Decimal("0")
+
+        # Track open positions: symbol -> position dict
+        self._open_positions: Dict[str, dict] = {}
 
         # DB
         self._db_path = str(Path("data") / "arbitrage.db")
@@ -242,6 +257,11 @@ class BasisArbitrage:
                         f"{' [OBSERVATION]' if self.observation_mode else ''}"
                     )
 
+
+                    # Execute trade if live and no existing position
+                    if not self.observation_mode and spot_sym not in self._open_positions:
+                        if len(self._open_positions) < self.max_total_positions:
+                            await self._open_basis_position(spot_sym, opp, spot, futures)
             except Exception as e:
                 logger.debug(f"Basis calc error for {spot_sym}: {e}")
                 continue
@@ -251,6 +271,10 @@ class BasisArbitrage:
         if opportunities:
             self._persist_opportunities(opportunities)
 
+
+        # Monitor open positions for exit
+        if not self.observation_mode and self._open_positions:
+            await self._monitor_positions(spot_prices, futures_prices)
         # Log summary every scan
         if snapshots:
             summary_parts = []
@@ -419,6 +443,199 @@ class BasisArbitrage:
         except Exception as e:
             logger.debug(f"Basis opportunity persist error: {e}")
 
+    async def _open_basis_position(self, symbol, opp, spot_price, futures_price):
+        """Open a basis trade: spot leg via MEXC + simulated futures leg."""
+        position_id = f"basis_{uuid.uuid4().hex[:8]}"
+        size_usd = Decimal(str(self.max_position_usd))
+        qty = size_usd / spot_price
+
+        # Determine spot leg direction
+        if opp.signal == "sell_basis":
+            spot_side = OrderSide.BUY   # Contango: buy spot, short futures
+            direction = "sell_basis"
+        else:
+            spot_side = OrderSide.SELL   # Backwardation: sell spot, long futures
+            direction = "buy_basis"
+
+        # Execute spot leg via MEXC paper trading
+        try:
+            order = OrderRequest(
+                exchange="mexc",
+                symbol=symbol,
+                side=spot_side,
+                order_type=OrderType.MARKET,
+                quantity=qty,
+                price=spot_price,
+                client_order_id=f"basis_{position_id}",
+            )
+            result = await self.mexc.place_order(order)
+            if result.status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                logger.warning(f"BASIS SPOT LEG FAILED: {symbol} {result.status}")
+                return
+            fill_price = result.average_fill_price or spot_price
+            fill_qty = result.filled_quantity
+        except Exception as e:
+            logger.error(f"BASIS SPOT ORDER ERROR: {symbol}: {e}")
+            return
+
+        # Record position (futures leg simulated at current price)
+        pos = {
+            "position_id": position_id,
+            "symbol": symbol,
+            "direction": direction,
+            "entry_spot_price": float(fill_price),
+            "entry_futures_price": float(futures_price),
+            "entry_basis_bps": float(opp.snapshot.basis_bps),
+            "entry_time": datetime.utcnow(),
+            "size_usd": float(fill_price * fill_qty),
+            "quantity": float(fill_qty),
+            "spot_fee": float(result.fee_amount),
+        }
+        self._open_positions[symbol] = pos
+        self._positions_opened += 1
+
+        # Persist to DB
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=10)
+            conn.execute(
+                "INSERT INTO basis_positions "
+                "(position_id, symbol, direction, entry_basis_bps, "
+                "entry_spot_price, entry_futures_price, entry_timestamp, "
+                "size_usd, is_open, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                (position_id, symbol, direction,
+                 float(opp.snapshot.basis_bps),
+                 float(fill_price), float(futures_price),
+                 datetime.utcnow().isoformat(),
+                 float(fill_price * fill_qty), "open"),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Basis position DB error: {e}")
+
+        logger.info(
+            f"BASIS POSITION OPENED: {position_id} | {symbol} {direction} | "
+            f"spot={float(fill_price):.2f} fut={float(futures_price):.2f} | "
+            f"basis={float(opp.snapshot.basis_bps):.1f}bps | "
+            f"size=${float(fill_price * fill_qty):.2f}"
+        )
+
+    async def _monitor_positions(self, spot_prices, futures_prices):
+        """Check open positions for exit conditions."""
+        to_close = []
+
+        for symbol, pos in self._open_positions.items():
+            name = symbol.split("/")[0]
+            contract_sym = self._symbols.get(name)
+
+            current_spot = spot_prices.get(symbol)
+            futures_data = futures_prices.get(contract_sym) if contract_sym else None
+            current_futures = futures_data["price"] if futures_data else None
+
+            if current_spot is None or current_futures is None:
+                continue
+
+            # Current basis
+            current_basis_bps = (current_futures - current_spot) / current_spot * Decimal("10000")
+
+            # Unrealized P&L
+            entry_spot = Decimal(str(pos["entry_spot_price"]))
+            entry_futures = Decimal(str(pos["entry_futures_price"]))
+            qty = Decimal(str(pos["quantity"]))
+
+            if pos["direction"] == "sell_basis":
+                spot_pnl = (current_spot - entry_spot) * qty
+                futures_pnl = (entry_futures - current_futures) * qty
+            else:
+                spot_pnl = (entry_spot - current_spot) * qty
+                futures_pnl = (current_futures - entry_futures) * qty
+
+            unrealized = spot_pnl + futures_pnl
+            fee_est = Decimal(str(pos.get("spot_fee", 0))) * 2
+
+            # Exit conditions
+            hold_hours = (datetime.utcnow() - pos["entry_time"]).total_seconds() / 3600
+            abs_current = abs(current_basis_bps)
+
+            exit_reason = None
+            if abs_current <= EXIT_BASIS_BPS:
+                exit_reason = "basis_converged"
+            elif abs_current > STOP_LOSS_BPS:
+                exit_reason = "stop_loss"
+            elif hold_hours >= MAX_HOLD_HOURS:
+                exit_reason = "max_hold_time"
+
+            if exit_reason:
+                to_close.append((symbol, exit_reason, unrealized - fee_est,
+                                 current_spot, current_futures, current_basis_bps))
+
+        for symbol, reason, pnl, c_spot, c_fut, c_basis in to_close:
+            await self._close_basis_position(symbol, reason, pnl, c_spot, c_fut, c_basis)
+
+    async def _close_basis_position(self, symbol, reason, pnl, current_spot, current_futures, current_basis_bps):
+        """Close a basis position: exit spot leg, record P&L."""
+        pos = self._open_positions.pop(symbol, None)
+        if not pos:
+            return
+
+        qty = Decimal(str(pos["quantity"]))
+        close_side = OrderSide.SELL if pos["direction"] == "sell_basis" else OrderSide.BUY
+
+        try:
+            order = OrderRequest(
+                exchange="mexc", symbol=symbol, side=close_side,
+                order_type=OrderType.MARKET, quantity=qty, price=current_spot,
+                client_order_id=f"basis_close_{pos[position_id]}",
+            )
+            result = await self.mexc.place_order(order)
+            exit_fee = float(result.fee_amount)
+        except Exception as e:
+            logger.error(f"BASIS CLOSE SPOT ERROR: {symbol}: {e}")
+            exit_fee = 0
+
+        final_pnl = float(pnl)
+        self._positions_closed += 1
+        self._total_pnl_usd += Decimal(str(final_pnl))
+
+        # Update DB
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=10)
+            conn.execute(
+                "UPDATE basis_positions SET "
+                "is_open=0, status=closed, exit_timestamp=?, exit_reason=?, "
+                "current_basis_bps=?, unrealized_pnl=?, final_pnl=? "
+                "WHERE position_id=?",
+                (datetime.utcnow().isoformat(), reason,
+                 float(current_basis_bps), final_pnl, final_pnl,
+                 pos["position_id"]),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Basis close DB error: {e}")
+
+        if self.tracker:
+            try:
+                self.tracker.record_trade(
+                    strategy="basis_trading", symbol=symbol,
+                    buy_exchange="mexc", sell_exchange="mexc_futures",
+                    buy_price=float(pos["entry_spot_price"]),
+                    sell_price=float(pos["entry_futures_price"]),
+                    quantity=float(qty), status="filled",
+                    actual_profit_usd=final_pnl,
+                )
+            except Exception:
+                pass
+
+        logger.info(
+            f"BASIS POSITION CLOSED: {pos[position_id]} | {symbol} | "
+            f"reason={reason} | P&L=${final_pnl:+.2f} | "
+            f"entry_basis={pos[entry_basis_bps]:.1f}bps -> "
+            f"exit_basis={float(current_basis_bps):.1f}bps | "
+            f"hold={((datetime.utcnow() - pos[entry_time]).total_seconds()/3600):.1f}h"
+        )
+
     def get_status(self) -> dict:
         """Return current status for dashboard/orchestrator."""
         return {
@@ -426,6 +643,19 @@ class BasisArbitrage:
             "running": self._running,
             "scans_completed": self._scans_completed,
             "opportunities_found": self._opportunities_found,
+            "positions_opened": self._positions_opened,
+            "positions_closed": self._positions_closed,
+            "total_pnl_usd": float(self._total_pnl_usd),
+            "open_positions": [
+                {
+                    "symbol": p["symbol"],
+                    "direction": p["direction"],
+                    "entry_basis_bps": p["entry_basis_bps"],
+                    "size_usd": p["size_usd"],
+                    "entry_time": p["entry_time"].isoformat(),
+                }
+                for p in self._open_positions.values()
+            ],
             "errors": self._errors,
             "symbols": list(self._symbols.keys()),
             "min_basis_bps": float(self.min_basis_bps),
