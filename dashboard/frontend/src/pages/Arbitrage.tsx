@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import PageShell from '../components/layout/PageShell';
 import MetricCard from '../components/cards/MetricCard';
 import ArbDailyPnlChart from '../components/charts/ArbDailyPnlChart';
+import ArbDailyPnlBarChart from '../components/charts/ArbDailyPnlBarChart';
 import { api } from '../api';
 import type { ArbStatus, ArbTrade, ArbSummary, ArbWallet } from '../types';
 import { formatCurrency, formatTimestamp, pnlColor, pnlSign, formatUptime } from '../utils/formatters';
@@ -109,6 +110,8 @@ export default function Arbitrage() {
 
       {/* Daily P&L Chart */}
       <ArbDailyPnlChart />
+
+      <ArbDailyPnlBarChart />
 
       {/* Metric Cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
