@@ -14,23 +14,28 @@ export default function ArbDailyPnlBarChart() {
   const [data, setData] = useState<DailyRow[]>([]);
 
   useEffect(() => {
-    api.arbDailyPnl(30).then(setData).catch(() => {});
-    const id = setInterval(() => api.arbDailyPnl(30).then(setData).catch(() => {}), 60_000);
+    const load = (raw: DailyRow[]) => {
+      const byDate = new Map(raw.map((r) => [r.date, r]));
+      const days: DailyRow[] = [];
+      const now = new Date();
+      for (let i = 30; i >= 0; i--) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const key = d.toISOString().slice(0, 10);
+        days.push(byDate.get(key) || { date: key, pnl: 0, trades: 0, wins: 0 });
+      }
+      setData(days);
+    };
+
+    api.arbDailyPnl(31).then(load).catch(() => {});
+    const id = setInterval(() => api.arbDailyPnl(31).then(load).catch(() => {}), 60_000);
     return () => clearInterval(id);
   }, []);
-
-  if (!data.length) {
-    return (
-      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
-        <h3 className="text-sm font-medium text-gray-300 mb-3">Daily P&L (30d)</h3>
-        <div className="text-sm text-gray-600 py-8 text-center">No daily data yet</div>
-      </div>
-    );
-  }
 
   const totalPnl = data.reduce((sum, d) => sum + d.pnl, 0);
   const totalTrades = data.reduce((sum, d) => sum + d.trades, 0);
   const profitDays = data.filter((d) => d.pnl > 0).length;
+  const activeDays = data.filter((d) => d.trades > 0).length;
 
   const formatted = data.map((d) => {
     const dt = new Date(d.date + "T00:00:00");
@@ -41,7 +46,7 @@ export default function ArbDailyPnlBarChart() {
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-300">Daily P&L (30d)</h3>
+        <h3 className="text-sm font-medium text-gray-300">Daily P&L (31d)</h3>
         <div className="flex gap-4 text-xs text-gray-500">
           <span>
             Total:{" "}
@@ -50,7 +55,7 @@ export default function ArbDailyPnlBarChart() {
             </span>
           </span>
           <span>{totalTrades} trades</span>
-          <span>{profitDays}/{data.length} green days</span>
+          <span>{profitDays}/{activeDays} green days</span>
         </div>
       </div>
       <ResponsiveContainer width="100%" height={220}>
