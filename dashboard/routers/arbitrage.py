@@ -1223,6 +1223,90 @@ async def arb_basis(request: Request):
     return _sanitize_for_json(result)
 
 
+@router.get("/listing")
+async def arb_listing(request: Request):
+    """Listing arbitrage (new MEXC token detection) status."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+
+    result = {
+        "observation_mode": True,
+        "listings_evaluated": 0,
+        "trades_opened": 0,
+        "trades_closed": 0,
+        "total_pnl_usd": 0,
+        "open_positions": [],
+        "recent_listings": [],
+        "monitor_stats": {},
+        "hard_limits": {
+            "max_position_usd": 200,
+            "max_concurrent": 2,
+            "max_hold_minutes": 60,
+        },
+    }
+
+    # Try live data from orchestrator
+    if orch and hasattr(orch, "listing_arb"):
+        try:
+            result.update(orch.listing_arb.get_status())
+        except Exception as e:
+            logger.debug(f"Live listing arb stats error: {e}")
+
+    if orch and hasattr(orch, "listing_monitor"):
+        try:
+            result["recent_listings"] = orch.listing_monitor.get_recent_listings(20)
+            result["monitor_stats"] = orch.listing_monitor.get_stats()
+        except Exception as e:
+            logger.debug(f"Live listing monitor stats error: {e}")
+
+    # DB fallback for recent listings
+    if not result["recent_listings"]:
+        try:
+            with _arb_conn() as c:
+                tables = [r[0] for r in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()]
+
+                if "listing_events" in tables:
+                    rows = c.execute(
+                        "SELECT symbol, detected_at, is_first_listing, mexc_initial_price, on_binance "
+                        "FROM listing_events ORDER BY id DESC LIMIT 20"
+                    ).fetchall()
+                    result["recent_listings"] = [
+                        {
+                            "symbol": r["symbol"],
+                            "detected_at": r["detected_at"],
+                            "is_first_listing": bool(r["is_first_listing"]),
+                            "mexc_initial_price": r["mexc_initial_price"],
+                            "already_on_binance": bool(r["on_binance"]),
+                        }
+                        for r in rows
+                    ]
+
+                if "listing_arb_evaluations" in tables:
+                    eval_count = c.execute(
+                        "SELECT COUNT(*) FROM listing_arb_evaluations"
+                    ).fetchone()[0]
+                    result["listings_evaluated"] = result.get("listings_evaluated", 0) or eval_count
+
+                if "known_symbols_snapshot" in tables:
+                    mexc_count = c.execute(
+                        "SELECT COUNT(*) FROM known_symbols_snapshot WHERE exchange='mexc'"
+                    ).fetchone()[0]
+                    binance_count = c.execute(
+                        "SELECT COUNT(*) FROM known_symbols_snapshot WHERE exchange='binance'"
+                    ).fetchone()[0]
+                    if not result["monitor_stats"]:
+                        result["monitor_stats"] = {
+                            "known_mexc_symbols": mexc_count,
+                            "known_binance_symbols": binance_count,
+                        }
+
+        except Exception as e:
+            result["error"] = str(e)
+
+    return _sanitize_for_json(result)
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

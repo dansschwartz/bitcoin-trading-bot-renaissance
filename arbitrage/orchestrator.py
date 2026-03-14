@@ -34,6 +34,8 @@ from arbitrage.detector.cross_exchange import CrossExchangeDetector
 from arbitrage.execution.engine import ArbitrageExecutor
 from arbitrage.funding.funding_rate_arb import FundingRateArbitrage
 from arbitrage.basis.basis_arb import BasisArbitrage
+from arbitrage.listing.listing_monitor import ListingMonitor
+from arbitrage.listing.listing_arb import ListingArbitrage
 from arbitrage.triangular.triangle_arb import TriangularArbitrage
 from arbitrage.risk.arb_risk import ArbitrageRiskEngine
 from arbitrage.inventory.manager import InventoryManager
@@ -154,6 +156,18 @@ class ArbitrageOrchestrator:
 
         self.basis_arb = BasisArbitrage(
             self.mexc, config=self.config, tracker=self.tracker,
+        )
+
+        # Listing arbitrage (new token listing monitor + arb evaluator)
+        self.listing_arb = ListingArbitrage(
+            mexc_spot_client=self.mexc,
+            observation_mode=True,
+            config=self.config,
+        )
+        self.listing_monitor = ListingMonitor(
+            mexc_client=self.mexc,
+            on_new_listing=self.listing_arb.on_new_listing,
+            config=self.config,
         )
 
         self.triangular_arb = TriangularArbitrage(
@@ -278,6 +292,8 @@ class ArbitrageOrchestrator:
             asyncio.create_task(self._run_execution_loop(), name="executor"),
             asyncio.create_task(self._run_funding_arb(), name="funding_arb"),
             asyncio.create_task(self._run_basis_arb(), name="basis_arb"),
+            asyncio.create_task(self._run_listing_monitor(), name="listing_monitor"),
+            asyncio.create_task(self._run_listing_arb(), name="listing_arb"),
             asyncio.create_task(self._run_triangular_arb(), name="triangular_arb"),
             *(
                 [asyncio.create_task(self._run_triangular_arb_bybit(), name="triangular_arb_bybit")]
@@ -304,6 +320,8 @@ class ArbitrageOrchestrator:
         self.pair_discovery.stop()
         self.funding_arb.stop()
         self.basis_arb.stop()
+        self.listing_monitor.stop()
+        self.listing_arb.stop()
         self.triangular_arb.stop()
         if self.triangular_arb_bybit:
             self.triangular_arb_bybit.stop()
@@ -414,6 +432,22 @@ class ArbitrageOrchestrator:
             await self.basis_arb.run()
         except Exception as e:
             logger.error(f"Basis arb error: {e}")
+
+    async def _run_listing_monitor(self):
+        """Run listing monitor (new MEXC token detection)."""
+        await asyncio.sleep(20)  # Let exchange connections fully stabilize
+        try:
+            await self.listing_monitor.run()
+        except Exception as e:
+            logger.error(f"Listing monitor error: {e}")
+
+    async def _run_listing_arb(self):
+        """Run listing arbitrage position monitor."""
+        await asyncio.sleep(25)  # Start after listing monitor
+        try:
+            await self.listing_arb.run()
+        except Exception as e:
+            logger.error(f"Listing arb error: {e}")
 
     async def _run_triangular_arb(self):
         """Run triangular arbitrage scanner (MEXC)."""
@@ -674,6 +708,14 @@ class ArbitrageOrchestrator:
         except Exception:
             basis_stats = {}
         try:
+            listing_monitor_stats = self.listing_monitor.get_stats()
+        except Exception:
+            listing_monitor_stats = {}
+        try:
+            listing_arb_stats = self.listing_arb.get_status()
+        except Exception:
+            listing_arb_stats = {}
+        try:
             risk_status = self.risk_engine.get_status()
         except Exception:
             risk_status = {}
@@ -703,6 +745,8 @@ class ArbitrageOrchestrator:
             "triangular": tri_stats,
             "triangular_bybit": tri_bybit_stats,
             "basis": basis_stats,
+            "listing_monitor": listing_monitor_stats,
+            "listing": listing_arb_stats,
             "risk": risk_status,
             "tracker_summary": tracker_summary,
             "contract_verification": contract_stats,

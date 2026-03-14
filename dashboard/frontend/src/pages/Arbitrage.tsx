@@ -11,6 +11,7 @@ const STRATEGY_COLORS: Record<string, string> = {
   triangular: 'bg-purple-400/20 text-purple-400',
   funding_rate: 'bg-accent-green/20 text-accent-green',
   basis_trading: 'bg-orange-400/20 text-orange-400',
+  listing_arb: 'bg-pink-400/20 text-pink-400',
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -28,6 +29,7 @@ export default function Arbitrage() {
   const [wallet, setWallet] = useState<ArbWallet | null>(null);
   const [showSignals, setShowSignals] = useState(false);
   const [basis, setBasis] = useState<Record<string, unknown> | null>(null);
+  const [listing, setListing] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     const load = () => {
@@ -36,6 +38,7 @@ export default function Arbitrage() {
       api.arbSummary().then(setSummary).catch(() => {});
       api.arbWallet().then(setWallet).catch(() => {});
       api.arbBasis().then(setBasis).catch(() => {});
+      api.arbListing().then(setListing).catch(() => {});
     };
     load();
     const id = setInterval(load, 10_000);
@@ -235,6 +238,90 @@ export default function Arbitrage() {
             <span>Opportunities: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.opportunities_found ?? ((basis as Record<string, unknown>).stats as Record<string, unknown>)?.total_opportunities ?? 0)}</span>
           </div>
         )}
+      </div>
+
+      {/* Listing Monitor */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-gray-300">Listing Monitor</h3>
+          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-pink-400/20 text-pink-400">
+            {listing != null && Boolean((listing as Record<string, unknown>).observation_mode) ? 'OBSERVATION' : 'LIVE'}
+          </span>
+        </div>
+
+        {/* Monitor stats */}
+        {listing != null && Boolean((listing as Record<string, unknown>).monitor_stats) && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">MEXC Symbols</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String(((listing as Record<string, unknown>).monitor_stats as Record<string, unknown>)?.known_mexc_symbols ?? 0)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Binance Symbols</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String(((listing as Record<string, unknown>).monitor_stats as Record<string, unknown>)?.known_binance_symbols ?? 0)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">New Detected</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String(((listing as Record<string, unknown>).monitor_stats as Record<string, unknown>)?.listings_detected ?? 0)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Evaluated</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String((listing as Record<string, unknown>)?.listings_evaluated ?? 0)}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Recent listings table */}
+        {listing && Array.isArray((listing as Record<string, unknown>).recent_listings) &&
+          ((listing as Record<string, unknown>).recent_listings as Array<Record<string, unknown>>).length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-surface-3">
+                  <th className="text-left py-1.5 px-2">Symbol</th>
+                  <th className="text-left py-1.5 px-2">Detected</th>
+                  <th className="text-right py-1.5 px-2">Price</th>
+                  <th className="text-center py-1.5 px-2">MEXC First?</th>
+                </tr>
+              </thead>
+              <tbody>
+                {((listing as Record<string, unknown>).recent_listings as Array<Record<string, unknown>>).map((evt, i) => (
+                  <tr key={i} className="border-b border-surface-3/50">
+                    <td className="py-1.5 px-2 text-gray-300">{String(evt.symbol)}</td>
+                    <td className="py-1.5 px-2 text-gray-500">{String(evt.detected_at ?? '--').slice(0, 19)}</td>
+                    <td className="py-1.5 px-2 text-right text-gray-300">
+                      {evt.mexc_initial_price != null ? `$${Number(evt.mexc_initial_price).toFixed(6)}` : '--'}
+                    </td>
+                    <td className="py-1.5 px-2 text-center">
+                      <span className={evt.is_first_listing
+                        ? 'text-accent-green'
+                        : 'text-gray-500'}>
+                        {evt.is_first_listing ? 'YES' : 'No'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-500">No new listings detected yet — monitoring every 60s...</p>
+        )}
+
+        {/* Hard limits footer */}
+        <div className="mt-2 flex gap-4 text-[10px] text-gray-600">
+          <span>Max position: $200</span>
+          <span>Max concurrent: 2</span>
+          <span>Max hold: 60min</span>
+        </div>
       </div>
 
       {/* Recent Trades Table */}

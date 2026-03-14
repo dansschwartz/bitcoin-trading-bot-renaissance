@@ -230,3 +230,15 @@ basis_trading:
     - BTC
     - ETH
     - SOL
+
+listing_arbitrage:
+  enabled: true
+  observation_mode: true              # DO NOT CHANGE — observe for 2+ weeks first
+  poll_interval_seconds: 60           # How often to check for new listings
+  max_position_usd: 200              # HARD CAP — do not increase without review
+  max_concurrent_positions: 2         # HARD CAP
+  max_hold_minutes: 60                # Force close after this long
+  take_profit_pct: 0.10               # 10% gain -> close
+  stop_loss_pct: 0.08                 # 8% loss -> close
+  min_volume_usd_5min: 1000           # Minimum volume before entering
+  quote_filter: USDT                  # Only track USDT pairs
