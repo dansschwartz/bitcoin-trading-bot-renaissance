@@ -36,6 +36,7 @@ from arbitrage.funding.funding_rate_arb import FundingRateArbitrage
 from arbitrage.basis.basis_arb import BasisArbitrage
 from arbitrage.listing.listing_monitor import ListingMonitor
 from arbitrage.listing.listing_arb import ListingArbitrage
+from arbitrage.pairs.pairs_arb import PairsArbitrage
 from arbitrage.triangular.triangle_arb import TriangularArbitrage
 from arbitrage.risk.arb_risk import ArbitrageRiskEngine
 from arbitrage.inventory.manager import InventoryManager
@@ -186,6 +187,13 @@ class ArbitrageOrchestrator:
             )
             self.triangular_arb_bybit._exchange_name = "bybit"
 
+        # Statistical pairs arbitrage (cointegration-based)
+        self.pairs_arb = PairsArbitrage(
+            mexc_spot_client=self.mexc,
+            observation_mode=True,
+            config=self.config,
+        )
+
         self._running = False
         self._start_time: Optional[datetime] = None
 
@@ -294,6 +302,7 @@ class ArbitrageOrchestrator:
             asyncio.create_task(self._run_basis_arb(), name="basis_arb"),
             asyncio.create_task(self._run_listing_monitor(), name="listing_monitor"),
             asyncio.create_task(self._run_listing_arb(), name="listing_arb"),
+            asyncio.create_task(self._run_pairs_arb(), name="pairs_arb"),
             asyncio.create_task(self._run_triangular_arb(), name="triangular_arb"),
             *(
                 [asyncio.create_task(self._run_triangular_arb_bybit(), name="triangular_arb_bybit")]
@@ -322,6 +331,7 @@ class ArbitrageOrchestrator:
         self.basis_arb.stop()
         self.listing_monitor.stop()
         self.listing_arb.stop()
+        self.pairs_arb.stop()
         self.triangular_arb.stop()
         if self.triangular_arb_bybit:
             self.triangular_arb_bybit.stop()
@@ -448,6 +458,14 @@ class ArbitrageOrchestrator:
             await self.listing_arb.run()
         except Exception as e:
             logger.error(f"Listing arb error: {e}")
+
+    async def _run_pairs_arb(self):
+        """Run statistical pairs arbitrage (cointegration-based)."""
+        await asyncio.sleep(30)  # Let exchange connections and price feeds stabilize
+        try:
+            await self.pairs_arb.run()
+        except Exception as e:
+            logger.error(f"Pairs arb error: {e}")
 
     async def _run_triangular_arb(self):
         """Run triangular arbitrage scanner (MEXC)."""
@@ -716,6 +734,10 @@ class ArbitrageOrchestrator:
         except Exception:
             listing_arb_stats = {}
         try:
+            pairs_arb_stats = self.pairs_arb.get_status()
+        except Exception:
+            pairs_arb_stats = {}
+        try:
             risk_status = self.risk_engine.get_status()
         except Exception:
             risk_status = {}
@@ -747,6 +769,7 @@ class ArbitrageOrchestrator:
             "basis": basis_stats,
             "listing_monitor": listing_monitor_stats,
             "listing": listing_arb_stats,
+            "pairs": pairs_arb_stats,
             "risk": risk_status,
             "tracker_summary": tracker_summary,
             "contract_verification": contract_stats,

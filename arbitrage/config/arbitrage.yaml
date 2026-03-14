@@ -242,3 +242,19 @@ listing_arbitrage:
   stop_loss_pct: 0.08                 # 8% loss -> close
   min_volume_usd_5min: 1000           # Minimum volume before entering
   quote_filter: USDT                  # Only track USDT pairs
+
+statistical_pairs:
+  enabled: true
+  observation_mode: true        # DO NOT CHANGE — collect 2+ weeks of data first
+  entry_z_score: 2.0            # Z-score to trigger signal
+  exit_z_score: 0.5             # Z-score to take profit (mean reversion)
+  stop_z_score: 3.5             # Emergency exit (spread not reverting)
+  max_position_usd: 1500        # Per leg, in USD
+  max_concurrent_positions: 3
+  scan_interval_seconds: 300    # Align with 5-min bot cycle
+  window_size_bars: 240         # 20 hours of 5-min bars
+  min_history_bars: 60          # Need 5 hours before testing
+  cointegration_pvalue: 0.05    # Standard significance threshold
+  retest_interval_cycles: 288   # Retest every 24 hours
+  max_half_life_bars: 120       # Maximum acceptable mean reversion speed
+  min_half_life_bars: 5         # Minimum (faster = too noisy)

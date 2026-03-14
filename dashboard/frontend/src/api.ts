@@ -110,6 +110,7 @@ export const api = {
   arbHourlyPnl: (hours = 48) => get<{ hour: string; pnl: number; trades: number; wins: number }[]>(`/api/arbitrage/hourly-pnl?hours=${hours}`),
   arbBasis: () => get<Record<string, unknown>>('/api/arbitrage/basis'),
   arbListing: () => get<Record<string, unknown>>('/api/arbitrage/listing'),
+  arbPairs: () => get<Record<string, unknown>>('/api/arbitrage/pairs'),
 
   // Breakout Scanner
   breakoutSummary: () => get<Record<string, unknown>>('/api/breakout/summary'),

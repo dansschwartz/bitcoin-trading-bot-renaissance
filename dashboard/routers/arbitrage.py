@@ -1307,6 +1307,74 @@ async def arb_listing(request: Request):
     return _sanitize_for_json(result)
 
 
+@router.get("/pairs")
+async def arb_pairs(request: Request):
+    """Statistical pairs arbitrage (cointegration) status."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+
+    result = {
+        "observation_mode": True,
+        "cycle_count": 0,
+        "opportunities_detected": 0,
+        "pair_states": [],
+        "open_positions": [],
+        "config": {},
+    }
+
+    # Try live data from orchestrator
+    if orch and hasattr(orch, "pairs_arb"):
+        try:
+            result.update(orch.pairs_arb.get_status())
+        except Exception as e:
+            logger.debug(f"Live pairs arb stats error: {e}")
+
+    # DB fallback for signal counts
+    if not result.get("pair_states"):
+        try:
+            with _arb_conn() as c:
+                tables = [r[0] for r in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()]
+
+                if "pairs_signals" in tables:
+                    sig_count = c.execute("SELECT COUNT(*) FROM pairs_signals").fetchone()[0]
+                    result["total_signals"] = sig_count
+
+                    opp_count = c.execute(
+                        "SELECT COUNT(*) FROM pairs_signals WHERE action_taken='observation_logged'"
+                    ).fetchone()[0]
+                    result["opportunities_detected"] = opp_count
+
+                    # Latest z-scores per pair
+                    latest = c.execute("""
+                        SELECT base_symbol, quote_symbol, z_score, half_life,
+                               is_cointegrated, adf_pvalue, signal
+                        FROM pairs_signals
+                        WHERE id IN (
+                            SELECT MAX(id) FROM pairs_signals
+                            GROUP BY base_symbol, quote_symbol
+                        )
+                    """).fetchall()
+                    result["pair_states"] = [
+                        {
+                            "base": r["base_symbol"],
+                            "quote": r["quote_symbol"],
+                            "z_score": r["z_score"],
+                            "half_life_bars": r["half_life"],
+                            "is_cointegrated": bool(r["is_cointegrated"]),
+                            "adf_pvalue": r["adf_pvalue"],
+                            "signal": r["signal"],
+                            "has_open_position": False,
+                        }
+                        for r in latest
+                    ]
+
+        except Exception as e:
+            result["error"] = str(e)
+
+    return _sanitize_for_json(result)
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

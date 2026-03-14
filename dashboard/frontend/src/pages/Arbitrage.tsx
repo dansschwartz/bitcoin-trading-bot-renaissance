@@ -12,6 +12,7 @@ const STRATEGY_COLORS: Record<string, string> = {
   funding_rate: 'bg-accent-green/20 text-accent-green',
   basis_trading: 'bg-orange-400/20 text-orange-400',
   listing_arb: 'bg-pink-400/20 text-pink-400',
+  pairs_arb: 'bg-teal-400/20 text-teal-400',
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -30,6 +31,7 @@ export default function Arbitrage() {
   const [showSignals, setShowSignals] = useState(false);
   const [basis, setBasis] = useState<Record<string, unknown> | null>(null);
   const [listing, setListing] = useState<Record<string, unknown> | null>(null);
+  const [pairs, setPairs] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     const load = () => {
@@ -39,6 +41,7 @@ export default function Arbitrage() {
       api.arbWallet().then(setWallet).catch(() => {});
       api.arbBasis().then(setBasis).catch(() => {});
       api.arbListing().then(setListing).catch(() => {});
+      api.arbPairs().then(setPairs).catch(() => {});
     };
     load();
     const id = setInterval(load, 10_000);
@@ -321,6 +324,121 @@ export default function Arbitrage() {
           <span>Max position: $200</span>
           <span>Max concurrent: 2</span>
           <span>Max hold: 60min</span>
+        </div>
+      </div>
+
+
+      {/* Statistical Pairs Trading */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-gray-300">Statistical Pairs Trading</h3>
+          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-teal-400/20 text-teal-400">
+            {pairs != null && Boolean((pairs as Record<string, unknown>).observation_mode) ? "OBSERVATION" : "LIVE"}
+          </span>
+        </div>
+
+        {/* Pairs stats */}
+        {pairs != null && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Cointegrated</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String(((pairs as Record<string, unknown>).pair_states as Array<Record<string, unknown>> ?? []).filter((p: Record<string, unknown>) => p.is_cointegrated).length)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Scan Cycles</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String((pairs as Record<string, unknown>).cycle_count ?? 0)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Signals Logged</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String((pairs as Record<string, unknown>).total_signals ?? (pairs as Record<string, unknown>).opportunities_detected ?? 0)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Opportunities</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String((pairs as Record<string, unknown>).opportunities_detected ?? 0)}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Z-Score Table */}
+        {pairs && Array.isArray((pairs as Record<string, unknown>).pair_states) &&
+          ((pairs as Record<string, unknown>).pair_states as Array<Record<string, unknown>>).length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-surface-3">
+                  <th className="text-left py-1.5 px-2">Pair</th>
+                  <th className="text-right py-1.5 px-2">Z-Score</th>
+                  <th className="text-right py-1.5 px-2">Half-Life</th>
+                  <th className="text-right py-1.5 px-2">Hedge Ratio</th>
+                  <th className="text-right py-1.5 px-2">ADF p-val</th>
+                  <th className="text-center py-1.5 px-2">Signal</th>
+                  <th className="text-center py-1.5 px-2">Cointegrated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {((pairs as Record<string, unknown>).pair_states as Array<Record<string, unknown>>).map((ps, i) => {
+                  const z = Number(ps.z_score ?? 0);
+                  const absZ = Math.abs(z);
+                  const zColor = absZ >= 3.5 ? "text-accent-red" :
+                                 absZ >= 2.0 ? "text-orange-400" :
+                                 absZ >= 0.5 ? "text-accent-yellow" :
+                                 "text-gray-500";
+                  return (
+                    <tr key={i} className="border-b border-surface-3/50">
+                      <td className="py-1.5 px-2 text-gray-300">
+                        {String(ps.base ?? "")} / {String(ps.quote ?? "")}
+                      </td>
+                      <td className={"py-1.5 px-2 text-right font-bold " + zColor}>
+                        {z >= 0 ? "+" : ""}{z.toFixed(3)}
+                      </td>
+                      <td className="py-1.5 px-2 text-right text-gray-400">
+                        {ps.half_life_bars != null ? Number(ps.half_life_bars).toFixed(1) : "--"}
+                      </td>
+                      <td className="py-1.5 px-2 text-right text-gray-400">
+                        {ps.hedge_ratio != null ? Number(ps.hedge_ratio).toFixed(4) : "--"}
+                      </td>
+                      <td className="py-1.5 px-2 text-right text-gray-400">
+                        {ps.adf_pvalue != null ? Number(ps.adf_pvalue).toFixed(4) : "--"}
+                      </td>
+                      <td className="py-1.5 px-2 text-center">
+                        <span className={
+                          String(ps.signal ?? "") === "entry_long" ? "text-accent-green" :
+                          String(ps.signal ?? "") === "entry_short" ? "text-accent-red" :
+                          String(ps.signal ?? "") === "stop_loss" ? "text-accent-red font-bold" :
+                          "text-gray-500"
+                        }>
+                          {String(ps.signal ?? "none")}
+                        </span>
+                      </td>
+                      <td className="py-1.5 px-2 text-center">
+                        <span className={ps.is_cointegrated ? "text-accent-green" : "text-gray-500"}>
+                          {ps.is_cointegrated ? "YES" : "No"}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-500">No pair signals yet — waiting for price data accumulation...</p>
+        )}
+
+        {/* Z-score color legend */}
+        <div className="mt-2 flex gap-4 text-[10px] text-gray-600">
+          <span className="text-gray-500">|z| &lt; 0.5 gray</span>
+          <span className="text-accent-yellow">|z| 0.5-2.0 yellow</span>
+          <span className="text-orange-400">|z| 2.0-3.5 orange (entry)</span>
+          <span className="text-accent-red">|z| &gt; 3.5 red (stop)</span>
         </div>
       </div>
 
