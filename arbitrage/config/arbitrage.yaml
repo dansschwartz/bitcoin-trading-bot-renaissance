@@ -85,7 +85,7 @@ pair_discovery:
 
 funding_rate:
   enabled: true
-  observation_mode: true             # Log only, don't trade — collect data first
+  observation_mode: false            # LIVE paper trading enabled
   entry_threshold: 0.0001            # 0.01% — minimum rate to enter
   exit_threshold: 0.00005            # 0.005% — rate considered normalized
   max_position_usd: 1000             # Max per-symbol position

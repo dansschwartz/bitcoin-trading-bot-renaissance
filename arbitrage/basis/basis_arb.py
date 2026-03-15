@@ -24,7 +24,6 @@ from typing import Dict, List, Optional
 
 import uuid
 
-import aiohttp
 
 from ..exchanges.base import OrderRequest, OrderSide, OrderType, OrderStatus
 
@@ -48,7 +47,7 @@ BASIS_SYMBOLS = {
 
 # Position management
 MAX_HOLD_HOURS = 24
-EXIT_BASIS_BPS = Decimal("15")       # Close when basis converges below this
+EXIT_BASIS_BPS = Decimal("3")        # Close when basis converges below this       # Close when basis converges below this
 STOP_LOSS_BPS = Decimal("50")       # Emergency exit if basis widens beyond this
 
 
@@ -348,71 +347,75 @@ class BasisArbitrage:
             )
 
     async def _fetch_futures_prices(self) -> Dict[str, dict]:
-        """Fetch futures/perpetual prices from MEXC contract REST API."""
+        """Fetch futures/perpetual prices from MEXC contract REST API (thread pool)."""
+        import json
+        import urllib.request
         result = {}
-        try:
-            async with aiohttp.ClientSession() as session:
-                for name, contract_sym in self._symbols.items():
+
+        def _do_fetch(contract_sym):
+            url = f"{MEXC_CONTRACT_API}?symbol={contract_sym}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read())
+
+        loop = asyncio.get_event_loop()
+
+        for name, contract_sym in self._symbols.items():
+            try:
+                data = await loop.run_in_executor(None, _do_fetch, contract_sym)
+
+                if not data.get("success"):
+                    continue
+
+                ticker = data.get("data", {})
+                last_price = ticker.get("lastPrice")
+                if last_price is None:
+                    continue
+
+                funding_rate_raw = ticker.get("fundingRate")
+                funding_rate = None
+                if funding_rate_raw is not None:
                     try:
-                        url = f"{MEXC_CONTRACT_API}?symbol={contract_sym}"
-                        async with session.get(
-                            url,
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as resp:
-                            if resp.status != 200:
-                                logger.debug(
-                                    f"MEXC contract API {resp.status} for {contract_sym}"
-                                )
-                                continue
-                            data = await resp.json()
+                        funding_rate = Decimal(str(funding_rate_raw))
+                    except (InvalidOperation, ValueError):
+                        pass
 
-                        # MEXC contract API response structure:
-                        # {"success": true, "data": {"lastPrice": ..., "fundingRate": ...}}
-                        if not data.get("success"):
-                            continue
+                result[contract_sym] = {
+                    "price": Decimal(str(last_price)),
+                    "funding_rate": funding_rate,
+                }
 
-                        ticker = data.get("data", {})
-                        last_price = ticker.get("lastPrice")
-                        if last_price is None:
-                            continue
-
-                        funding_rate_raw = ticker.get("fundingRate")
-                        funding_rate = None
-                        if funding_rate_raw is not None:
-                            try:
-                                funding_rate = Decimal(str(funding_rate_raw))
-                            except (InvalidOperation, ValueError):
-                                pass
-
-                        result[contract_sym] = {
-                            "price": Decimal(str(last_price)),
-                            "funding_rate": funding_rate,
-                        }
-
-                    except asyncio.TimeoutError:
-                        logger.debug(f"MEXC contract timeout for {contract_sym}")
-                    except Exception as e:
-                        logger.debug(f"MEXC contract fetch error {contract_sym}: {e}")
-
-        except Exception as e:
-            logger.warning(f"MEXC contract API session error: {e}")
+            except Exception as e:
+                logger.debug(f"MEXC contract fetch error {contract_sym}: {e}")
 
         return result
 
     async def _fetch_spot_prices(self) -> Dict[str, Decimal]:
-        """Fetch spot prices from MEXC client (already connected)."""
+        """Fetch spot prices from MEXC REST API (thread pool, avoids ccxt overhead)."""
+        import json
+        import urllib.request
         result = {}
-        for name in self._symbols:
-            spot_sym = f"{name}/USDT"
-            try:
-                # Use the MEXC client's get_ticker or equivalent
-                ticker = await self.mexc.get_ticker(spot_sym)
-                if ticker and "last_price" in ticker:
-                    result[spot_sym] = Decimal(str(ticker["last_price"]))
-                elif ticker and "last" in ticker:
-                    result[spot_sym] = Decimal(str(ticker["last"]))
-            except Exception as e:
-                logger.debug(f"Spot price fetch error for {spot_sym}: {e}")
+
+        def _do_fetch():
+            req = urllib.request.Request(
+                "https://api.mexc.com/api/v3/ticker/price",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read())
+
+        try:
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, _do_fetch)
+            price_map = {item["symbol"]: item["price"] for item in data}
+
+            for name in self._symbols:
+                mexc_sym = f"{name}USDT"
+                if mexc_sym in price_map:
+                    result[f"{name}/USDT"] = Decimal(str(price_map[mexc_sym]))
+        except Exception as e:
+            logger.warning(f"Spot price fetch error: {e}")
+
         return result
 
     def _persist_snapshots(self, snapshots: List[BasisSnapshot]):
@@ -609,6 +612,9 @@ class BasisArbitrage:
             abs_current = abs(current_basis_bps)
 
             exit_reason = None
+            # Skip positions opened less than 1 scan cycle ago
+            if hold_hours < (self.scan_interval / 3600):
+                continue
             if abs_current <= EXIT_BASIS_BPS:
                 exit_reason = "basis_converged"
             elif abs_current > STOP_LOSS_BPS:

@@ -185,10 +185,12 @@ class PairsArbitrage:
     async def _run_cycle(self):
         """Single scan cycle: fetch prices -> update engine -> evaluate -> act."""
         self._cycle_count += 1
+        logger.info(f"PAIRS CYCLE #{self._cycle_count} starting")
 
         # 1. Fetch current prices for all required symbols
         prices = await self._fetch_prices()
         if not prices:
+            logger.warning(f"PAIRS CYCLE #{self._cycle_count}: no prices fetched")
             return
 
         # 2. Feed prices into engine
@@ -246,14 +248,33 @@ class PairsArbitrage:
             conn.close()
 
     async def _fetch_prices(self) -> Dict[str, float]:
-        """Fetch current prices for all symbols via MEXC spot."""
+        """Fetch current prices via MEXC REST API in thread pool (avoids event loop blocking)."""
+        import json
+        import urllib.request
         prices = {}
-        for symbol in ALL_SYMBOLS:
-            try:
-                ticker = await self.spot.get_ticker(symbol)
-                prices[symbol] = float(ticker['last_price'])
-            except Exception as e:
-                logger.debug(f"Price fetch error for {symbol}: {e}")
+        try:
+            def _do_fetch():
+                req = urllib.request.Request(
+                    "https://api.mexc.com/api/v3/ticker/price",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return json.loads(resp.read())
+
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, _do_fetch)
+
+            # Build lookup: BTCUSDT -> price
+            price_map = {item["symbol"]: float(item["price"]) for item in data}
+
+            for symbol in ALL_SYMBOLS:
+                mexc_sym = symbol.replace("/", "")
+                if mexc_sym in price_map:
+                    prices[symbol] = price_map[mexc_sym]
+
+            logger.info(f"PAIRS prices fetched: {len(prices)}/{len(ALL_SYMBOLS)} symbols")
+        except Exception as e:
+            logger.warning(f"PAIRS price fetch error: {type(e).__name__}: {e}", exc_info=True)
         return prices
 
     def _evaluate_entry(

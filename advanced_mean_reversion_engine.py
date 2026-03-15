@@ -107,11 +107,13 @@ class AdvancedMeanReversionEngine:
 
                 # Test cointegration
                 is_coint, pvalue = self._test_cointegration(base, target)
-                self._coint_cache[pair_key] = {
-                    "is_coint": is_coint,
-                    "pvalue": pvalue,
-                    "last_cycle": cycle_count,
-                }
+                # Only cache if we had enough data (pvalue=1.0 means insufficient history)
+                if pvalue < 1.0:
+                    self._coint_cache[pair_key] = {
+                        "is_coint": is_coint,
+                        "pvalue": pvalue,
+                        "last_cycle": cycle_count,
+                    }
                 if is_coint:
                     pairs.append(pair_key)
 
