@@ -48,7 +48,7 @@ BASIS_SYMBOLS = {
 
 # Position management
 MAX_HOLD_HOURS = 24
-EXIT_BASIS_BPS = Decimal("2")       # Close when basis converges below this
+EXIT_BASIS_BPS = Decimal("15")       # Close when basis converges below this
 STOP_LOSS_BPS = Decimal("50")       # Emergency exit if basis widens beyond this
 
 
@@ -99,6 +99,7 @@ class BasisArbitrage:
         # DB
         self._db_path = str(Path("data") / "arbitrage.db")
         self._init_db()
+        self._reload_positions()
 
     def _init_db(self):
         """Create basis-specific tables in arbitrage.db."""
@@ -169,6 +170,42 @@ class BasisArbitrage:
             logger.info("Basis trading DB tables initialized")
         except Exception as e:
             logger.warning(f"Basis DB init error: {e}")
+
+
+    def _reload_positions(self):
+        """Reload open positions from DB on restart (prevents orphans)."""
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=10)
+            rows = conn.execute(
+                "SELECT position_id, symbol, direction, entry_basis_bps, "
+                "entry_spot_price, entry_futures_price, entry_timestamp, "
+                "size_usd FROM basis_positions WHERE is_open=1"
+            ).fetchall()
+            conn.close()
+            for row in rows:
+                pos_id, symbol, direction, entry_bps, entry_spot, entry_fut, entry_ts, size = row
+                try:
+                    entry_time = datetime.fromisoformat(entry_ts)
+                except Exception:
+                    entry_time = datetime.utcnow()
+                # Estimate quantity from size and entry price
+                qty = size / entry_spot if entry_spot else 0
+                self._open_positions[symbol] = {
+                    "position_id": pos_id,
+                    "symbol": symbol,
+                    "direction": direction,
+                    "entry_spot_price": entry_spot,
+                    "entry_futures_price": entry_fut,
+                    "entry_basis_bps": entry_bps,
+                    "entry_time": entry_time,
+                    "size_usd": size,
+                    "quantity": qty,
+                    "spot_fee": 0,
+                }
+            if rows:
+                logger.info(f"Reloaded {len(rows)} open basis positions from DB")
+        except Exception as e:
+            logger.warning(f"Position reload error: {e}")
 
     async def run(self):
         """Main monitoring loop."""
@@ -552,6 +589,19 @@ class BasisArbitrage:
                 futures_pnl = (current_futures - entry_futures) * qty
 
             unrealized = spot_pnl + futures_pnl
+
+            # Update unrealized P&L in DB
+            try:
+                conn = sqlite3.connect(self._db_path, timeout=10)
+                conn.execute(
+                    "UPDATE basis_positions SET current_basis_bps=?, unrealized_pnl=? WHERE position_id=?",
+                    (float(current_basis_bps), float(unrealized), pos["position_id"]),
+                )
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
             fee_est = Decimal(str(pos.get("spot_fee", 0))) * 2
 
             # Exit conditions
@@ -586,7 +636,7 @@ class BasisArbitrage:
             order = OrderRequest(
                 exchange="mexc", symbol=symbol, side=close_side,
                 order_type=OrderType.MARKET, quantity=qty, price=current_spot,
-                client_order_id=f"basis_close_{pos[position_id]}",
+                client_order_id=f"basis_close_{pos['position_id']}",
             )
             result = await self.mexc.place_order(order)
             exit_fee = float(result.fee_amount)
@@ -603,7 +653,7 @@ class BasisArbitrage:
             conn = sqlite3.connect(self._db_path, timeout=10)
             conn.execute(
                 "UPDATE basis_positions SET "
-                "is_open=0, status=closed, exit_timestamp=?, exit_reason=?, "
+                "is_open=0, status='closed', exit_timestamp=?, exit_reason=?, "
                 "current_basis_bps=?, unrealized_pnl=?, final_pnl=? "
                 "WHERE position_id=?",
                 (datetime.utcnow().isoformat(), reason,
@@ -629,11 +679,11 @@ class BasisArbitrage:
                 pass
 
         logger.info(
-            f"BASIS POSITION CLOSED: {pos[position_id]} | {symbol} | "
+            f"BASIS POSITION CLOSED: {pos['position_id']} | {symbol} | "
             f"reason={reason} | P&L=${final_pnl:+.2f} | "
-            f"entry_basis={pos[entry_basis_bps]:.1f}bps -> "
+            f"entry_basis={pos['entry_basis_bps']:.1f}bps -> "
             f"exit_basis={float(current_basis_bps):.1f}bps | "
-            f"hold={((datetime.utcnow() - pos[entry_time]).total_seconds()/3600):.1f}h"
+            f"hold={((datetime.utcnow() - pos['entry_time']).total_seconds()/3600):.1f}h"
         )
 
     def get_status(self) -> dict:

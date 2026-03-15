@@ -187,6 +187,9 @@ class ListingMonitor:
         mexc_symbols = await self._fetch_mexc_symbols()
         binance_symbols = await self._fetch_binance_symbols()
 
+        # Collect events to fire AFTER DB connection is closed
+        pending_callbacks = []
+
         conn = sqlite3.connect(_DB_PATH, timeout=10)
         try:
             # Update Binance known set (silently)
@@ -258,12 +261,9 @@ class ListingMonitor:
                     f"price={initial_price} | first_on_mexc={is_first_listing}"
                 )
 
-                # Fire callback
+                # Queue callback for after DB is closed (prevents "database is locked")
                 if self.on_new_listing and is_first_listing:
-                    try:
-                        await self.on_new_listing(event)
-                    except Exception as e:
-                        logger.error(f"on_new_listing callback error: {e}")
+                    pending_callbacks.append(event)
 
             # Update known set
             self._known_mexc_symbols.update(new_mexc)
@@ -275,6 +275,13 @@ class ListingMonitor:
             conn.commit()
         finally:
             conn.close()
+
+        # Fire callbacks AFTER DB connection is committed and closed
+        for event in pending_callbacks:
+            try:
+                await self.on_new_listing(event)
+            except Exception as e:
+                logger.error(f"on_new_listing callback error for {event.symbol}: {e}")
 
     async def _fetch_mexc_symbols(self) -> Set[str]:
         """Fetch all currently tradeable MEXC spot symbols via REST API."""

@@ -271,7 +271,7 @@ class AdvancedMeanReversionEngine:
 
         # Check cointegration from cache
         cache_key = (base_id, target_id)
-        cached = self._coint_cache.get(cache_key, {})
+        cached = self._coint_cache.get(cache_key) or self._coint_cache.get((target_id, base_id), {})
 
         return PairState(
             base_id=base_id,

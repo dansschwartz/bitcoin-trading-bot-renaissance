@@ -171,6 +171,18 @@ class ListingArbitrage:
                                        "already have open position in this symbol")
             return
 
+        # Retry price fetch if not available (new listings sometimes have None price)
+        if not event.mexc_initial_price:
+            try:
+                ticker = await self.spot.get_ticker(symbol)
+                if ticker:
+                    price = ticker.get('last_price') or ticker.get('lastPrice')
+                    if price:
+                        event.mexc_initial_price = float(price)
+                        logger.info(f"LISTING: retried price for {symbol}: ${event.mexc_initial_price}")
+            except Exception as e:
+                logger.debug(f"LISTING: price retry failed for {symbol}: {e}")
+
         # Validate minimum price
         if not event.mexc_initial_price or event.mexc_initial_price < MIN_TOKEN_PRICE_USDT:
             await self._log_evaluation(symbol, event.mexc_initial_price, None, "skipped",
