@@ -30,6 +30,40 @@ export default function Arbitrage() {
   const [summary, setSummary] = useState<ArbSummary | null>(null);
   const [wallet, setWallet] = useState<ArbWallet | null>(null);
   const [showSignals, setShowSignals] = useState(false);
+
+  // Helper: format ISO timestamp to relative time string
+  const relativeTime = (ts: string | null | undefined): string => {
+    if (!ts) return '—';
+    try {
+      const then = new Date(ts).getTime();
+      const now = Date.now();
+      const diffMs = now - then;
+      if (diffMs < 0) return 'just now';
+      const mins = Math.floor(diffMs / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return `${mins}m ago`;
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return `${hrs}h ago`;
+      const days = Math.floor(hrs / 24);
+      return `${days}d ago`;
+    } catch { return '—'; }
+  };
+
+  // Helper: format hold duration between two timestamps
+  const holdTime = (entry: string | null | undefined, exit: string | null | undefined): string => {
+    if (!entry || !exit) return '—';
+    try {
+      const diffMs = new Date(exit).getTime() - new Date(entry).getTime();
+      if (diffMs < 0) return '—';
+      const mins = Math.floor(diffMs / 60000);
+      if (mins < 60) return `${mins}m`;
+      const hrs = Math.floor(mins / 60);
+      const remainMins = mins % 60;
+      if (hrs < 24) return `${hrs}h ${remainMins}m`;
+      const days = Math.floor(hrs / 24);
+      return `${days}d ${hrs % 24}h`;
+    } catch { return '—'; }
+  };
   const [basis, setBasis] = useState<Record<string, unknown> | null>(null);
   const [listing, setListing] = useState<Record<string, unknown> | null>(null);
   const [pairs, setPairs] = useState<Record<string, unknown> | null>(null);
@@ -242,6 +276,124 @@ export default function Arbitrage() {
           <div className="mt-2 flex gap-4 text-xs text-gray-500">
             <span>Scans: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.scans_completed ?? ((basis as Record<string, unknown>).stats as Record<string, unknown>)?.total_snapshots ?? 0)}</span>
             <span>Opportunities: {String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.opportunities_found ?? ((basis as Record<string, unknown>).stats as Record<string, unknown>)?.total_opportunities ?? 0)}</span>
+          </div>
+        )}
+
+        {/* Open Positions */}
+        {basis != null && Array.isArray((basis as Record<string, unknown>).open_positions) && ((basis as Record<string, unknown>).open_positions as Array<Record<string, unknown>>).length > 0 && (
+          <div className="mt-4">
+            <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Open Positions</h4>
+            <div className="space-y-2">
+              {((basis as Record<string, unknown>).open_positions as Array<Record<string, unknown>>).map((pos, i) => {
+                const pnl = Number(pos.unrealized_pnl ?? 0);
+                const entryBps = Number(pos.entry_basis_bps ?? 0);
+                const curBps = Number(pos.current_basis_bps ?? 0);
+                return (
+                  <div key={String(pos.position_id ?? i)} className="bg-surface-2 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-gray-200">{String(pos.symbol ?? '—')}</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                          String(pos.direction) === 'buy_basis' ? 'bg-accent-green/20 text-accent-green' : 'bg-accent-red/20 text-accent-red'
+                        }`}>
+                          {String(pos.direction ?? '—')}
+                        </span>
+                      </div>
+                      <span className={`text-sm font-mono font-medium ${pnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                        {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-4 gap-2 text-xs">
+                      <div>
+                        <div className="text-gray-500">Entry Basis</div>
+                        <div className="font-mono text-gray-300">{entryBps.toFixed(1)} bps</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Current Basis</div>
+                        <div className="font-mono text-gray-300">{curBps.toFixed(1)} bps</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Size</div>
+                        <div className="font-mono text-gray-300">${Number(pos.size_usd ?? 0).toFixed(0)}</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Opened</div>
+                        <div className="font-mono text-gray-400">{relativeTime(pos.entry_timestamp as string)}</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Recent Trades */}
+        {basis != null && Array.isArray((basis as Record<string, unknown>).recent_trades) && ((basis as Record<string, unknown>).recent_trades as Array<Record<string, unknown>>).length > 0 && (
+          <div className="mt-4">
+            <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Recent Trades</h4>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-500 border-b border-surface-3">
+                    <th className="text-left py-1 pr-2">Symbol</th>
+                    <th className="text-left py-1 pr-2">Direction</th>
+                    <th className="text-right py-1 pr-2">Entry→Exit (bps)</th>
+                    <th className="text-right py-1 pr-2">P&L</th>
+                    <th className="text-right py-1 pr-2">Hold Time</th>
+                    <th className="text-left py-1">Exit Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {((basis as Record<string, unknown>).recent_trades as Array<Record<string, unknown>>).slice(0, 10).map((trade, i) => {
+                    const pnl = Number(trade.final_pnl ?? 0);
+                    return (
+                      <tr key={String(trade.position_id ?? i)} className="border-b border-surface-3/50">
+                        <td className="py-1.5 pr-2 text-gray-300 font-medium">{String(trade.symbol ?? '—')}</td>
+                        <td className="py-1.5 pr-2">
+                          <span className={`px-1 py-0.5 rounded text-[10px] ${
+                            String(trade.direction) === 'buy_basis' ? 'bg-accent-green/20 text-accent-green' : 'bg-accent-red/20 text-accent-red'
+                          }`}>
+                            {String(trade.direction ?? '—')}
+                          </span>
+                        </td>
+                        <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                          {Number(trade.entry_basis_bps ?? 0).toFixed(1)}→{Number(trade.current_basis_bps ?? Number(trade.entry_basis_bps ?? 0)).toFixed(1)}
+                        </td>
+                        <td className={`py-1.5 pr-2 text-right font-mono font-medium ${pnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                          {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                        </td>
+                        <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                          {holdTime(trade.entry_timestamp as string, trade.exit_timestamp as string)}
+                        </td>
+                        <td className="py-1.5 text-gray-500">{String(trade.exit_reason ?? '—')}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Summary Stats Footer */}
+        {basis != null && (
+          <div className="mt-4 pt-3 border-t border-surface-3 flex items-center justify-between text-xs">
+            <div className="flex gap-4">
+              <span className="text-gray-500">Total P&L: <span className={`font-mono font-medium ${
+                Number((basis as Record<string, unknown>).total_pnl ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'
+              }`}>
+                {Number((basis as Record<string, unknown>).total_pnl ?? 0) >= 0 ? '+' : ''}${Number((basis as Record<string, unknown>).total_pnl ?? 0).toFixed(2)}
+              </span></span>
+              <span className="text-gray-500">Open Positions: <span className="text-gray-300 font-mono">{
+                String(((basis as Record<string, unknown>).stats as Record<string, unknown>)?.open_positions ?? 0)
+              }</span></span>
+              <span className="text-gray-500">Total Trades: <span className="text-gray-300 font-mono">{
+                Array.isArray((basis as Record<string, unknown>).recent_trades)
+                  ? String(((basis as Record<string, unknown>).recent_trades as unknown[]).length + (Array.isArray((basis as Record<string, unknown>).open_positions) ? ((basis as Record<string, unknown>).open_positions as unknown[]).length : 0))
+                  : '0'
+              }</span></span>
+            </div>
           </div>
         )}
       </div>

@@ -1228,6 +1228,25 @@ async def arb_basis(request: Request):
                 ).fetchone()[0]
                 result["stats"]["open_positions"] = open_count
 
+                # Fetch actual open position rows
+                open_rows = c.execute(
+                    "SELECT * FROM basis_positions WHERE is_open=1 ORDER BY entry_timestamp DESC"
+                ).fetchall()
+                result["open_positions"] = _rows_to_dicts(open_rows)
+
+                # Fetch last 20 closed positions
+                closed_rows = c.execute(
+                    "SELECT * FROM basis_positions WHERE is_open=0 "
+                    "ORDER BY exit_timestamp DESC LIMIT 20"
+                ).fetchall()
+                result["recent_trades"] = _rows_to_dicts(closed_rows)
+
+                # Total P&L from all closed positions
+                total_pnl_row = c.execute(
+                    "SELECT COALESCE(SUM(final_pnl), 0) as total FROM basis_positions WHERE is_open=0"
+                ).fetchone()
+                result["total_pnl"] = total_pnl_row[0] if total_pnl_row else 0
+
     except Exception as e:
         result["error"] = str(e)
 
