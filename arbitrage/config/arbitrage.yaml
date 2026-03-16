@@ -138,7 +138,7 @@ triangular_bybit:
     - USDT
   scan_interval_ms: 5000
   max_trade_usd: 500                 # Start conservative
-  observation_mode: true             # MUST start in observation mode
+  observation_mode: false             # MUST start in observation mode
   max_signals_per_cycle: 2
 
 inventory:
