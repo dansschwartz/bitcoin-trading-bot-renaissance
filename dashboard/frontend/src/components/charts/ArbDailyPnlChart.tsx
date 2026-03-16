@@ -1,7 +1,16 @@
 import { useEffect, useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, ReferenceLine } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { api } from '../../api';
 import { formatCurrency } from '../../utils/formatters';
+
+const STRATEGY_KEYS = [
+  "cross_exchange",
+  "triangular",
+  "funding_rate",
+  "basis_trading",
+  "listing_arb",
+  "pairs_arb",
+] as const;
 
 const STRATEGY_COLORS: Record<string, string> = {
   cross_exchange: "#3b82f6",
@@ -29,12 +38,49 @@ interface HourlyRow {
   by_strategy?: Record<string, number>;
 }
 
+interface ChartRow {
+  hour: string;
+  label: string;
+  pnl: number;
+  trades: number;
+  wins: number;
+  cross_exchange: number;
+  triangular: number;
+  funding_rate: number;
+  basis_trading: number;
+  listing_arb: number;
+  pairs_arb: number;
+  by_strategy?: Record<string, number>;
+}
+
 export default function ArbDailyPnlChart() {
-  const [data, setData] = useState<HourlyRow[]>([]);
+  const [data, setData] = useState<ChartRow[]>([]);
 
   useEffect(() => {
-    api.arbHourlyPnl(48).then(setData).catch(() => {});
-    const id = setInterval(() => api.arbHourlyPnl(48).then(setData).catch(() => {}), 30_000);
+    const load = (raw: HourlyRow[]) => {
+      const formatted = raw.map((d) => {
+        const dt = new Date(d.hour.replace(' ', 'T') + ':00');
+        const h = dt.getHours();
+        const ampm = h >= 12 ? 'pm' : 'am';
+        const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+        const label = `${dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${h12}${ampm}`;
+        const bs = d.by_strategy || {};
+        return {
+          ...d,
+          label,
+          cross_exchange: bs.cross_exchange ?? 0,
+          triangular: bs.triangular ?? 0,
+          funding_rate: bs.funding_rate ?? 0,
+          basis_trading: bs.basis_trading ?? 0,
+          listing_arb: bs.listing_arb ?? 0,
+          pairs_arb: bs.pairs_arb ?? 0,
+        };
+      });
+      setData(formatted);
+    };
+
+    api.arbHourlyPnl(48).then(load).catch(() => {});
+    const id = setInterval(() => api.arbHourlyPnl(48).then(load).catch(() => {}), 30_000);
     return () => clearInterval(id);
   }, []);
 
@@ -47,21 +93,16 @@ export default function ArbDailyPnlChart() {
     );
   }
 
-  // Format hour for x-axis: "Mar 7 3pm"
-  const formatted = data.map((d) => {
-    const dt = new Date(d.hour.replace(' ', 'T') + ':00');
-    const h = dt.getHours();
-    const ampm = h >= 12 ? 'pm' : 'am';
-    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-    const label = `${dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${h12}${ampm}`;
-    return { ...d, label };
-  });
+  // Determine which strategies have any data
+  const activeStrategies = STRATEGY_KEYS.filter((k) =>
+    data.some((d) => d[k] !== 0)
+  );
 
   return (
     <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
       <h3 className="text-sm font-medium text-gray-300 mb-3">Hourly P&L (48h)</h3>
       <ResponsiveContainer width="100%" height={220}>
-        <BarChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <BarChart data={data} stackOffset="sign" margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <XAxis
             dataKey="label"
             tick={{ fill: '#9ca3af', fontSize: 10 }}
@@ -82,10 +123,9 @@ export default function ArbDailyPnlChart() {
           <Tooltip
             content={({ active, payload, label }) => {
               if (!active || !payload?.length) return null;
-              const row = payload[0]?.payload as (HourlyRow & { label: string }) | undefined;
+              const row = payload[0]?.payload as ChartRow | undefined;
               if (!row) return null;
-              const bs = row.by_strategy || {};
-              const stratKeys = Object.keys(bs).filter((k) => bs[k] !== 0);
+              const netPnl = row.pnl;
               return (
                 <div style={{
                   backgroundColor: '#111827',
@@ -95,31 +135,52 @@ export default function ArbDailyPnlChart() {
                   fontSize: 12,
                 }}>
                   <div style={{ color: '#9ca3af', marginBottom: 4 }}>{label}</div>
-                  <div style={{ color: row.pnl >= 0 ? '#00d395' : '#ff4757', fontWeight: 600, marginBottom: stratKeys.length > 0 ? 4 : 0 }}>
-                    Net: {formatCurrency(row.pnl)} ({row.trades} trades, {row.wins} wins)
+                  <div style={{ color: netPnl >= 0 ? '#00d395' : '#ff4757', fontWeight: 600, marginBottom: 4 }}>
+                    Net: {formatCurrency(netPnl)} ({row.trades} trades, {row.wins} wins)
                   </div>
-                  {stratKeys.map((k) => (
-                    <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-                      <span style={{ color: STRATEGY_COLORS[k] || '#9ca3af' }}>
-                        {STRATEGY_LABELS[k] || k.replace(/_/g, ' ')}
-                      </span>
-                      <span style={{ color: bs[k] >= 0 ? '#00d395' : '#ff4757', fontFamily: 'monospace' }}>
-                        {bs[k] >= 0 ? '+' : ''}{formatCurrency(bs[k])}
-                      </span>
-                    </div>
-                  ))}
+                  {activeStrategies.map((k) => {
+                    const val = row[k];
+                    if (val === 0) return null;
+                    return (
+                      <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+                        <span style={{ color: STRATEGY_COLORS[k] }}>{STRATEGY_LABELS[k]}</span>
+                        <span style={{ color: val >= 0 ? '#00d395' : '#ff4757', fontFamily: 'monospace' }}>
+                          {val >= 0 ? '+' : ''}{formatCurrency(val)}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               );
             }}
           />
           <ReferenceLine y={0} stroke="#374151" />
-          <Bar dataKey="pnl" radius={[4, 4, 0, 0]} maxBarSize={20}>
-            {formatted.map((entry, idx) => (
-              <Cell key={idx} fill={entry.pnl >= 0 ? '#00d395' : '#ff4757'} />
-            ))}
-          </Bar>
+          {activeStrategies.map((k) => (
+            <Bar
+              key={k}
+              dataKey={k}
+              stackId="pnl"
+              fill={STRATEGY_COLORS[k]}
+              radius={0}
+              maxBarSize={20}
+            />
+          ))}
         </BarChart>
       </ResponsiveContainer>
+      {/* Legend */}
+      {activeStrategies.length > 1 && (
+        <div className="flex flex-wrap gap-3 mt-2 justify-center">
+          {activeStrategies.map((k) => (
+            <div key={k} className="flex items-center gap-1 text-[10px] text-gray-400">
+              <div
+                className="w-2.5 h-2.5 rounded-sm"
+                style={{ backgroundColor: STRATEGY_COLORS[k] }}
+              />
+              {STRATEGY_LABELS[k]}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
