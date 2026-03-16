@@ -554,9 +554,26 @@ class ArbitrageOrchestrator:
         while self._running:
             try:
                 await self.expanded_pair_manager.maybe_update()
+                # Write cache file for dashboard (runs as separate process)
+                self._write_pair_expansion_cache()
             except Exception as e:
                 logger.debug(f"Pair expansion update error: {e}")
             await asyncio.sleep(600)  # Check every 10 minutes
+
+    def _write_pair_expansion_cache(self):
+        """Write pair expansion state to JSON cache for dashboard."""
+        import json
+        from pathlib import Path
+        try:
+            cache = {
+                "manager": self.expanded_pair_manager.get_report(),
+                "discovery": self.mexc_pair_discovery.get_report(),
+            }
+            cache_path = Path("data/pair_expansion_cache.json")
+            with open(cache_path, "w") as f:
+                json.dump(cache, f, default=str)
+        except Exception as e:
+            logger.debug(f"Failed to write pair expansion cache: {e}")
 
     async def _run_monitoring(self):
         """Periodic status logging."""

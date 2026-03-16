@@ -1880,24 +1880,36 @@ async def arb_temporal(request: Request):
 @router.get("/pair-expansion")
 async def arb_pair_expansion(request: Request):
     """MEXC pair expansion — discovered pairs, tiers, scores."""
-    orch = getattr(request.app.state, "arb_orchestrator", None)
-    if not orch:
-        return {
-            "status": "not_enabled",
-            "note": "Pair expansion is disabled in config (pair_expansion.enabled = false). "
-                    "Enable it in arbitrage.yaml to start discovering pairs.",
-        }
+    import json
+    from pathlib import Path
 
-    result = {}
-    try:
-        result["manager"] = orch.expanded_pair_manager.get_report()
-    except Exception as e:
-        result["manager"] = {"error": str(e)}
-    try:
-        result["discovery"] = orch.mexc_pair_discovery.get_report()
-    except Exception as e:
-        result["discovery"] = {"error": str(e)}
-    return _sanitize_for_json(result)
+    # Try live orchestrator first
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch:
+        try:
+            result = {}
+            result["manager"] = orch.expanded_pair_manager.get_report()
+            result["discovery"] = orch.mexc_pair_discovery.get_report()
+            return _sanitize_for_json(result)
+        except Exception:
+            pass  # Fall through to cache
+
+    # Fallback: read from cached file
+    cache_path = Path("data/pair_expansion_cache.json")
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                data = json.load(f)
+            return _sanitize_for_json(data)
+        except Exception as e:
+            return {"error": f"cache read failed: {e}"}
+
+    return {
+        "status": "not_enabled",
+        "note": "Pair expansion has not completed a scan yet. "
+                "Check arbitrage.yaml pair_expansion.enabled and wait for first scan cycle.",
+    }
+
 
 
 def _sanitize_for_json(obj):

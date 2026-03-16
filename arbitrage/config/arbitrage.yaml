@@ -269,7 +269,7 @@ temporal_analyzer:
 
 # --- MEXC Pair Expansion ---
 pair_expansion:
-  enabled: false                  # Start disabled, enable after verification
+  enabled: true                   # LIVE — scanning all MEXC pairs
   min_volume_24h_usd: 50000
   min_trades_24h: 100
   max_spread_bps: 50

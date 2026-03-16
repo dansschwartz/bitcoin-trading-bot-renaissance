@@ -111,6 +111,8 @@ export const api = {
   arbBasis: () => get<Record<string, unknown>>('/api/arbitrage/basis'),
   arbListing: () => get<Record<string, unknown>>('/api/arbitrage/listing'),
   arbPairs: () => get<Record<string, unknown>>('/api/arbitrage/pairs'),
+  arbTemporal: () => get<Record<string, unknown>>('/api/arbitrage/temporal'),
+  arbPairExpansion: () => get<Record<string, unknown>>('/api/arbitrage/pair-expansion'),
 
   // Breakout Scanner
   breakoutSummary: () => get<Record<string, unknown>>('/api/breakout/summary'),

@@ -67,6 +67,8 @@ export default function Arbitrage() {
   const [basis, setBasis] = useState<Record<string, unknown> | null>(null);
   const [listing, setListing] = useState<Record<string, unknown> | null>(null);
   const [pairs, setPairs] = useState<Record<string, unknown> | null>(null);
+  const [temporal, setTemporal] = useState<Record<string, unknown> | null>(null);
+  const [pairExpansion, setPairExpansion] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     const load = () => {
@@ -77,6 +79,8 @@ export default function Arbitrage() {
       api.arbBasis().then(setBasis).catch(() => {});
       api.arbListing().then(setListing).catch(() => {});
       api.arbPairs().then(setPairs).catch(() => {});
+      api.arbTemporal().then(setTemporal).catch(() => {});
+      api.arbPairExpansion().then(setPairExpansion).catch(() => {});
     };
     load();
     const id = setInterval(load, 10_000);
@@ -223,6 +227,175 @@ export default function Arbitrage() {
       )}
 
 
+
+      {/* Temporal Pattern Mining */}
+      {temporal && !temporal.error && (
+        <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-gray-300">Temporal Pattern Mining</h3>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-500">
+                {temporal.total_profiles ? `${temporal.total_profiles} profiles` : ''}{' '}
+                {temporal.total_trades ? `| ${Number(temporal.total_trades).toLocaleString()} trades analyzed` : ''}
+              </span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-cyan-400/20 text-cyan-400">
+                {temporal.status === 'from_cache' ? 'CACHED' : 'LIVE'}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Best Hours */}
+            <div className="bg-surface-2 rounded-lg p-3">
+              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Best Trading Hours (UTC)</h4>
+              <div className="space-y-1.5">
+                {(temporal.global_best_hours as Array<Record<string, unknown>> ?? []).map((h: Record<string, unknown>, i: number) => {
+                  const bias = Number(h.bias ?? 1);
+                  const barWidth = Math.min(100, (bias / 2) * 100);
+                  return (
+                    <div key={i} className="flex items-center gap-2 text-xs">
+                      <span className="w-12 text-gray-400 font-mono">{String(h.hour).padStart(2, '0')}:00</span>
+                      <div className="flex-1 h-3 bg-surface-3 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-accent-green/60 rounded-full"
+                          style={{ width: `${barWidth}%` }}
+                        />
+                      </div>
+                      <span className="w-10 text-right font-mono text-accent-green text-[10px]">{bias.toFixed(2)}x</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Worst Hours */}
+            <div className="bg-surface-2 rounded-lg p-3">
+              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Worst Trading Hours (UTC)</h4>
+              <div className="space-y-1.5">
+                {(temporal.global_worst_hours as Array<Record<string, unknown>> ?? []).map((h: Record<string, unknown>, i: number) => {
+                  const bias = Number(h.bias ?? 1);
+                  const barWidth = Math.min(100, (bias / 2) * 100);
+                  return (
+                    <div key={i} className="flex items-center gap-2 text-xs">
+                      <span className="w-12 text-gray-400 font-mono">{String(h.hour).padStart(2, '0')}:00</span>
+                      <div className="flex-1 h-3 bg-surface-3 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-accent-red/60 rounded-full"
+                          style={{ width: `${barWidth}%` }}
+                        />
+                      </div>
+                      <span className="w-10 text-right font-mono text-accent-red text-[10px]">{bias.toFixed(2)}x</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Day of Week */}
+            <div className="bg-surface-2 rounded-lg p-3">
+              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Day of Week Bias</h4>
+              <div className="space-y-1.5">
+                {(temporal.global_by_dow as Array<Record<string, unknown>> ?? []).map((d: Record<string, unknown>, i: number) => {
+                  const bias = Number(d.bias ?? 1);
+                  const barWidth = Math.min(100, (bias / 2) * 100);
+                  const color = bias >= 1.2 ? 'bg-accent-green/60' : bias <= 0.8 ? 'bg-accent-red/60' : 'bg-accent-yellow/60';
+                  const textColor = bias >= 1.2 ? 'text-accent-green' : bias <= 0.8 ? 'text-accent-red' : 'text-accent-yellow';
+                  return (
+                    <div key={i} className="flex items-center gap-2 text-xs">
+                      <span className="w-8 text-gray-400 font-mono">{String(d.day)}</span>
+                      <div className="flex-1 h-3 bg-surface-3 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full ${color} rounded-full`}
+                          style={{ width: `${barWidth}%` }}
+                        />
+                      </div>
+                      <span className={`w-10 text-right font-mono text-[10px] ${textColor}`}>{bias.toFixed(2)}x</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-2 text-[10px] text-gray-600">
+            Bias &gt; 1.0 = historically better than average | Bias &lt; 0.4 = trades skipped (temporal filter active)
+          </div>
+        </div>
+      )}
+
+      {/* Pair Expansion */}
+      {pairExpansion && pairExpansion.status !== 'not_enabled' && !pairExpansion.error && (
+        <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-gray-300">MEXC Pair Expansion</h3>
+            <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-400/20 text-indigo-400">
+              {(pairExpansion.manager as Record<string, unknown>)?.initialized ? 'ACTIVE' : 'INITIALIZING'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Total Active</div>
+              <div className="text-sm font-mono text-gray-200">
+                {String((pairExpansion.manager as Record<string, unknown>)?.total_active ?? (pairExpansion.discovery as Record<string, unknown>)?.total_eligible ?? 0)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Tier 1 (Full)</div>
+              <div className="text-sm font-mono text-accent-green">
+                {String((pairExpansion.manager as Record<string, unknown>)?.tier_1_count ?? 0)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Tier 2 (Ticker)</div>
+              <div className="text-sm font-mono text-accent-yellow">
+                {String((pairExpansion.manager as Record<string, unknown>)?.tier_2_count ?? 0)}
+              </div>
+            </div>
+            <div className="bg-surface-2 rounded-lg p-2">
+              <div className="text-[10px] text-gray-500">Tier 3 (Tri-only)</div>
+              <div className="text-sm font-mono text-gray-400">
+                {String((pairExpansion.manager as Record<string, unknown>)?.tier_3_count ?? (pairExpansion.discovery as Record<string, unknown>)?.tier_3_count ?? 0)}
+              </div>
+            </div>
+          </div>
+
+          {/* Tier 1 pairs detail */}
+          {Array.isArray((pairExpansion.discovery as Record<string, unknown>)?.tier_1) && (
+            <div>
+              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Tier 1 Pairs</h4>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs font-mono">
+                  <thead>
+                    <tr className="text-gray-500 border-b border-surface-3">
+                      <th className="text-left py-1 px-2">Symbol</th>
+                      <th className="text-right py-1 px-2">Score</th>
+                      <th className="text-right py-1 px-2">Volume 24h</th>
+                      <th className="text-right py-1 px-2">Spread (bps)</th>
+                      <th className="text-center py-1 px-2">Binance</th>
+                      <th className="text-right py-1 px-2">Tri Paths</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {((pairExpansion.discovery as Record<string, unknown>).tier_1 as Array<Record<string, unknown>>).map((p, i) => (
+                      <tr key={i} className="border-b border-surface-3/50">
+                        <td className="py-1 px-2 text-gray-300">{String(p.symbol)}</td>
+                        <td className="py-1 px-2 text-right text-gray-200">{Number(p.score).toFixed(1)}</td>
+                        <td className="py-1 px-2 text-right text-gray-400">${Number(p.volume_24h).toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                        <td className="py-1 px-2 text-right text-gray-400">{Number(p.spread_bps).toFixed(1)}</td>
+                        <td className="py-1 px-2 text-center">
+                          <span className={p.on_binance ? 'text-accent-green' : 'text-gray-500'}>{p.on_binance ? 'Y' : 'N'}</span>
+                        </td>
+                        <td className="py-1 px-2 text-right text-gray-400">{String(p.triangular_paths ?? 0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {/* Basis Trading (Spot-Futures Convergence) */}
       <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
         <div className="flex items-center justify-between mb-3">
