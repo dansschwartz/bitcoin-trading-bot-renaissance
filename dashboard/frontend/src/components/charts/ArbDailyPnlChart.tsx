@@ -3,11 +3,30 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, Refere
 import { api } from '../../api';
 import { formatCurrency } from '../../utils/formatters';
 
+const STRATEGY_COLORS: Record<string, string> = {
+  cross_exchange: "#3b82f6",
+  triangular: "#a855f7",
+  funding_rate: "#00d395",
+  basis_trading: "#fb923c",
+  listing_arb: "#ec4899",
+  pairs_arb: "#2dd4bf",
+};
+
+const STRATEGY_LABELS: Record<string, string> = {
+  cross_exchange: "Cross-Exchange",
+  triangular: "Triangular",
+  funding_rate: "Funding Rate",
+  basis_trading: "Basis",
+  listing_arb: "Listing",
+  pairs_arb: "Pairs",
+};
+
 interface HourlyRow {
   hour: string;
   pnl: number;
   trades: number;
   wins: number;
+  by_strategy?: Record<string, number>;
 }
 
 export default function ArbDailyPnlChart() {
@@ -61,16 +80,36 @@ export default function ArbDailyPnlChart() {
             width={50}
           />
           <Tooltip
-            contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: 8 }}
-            labelStyle={{ color: '#9ca3af', fontSize: 12 }}
-            itemStyle={{ color: '#e5e7eb', fontSize: 12 }}
-            formatter={(value: number, _name: string, props: { payload?: HourlyRow }) => {
-              const trades = props.payload?.trades ?? 0;
-              const wins = props.payload?.wins ?? 0;
-              return [
-                `${formatCurrency(value)}  (${trades} trades, ${wins} wins)`,
-                'P&L',
-              ];
+            content={({ active, payload, label }) => {
+              if (!active || !payload?.length) return null;
+              const row = payload[0]?.payload as (HourlyRow & { label: string }) | undefined;
+              if (!row) return null;
+              const bs = row.by_strategy || {};
+              const stratKeys = Object.keys(bs).filter((k) => bs[k] !== 0);
+              return (
+                <div style={{
+                  backgroundColor: '#111827',
+                  border: '1px solid #374151',
+                  borderRadius: 8,
+                  padding: '8px 12px',
+                  fontSize: 12,
+                }}>
+                  <div style={{ color: '#9ca3af', marginBottom: 4 }}>{label}</div>
+                  <div style={{ color: row.pnl >= 0 ? '#00d395' : '#ff4757', fontWeight: 600, marginBottom: stratKeys.length > 0 ? 4 : 0 }}>
+                    Net: {formatCurrency(row.pnl)} ({row.trades} trades, {row.wins} wins)
+                  </div>
+                  {stratKeys.map((k) => (
+                    <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+                      <span style={{ color: STRATEGY_COLORS[k] || '#9ca3af' }}>
+                        {STRATEGY_LABELS[k] || k.replace(/_/g, ' ')}
+                      </span>
+                      <span style={{ color: bs[k] >= 0 ? '#00d395' : '#ff4757', fontFamily: 'monospace' }}>
+                        {bs[k] >= 0 ? '+' : ''}{formatCurrency(bs[k])}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              );
             }}
           />
           <ReferenceLine y={0} stroke="#374151" />

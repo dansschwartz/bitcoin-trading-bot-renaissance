@@ -195,7 +195,7 @@ export default function Arbitrage() {
                   {s.strategy.replace(/_/g, ' ')}
                 </span>
               </div>
-              <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="grid grid-cols-4 gap-2 text-xs">
                 <div>
                   <div className="text-gray-500">Trades</div>
                   <div className="text-lg font-mono text-gray-200">{s.trades}</div>
@@ -208,6 +208,12 @@ export default function Arbitrage() {
                   <div className="text-gray-500">Profit</div>
                   <div className={`text-lg font-mono ${pnlColor(s.profit_usd)}`}>
                     {formatCurrency(s.profit_usd)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-gray-500">Today</div>
+                  <div className={`text-lg font-mono ${pnlColor(s.today_pnl_usd ?? 0)}`}>
+                    {pnlSign(s.today_pnl_usd ?? 0)}{formatCurrency(s.today_pnl_usd ?? 0)}
                   </div>
                 </div>
               </div>

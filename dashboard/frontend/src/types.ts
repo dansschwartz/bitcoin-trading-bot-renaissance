@@ -388,7 +388,7 @@ export interface ArbSummary {
   signals_total: number;
   signals_approved: number;
   daily_pnl_usd: number;
-  by_strategy: { strategy: string; trades: number; fills: number; profit_usd: number }[];
+  by_strategy: { strategy: string; trades: number; fills: number; profit_usd: number; today_pnl_usd?: number }[];
 }
 
 export interface ArbWallet {

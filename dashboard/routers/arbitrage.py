@@ -24,6 +24,23 @@ router = APIRouter(prefix="/api/arbitrage", tags=["arbitrage"])
 
 ARB_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "arbitrage.db"
 
+_INDEXES_ENSURED = False
+
+def _ensure_indexes(conn):
+    """Create indexes for faster GROUP BY queries (idempotent)."""
+    global _INDEXES_ENSURED
+    if _INDEXES_ENSURED:
+        return
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_arb_trades_ts_strategy_status "
+            "ON arb_trades(timestamp, strategy, status)"
+        )
+        conn.commit()
+        _INDEXES_ENSURED = True
+    except Exception as e:
+        logger.debug(f"Index creation: {e}")
+
 
 @contextmanager
 def _arb_conn():
@@ -32,6 +49,7 @@ def _arb_conn():
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
+        _ensure_indexes(conn)
         yield conn
     finally:
         conn.close()
@@ -39,6 +57,310 @@ def _arb_conn():
 
 def _rows_to_dicts(rows) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
+
+
+def _query_extra_strategy_pnl_daily(conn, days: int) -> Dict[str, Dict[str, Dict]]:
+    """Query basis/funding/listing/pairs tables for daily P&L.
+    Returns {date: {strategy: {pnl, trades, wins}}}
+    """
+    result: Dict[str, Dict[str, Dict]] = {}
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+
+    # Basis positions (closed)
+    if "basis_positions" in tables:
+        try:
+            rows = conn.execute(
+                """SELECT date(exit_timestamp) as d,
+                          COALESCE(SUM(final_pnl), 0) as pnl,
+                          COUNT(*) as trades,
+                          SUM(CASE WHEN final_pnl > 0 THEN 1 ELSE 0 END) as wins
+                   FROM basis_positions
+                   WHERE is_open = 0 AND exit_timestamp IS NOT NULL
+                     AND date(exit_timestamp) >= date('now', ?)
+                   GROUP BY date(exit_timestamp)""",
+                (f"-{days} days",),
+            ).fetchall()
+            for r in rows:
+                d = r["d"]
+                if d:
+                    result.setdefault(d, {})
+                    result[d]["basis_trading"] = {
+                        "pnl": round(float(r["pnl"]), 4),
+                        "trades": r["trades"],
+                        "wins": r["wins"],
+                    }
+        except Exception as e:
+            logger.debug(f"basis daily pnl: {e}")
+
+    # Funding positions (closed)
+    if "funding_positions" in tables:
+        try:
+            rows = conn.execute(
+                """SELECT date(exit_timestamp) as d,
+                          COALESCE(SUM(final_pnl), 0) as pnl,
+                          COUNT(*) as trades,
+                          SUM(CASE WHEN final_pnl > 0 THEN 1 ELSE 0 END) as wins
+                   FROM funding_positions
+                   WHERE status = 'closed' AND exit_timestamp IS NOT NULL
+                     AND date(exit_timestamp) >= date('now', ?)
+                   GROUP BY date(exit_timestamp)""",
+                (f"-{days} days",),
+            ).fetchall()
+            for r in rows:
+                d = r["d"]
+                if d:
+                    result.setdefault(d, {})
+                    result[d]["funding_rate"] = {
+                        "pnl": round(float(r["pnl"]), 4),
+                        "trades": r["trades"],
+                        "wins": r["wins"],
+                    }
+        except Exception as e:
+            logger.debug(f"funding daily pnl: {e}")
+
+    # Listing arb positions (closed)
+    if "listing_arb_positions" in tables:
+        try:
+            rows = conn.execute(
+                """SELECT date(exit_time) as d,
+                          COALESCE(SUM(realized_pnl_usd), 0) as pnl,
+                          COUNT(*) as trades,
+                          SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                   FROM listing_arb_positions
+                   WHERE is_open = 0 AND exit_time IS NOT NULL
+                     AND date(exit_time) >= date('now', ?)
+                   GROUP BY date(exit_time)""",
+                (f"-{days} days",),
+            ).fetchall()
+            for r in rows:
+                d = r["d"]
+                if d:
+                    result.setdefault(d, {})
+                    result[d]["listing_arb"] = {
+                        "pnl": round(float(r["pnl"]), 4),
+                        "trades": r["trades"],
+                        "wins": r["wins"],
+                    }
+        except Exception as e:
+            logger.debug(f"listing daily pnl: {e}")
+
+    # Pairs positions (closed)
+    if "pairs_positions" in tables:
+        try:
+            rows = conn.execute(
+                """SELECT date(exit_time) as d,
+                          COALESCE(SUM(realized_pnl_usd), 0) as pnl,
+                          COUNT(*) as trades,
+                          SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                   FROM pairs_positions
+                   WHERE is_open = 0 AND exit_time IS NOT NULL
+                     AND date(exit_time) >= date('now', ?)
+                   GROUP BY date(exit_time)""",
+                (f"-{days} days",),
+            ).fetchall()
+            for r in rows:
+                d = r["d"]
+                if d:
+                    result.setdefault(d, {})
+                    result[d]["pairs_arb"] = {
+                        "pnl": round(float(r["pnl"]), 4),
+                        "trades": r["trades"],
+                        "wins": r["wins"],
+                    }
+        except Exception as e:
+            logger.debug(f"pairs daily pnl: {e}")
+
+    return result
+
+
+def _query_extra_strategy_pnl_hourly(conn, hours: int) -> Dict[str, Dict[str, float]]:
+    """Query basis/funding/listing/pairs tables for hourly P&L.
+    Returns {hour: {strategy: pnl}}
+    """
+    result: Dict[str, Dict[str, float]] = {}
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+
+    if "basis_positions" in tables:
+        try:
+            rows = conn.execute(
+                """SELECT strftime('%Y-%m-%d %H:00', exit_timestamp) as h,
+                          COALESCE(SUM(final_pnl), 0) as pnl
+                   FROM basis_positions
+                   WHERE is_open = 0 AND exit_timestamp IS NOT NULL
+                     AND exit_timestamp >= datetime('now', ?)
+                   GROUP BY strftime('%Y-%m-%d %H:00', exit_timestamp)""",
+                (f"-{hours} hours",),
+            ).fetchall()
+            for r in rows:
+                h = r["h"]
+                if h:
+                    result.setdefault(h, {})
+                    result[h]["basis_trading"] = round(float(r["pnl"]), 4)
+        except Exception as e:
+            logger.debug(f"basis hourly pnl: {e}")
+
+    if "funding_positions" in tables:
+        try:
+            rows = conn.execute(
+                """SELECT strftime('%Y-%m-%d %H:00', exit_timestamp) as h,
+                          COALESCE(SUM(final_pnl), 0) as pnl
+                   FROM funding_positions
+                   WHERE status = 'closed' AND exit_timestamp IS NOT NULL
+                     AND exit_timestamp >= datetime('now', ?)
+                   GROUP BY strftime('%Y-%m-%d %H:00', exit_timestamp)""",
+                (f"-{hours} hours",),
+            ).fetchall()
+            for r in rows:
+                h = r["h"]
+                if h:
+                    result.setdefault(h, {})
+                    result[h]["funding_rate"] = round(float(r["pnl"]), 4)
+        except Exception as e:
+            logger.debug(f"funding hourly pnl: {e}")
+
+    if "listing_arb_positions" in tables:
+        try:
+            rows = conn.execute(
+                """SELECT strftime('%Y-%m-%d %H:00', exit_time) as h,
+                          COALESCE(SUM(realized_pnl_usd), 0) as pnl
+                   FROM listing_arb_positions
+                   WHERE is_open = 0 AND exit_time IS NOT NULL
+                     AND exit_time >= datetime('now', ?)
+                   GROUP BY strftime('%Y-%m-%d %H:00', exit_time)""",
+                (f"-{hours} hours",),
+            ).fetchall()
+            for r in rows:
+                h = r["h"]
+                if h:
+                    result.setdefault(h, {})
+                    result[h]["listing_arb"] = round(float(r["pnl"]), 4)
+        except Exception as e:
+            logger.debug(f"listing hourly pnl: {e}")
+
+    if "pairs_positions" in tables:
+        try:
+            rows = conn.execute(
+                """SELECT strftime('%Y-%m-%d %H:00', exit_time) as h,
+                          COALESCE(SUM(realized_pnl_usd), 0) as pnl
+                   FROM pairs_positions
+                   WHERE is_open = 0 AND exit_time IS NOT NULL
+                     AND exit_time >= datetime('now', ?)
+                   GROUP BY strftime('%Y-%m-%d %H:00', exit_time)""",
+                (f"-{hours} hours",),
+            ).fetchall()
+            for r in rows:
+                h = r["h"]
+                if h:
+                    result.setdefault(h, {})
+                    result[h]["pairs_arb"] = round(float(r["pnl"]), 4)
+        except Exception as e:
+            logger.debug(f"pairs hourly pnl: {e}")
+
+    return result
+
+
+def _query_extra_strategy_totals(conn) -> Dict[str, Dict[str, Any]]:
+    """Query total + today's P&L for each extra strategy.
+    Returns {strategy: {profit_usd, trades, fills, today_pnl_usd}}
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+
+    if "basis_positions" in tables:
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) as trades,
+                          COALESCE(SUM(final_pnl), 0) as profit,
+                          SUM(CASE WHEN final_pnl > 0 THEN 1 ELSE 0 END) as wins
+                   FROM basis_positions WHERE is_open = 0"""
+            ).fetchone()
+            today = conn.execute(
+                """SELECT COALESCE(SUM(final_pnl), 0) as today
+                   FROM basis_positions
+                   WHERE is_open = 0 AND date(exit_timestamp) = date('now')"""
+            ).fetchone()
+            result["basis_trading"] = {
+                "profit_usd": round(float(row["profit"]), 4),
+                "trades": row["trades"],
+                "fills": row["trades"],
+                "today_pnl_usd": round(float(today["today"]), 4),
+            }
+        except Exception as e:
+            logger.debug(f"basis totals: {e}")
+
+    if "funding_positions" in tables:
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) as trades,
+                          COALESCE(SUM(final_pnl), 0) as profit,
+                          SUM(CASE WHEN final_pnl > 0 THEN 1 ELSE 0 END) as wins
+                   FROM funding_positions WHERE status = 'closed'"""
+            ).fetchone()
+            today = conn.execute(
+                """SELECT COALESCE(SUM(final_pnl), 0) as today
+                   FROM funding_positions
+                   WHERE status = 'closed' AND date(exit_timestamp) = date('now')"""
+            ).fetchone()
+            result["funding_rate"] = {
+                "profit_usd": round(float(row["profit"]), 4),
+                "trades": row["trades"],
+                "fills": row["trades"],
+                "today_pnl_usd": round(float(today["today"]), 4),
+            }
+        except Exception as e:
+            logger.debug(f"funding totals: {e}")
+
+    if "listing_arb_positions" in tables:
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) as trades,
+                          COALESCE(SUM(realized_pnl_usd), 0) as profit,
+                          SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                   FROM listing_arb_positions WHERE is_open = 0"""
+            ).fetchone()
+            today = conn.execute(
+                """SELECT COALESCE(SUM(realized_pnl_usd), 0) as today
+                   FROM listing_arb_positions
+                   WHERE is_open = 0 AND date(exit_time) = date('now')"""
+            ).fetchone()
+            result["listing_arb"] = {
+                "profit_usd": round(float(row["profit"]), 4),
+                "trades": row["trades"],
+                "fills": row["trades"],
+                "today_pnl_usd": round(float(today["today"]), 4),
+            }
+        except Exception as e:
+            logger.debug(f"listing totals: {e}")
+
+    if "pairs_positions" in tables:
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) as trades,
+                          COALESCE(SUM(realized_pnl_usd), 0) as profit,
+                          SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                   FROM pairs_positions WHERE is_open = 0"""
+            ).fetchone()
+            today = conn.execute(
+                """SELECT COALESCE(SUM(realized_pnl_usd), 0) as today
+                   FROM pairs_positions
+                   WHERE is_open = 0 AND date(exit_time) = date('now')"""
+            ).fetchone()
+            result["pairs_arb"] = {
+                "profit_usd": round(float(row["profit"]), 4),
+                "trades": row["trades"],
+                "fills": row["trades"],
+                "today_pnl_usd": round(float(today["today"]), 4),
+            }
+        except Exception as e:
+            logger.debug(f"pairs totals: {e}")
+
+    return result
 
 
 @router.get("/status")
@@ -183,7 +505,7 @@ async def arb_summary(request: Request):
             wins = profit_row["wins"] or 0
             losses = profit_row["losses"] or 0
 
-            # By strategy
+            # By strategy (arb_trades: cross_exchange + triangular)
             strategy_rows = c.execute(
                 """SELECT strategy,
                           COUNT(*) as trades,
@@ -191,6 +513,43 @@ async def arb_summary(request: Request):
                           SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) as fills
                    FROM arb_trades GROUP BY strategy"""
             ).fetchall()
+
+            # Today's P&L per strategy from arb_trades
+            today_by_strategy = {}
+            try:
+                today_rows = c.execute(
+                    """SELECT strategy,
+                              COALESCE(SUM(actual_profit_usd), 0) as today_pnl
+                       FROM arb_trades
+                       WHERE date(timestamp) = date('now') AND status = 'filled'
+                       GROUP BY strategy"""
+                ).fetchall()
+                for r in today_rows:
+                    today_by_strategy[r["strategy"]] = round(float(r["today_pnl"]), 4)
+            except Exception:
+                pass
+
+            by_strategy = [
+                {
+                    "strategy": r["strategy"],
+                    "trades": r["trades"],
+                    "fills": r["fills"],
+                    "profit_usd": round(float(r["profit"]), 4),
+                    "today_pnl_usd": today_by_strategy.get(r["strategy"], 0.0),
+                }
+                for r in strategy_rows
+            ]
+
+            # Add extra strategies from other tables
+            extra = _query_extra_strategy_totals(c)
+            for strat_name, strat_data in extra.items():
+                by_strategy.append({
+                    "strategy": strat_name,
+                    "trades": strat_data["trades"],
+                    "fills": strat_data["fills"],
+                    "profit_usd": strat_data["profit_usd"],
+                    "today_pnl_usd": strat_data.get("today_pnl_usd", 0.0),
+                })
 
             # Signals
             signal_total = 0
@@ -206,32 +565,33 @@ async def arb_summary(request: Request):
             except Exception:
                 pass
 
-            # Today's P&L
-            daily_row = c.execute(
+            # Today's P&L (all strategies combined)
+            daily_arb = c.execute(
                 """SELECT COALESCE(SUM(actual_profit_usd), 0) as daily
                    FROM arb_trades
                    WHERE date(timestamp) = date('now') AND status = 'filled'"""
             ).fetchone()
+            daily_total = float(daily_arb["daily"])
+            # Add extra strategy today P&L
+            for strat_data in extra.values():
+                daily_total += strat_data.get("today_pnl_usd", 0.0)
+
+            # Total profit including extra strategies
+            total_profit = float(profit_row["total_profit"])
+            for strat_data in extra.values():
+                total_profit += strat_data["profit_usd"]
 
             return {
                 "total_trades": total,
                 "filled_trades": filled,
-                "total_profit_usd": round(float(profit_row["total_profit"]), 4),
+                "total_profit_usd": round(total_profit, 4),
                 "wins": wins,
                 "losses": losses,
                 "win_rate": round(wins / (wins + losses), 4) if (wins + losses) > 0 else 0.0,
                 "signals_total": signal_total,
                 "signals_approved": signal_approved,
-                "daily_pnl_usd": round(float(daily_row["daily"]), 4),
-                "by_strategy": [
-                    {
-                        "strategy": r["strategy"],
-                        "trades": r["trades"],
-                        "fills": r["fills"],
-                        "profit_usd": round(float(r["profit"]), 4),
-                    }
-                    for r in strategy_rows
-                ],
+                "daily_pnl_usd": round(daily_total, 4),
+                "by_strategy": by_strategy,
             }
     except Exception as e:
         return {"error": str(e)}
@@ -239,62 +599,104 @@ async def arb_summary(request: Request):
 
 @router.get("/daily-pnl")
 async def arb_daily_pnl(request: Request):
-    """Daily P&L for the last N days (default 10)."""
+    """Daily P&L for the last N days (default 10), with per-strategy breakdown."""
     days = int(request.query_params.get("days", 10))
     try:
         with _arb_conn() as c:
+            # arb_trades grouped by date + strategy
             rows = c.execute(
-                """SELECT date(timestamp) as date,
+                """SELECT date(timestamp) as date, strategy,
                           COALESCE(SUM(actual_profit_usd), 0) as pnl,
                           COUNT(*) as trades,
                           SUM(CASE WHEN actual_profit_usd > 0 THEN 1 ELSE 0 END) as wins
                    FROM arb_trades
                    WHERE status = 'filled'
                      AND date(timestamp) >= date('now', ?)
-                   GROUP BY date(timestamp)
+                   GROUP BY date(timestamp), strategy
                    ORDER BY date(timestamp)""",
                 (f"-{days} days",),
             ).fetchall()
-            return [
-                {
-                    "date": r["date"],
-                    "pnl": round(float(r["pnl"]), 4),
-                    "trades": r["trades"],
-                    "wins": r["wins"],
-                }
-                for r in rows
-            ]
+
+            # Build per-date dict
+            daily: Dict[str, Dict] = {}
+            for r in rows:
+                d = r["date"]
+                if d not in daily:
+                    daily[d] = {"date": d, "pnl": 0.0, "trades": 0, "wins": 0, "by_strategy": {}}
+                strat = r["strategy"]
+                pnl = round(float(r["pnl"]), 4)
+                trades = r["trades"]
+                w = r["wins"]
+                daily[d]["pnl"] += pnl
+                daily[d]["trades"] += trades
+                daily[d]["wins"] += w
+                daily[d]["by_strategy"][strat] = {"pnl": pnl, "trades": trades, "wins": w}
+
+            # Merge extra strategy data
+            extra = _query_extra_strategy_pnl_daily(c, days)
+            for d, strats in extra.items():
+                if d not in daily:
+                    daily[d] = {"date": d, "pnl": 0.0, "trades": 0, "wins": 0, "by_strategy": {}}
+                for strat, data in strats.items():
+                    daily[d]["pnl"] += data["pnl"]
+                    daily[d]["trades"] += data["trades"]
+                    daily[d]["wins"] += data["wins"]
+                    daily[d]["by_strategy"][strat] = data
+
+            # Round totals
+            for d in daily.values():
+                d["pnl"] = round(d["pnl"], 4)
+
+            return sorted(daily.values(), key=lambda x: x["date"])
     except Exception as e:
         return {"error": str(e)}
 
 
 @router.get("/hourly-pnl")
 async def arb_hourly_pnl(request: Request):
-    """Hourly P&L for the last N hours (default 48)."""
+    """Hourly P&L for the last N hours (default 48), with per-strategy breakdown."""
     hours = int(request.query_params.get("hours", 48))
     try:
         with _arb_conn() as c:
+            # arb_trades grouped by hour + strategy
             rows = c.execute(
-                """SELECT strftime('%Y-%m-%d %H:00', timestamp) as hour,
+                """SELECT strftime('%Y-%m-%d %H:00', timestamp) as hour, strategy,
                           COALESCE(SUM(actual_profit_usd), 0) as pnl,
                           COUNT(*) as trades,
                           SUM(CASE WHEN actual_profit_usd > 0 THEN 1 ELSE 0 END) as wins
                    FROM arb_trades
                    WHERE status = 'filled'
                      AND timestamp >= datetime('now', ?)
-                   GROUP BY strftime('%Y-%m-%d %H:00', timestamp)
+                   GROUP BY strftime('%Y-%m-%d %H:00', timestamp), strategy
                    ORDER BY hour""",
                 (f"-{hours} hours",),
             ).fetchall()
-            return [
-                {
-                    "hour": r["hour"],
-                    "pnl": round(float(r["pnl"]), 4),
-                    "trades": r["trades"],
-                    "wins": r["wins"],
-                }
-                for r in rows
-            ]
+
+            hourly: Dict[str, Dict] = {}
+            for r in rows:
+                h = r["hour"]
+                if h not in hourly:
+                    hourly[h] = {"hour": h, "pnl": 0.0, "trades": 0, "wins": 0, "by_strategy": {}}
+                strat = r["strategy"]
+                pnl = round(float(r["pnl"]), 4)
+                hourly[h]["pnl"] += pnl
+                hourly[h]["trades"] += r["trades"]
+                hourly[h]["wins"] += r["wins"]
+                hourly[h]["by_strategy"][strat] = pnl
+
+            # Merge extra strategy data
+            extra = _query_extra_strategy_pnl_hourly(c, hours)
+            for h, strats in extra.items():
+                if h not in hourly:
+                    hourly[h] = {"hour": h, "pnl": 0.0, "trades": 0, "wins": 0, "by_strategy": {}}
+                for strat, pnl in strats.items():
+                    hourly[h]["pnl"] += pnl
+                    hourly[h]["by_strategy"][strat] = pnl
+
+            for h in hourly.values():
+                h["pnl"] = round(h["pnl"], 4)
+
+            return sorted(hourly.values(), key=lambda x: x["hour"])
     except Exception as e:
         return {"error": str(e)}
 
@@ -313,6 +715,11 @@ async def arb_wallet(request: Request):
                 "SELECT COALESCE(SUM(actual_profit_usd), 0) as p FROM arb_trades WHERE status = 'filled'"
             ).fetchone()
             total_profit = float(row["p"])
+
+            # Add extra strategy P&L
+            extra = _query_extra_strategy_totals(c)
+            for strat_data in extra.values():
+                total_profit += strat_data["profit_usd"]
     except Exception:
         pass
 
