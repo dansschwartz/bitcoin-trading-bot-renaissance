@@ -1814,6 +1814,92 @@ async def arb_pairs(request: Request):
     return _sanitize_for_json(result)
 
 
+@router.get("/temporal")
+async def arb_temporal(request: Request):
+    """Temporal pattern analysis — bias weights by hour/day/funding window."""
+    import json
+    from pathlib import Path
+
+    # Try live orchestrator first
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch:
+        try:
+            report = orch.temporal_analyzer.get_report()
+            return _sanitize_for_json(report)
+        except Exception as e:
+            pass  # Fall through to cache
+
+    # Fallback: read from cached file
+    cache_path = Path("data/temporal_profiles.json")
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                cache_data = json.load(f)
+            profiles = cache_data.get("profiles", {})
+            report = {
+                "status": "from_cache",
+                "total_profiles": len(profiles),
+                "total_trades": cache_data.get("trade_count", 0),
+                "last_refresh": cache_data.get("last_refresh"),
+            }
+            # Extract aggregate profiles: "cross_exchange:*", "triangular:*", "*:*" (global)
+            for strategy_key, label in [("*:*", "global"), ("cross_exchange:*", "cross_exchange"), ("triangular:*", "triangular")]:
+                if strategy_key in profiles:
+                    p = profiles[strategy_key]
+                    by_hour = p.get("by_hour", {})
+                    by_dow = p.get("by_dow", {})
+                    # Best/worst hours
+                    hour_list = [(h, b.get("bias_weight", 1.0), b.get("avg_profit_usd", 0), b.get("total_trades", 0))
+                                 for h, b in by_hour.items()]
+                    hour_list.sort(key=lambda x: x[1], reverse=True)
+                    report[f"{label}_best_hours"] = [
+                        {"hour": h, "bias": round(w, 3), "avg_profit": round(p, 4), "trades": t}
+                        for h, w, p, t in hour_list[:5]
+                    ]
+                    report[f"{label}_worst_hours"] = [
+                        {"hour": h, "bias": round(w, 3), "avg_profit": round(p, 4), "trades": t}
+                        for h, w, p, t in hour_list[-5:]
+                    ]
+                    # Day of week
+                    dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    dow_list = [(dow_names[int(d)] if d.isdigit() and int(d) < 7 else d,
+                                 b.get("bias_weight", 1.0), b.get("avg_profit_usd", 0))
+                                for d, b in by_dow.items()]
+                    dow_list.sort(key=lambda x: x[1], reverse=True)
+                    report[f"{label}_by_dow"] = [
+                        {"day": d, "bias": round(w, 3), "avg_profit": round(p, 4)}
+                        for d, w, p in dow_list
+                    ]
+            return _sanitize_for_json(report)
+        except Exception as e:
+            return {"error": f"cache read failed: {e}"}
+
+    return {"error": "no temporal data available (orchestrator not running, no cache)"}
+
+
+@router.get("/pair-expansion")
+async def arb_pair_expansion(request: Request):
+    """MEXC pair expansion — discovered pairs, tiers, scores."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if not orch:
+        return {
+            "status": "not_enabled",
+            "note": "Pair expansion is disabled in config (pair_expansion.enabled = false). "
+                    "Enable it in arbitrage.yaml to start discovering pairs.",
+        }
+
+    result = {}
+    try:
+        result["manager"] = orch.expanded_pair_manager.get_report()
+    except Exception as e:
+        result["manager"] = {"error": str(e)}
+    try:
+        result["discovery"] = orch.mexc_pair_discovery.get_report()
+    except Exception as e:
+        result["discovery"] = {"error": str(e)}
+    return _sanitize_for_json(result)
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

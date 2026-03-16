@@ -45,6 +45,10 @@ from arbitrage.exchanges.base import Trade
 from arbitrage.safety.contract_verifier import ContractVerifier
 from arbitrage.safety.volume_limiter import VolumeParticipationLimiter
 from arbitrage.detector.pair_discovery import PairDiscoveryEngine
+from arbitrage.analytics.temporal_analyzer import TemporalAnalyzer
+from arbitrage.analytics.temporal_bias import TemporalBias
+from arbitrage.pairs.discovery import MexcPairDiscovery
+from arbitrage.pairs.pair_manager import ExpandedPairManager
 
 logger = logging.getLogger("arb.orchestrator")
 
@@ -150,6 +154,23 @@ class ArbitrageOrchestrator:
         self.inventory = InventoryManager(self.mexc, self.binance)
         self.tracker = PerformanceTracker()
 
+        # Temporal pattern analyzer — mines trade history for hour/dow bias
+        db_path = self.config.get('db_path', 'data/arbitrage.db')
+        self.temporal_analyzer = TemporalAnalyzer(db_path=db_path)
+        self.temporal_bias = TemporalBias(self.temporal_analyzer)
+
+        # MEXC pair expansion — discover and tier 50-100 pairs
+        self.mexc_pair_discovery = MexcPairDiscovery(
+            mexc_client=self.mexc,
+            binance_client=self.binance,
+            temporal_analyzer=self.temporal_analyzer,
+            config=self.config,
+        )
+        self.expanded_pair_manager = ExpandedPairManager(
+            discovery=self.mexc_pair_discovery,
+            orchestrator=self,
+        )
+
         self.funding_arb = FundingRateArbitrage(
             self.mexc, self.binance, self.risk_engine,
             config=self.config, tracker=self.tracker,
@@ -193,6 +214,12 @@ class ArbitrageOrchestrator:
             observation_mode=True,
             config=self.config,
         )
+
+        # Wire temporal bias into detectors
+        self.cross_exchange_detector.temporal_bias = self.temporal_bias
+        self.triangular_arb.temporal_bias = self.temporal_bias
+        if self.triangular_arb_bybit:
+            self.triangular_arb_bybit.temporal_bias = self.temporal_bias
 
         self._running = False
         self._start_time: Optional[datetime] = None
@@ -276,6 +303,23 @@ class ArbitrageOrchestrator:
         except Exception as e:
             logger.warning(f"Initial inventory check failed: {e}")
 
+        # Initialize temporal analyzer (mine historical trade patterns)
+        try:
+            await self.temporal_analyzer.initialize()
+            logger.info("Temporal analyzer initialized — bias weights ready")
+        except Exception as e:
+            logger.warning(f"Temporal analyzer init failed (continuing without bias): {e}")
+
+        # Initialize expanded pair manager
+        pair_expansion_enabled = self.config.get('pair_expansion', {}).get('enabled', False)
+        if pair_expansion_enabled:
+            try:
+                locked_pairs = self.config.get('pair_expansion', {}).get('locked_pairs', [])
+                await self.expanded_pair_manager.initialize(locked_pairs=locked_pairs)
+                logger.info("Expanded pair manager initialized")
+            except Exception as e:
+                logger.warning(f"Expanded pair manager init failed: {e}")
+
         # Start all async tasks
         cross_exchange_enabled = self.config.get('cross_exchange', {}).get('enabled', True)
         if not cross_exchange_enabled:
@@ -312,6 +356,11 @@ class ArbitrageOrchestrator:
             asyncio.create_task(self._run_inventory_checks(), name="inventory"),
             asyncio.create_task(self._subscribe_trade_feeds(), name="trade_feeds"),
             asyncio.create_task(self._run_fee_monitor(), name="fee_monitor"),
+            asyncio.create_task(self._run_temporal_refresh(), name="temporal_refresh"),
+            *(
+                [asyncio.create_task(self._run_pair_expansion(), name="pair_expansion")]
+                if pair_expansion_enabled else []
+            ),
         ]
 
         logger.info(f"All {len(tasks)} subsystems launched")
@@ -484,6 +533,30 @@ class ArbitrageOrchestrator:
             await self.triangular_arb_bybit.run()
         except Exception as e:
             logger.error(f"Bybit triangular arb error: {e}")
+
+    async def _run_temporal_refresh(self):
+        """Periodically refresh temporal bias weights from trade history."""
+        await asyncio.sleep(120)  # Let trades accumulate first
+
+        while self._running:
+            try:
+                refreshed = await self.temporal_analyzer.maybe_refresh()
+                if refreshed:
+                    logger.info("Temporal analyzer refreshed bias weights")
+            except Exception as e:
+                logger.debug(f"Temporal refresh error: {e}")
+            await asyncio.sleep(300)  # Check every 5 minutes (actual refresh is hourly)
+
+    async def _run_pair_expansion(self):
+        """Periodically update expanded pair sets (rescan + rotation)."""
+        await asyncio.sleep(60)  # Let exchanges stabilize
+
+        while self._running:
+            try:
+                await self.expanded_pair_manager.maybe_update()
+            except Exception as e:
+                logger.debug(f"Pair expansion update error: {e}")
+            await asyncio.sleep(600)  # Check every 10 minutes
 
     async def _run_monitoring(self):
         """Periodic status logging."""
@@ -757,6 +830,14 @@ class ArbitrageOrchestrator:
             volume_limiter_stats = self.volume_limiter.get_stats()
         except Exception:
             volume_limiter_stats = {}
+        try:
+            temporal_stats = self.temporal_analyzer.get_report()
+        except Exception:
+            temporal_stats = {}
+        try:
+            pair_expansion_stats = self.expanded_pair_manager.get_report()
+        except Exception:
+            pair_expansion_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -775,6 +856,8 @@ class ArbitrageOrchestrator:
             "contract_verification": contract_stats,
             "pair_discovery": discovery_stats,
             "volume_limiter": volume_limiter_stats,
+            "temporal_analyzer": temporal_stats,
+            "pair_expansion": pair_expansion_stats,
         }
 
     def _log_final_summary(self):

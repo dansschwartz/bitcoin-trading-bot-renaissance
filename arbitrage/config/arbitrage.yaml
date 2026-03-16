@@ -258,3 +258,24 @@ statistical_pairs:
   retest_interval_cycles: 288   # Retest every 24 hours
   max_half_life_bars: 120       # Maximum acceptable mean reversion speed
   min_half_life_bars: 5         # Minimum (faster = too noisy)
+
+# --- Temporal Pattern Mining ---
+temporal_analyzer:
+  enabled: true
+  refresh_interval_minutes: 60
+  min_sample_size: 20
+  # Bias skip threshold — skip trades when bias < this (0.4 = 40% of average)
+  skip_threshold: 0.4
+
+# --- MEXC Pair Expansion ---
+pair_expansion:
+  enabled: false                  # Start disabled, enable after verification
+  min_volume_24h_usd: 50000
+  min_trades_24h: 100
+  max_spread_bps: 50
+  tier_1_max: 10
+  tier_2_max: 20
+  tier_3_max: 70
+  rescan_interval_hours: 6
+  allowed_quote_currencies: ["USDT", "BTC", "ETH", "USDC"]
+  locked_pairs: []                # Pairs that always stay in Tier 1

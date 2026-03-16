@@ -68,6 +68,7 @@ class CrossExchangeDetector:
         self.risk = risk_engine
         self.signal_queue = signal_queue
         self.contract_verifier = contract_verifier
+        self.temporal_bias = None  # Set by orchestrator after construction
 
         # Override from config
         if config:
@@ -89,6 +90,7 @@ class CrossExchangeDetector:
         self._last_spreads: dict = {}  # pair -> last gross spread for stability check
         self._last_signal_time: Dict[str, float] = {}  # pair -> monotonic time of last emitted signal
         self.SIGNAL_COOLDOWN_SEC = 10.0  # Don't signal same pair more than once per 10s
+        self._temporal_skips = 0
 
     async def run(self):
         self._running = True
@@ -199,6 +201,16 @@ class CrossExchangeDetector:
 
                     self._signals_generated += 1
 
+                    # Temporal bias check — skip if this time window is historically bad
+                    if self.temporal_bias and self.temporal_bias.should_skip("cross_exchange", pair):
+                        self._temporal_skips += 1
+                        continue
+
+                    # Adjust confidence by temporal bias
+                    if self.temporal_bias:
+                        bias = self.temporal_bias.get_bias("cross_exchange", pair)
+                        signal.confidence = float(signal.confidence) * bias
+
                     # Risk check
                     if self.risk.approve_arbitrage(signal):
                         try:
@@ -284,6 +296,7 @@ class CrossExchangeDetector:
             ),
             "contract_skips": self._contract_skips,
             "price_sanity_skips": self._price_sanity_skips,
+            "temporal_skips": self._temporal_skips,
         }
         if self.contract_verifier:
             stats["contract_verification"] = self.contract_verifier.get_stats()

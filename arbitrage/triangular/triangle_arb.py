@@ -155,6 +155,7 @@ class TriangularArbitrage:
             self._quad_max_signals = 1
             self._quad_min_profit_bps = Decimal('6.0')
 
+        self.temporal_bias = None  # Set by orchestrator after construction
         self._running = False
         self._scan_count = 0
         self._opportunities_found = 0
@@ -162,6 +163,7 @@ class TriangularArbitrage:
         self._signals_skipped_balance = 0
         self._signals_skipped_size = 0
         self._signals_skipped_observation = 0
+        self._temporal_skips = 0
         self._signals_skipped_capital = 0
         self._last_signal_time: Optional[datetime] = None
         self._signals_this_cycle = 0
@@ -291,6 +293,13 @@ class TriangularArbitrage:
                         self._signals_skipped_observation += 1
                         continue
 
+                    # Temporal bias check — skip if time window is historically bad
+                    if self.temporal_bias:
+                        primary_pair = opp.path[0][0] if opp.path else None
+                        if primary_pair and self.temporal_bias.should_skip("triangular", primary_pair):
+                            self._temporal_skips += 1
+                            continue
+
                     if self._signals_this_cycle >= self.MAX_SIGNALS_PER_CYCLE:
                         continue
 
@@ -354,6 +363,13 @@ class TriangularArbitrage:
                     if self.OBSERVATION_MODE:
                         self._quad_rejection_reasons['skipped_observation'] += 1
                         continue
+
+                    # Temporal bias check for 4-leg
+                    if self.temporal_bias:
+                        primary_pair = opp.path[0][0] if opp.path else None
+                        if primary_pair and self.temporal_bias.should_skip("triangular", primary_pair):
+                            self._temporal_skips += 1
+                            continue
 
                     if not self._quad_enabled:
                         continue
@@ -993,6 +1009,7 @@ class TriangularArbitrage:
             "preflight": self._preflight_stats.copy(),
             "staleness_skips": self._staleness_skips,
             "staleness_active_cooldowns": self._staleness_filter.active_cooldowns,
+            "temporal_skips": self._temporal_skips,
             "observation_mode": self.OBSERVATION_MODE,
             "min_profit_bps": float(self.MIN_NET_PROFIT_BPS),
             "graph_currencies": len(self._pair_graph),
