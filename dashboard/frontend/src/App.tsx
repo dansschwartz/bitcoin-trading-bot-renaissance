@@ -12,6 +12,7 @@ import Analytics from './pages/Analytics';
 import Risk from './pages/Risk';
 import Agents from './pages/Agents';
 import Arbitrage from './pages/Arbitrage';
+import Intelligence from './pages/Intelligence';
 import BreakoutScanner from './pages/BreakoutScanner';
 import Polymarket from './pages/Polymarket';
 import BreakoutBets from './pages/BreakoutBets';
@@ -42,7 +43,7 @@ export default function App() {
                 <Route path="/breakout-bets" element={<BreakoutBets />} />
                 <Route path="/oracle-trading" element={<OracleTrading />} />
                 <Route path="/agents" element={<Agents />} />
-                <Route path="/intelligence" element={<Agents />} />
+                <Route path="/intelligence" element={<Intelligence />} />
               </Routes>
             </main>
           </div>
