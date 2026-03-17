@@ -99,6 +99,8 @@ class TriangularArbitrage:
         from ..execution.triangular_executor import TriangularExecutor
         self.tri_executor = TriangularExecutor(mexc_client)
         self.tracker = tracker
+        self.velocity_tracker = None  # Set by orchestrator
+        self.exhaust_capture = None  # Set by orchestrator
         self._exchange_name = "mexc"  # Default; overridable for multi-exchange
 
         # Override class defaults from config if provided
@@ -344,6 +346,30 @@ class TriangularArbitrage:
                                 self.tracker.record_triangular_trade(result, opportunity=opp)
                             except Exception as track_err:
                                 logger.debug(f"Triangular trade tracking error: {track_err}")
+
+                        # Record capital velocity for triangular trades
+                        if self.velocity_tracker and result.status == "filled":
+                            try:
+                                self.velocity_tracker.record_trade(
+                                    strategy="triangular",
+                                    trade_size_usd=float(result.start_amount),
+                                    hold_seconds=result.execution_time_ms / 1000.0,
+                                    profit_usd=float(result.profit_usd),
+                                )
+                            except Exception:
+                                pass
+
+                        # Record capital velocity for triangular trades
+                        if self.velocity_tracker and result.status == "filled":
+                            try:
+                                self.velocity_tracker.record_trade(
+                                    strategy="triangular",
+                                    trade_size_usd=float(result.start_amount),
+                                    hold_seconds=result.execution_time_ms / 1000.0,
+                                    profit_usd=float(result.profit_usd),
+                                )
+                            except Exception:
+                                pass
                     except Exception as e:
                         self._staleness_filter.record_failure(path_key)
                         logger.error(f"Triangular execution error: {e}")

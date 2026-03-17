@@ -79,6 +79,7 @@ class ArbitrageExecutor:
         self._fill_count = 0
         self._depth_rejects = 0
         self._freshness_rejects = 0
+        self.exhaust_capture = None  # Set by orchestrator for data exhaust
 
     # ── Pre-execution gates ────────────────────────────────────────
 
@@ -162,6 +163,7 @@ class ArbitrageExecutor:
     async def execute_arbitrage(self, signal: ArbitrageSignal) -> ExecutionResult:
         """Execute a cross-exchange arbitrage trade."""
         trade_id = signal.signal_id
+        self._last_exec_start = time.monotonic()
 
         # Check expiry
         if datetime.utcnow() > signal.expires_at:
@@ -244,6 +246,21 @@ class ArbitrageExecutor:
             f"SELL {float(sell_qty):.6f} @ {float(sell_price):.2f} on {signal.sell_exchange} | "
             f"Expected profit: ${float(signal.expected_profit_usd):.2f}"
         )
+
+        # Capture book state at execution time
+        if self.exhaust_capture and self.book_manager:
+            try:
+                _view = self.book_manager.pairs.get(signal.symbol)
+                if _view:
+                    _eb = {}
+                    for _ex in [signal.buy_exchange, signal.sell_exchange]:
+                        _bk = getattr(_view, f"{_ex}_book", None)
+                        if _bk:
+                            _eb[_ex] = _bk
+                    self.exhaust_capture.capture_at_execution(
+                        signal.signal_id, signal.symbol, _eb)
+            except Exception:
+                pass
 
         # LAYER 4: Order type — MEXC LIMIT_MAKER (0% fee), Binance IOC (fill-or-kill)
         buy_order = OrderRequest(
@@ -377,13 +394,41 @@ class ArbitrageExecutor:
                 "realized_cost_bps": realized_cost,
             })
 
+            hold_dur = time.monotonic() - getattr(self, '_last_exec_start', time.monotonic())
             result = ExecutionResult(
                 trade_id=trade_id, status="filled", signal=signal,
                 buy_result=buy_result, sell_result=sell_result,
                 actual_profit_usd=paper_profit, realized_cost_bps=realized_cost,
                 realistic_costs=realistic,
             )
+            result.hold_duration_seconds = hold_dur
             self._completed_trades.append(result)
+
+            # Post-execution book snapshot (~1s later)
+            if self.exhaust_capture and self.book_manager:
+                try:
+                    _loop = asyncio.get_event_loop()
+                    _sid = signal.signal_id
+                    _sym = signal.symbol
+                    _bm = self.book_manager
+                    _ec = self.exhaust_capture
+                    _bex = signal.buy_exchange
+                    _sex = signal.sell_exchange
+                    def _post_capture():
+                        try:
+                            _v = _bm.pairs.get(_sym)
+                            if _v:
+                                _bs = {}
+                                for _e in [_bex, _sex]:
+                                    _b = getattr(_v, f"{_e}_book", None)
+                                    if _b:
+                                        _bs[_e] = _b
+                                _ec.capture_post_execution(_sid, _sym, _bs)
+                        except Exception:
+                            pass
+                    _loop.call_later(1.0, _post_capture)
+                except Exception:
+                    pass
 
             edge_tag = "EDGE_SURVIVED" if realistic.edge_survived else "EDGE_LOST"
             logger.info(

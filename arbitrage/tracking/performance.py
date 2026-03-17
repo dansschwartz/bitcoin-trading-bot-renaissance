@@ -143,6 +143,7 @@ class PerformanceTracker:
             ("adverse_move_usd", "REAL DEFAULT 0"),
             ("realistic_profit_usd", "REAL"),
             ("edge_survived", "INTEGER DEFAULT 1"),
+            ("hold_duration_seconds", "REAL"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {coltype}")

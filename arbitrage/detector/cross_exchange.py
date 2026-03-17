@@ -69,6 +69,7 @@ class CrossExchangeDetector:
         self.signal_queue = signal_queue
         self.contract_verifier = contract_verifier
         self.temporal_bias = None  # Set by orchestrator after construction
+        self.exhaust_capture = None  # Set by orchestrator for data exhaust
 
         # Override from config
         if config:
@@ -200,6 +201,21 @@ class CrossExchangeDetector:
                     )
 
                     self._signals_generated += 1
+
+                    # Capture book snapshot at detection time
+                    if self.exhaust_capture:
+                        try:
+                            view_for_exhaust = self.books.pairs.get(pair)
+                            if view_for_exhaust:
+                                exhaust_books = {}
+                                for exch in [spread_info['buy_exchange'], spread_info['sell_exchange']]:
+                                    book = getattr(view_for_exhaust, f'{exch}_book', None)
+                                    if book:
+                                        exhaust_books[exch] = book
+                                self.exhaust_capture.capture_at_detection(
+                                    signal.signal_id, pair, exhaust_books)
+                        except Exception:
+                            pass
 
                     # Temporal bias check — skip if this time window is historically bad
                     if self.temporal_bias and self.temporal_bias.should_skip("cross_exchange", pair):

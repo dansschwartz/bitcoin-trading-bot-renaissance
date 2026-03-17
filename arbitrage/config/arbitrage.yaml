@@ -130,8 +130,9 @@ quadrangular:
   max_signals_per_cycle: 1          # Dedicated slot for 4-leg trades
   min_net_profit_bps: 6.0           # Higher than 3-leg — extra leg = extra risk
 
+# Bybit triangular arb disabled — 30bps fee floor (3×10bps maker) makes it structurally unprofitable
 triangular_bybit:
-  enabled: true                     # Enable after observation period
+  enabled: false                     # Enable after observation period
   min_net_profit_bps: 35.0           # Bybit maker fee 0.10% × 3 legs = 30bps + 5bps buffer
   exchange: bybit
   start_currencies:

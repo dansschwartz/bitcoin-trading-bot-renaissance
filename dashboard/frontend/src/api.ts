@@ -113,6 +113,10 @@ export const api = {
   arbPairs: () => get<Record<string, unknown>>('/api/arbitrage/pairs'),
   arbTemporal: () => get<Record<string, unknown>>('/api/arbitrage/temporal'),
   arbPairExpansion: () => get<Record<string, unknown>>('/api/arbitrage/pair-expansion'),
+  arbCapitalVelocity: () => get<Record<string, unknown>>('/api/arbitrage/capital-velocity'),
+  arbEdgeDecay: () => get<Record<string, unknown>>('/api/arbitrage/edge-decay'),
+  arbStrategyAllocation: () => get<Record<string, unknown>>('/api/arbitrage/strategy-allocation'),
+  arbExhaustSnapshots: () => get<Record<string, unknown>>('/api/arbitrage/exhaust-snapshots'),
 
   // Breakout Scanner
   breakoutSummary: () => get<Record<string, unknown>>('/api/breakout/summary'),

@@ -30,6 +30,9 @@ export default function Arbitrage() {
   const [summary, setSummary] = useState<ArbSummary | null>(null);
   const [wallet, setWallet] = useState<ArbWallet | null>(null);
   const [showSignals, setShowSignals] = useState(false);
+  const [velocity, setVelocity] = useState<Record<string, unknown> | null>(null);
+  const [edgeDecay, setEdgeDecay] = useState<Record<string, unknown> | null>(null);
+  const [allocation, setAllocation] = useState<Record<string, unknown> | null>(null);
 
   // Helper: format ISO timestamp to relative time string
   const relativeTime = (ts: string | null | undefined): string => {
@@ -841,6 +844,107 @@ export default function Arbitrage() {
               )}
             </tbody>
           </table>
+        </div>
+      </div>
+
+
+      {/* Analytics — Capital Velocity, Edge Decay, Strategy Allocation */}
+      <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-gray-300 mb-3">Analytics</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+
+          {/* Capital Velocity */}
+          <div className="bg-surface-2 rounded-lg p-3">
+            <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Capital Velocity</h4>
+            {velocity && (velocity as Record<string, unknown>).strategies ? (
+              <div className="space-y-2">
+                {Object.entries((velocity as Record<string, unknown>).strategies as Record<string, unknown>).map(([strat, data]) => {
+                  const d = data as Record<string, Record<string, unknown>>;
+                  const v1h = d?.["1h"]?.velocity;
+                  const v24h = d?.["24h"]?.velocity;
+                  return (
+                    <div key={strat} className="flex justify-between items-center">
+                      <span className="text-xs text-gray-400">{strat}</span>
+                      <div className="flex gap-3 text-xs font-mono">
+                        <span className="text-gray-500">1h: <span className={Number(v1h) > 0 ? 'text-accent-green' : 'text-gray-400'}>{Number(v1h || 0).toFixed(4)}</span></span>
+                        <span className="text-gray-500">24h: <span className={Number(v24h) > 0 ? 'text-accent-green' : 'text-gray-400'}>{Number(v24h || 0).toFixed(4)}</span></span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500">No velocity data yet</p>
+            )}
+          </div>
+
+          {/* Edge Decay */}
+          <div className="bg-surface-2 rounded-lg p-3">
+            <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Edge Decay</h4>
+            {edgeDecay && (edgeDecay as Record<string, unknown>).strategies ? (
+              <div className="space-y-2">
+                {Object.entries((edgeDecay as Record<string, unknown>).strategies as Record<string, unknown>).map(([strat, data]) => {
+                  const d = data as Record<string, unknown>;
+                  const health = String(d?.health ?? "unknown");
+                  const slope = Number(d?.slope ?? 0);
+                  const healthColor = health === "healthy" ? "bg-green-400/20 text-green-400"
+                    : health === "warning" ? "bg-yellow-400/20 text-yellow-400"
+                    : health === "critical" ? "bg-orange-400/20 text-orange-400"
+                    : health === "dead" ? "bg-red-400/20 text-red-400"
+                    : "bg-gray-400/20 text-gray-400";
+                  return (
+                    <div key={strat} className="flex justify-between items-center">
+                      <span className="text-xs text-gray-400">{strat}</span>
+                      <div className="flex gap-2 items-center">
+                        <span className="text-xs font-mono text-gray-500">{slope >= 0 ? '+' : ''}{slope.toFixed(4)}</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${healthColor}`}>
+                          {health.toUpperCase()}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500">No edge decay data yet</p>
+            )}
+          </div>
+
+          {/* Strategy Allocation */}
+          <div className="bg-surface-2 rounded-lg p-3">
+            <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Strategy Allocation</h4>
+            {allocation && (allocation as Record<string, unknown>).target_allocation ? (
+              <div className="space-y-2">
+                {allocation && Boolean((allocation as Record<string, unknown>).observation_mode) && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-400/20 text-amber-400 mb-1 inline-block">
+                    OBSERVATION MODE
+                  </span>
+                )}
+                {Object.entries((allocation as Record<string, unknown>).target_allocation as Record<string, unknown>).map(([strat, pct]) => {
+                  const current = ((allocation as Record<string, unknown>).current_allocation as Record<string, unknown>)?.[strat];
+                  const pctNum = Number(pct) * 100;
+                  const curNum = Number(current ?? pct) * 100;
+                  const barColor = strat === "cross_exchange" ? "bg-blue-500"
+                    : strat === "triangular" ? "bg-purple-500"
+                    : "bg-cyan-500";
+                  return (
+                    <div key={strat}>
+                      <div className="flex justify-between text-xs mb-0.5">
+                        <span className="text-gray-400">{strat}</span>
+                        <span className="font-mono text-gray-300">{pctNum.toFixed(1)}%</span>
+                      </div>
+                      <div className="w-full bg-surface-3 rounded-full h-1.5">
+                        <div className={`${barColor} h-1.5 rounded-full`} style={{ width: `${Math.min(100, pctNum)}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500">Allocator has not run yet</p>
+            )}
+          </div>
+
         </div>
       </div>
 

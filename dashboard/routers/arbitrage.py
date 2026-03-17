@@ -1912,6 +1912,105 @@ async def arb_pair_expansion(request: Request):
 
 
 
+
+@router.get("/capital-velocity")
+async def arb_capital_velocity(request: Request):
+    """Capital velocity — profit per capital-hour by strategy."""
+    import json
+    from pathlib import Path
+
+    # Try live orchestrator first
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch:
+        try:
+            return _sanitize_for_json(orch.velocity_tracker.get_velocity_report())
+        except Exception:
+            pass
+
+    # Fallback: cached file
+    cache_path = Path("data/capital_velocity_cache.json")
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                return json.load(f)
+        except Exception as e:
+            return {"error": f"cache read failed: {e}"}
+
+    return {"strategies": {}, "note": "Velocity tracker has no data yet."}
+
+
+@router.get("/edge-decay")
+async def arb_edge_decay(request: Request):
+    """Edge decay — profitability trend per strategy (7-day rolling)."""
+    import json
+    from pathlib import Path
+
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch:
+        try:
+            return _sanitize_for_json(orch.edge_decay_monitor.get_decay_report())
+        except Exception:
+            pass
+
+    cache_path = Path("data/edge_decay_cache.json")
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                return json.load(f)
+        except Exception as e:
+            return {"error": f"cache read failed: {e}"}
+
+    return {"strategies": {}, "note": "Edge decay monitor has not run yet."}
+
+
+@router.get("/strategy-allocation")
+async def arb_strategy_allocation(request: Request):
+    """Strategy allocation — current and target capital allocation."""
+    import json
+    from pathlib import Path
+
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch:
+        try:
+            return _sanitize_for_json(orch.strategy_allocator.get_allocation_report())
+        except Exception:
+            pass
+
+    cache_path = Path("data/strategy_allocation_cache.json")
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                return json.load(f)
+        except Exception as e:
+            return {"error": f"cache read failed: {e}"}
+
+    return {"observation_mode": True, "note": "Strategy allocator has not run yet."}
+
+
+@router.get("/exhaust-snapshots")
+async def arb_exhaust_snapshots(request: Request):
+    """Data exhaust — recent order book snapshots around trade events."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch:
+        try:
+            snapshots = orch.exhaust_capture.get_recent_snapshots(limit=100)
+            return _sanitize_for_json({"snapshots": snapshots, "count": len(snapshots)})
+        except Exception:
+            pass
+
+    # Fallback: query DB directly
+    try:
+        with _arb_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM arb_signal_snapshots ORDER BY id DESC LIMIT 100"
+            ).fetchall()
+            snapshots = _rows_to_dicts(rows)
+            return {"snapshots": snapshots, "count": len(snapshots)}
+    except Exception:
+        return {"snapshots": [], "count": 0, "note": "No exhaust data yet."}
+
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

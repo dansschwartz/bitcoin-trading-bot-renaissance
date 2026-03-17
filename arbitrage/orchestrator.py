@@ -47,6 +47,10 @@ from arbitrage.safety.volume_limiter import VolumeParticipationLimiter
 from arbitrage.detector.pair_discovery import PairDiscoveryEngine
 from arbitrage.analytics.temporal_analyzer import TemporalAnalyzer
 from arbitrage.analytics.temporal_bias import TemporalBias
+from arbitrage.analytics.capital_velocity import CapitalVelocityTracker
+from arbitrage.analytics.edge_decay import EdgeDecayMonitor
+from arbitrage.analytics.strategy_allocator import StrategyAllocator
+from arbitrage.analytics.exhaust_capture import ExhaustCapture
 from arbitrage.pairs.discovery import MexcPairDiscovery
 from arbitrage.pairs.pair_manager import ExpandedPairManager
 
@@ -159,6 +163,16 @@ class ArbitrageOrchestrator:
         self.temporal_analyzer = TemporalAnalyzer(db_path=db_path)
         self.temporal_bias = TemporalBias(self.temporal_analyzer)
 
+        # Analytics modules (capital velocity, edge decay, strategy allocator, data exhaust)
+        self.velocity_tracker = CapitalVelocityTracker(db_path=db_path)
+        self.edge_decay_monitor = EdgeDecayMonitor(db_path=db_path)
+        self.strategy_allocator = StrategyAllocator(db_path=db_path)
+        self.exhaust_capture = ExhaustCapture(db_path=db_path)
+
+        # Wire exhaust capture into detector
+        self.cross_exchange_detector.exhaust_capture = self.exhaust_capture
+        self.executor.exhaust_capture = self.exhaust_capture
+
         # MEXC pair expansion — discover and tier 50-100 pairs
         self.mexc_pair_discovery = MexcPairDiscovery(
             mexc_client=self.mexc,
@@ -218,8 +232,10 @@ class ArbitrageOrchestrator:
         # Wire temporal bias into detectors
         self.cross_exchange_detector.temporal_bias = self.temporal_bias
         self.triangular_arb.temporal_bias = self.temporal_bias
+        self.triangular_arb.velocity_tracker = self.velocity_tracker
         if self.triangular_arb_bybit:
             self.triangular_arb_bybit.temporal_bias = self.temporal_bias
+            self.triangular_arb_bybit.velocity_tracker = self.velocity_tracker
 
         self._running = False
         self._start_time: Optional[datetime] = None
@@ -361,6 +377,9 @@ class ArbitrageOrchestrator:
                 [asyncio.create_task(self._run_pair_expansion(), name="pair_expansion")]
                 if pair_expansion_enabled else []
             ),
+            asyncio.create_task(self._run_velocity_cache_writer(), name="velocity_cache"),
+            asyncio.create_task(self._run_edge_decay(), name="edge_decay"),
+            asyncio.create_task(self._run_strategy_allocator(), name="strategy_allocator"),
         ]
 
         logger.info(f"All {len(tasks)} subsystems launched")
@@ -450,6 +469,18 @@ class ArbitrageOrchestrator:
 
                 # Track
                 self.tracker.record_trade(result)
+
+                # Record capital velocity for cross-exchange trades
+                if result.status == "filled" and hasattr(result, 'signal'):
+                    trade_size = float(result.signal.recommended_quantity * result.signal.buy_price)
+                    # Cross-exchange hold is ~instant (simultaneous legs)
+                    hold_sec = getattr(result, 'hold_duration_seconds', 2.0)
+                    self.velocity_tracker.record_trade(
+                        strategy=result.signal.signal_type,
+                        trade_size_usd=trade_size,
+                        hold_seconds=hold_sec,
+                        profit_usd=float(result.actual_profit_usd),
+                    )
 
                 # Record outcome in volume limiter
                 if signal.signal_type == "cross_exchange":
@@ -574,6 +605,53 @@ class ArbitrageOrchestrator:
                 json.dump(cache, f, default=str)
         except Exception as e:
             logger.debug(f"Failed to write pair expansion cache: {e}")
+
+    async def _run_velocity_cache_writer(self):
+        """Periodically write capital velocity cache for dashboard."""
+        await asyncio.sleep(90)
+        while self._running:
+            try:
+                import json
+                report = self.velocity_tracker.get_velocity_report()
+                cache_path = Path("data/capital_velocity_cache.json")
+                with open(cache_path, "w") as f:
+                    json.dump(report, f, default=str)
+            except Exception as e:
+                logger.debug(f"Velocity cache write error: {e}")
+            await asyncio.sleep(60)
+
+    async def _run_edge_decay(self):
+        """Periodically compute edge decay analysis."""
+        await asyncio.sleep(300)  # Let trades accumulate
+        while self._running:
+            try:
+                import json
+                report = self.edge_decay_monitor.compute_daily()
+                cache_path = Path("data/edge_decay_cache.json")
+                with open(cache_path, "w") as f:
+                    json.dump(report, f, default=str)
+                logger.info("Edge decay analysis updated")
+            except Exception as e:
+                logger.debug(f"Edge decay error: {e}")
+            await asyncio.sleep(21600)  # Every 6 hours
+
+    async def _run_strategy_allocator(self):
+        """Periodically compute optimal strategy allocation."""
+        await asyncio.sleep(600)  # Wait for velocity + decay data
+        while self._running:
+            try:
+                import json
+                velocity = self.velocity_tracker.get_velocity_report()
+                decay = self.edge_decay_monitor.get_decay_report()
+                report = self.strategy_allocator.rebalance(velocity, decay)
+                cache_path = Path("data/strategy_allocation_cache.json")
+                with open(cache_path, "w") as f:
+                    json.dump(report, f, default=str)
+                mode = "OBSERVATION" if report.get("observation_mode") else "LIVE"
+                logger.info(f"Strategy allocator updated [{mode}]: {report.get('target_allocation', {})}")
+            except Exception as e:
+                logger.debug(f"Strategy allocator error: {e}")
+            await asyncio.sleep(604800)  # Weekly
 
     async def _run_monitoring(self):
         """Periodic status logging."""
@@ -855,6 +933,18 @@ class ArbitrageOrchestrator:
             pair_expansion_stats = self.expanded_pair_manager.get_report()
         except Exception:
             pair_expansion_stats = {}
+        try:
+            velocity_stats = self.velocity_tracker.get_velocity_report()
+        except Exception:
+            velocity_stats = {}
+        try:
+            edge_decay_stats = self.edge_decay_monitor.get_decay_report()
+        except Exception:
+            edge_decay_stats = {}
+        try:
+            allocator_stats = self.strategy_allocator.get_allocation_report()
+        except Exception:
+            allocator_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -875,6 +965,9 @@ class ArbitrageOrchestrator:
             "volume_limiter": volume_limiter_stats,
             "temporal_analyzer": temporal_stats,
             "pair_expansion": pair_expansion_stats,
+            "capital_velocity": velocity_stats,
+            "edge_decay": edge_decay_stats,
+            "strategy_allocation": allocator_stats,
         }
 
     def _log_final_summary(self):
