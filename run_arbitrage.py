@@ -34,10 +34,9 @@ async def main():
     parser.add_argument('--live', action='store_true', help='Live trading mode')
     args = parser.parse_args()
 
-    orchestrator = ArbitrageOrchestrator(config_path=args.config)
+    orchestrator = ArbitrageOrchestrator(config_path=args.config, live=args.live)
 
     if args.live:
-        orchestrator.config.setdefault('paper_trading', {})['enabled'] = False
         print("*** LIVE TRADING MODE — Real orders will be placed ***")
     else:
         print("Paper trading mode — no real orders")

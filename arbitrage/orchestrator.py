@@ -63,9 +63,13 @@ class ArbitrageOrchestrator:
     Manages lifecycle, data flow, and monitoring.
     """
 
-    def __init__(self, config_path: str = "arbitrage/config/arbitrage.yaml"):
+    def __init__(self, config_path: str = "arbitrage/config/arbitrage.yaml", live: bool = False):
         self.config = self._load_config(config_path)
         self._setup_logging()
+
+        # --live flag overrides config before clients are constructed
+        if live:
+            self.config.setdefault('paper_trading', {})['enabled'] = False
 
         paper = self.config.get('paper_trading', {}).get('enabled', True)
         logger.info(f"{'PAPER' if paper else 'LIVE'} TRADING MODE")
@@ -997,10 +1001,7 @@ async def main():
     parser.add_argument('--live', action='store_true', help='Live trading mode (overrides --paper)')
     args = parser.parse_args()
 
-    orchestrator = ArbitrageOrchestrator(config_path=args.config)
-
-    if args.live:
-        orchestrator.config.setdefault('paper_trading', {})['enabled'] = False
+    orchestrator = ArbitrageOrchestrator(config_path=args.config, live=args.live)
 
     # Handle shutdown signals
     loop = asyncio.get_event_loop()
