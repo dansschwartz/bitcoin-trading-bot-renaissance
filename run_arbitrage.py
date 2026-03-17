@@ -29,18 +29,29 @@ from arbitrage.orchestrator import ArbitrageOrchestrator
 
 async def main():
     import argparse
+    import yaml
+    from dotenv import load_dotenv
+    load_dotenv()  # Load .env file if present (API keys, etc.)
+
     parser = argparse.ArgumentParser(description="Renaissance Arbitrage Engine")
     parser.add_argument('--config', default='arbitrage/config/arbitrage.yaml')
     parser.add_argument('--live', action='store_true', help='Live trading mode')
     args = parser.parse_args()
 
-    orchestrator = ArbitrageOrchestrator(config_path=args.config, live=args.live)
+    # Parse --live BEFORE constructing orchestrator
+    # Load config, override paper_trading, THEN construct
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
 
     if args.live:
+        config.setdefault('paper_trading', {})['enabled'] = False
         print("*** LIVE TRADING MODE — Real orders will be placed ***")
     else:
+        config.setdefault('paper_trading', {})['enabled'] = True
         print("Paper trading mode — no real orders")
 
+    # Now construct with already-modified config
+    orchestrator = ArbitrageOrchestrator(config=config)
     await orchestrator.start()
 
 

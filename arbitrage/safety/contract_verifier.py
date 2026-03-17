@@ -29,7 +29,13 @@ NATIVE_TOKENS: Set[str] = {"BTC", "ETH", "SOL", "DOT", "ATOM", "XRP", "ADA", "AL
 # APPEND-ONLY — tokens permanently blocked due to insufficient orderbook depth.
 # Paper trader fills at theoretical prices but real execution would fail.
 # NEVER remove entries from this set. Only add new ones.
-DEPTH_BLOCKED: Set[str] = {"VANRY", "COTI", "DUSK", "ALGO"}
+DEPTH_BLOCKED: Set[str] = {
+    "VANRY", "COTI", "DUSK", "ALGO",
+    # Added 2026-03-16: persistent >50bps edges (87-110bps avg) despite
+    # same contract — likely intermittent withdrawal suspensions.
+    # Re-evaluate once API keys configured and withdrawal status verified.
+    "G", "ENJ", "IMX", "ZKP",
+}
 
 
 class ContractVerifier:

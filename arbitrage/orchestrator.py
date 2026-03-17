@@ -10,6 +10,7 @@ Usage:
 """
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import signal as sig
 import sys
@@ -63,15 +64,18 @@ class ArbitrageOrchestrator:
     Manages lifecycle, data flow, and monitoring.
     """
 
-    def __init__(self, config_path: str = "arbitrage/config/arbitrage.yaml", live: bool = False):
-        self.config = self._load_config(config_path)
+    def __init__(self, config_path: str = None, config: dict = None):
+        if config is not None:
+            self.config = config
+        elif config_path is not None:
+            self.config = self._load_config(config_path)
+        else:
+            self.config = self._load_config("arbitrage/config/arbitrage.yaml")
         self._setup_logging()
 
-        # --live flag overrides config before clients are constructed
-        if live:
-            self.config.setdefault('paper_trading', {})['enabled'] = False
-
-        paper = self.config.get('paper_trading', {}).get('enabled', True)
+        # paper_trading flag is now correctly set BEFORE clients are constructed
+        self._paper_trading = self.config.get('paper_trading', {}).get('enabled', True)
+        paper = self._paper_trading
         logger.info(f"{'PAPER' if paper else 'LIVE'} TRADING MODE")
 
         # Exchange clients
@@ -269,7 +273,11 @@ class ArbitrageOrchestrator:
 
         if not arb_logger.handlers:
             # File handler
-            fh = logging.FileHandler(log_path)
+            fh = RotatingFileHandler(
+                log_path,
+                maxBytes=50 * 1024 * 1024,  # 50MB per file
+                backupCount=5,               # Keep 5 rotated files = 250MB max
+            )
             fh.setLevel(logging.DEBUG)
             fh.setFormatter(logging.Formatter(
                 '%(asctime)s | %(name)-20s | %(levelname)-5s | %(message)s',
@@ -1001,7 +1009,17 @@ async def main():
     parser.add_argument('--live', action='store_true', help='Live trading mode (overrides --paper)')
     args = parser.parse_args()
 
-    orchestrator = ArbitrageOrchestrator(config_path=args.config, live=args.live)
+    import yaml as _yaml
+    with open(args.config) as _f:
+        cfg = _yaml.safe_load(_f)
+
+    if args.live:
+        cfg.setdefault('paper_trading', {})['enabled'] = False
+        logger.info("*** LIVE TRADING MODE — Real orders will be placed ***")
+    else:
+        cfg.setdefault('paper_trading', {})['enabled'] = True
+
+    orchestrator = ArbitrageOrchestrator(config=cfg)
 
     # Handle shutdown signals
     loop = asyncio.get_event_loop()
