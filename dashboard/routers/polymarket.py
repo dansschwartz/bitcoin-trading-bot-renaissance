@@ -659,3 +659,64 @@ async def polymarket_lifecycle_stats(request: Request):
         "ml_accuracy": {"total": 0, "correct": 0, "pct": 0},
         "crowd_lag_by_asset": [], "by_asset": [],
     }
+
+
+@router.get("/ml-calibration")
+async def polymarket_ml_calibration(request: Request):
+    """Return ML calibration diagnostics (isotonic/Platt fitted model)."""
+    import os
+    cal_path = Path(__file__).resolve().parent.parent.parent / "data" / "calibration" / "calibration_model.json"
+    if cal_path.exists():
+        with open(cal_path) as f:
+            return json.load(f)
+    return {"error": "No calibration data yet. Run polymarket_calibration.py first."}
+
+
+@router.get("/simulation")
+async def polymarket_simulation(request: Request):
+    """Return edge simulation results."""
+    import os
+    sim_path = Path(__file__).resolve().parent.parent.parent / "data" / "calibration" / "edge_simulation.json"
+    if sim_path.exists():
+        with open(sim_path) as f:
+            return json.load(f)
+    return {"error": "No simulation data yet. Run polymarket_edge_simulation.py first."}
+
+
+@router.get("/history-stats")
+async def polymarket_history_stats(request: Request):
+    """Return 5-minute market history collection stats."""
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            if not _table_exists(c, "polymarket_5m_history"):
+                return {"error": "No history data. Run polymarket_history.py first."}
+
+            total = c.execute("SELECT COUNT(*) FROM polymarket_5m_history").fetchone()[0]
+            per_asset = c.execute("""
+                SELECT asset, COUNT(*) as n,
+                       SUM(resolved) as ups,
+                       SUM(CASE WHEN crowd_yes_open IS NOT NULL THEN 1 ELSE 0 END) as has_crowd,
+                       SUM(CASE WHEN price_start IS NOT NULL THEN 1 ELSE 0 END) as has_price,
+                       MIN(window_start) as earliest,
+                       MAX(window_start) as latest
+                FROM polymarket_5m_history
+                GROUP BY asset
+            """).fetchall()
+
+            return {
+                "total_markets": total,
+                "per_asset": [
+                    {
+                        "asset": r["asset"],
+                        "count": r["n"],
+                        "ups": r["ups"],
+                        "up_pct": round(r["ups"] / r["n"] * 100, 1) if r["n"] > 0 else 0,
+                        "has_crowd": r["has_crowd"],
+                        "has_price": r["has_price"],
+                    }
+                    for r in per_asset
+                ],
+            }
+    except Exception as e:
+        return {"error": str(e)}
