@@ -590,14 +590,24 @@ class StrategyAExecutor:
             crowd_up = self._parse_crowd_up(market)
             token_cost = crowd_up if ml_direction == "UP" else (1.0 - crowd_up)
 
-            # Gate: odds filter — block extreme/expensive token costs
-            # Optimizer: cheap tokens (<0.50) are profitable, expensive tokens bleed
-            if token_cost < 0.15 or token_cost > 0.50:
-                self._log_skip(inst.asset, slug,
-                               f"odds_filter token_cost={token_cost:.3f} outside [0.15, 0.50]",
-                               ml_conf, token_cost, ml_direction, minutes_left,
-                               timeframe=inst.timeframe)
-                continue
+            # Gate: odds filter — entry-price-first gating
+            # 5m data: cheap tokens (<=0.48) are a TRAP (36% wr, -$152).
+            #          Edge lives in 0.48-0.52 band (59% wr, +$505).
+            # 15m data: cheap tokens work (55% wr), wider range is OK.
+            if inst.timeframe == 5:
+                if token_cost < 0.47 or token_cost > 0.53:
+                    self._log_skip(inst.asset, slug,
+                                   f"5m_odds token_cost={token_cost:.3f} outside [0.47, 0.53]",
+                                   ml_conf, token_cost, ml_direction, minutes_left,
+                                   timeframe=inst.timeframe)
+                    continue
+            else:
+                if token_cost < 0.15 or token_cost > 0.50:
+                    self._log_skip(inst.asset, slug,
+                                   f"odds_filter token_cost={token_cost:.3f} outside [0.15, 0.50]",
+                                   ml_conf, token_cost, ml_direction, minutes_left,
+                                   timeframe=inst.timeframe)
+                    continue
 
             # Gate: confidence floor
             if ml_conf < self.CONFIDENCE_THRESHOLD:
@@ -945,6 +955,20 @@ class StrategyAExecutor:
         if bet_amount <= 0:
             self.logger.debug(f"SKIP [{inst.asset}]: Kelly returned $0 (no edge at {token_cost:.3f})")
             return
+
+        # 5m entry-price sizing: override Kelly with edge-based flat sizing
+        # Data: 0.48-0.52 band has 59% wr (+$505), cheap tokens lose (-$152)
+        if inst.timeframe == 5:
+            if token_cost > 0.53:
+                self.logger.debug(f"SKIP [{inst.asset}] 5m: token_cost={token_cost:.3f} > 0.53, no edge")
+                return
+            elif token_cost > 0.51:
+                bet_amount = self.MIN_BET  # $5 — thin edge, minimum size
+            else:
+                bet_amount = min(12.0, max(8.0, bet_amount))  # $8-12 — good entry
+            self.logger.info(
+                f"5m SIZING [{inst.asset}]: entry={token_cost:.3f} → ${bet_amount:.2f}"
+            )
         tokens = bet_amount / token_cost if token_cost > 0 else 0
         slug = market.get("slug", "")
 
