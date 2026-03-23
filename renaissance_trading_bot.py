@@ -4297,6 +4297,8 @@ class RenaissanceTradingBot:
                         cross_data[_pid] = _cdf
                 except Exception:
                     pass
+            # Save for Strategy A timing features (BTC lead-lag)
+            self._latest_cross_data = cross_data
 
             # ── Hierarchical Regime Classification (once per cycle) ──
             _cycle_regime_state = {}
@@ -6118,10 +6120,13 @@ class RenaissanceTradingBot:
                         _sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
                     if not hasattr(self, '_sa_ml_cache'):
                         self._sa_ml_cache = {}
+                    # Pass cross_data for BTC lead-lag timing features
+                    _sa_cross = getattr(self, '_latest_cross_data', None)
                     await self.polymarket_executor.execute_cycle(
                         ml_predictions=self._sa_ml_cache,
                         current_prices=_sa_prices,
                         current_regime=_sa_regime,
+                        cross_data=_sa_cross,
                     )
                 except Exception as _pex_err:
                     self.logger.warning(f"Strategy A cycle error: {_pex_err}")

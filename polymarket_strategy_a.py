@@ -35,6 +35,8 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
+from polymarket_timing_features import TimingFeatureEngine
+
 logger = logging.getLogger(__name__)
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
@@ -148,6 +150,9 @@ class StrategyAExecutor:
         self._daily_pnl: float = 0.0
         self._daily_pnl_5m: float = 0.0  # Separate 5m loss tracking
         self._last_trading_day: Optional[object] = None
+
+        # Timing features for BTC lead-lag altcoin edge
+        self.timing_engine = TimingFeatureEngine()
 
         self._ensure_tables()
         self._load_bankroll()
@@ -528,6 +533,7 @@ class StrategyAExecutor:
         ml_predictions: dict,
         current_prices: dict,
         current_regime: str = "unknown",
+        cross_data: Optional[dict] = None,
     ) -> None:
         """Called every bot cycle from the main trading loop."""
         if not self.enabled:
@@ -609,6 +615,16 @@ class StrategyAExecutor:
                                timeframe=inst.timeframe)
                 continue
 
+            # Gate: altcoin-only filter for 5m markets
+            # Calibration shows BTC (49.3%) and ETH (49.4%) have negative edge on 5m,
+            # while altcoins SOL (51.7%), XRP (51.8%), DOGE (52.4%) have positive edge.
+            if inst.timeframe == 5 and inst.asset in ("BTC", "ETH"):
+                self._log_skip(inst.asset, slug,
+                               f"5m_altcoin_only (BTC/ETH neg edge on 5m)",
+                               ml_conf, token_cost, ml_direction, minutes_left,
+                               timeframe=inst.timeframe)
+                continue
+
             # Gate: lead asset agreement (5m altcoins must agree with BTC direction)
             if inst.lead_asset:
                 lead_data = ml_predictions.get(f"{inst.lead_asset}-USD", {})
@@ -623,6 +639,24 @@ class StrategyAExecutor:
                                    ml_conf, token_cost, ml_direction, minutes_left,
                                    timeframe=inst.timeframe)
                     continue
+
+            # Timing features: BTC lead-lag boost for altcoin 5m bets
+            timing_features = None
+            if inst.timeframe == 5 and self.timing_engine.is_follower(inst.asset) and cross_data:
+                timing_features = self.timing_engine.compute(
+                    asset=inst.asset, cross_data=cross_data,
+                    current_prices=current_prices,
+                )
+                if timing_features.get("has_data"):
+                    boost = self.timing_engine.get_direction_boost(timing_features, ml_direction)
+                    original_conf = ml_conf
+                    ml_conf *= boost
+                    if boost != 1.0:
+                        self.logger.info(
+                            f"[TIMING] {inst.asset} 5m: boost={boost:.3f} "
+                            f"conf={original_conf:.1f}→{ml_conf:.1f}% "
+                            f"lead_mom={timing_features['lead_momentum']:.3f}"
+                        )
 
             # Gate: rate limit
             if not self._check_rate_limit():
@@ -707,9 +741,10 @@ class StrategyAExecutor:
             # Get asset price for recording
             asset_price = current_prices.get(inst.price_pair, 0)
 
-            # Place bet
+            # Place bet (pass timing features for audit trail)
             self._place_bet(inst, market, ml_direction, entry_side, token_cost,
-                            ml_conf, current_regime, asset_price)
+                            ml_conf, current_regime, asset_price,
+                            timing_features=timing_features)
 
     # -- Active Position Management --
 
@@ -897,7 +932,8 @@ class StrategyAExecutor:
 
     def _place_bet(self, inst: InstrumentConfig, market: dict,
                    direction: str, entry_side: str, token_cost: float,
-                   ml_confidence: float, regime: str, asset_price: float) -> None:
+                   ml_confidence: float, regime: str, asset_price: float,
+                   timing_features: Optional[Dict] = None) -> None:
         """Place a Kelly-sized bet."""
         # Convert confidence (50-100% scale) to probability (0.5-1.0)
         prob = ml_confidence / 100.0
@@ -958,10 +994,16 @@ class StrategyAExecutor:
             timeframe=inst.timeframe,
         )
 
+        timing_str = ""
+        if timing_features and timing_features.get("has_data"):
+            timing_str = (
+                f" | lead_mom={timing_features['lead_momentum']:.3f}"
+                f" btc_1b={timing_features['btc_1bar_ret']:.4f}"
+            )
         self.logger.info(
             f"BET [{inst.asset}]: {direction} ({entry_side}) | "
             f"Conf: {ml_confidence:.1f}% | Token: ${token_cost:.2f} | "
-            f"Kelly: ${bet_amount:.2f} | Bankroll: ${self.bankroll:.2f}"
+            f"Kelly: ${bet_amount:.2f} | Bankroll: ${self.bankroll:.2f}{timing_str}"
         )
 
     def _add_to_bet(self, bet, token_cost: float, ml_confidence: float,

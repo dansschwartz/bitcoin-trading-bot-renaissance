@@ -720,3 +720,71 @@ async def polymarket_history_stats(request: Request):
             }
     except Exception as e:
         return {"error": str(e)}
+
+
+# ── Timing Features Endpoint ──
+
+
+@router.get("/timing")
+def get_timing_features():
+    """BTC lead-lag timing features and per-asset edge breakdown."""
+    try:
+        from polymarket_timing_features import TimingFeatureEngine
+
+        result = {
+            "timing_engine": {
+                "lead_assets": ["BTC", "ETH"],
+                "follower_assets": sorted(TimingFeatureEngine.FOLLOWER_ASSETS),
+                "features": [
+                    "btc_1bar_ret", "btc_3bar_ret", "btc_vol_ratio",
+                    "btc_alt_spread", "btc_volume_z", "lead_momentum",
+                ],
+            },
+            "altcoin_filter": {
+                "enabled": True,
+                "rule": "5m markets skip BTC/ETH (negative edge per calibration)",
+                "reason": "Calibration shows BTC=49.3%, ETH=49.4% on 5m (below 50%)",
+            },
+            "per_asset_edge": {},
+        }
+
+        # Load calibration data for per-asset accuracy
+        cal_path = Path(__file__).resolve().parent.parent.parent / "data" / "calibration" / "calibration_model.json"
+        if cal_path.exists():
+            import json as _json
+            with open(cal_path) as f:
+                cal_data = _json.load(f)
+            for asset, info in cal_data.get("per_asset", {}).items():
+                acc = info.get("accuracy", 0) * 100  # Convert to percentage
+                result["per_asset_edge"][asset] = {
+                    "accuracy_pct": round(acc, 1),
+                    "n_samples": info.get("n", 0),
+                    "has_edge": acc > 50.0,
+                    "is_follower": asset.upper() in TimingFeatureEngine.FOLLOWER_ASSETS,
+                }
+
+        # Load recent bet timing data from DB
+        with _conn() as c:
+            if _table_exists(c, "polymarket_bets"):
+                recent = c.execute("""
+                    SELECT asset, entry_side, entry_confidence, pnl,
+                           opened_at, timeframe
+                    FROM polymarket_bets
+                    WHERE timeframe = 5
+                    ORDER BY opened_at DESC LIMIT 50
+                """).fetchall()
+                result["recent_5m_bets"] = [
+                    {
+                        "asset": r["asset"],
+                        "side": r["entry_side"],
+                        "confidence": r["entry_confidence"],
+                        "pnl": r["pnl"],
+                        "opened_at": r["opened_at"],
+                    }
+                    for r in recent
+                ]
+
+        return result
+
+    except Exception as e:
+        return {"error": str(e)}
