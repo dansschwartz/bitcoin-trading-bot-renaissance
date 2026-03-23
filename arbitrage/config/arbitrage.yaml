@@ -115,10 +115,10 @@ triangular:
   scan_interval_ms_rest: 1000       # REST fallback interval (was 5000)
   max_single_trade_usd: 50          # Safe fallback if balance fetch fails
   max_trade_usd: 150                # Fallback only if balance fetch fails
-  min_trade_usd: 20                 # Hard floor — below this fees eat the edge
+  min_trade_usd: 15                 # Hard floor — $15 @ 7bps edge = $0.01 profit (above 5bps fee cost)
   max_trade_pct: 0.40               # 20% of wallet per trade (dynamic sizing)
   abs_max_trade_usd: 2000           # Hard ceiling regardless of balance
-  max_depth_fraction: 0.15          # Use at most 15% of thinnest leg's depth — 📊 data-backed (14K trades)
+  max_depth_fraction: 0.20          # Use at most 20% of thinnest leg's depth (raised from 15% to unblock thin books)
   min_depth_fraction: 0.05          # Skip if trade < 5% of book depth -- data-backed (0% fill rate below 5%)
   max_capital_per_cycle: 25000      # Total USD deployed per 60s cycle
   hourly_capital_limit: 500000      # Hourly capital breaker
