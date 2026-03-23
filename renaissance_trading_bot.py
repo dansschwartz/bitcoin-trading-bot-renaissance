@@ -74,6 +74,12 @@ except ImportError as _sa_err:
     STRATEGY_A_AVAILABLE = False
     logging.getLogger(__name__).warning(f"Strategy A import failed: {_sa_err}")
 try:
+    from polymarket_live_executor import PolymarketLiveExecutor
+    LIVE_EXECUTOR_AVAILABLE = True
+except ImportError as _le_err:
+    LIVE_EXECUTOR_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"Live Executor import failed: {_le_err}")
+try:
     from polymarket_reversal import ReversalStrategy
     REVERSAL_STRATEGY_AVAILABLE = True
 except ImportError as _rev_err:
@@ -992,6 +998,24 @@ class RenaissanceTradingBot:
             except Exception as _pe_err:
                 self.logger.warning(f"Strategy A init failed: {_pe_err}")
                 self.polymarket_executor = None
+
+        # Initialize Polymarket Live Executor (real CLOB orders for proven assets)
+        self.polymarket_live_executor = None
+        if LIVE_EXECUTOR_AVAILABLE and self.polymarket_executor:
+            try:
+                self.polymarket_live_executor = PolymarketLiveExecutor(
+                    db_path=scanner_db,
+                    config=self.config,
+                )
+                # Wire into Strategy A so it can queue live bets alongside paper
+                self.polymarket_executor.live_executor = self.polymarket_live_executor
+                self.logger.info(
+                    f"Polymarket Live Executor: "
+                    f"{'ENABLED' if self.polymarket_live_executor.live_enabled else 'disabled (no wallet)'}"
+                )
+            except Exception as _le_err:
+                self.logger.warning(f"Live Executor init failed: {_le_err}")
+                self.polymarket_live_executor = None
 
         # Initialize Polymarket Reversal Strategy — "BTC Already Told You"
         self.reversal_strategy = None
@@ -6148,6 +6172,13 @@ class RenaissanceTradingBot:
                     )
                 except Exception as _pex_err:
                     self.logger.warning(f"Strategy A cycle error: {_pex_err}")
+
+            # Check live bet resolutions (separate from paper)
+            if self.polymarket_live_executor:
+                try:
+                    self.polymarket_live_executor.check_live_resolutions()
+                except Exception as _lr_err:
+                    self.logger.debug(f"Live resolution check error: {_lr_err}")
 
             # ── Polymarket Reversal Strategy ("BTC Already Told You") ──
             # Build _scan_prices: prefer Binance WS (1s-fresh), fallback to _sa_prices / _last_prices

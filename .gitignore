@@ -11,3 +11,4 @@ __pycache__/
 .DS_Store
 .idea/
 models/trained/*.pth
+config/polymarket_secrets.json

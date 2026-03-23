@@ -878,3 +878,64 @@ async def polymarket_reversal_live():
             "at extreme odds ($0.10-$0.25). Only needs 15-25% accuracy to profit."
         ),
     }
+
+
+# ─── Live Execution Endpoints ───
+
+
+@router.get("/live")
+async def polymarket_live_stats(request: Request):
+    """Live trading statistics — separate from paper."""
+    bot = getattr(request.app.state, "bot", None)
+    if bot and hasattr(bot, "polymarket_live_executor") and bot.polymarket_live_executor:
+        try:
+            return bot.polymarket_live_executor.get_stats()
+        except Exception as e:
+            return {"error": str(e), "live_enabled": False}
+
+    # Fallback: read directly from DB
+    try:
+        with _conn() as c:
+            if not _table_exists(c, "polymarket_live_bets"):
+                return {"live_enabled": False, "total_bets": 0, "note": "table not created yet"}
+            stats = c.execute("""
+                SELECT
+                    COUNT(*) as total_bets,
+                    SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_bets,
+                    COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN pnl ELSE 0 END), 0) as total_pnl,
+                    COALESCE(SUM(order_size_usd), 0) as total_wagered
+                FROM polymarket_live_bets
+            """).fetchone()
+            recent = c.execute("""
+                SELECT asset, direction, order_price, order_size_usd,
+                       pnl, status, fill_status, created_at, error_message,
+                       timeframe, slug
+                FROM polymarket_live_bets ORDER BY created_at DESC LIMIT 20
+            """).fetchall()
+            resolved = (stats["wins"] or 0) + (stats["losses"] or 0)
+            return {
+                "live_enabled": "unknown (separate process)",
+                "total_bets": stats["total_bets"] or 0,
+                "wins": stats["wins"] or 0,
+                "losses": stats["losses"] or 0,
+                "open_bets": stats["open_bets"] or 0,
+                "total_pnl": round(float(stats["total_pnl"]), 2),
+                "total_wagered": round(float(stats["total_wagered"] or 0), 2),
+                "win_rate": round((stats["wins"] or 0) / resolved * 100, 1) if resolved > 0 else 0,
+                "recent_bets": [dict(r) for r in recent],
+            }
+    except Exception as e:
+        return {"error": str(e), "live_enabled": False}
+
+
+@router.get("/live/kill")
+async def polymarket_kill_switch(request: Request):
+    """Emergency kill switch — disables all live execution immediately."""
+    bot = getattr(request.app.state, "bot", None)
+    if bot and hasattr(bot, "polymarket_live_executor") and bot.polymarket_live_executor:
+        bot.polymarket_live_executor.live_enabled = False
+        logger.warning("[LIVE] *** KILL SWITCH ACTIVATED — live execution disabled ***")
+        return {"killed": True, "live_enabled": False}
+    return {"killed": False, "error": "Live executor not available in this process"}

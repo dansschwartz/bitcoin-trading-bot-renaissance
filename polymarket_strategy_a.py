@@ -157,6 +157,10 @@ class StrategyAExecutor:
         # Timing features for BTC lead-lag altcoin edge
         self.timing_engine = TimingFeatureEngine()
 
+        # Live executor — set by renaissance_trading_bot after init
+        self.live_executor = None
+        self._pending_live_bet: Optional[Dict] = None
+
         self._ensure_tables()
         self._load_bankroll()
         self._reset_daily_if_needed()
@@ -759,6 +763,26 @@ class StrategyAExecutor:
                             ml_conf, current_regime, asset_price,
                             timing_features=timing_features)
 
+            # Execute live bet if queued by _place_bet
+            if self._pending_live_bet and self.live_executor:
+                try:
+                    lb = self._pending_live_bet
+                    should_live, reason = self.live_executor.should_go_live(
+                        lb["asset"], lb["bet_amount"],
+                    )
+                    if should_live:
+                        live_result = await self.live_executor.place_live_bet(**lb)
+                        if live_result and live_result.get("fill_status") != "error":
+                            self.logger.info(f"[LIVE] Bet placed alongside paper: {live_result}")
+                        else:
+                            self.logger.warning(f"[LIVE] Bet failed: {live_result}")
+                    else:
+                        self.logger.debug(f"[LIVE] Skipped ({reason})")
+                except Exception as _live_err:
+                    self.logger.warning(f"[LIVE] Live bet error: {_live_err}")
+                finally:
+                    self._pending_live_bet = None
+
     # -- Active Position Management --
 
     def _manage_positions(self, ml_predictions: dict, current_prices: dict) -> None:
@@ -1032,6 +1056,32 @@ class StrategyAExecutor:
             f"Conf: {ml_confidence:.1f}% | Token: ${token_cost:.2f} | "
             f"Kelly: ${bet_amount:.2f} | Bankroll: ${self.bankroll:.2f}{timing_str}"
         )
+
+        # Queue live execution if live executor is available
+        if self.live_executor:
+            token_id = (market.get("token_id_yes") if direction == "UP"
+                        else market.get("token_id_no"))
+            if token_id:
+                # Compute window_start from slug
+                ws = 0
+                try:
+                    ws = int(slug.rsplit("-", 1)[-1])
+                except (ValueError, IndexError):
+                    pass
+                self._pending_live_bet = {
+                    "asset": inst.asset,
+                    "direction": direction,
+                    "entry_price": token_cost,
+                    "bet_amount": min(bet_amount, 2.0),  # Hard cap $2
+                    "token_id": token_id,
+                    "slug": slug,
+                    "question": market.get("question", ""),
+                    "window_start": ws,
+                    "timeframe": str(inst.timeframe) + "m",
+                    "edge": (prob - token_cost) if prob > 0.5 else (token_cost - (1 - prob)),
+                    "confidence": prob,
+                    "crowd_price": crowd_up,
+                }
 
     def _add_to_bet(self, bet, token_cost: float, ml_confidence: float,
                     inst: Optional[InstrumentConfig] = None) -> None:
@@ -1577,6 +1627,16 @@ class StrategyAExecutor:
             m = markets[0]
             crowd_up = self._parse_crowd_up_raw(m)
 
+            # Extract CLOB token IDs for live order placement
+            token_ids_raw = m.get("clobTokenIds", "[]")
+            if isinstance(token_ids_raw, str):
+                try:
+                    token_ids_raw = json.loads(token_ids_raw)
+                except (json.JSONDecodeError, TypeError):
+                    token_ids_raw = []
+            token_id_yes = token_ids_raw[0] if len(token_ids_raw) >= 1 else None
+            token_id_no = token_ids_raw[1] if len(token_ids_raw) >= 2 else None
+
             return {
                 "slug": m.get("slug", slug),
                 "question": m.get("question", ""),
@@ -1589,6 +1649,8 @@ class StrategyAExecutor:
                 "volume_24h": float(m.get("volume24hr", 0) or 0),
                 "liquidity": float(m.get("liquidity", 0) or 0),
                 "resolved": m.get("resolved", False),
+                "token_id_yes": token_id_yes,
+                "token_id_no": token_id_no,
                 "gamma_raw": m,
             }
         except Exception as e:
