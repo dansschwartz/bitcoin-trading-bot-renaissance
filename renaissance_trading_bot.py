@@ -74,6 +74,12 @@ except ImportError as _sa_err:
     STRATEGY_A_AVAILABLE = False
     logging.getLogger(__name__).warning(f"Strategy A import failed: {_sa_err}")
 try:
+    from polymarket_reversal import ReversalStrategy
+    REVERSAL_STRATEGY_AVAILABLE = True
+except ImportError as _rev_err:
+    REVERSAL_STRATEGY_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"Reversal Strategy import failed: {_rev_err}")
+try:
     from sub_bar_scanner import SubBarScanner
     SUB_BAR_SCANNER_AVAILABLE = True
 except ImportError:
@@ -986,6 +992,16 @@ class RenaissanceTradingBot:
             except Exception as _pe_err:
                 self.logger.warning(f"Strategy A init failed: {_pe_err}")
                 self.polymarket_executor = None
+
+        # Initialize Polymarket Reversal Strategy — "BTC Already Told You"
+        self.reversal_strategy = None
+        if REVERSAL_STRATEGY_AVAILABLE:
+            try:
+                self.reversal_strategy = ReversalStrategy(db_path=scanner_db)
+                self.logger.info("Polymarket Reversal Strategy: initialized (paper mode)")
+            except Exception as _rev_err:
+                self.logger.warning(f"Reversal Strategy init failed: {_rev_err}")
+                self.reversal_strategy = None
 
         # Initialize Cascade data collector (Polymarket crowd pricing for lead-lag validation)
         self.cascade_collector = None
@@ -6130,6 +6146,33 @@ class RenaissanceTradingBot:
                     )
                 except Exception as _pex_err:
                     self.logger.warning(f"Strategy A cycle error: {_pex_err}")
+
+            # ── Polymarket Reversal Strategy ("BTC Already Told You") ──
+            if hasattr(self, 'reversal_strategy') and self.reversal_strategy and self._scan_prices:
+                try:
+                    # Update BTC price for intra-window tracking
+                    btc_price = self._scan_prices.get("BTC-USD", 0)
+                    if btc_price and btc_price > 0:
+                        self.reversal_strategy.update_btc_price(btc_price)
+
+                    # Check for contrarian reversal opportunities
+                    bets = self.reversal_strategy.check_and_execute(
+                        current_prices=self._scan_prices,
+                        bankroll=getattr(self, '_polymarket_bankroll', 500.0),
+                    )
+
+                    if bets:
+                        for b in bets:
+                            self.logger.info(
+                                f"[REVERSAL] Placed: {b['asset']} {b['direction']} "
+                                f"@ ${b['entry_price']:.2f} for ${b['bet_amount']:.2f}"
+                            )
+
+                    # Check resolutions of previous bets
+                    self.reversal_strategy.check_resolutions()
+
+                except Exception as _rev_err:
+                    self.logger.debug(f"Reversal strategy error: {_rev_err}")
 
             cycle_time = time.time() - cycle_start
             self.logger.info(

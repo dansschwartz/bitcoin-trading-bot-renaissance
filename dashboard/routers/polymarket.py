@@ -788,3 +788,93 @@ def get_timing_features():
 
     except Exception as e:
         return {"error": str(e)}
+
+
+# --- REVERSAL STRATEGY ENDPOINTS ---
+
+
+@router.get("/reversal")
+async def polymarket_reversal_stats():
+    """Reversal strategy performance and recent bets."""
+    try:
+        with _conn() as c:
+            if not _table_exists(c, "polymarket_reversal_bets"):
+                return {
+                    "strategy": "BTC Already Told You",
+                    "status": "no_data",
+                    "total_bets": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "open_bets": 0,
+                    "win_rate": 0,
+                    "total_pnl": 0,
+                    "recent_bets": [],
+                    "message": "No reversal bets yet — table not created",
+                }
+
+            stats = c.execute("""
+                SELECT
+                    COUNT(*) as total_bets,
+                    SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_bets,
+                    COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN pnl ELSE 0 END), 0) as total_pnl,
+                    COALESCE(SUM(bet_amount), 0) as total_wagered,
+                    AVG(entry_price) as avg_entry_price,
+                    AVG(btc_reversal_magnitude_pct) as avg_btc_reversal,
+                    AVG(divergence_pct) as avg_divergence
+                FROM polymarket_reversal_bets
+            """).fetchone()
+
+            recent = c.execute("""
+                SELECT asset, direction, entry_price, bet_amount, pnl, status,
+                       btc_trend_direction, btc_reversal_direction,
+                       altcoin_close_vs_open, opened_at, seconds_remaining
+                FROM polymarket_reversal_bets
+                ORDER BY opened_at DESC LIMIT 20
+            """).fetchall()
+
+            total = stats["total_bets"] or 0
+            resolved = (stats["wins"] or 0) + (stats["losses"] or 0)
+
+            return {
+                "strategy": "BTC Already Told You",
+                "status": "active",
+                "total_bets": total,
+                "wins": stats["wins"] or 0,
+                "losses": stats["losses"] or 0,
+                "open_bets": stats["open_bets"] or 0,
+                "win_rate": round((stats["wins"] or 0) / resolved * 100, 1) if resolved > 0 else 0,
+                "total_pnl": round(stats["total_pnl"], 2),
+                "total_wagered": round(stats["total_wagered"] or 0, 2),
+                "roi": round(stats["total_pnl"] / (stats["total_wagered"] or 1) * 100, 1),
+                "avg_entry_price": round(stats["avg_entry_price"] or 0, 3),
+                "avg_btc_reversal_pct": round(stats["avg_btc_reversal"] or 0, 4),
+                "avg_divergence_pct": round(stats["avg_divergence"] or 0, 4),
+                "breakeven_accuracy": "15-25% depending on entry price",
+                "recent_bets": [dict(r) for r in recent],
+            }
+
+    except Exception as e:
+        return {"error": str(e), "strategy": "BTC Already Told You"}
+
+
+@router.get("/reversal/live")
+async def polymarket_reversal_live():
+    """Current reversal strategy configuration and live state."""
+    from polymarket_reversal import REVERSAL_ASSETS, MAX_ENTRY_PRICE, MAX_DAILY_REVERSAL_LOSS
+    from polymarket_reversal import BASE_BET_SIZE, MAX_BET_SIZE, ENTRY_EARLIEST_SEC, ENTRY_LATEST_SEC
+
+    return {
+        "strategy": "BTC Already Told You",
+        "entry_window": f"t={ENTRY_EARLIEST_SEC}s to t={ENTRY_LATEST_SEC}s",
+        "max_entry_price": MAX_ENTRY_PRICE,
+        "assets": list(REVERSAL_ASSETS.keys()),
+        "daily_loss_limit": MAX_DAILY_REVERSAL_LOSS,
+        "bet_size_range": f"${BASE_BET_SIZE}-${MAX_BET_SIZE}",
+        "status": "active (paper)",
+        "description": (
+            "Detects BTC reversals mid-window, buys contrarian on altcoins "
+            "at extreme odds ($0.10-$0.25). Only needs 15-25% accuracy to profit."
+        ),
+    }
