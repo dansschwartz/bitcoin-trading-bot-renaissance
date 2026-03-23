@@ -33,6 +33,7 @@ class TriLegResult:
     order_result: Optional[OrderResult] = None
     quantity_in: Decimal = Decimal('0')
     quantity_out: Decimal = Decimal('0')
+    fill_time_ms: float = 0.0
 
 
 @dataclass
@@ -46,6 +47,7 @@ class TriExecutionResult:
     profit_usd: Decimal = Decimal('0')
     total_fees_usd: Decimal = Decimal('0')
     execution_time_ms: float = 0.0
+    leg_fill_times_ms: List[float] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.utcnow)
     book_depth: Optional[Dict] = None  # Per-leg book depth at time of execution
     bottleneck_depth_usd: float = 0.0  # USD depth of thinnest leg
@@ -67,6 +69,7 @@ class TriangularExecutor:
                       trade_usd: Decimal,
                       min_trade_usd: float = 50.0,
                       depth_fraction: float = 0.15,
+                      min_depth_fraction: float = 0.0,
                       edge_bps: Optional[float] = None,
                       edge_thresholds: Optional[Dict[str, float]] = None,
                       ) -> TriExecutionResult:
@@ -120,6 +123,7 @@ class TriangularExecutor:
             leg_depths, float(trade_usd),
             min_trade_usd=min_trade_usd,
             depth_fraction=depth_fraction,
+            min_depth_fraction=min_depth_fraction,
             edge_bps=edge_bps,
             edge_thresholds=edge_thresholds,
         )
@@ -132,7 +136,7 @@ class TriangularExecutor:
             tier = "FULL"
         elif optimal_size >= 500:
             tier = "MEDIUM"
-        elif optimal_size >= 50:
+        elif optimal_size >= 20:
             tier = "SMALL"
         else:
             tier = "SKIP"
@@ -169,7 +173,7 @@ class TriangularExecutor:
         for symbol, side, _ in path:
             qty_prec = precisions.get(symbol, (8, 8))[1]
             price_prec = precisions.get(symbol, (8, 8))[0]
-            price_side = 'bid' if side == 'buy' else 'ask'
+            price_side = 'ask' if side == 'buy' else 'bid'  # IOC: cross spread
             price = books.get((symbol, price_side))
             if not price or price <= 0:
                 break  # Can't simulate — let execution handle the error
@@ -209,9 +213,12 @@ class TriangularExecutor:
             leg_num = i + 1
             base, quote = symbol.split('/')
 
-            # Use pre-fetched price — LIMIT_MAKER rests in book:
-            #   BUY at bid (top of bid book), SELL at ask (top of ask book)
-            price_side = 'bid' if side == 'buy' else 'ask'
+            # Hybrid: Leg 1 = IOC taker (cross spread), Legs 2-3 = LIMIT_MAKER (passive)
+            is_taker_leg = (leg_num == 1)
+            if is_taker_leg:
+                price_side = 'ask' if side == 'buy' else 'bid'  # cross spread
+            else:
+                price_side = 'bid' if side == 'buy' else 'ask'  # rest on book
             price = books.get((symbol, price_side))
             if price is None or price <= 0:
                 # Fallback: fetch fresh price for this leg
@@ -247,24 +254,51 @@ class TriangularExecutor:
                                           bottleneck_depth_usd=min_depth,
                                           sizing_reason=sizing_reason)
 
-            order = OrderRequest(
-                exchange="mexc",
-                symbol=symbol,
-                side=order_side,
-                order_type=OrderType.LIMIT_MAKER,  # Post-only → 0% maker fee on MEXC
-                quantity=quantity,
-                price=rounded_price,
-                time_in_force=TimeInForce.GTC,
-                client_order_id=f"{trade_id}_leg{leg_num}",
+            leg_type_str = 'IOC' if is_taker_leg else 'MAKER'
+            fee_label = 'taker 5bps' if is_taker_leg else 'maker 0bps'
+            logger.info(
+                f"TRI LEG {leg_num} {leg_type_str}: {side.upper()} {symbol} "
+                f"qty={float(quantity):.10f} price={float(rounded_price):.10f} "
+                f"({price_side}) prec=({price_prec},{qty_prec})"
             )
 
+            if is_taker_leg:
+                order = OrderRequest(
+                    exchange="mexc",
+                    symbol=symbol,
+                    side=order_side,
+                    order_type=OrderType.LIMIT,
+                    quantity=quantity,
+                    price=rounded_price,
+                    time_in_force=TimeInForce.IOC,
+                    client_order_id=f"{trade_id}_leg{leg_num}",
+                )
+            else:
+                order = OrderRequest(
+                    exchange="mexc",
+                    symbol=symbol,
+                    side=order_side,
+                    order_type=OrderType.LIMIT_MAKER,
+                    quantity=quantity,
+                    price=rounded_price,
+                    time_in_force=TimeInForce.GTC,
+                    client_order_id=f"{trade_id}_leg{leg_num}",
+                )
+
+            leg_start = time.monotonic()
             try:
                 result = await asyncio.wait_for(
                     self.client.place_order(order),
-                    timeout=3.0,
+                    timeout=15.0,
                 )
+                leg_ms = (time.monotonic() - leg_start) * 1000
             except asyncio.TimeoutError:
                 logger.error(f"TRI LEG {leg_num} TIMEOUT: {symbol} {side}")
+                # Cancel any outstanding order to prevent stranded assets
+                try:
+                    await self._cancel_leg_order(symbol, f"{trade_id}_leg{leg_num}", trade_id, leg_num)
+                except Exception:
+                    pass
                 legs.append(TriLegResult(
                     leg_number=leg_num, symbol=symbol, side=side,
                     status="failed", quantity_in=current_amount,
@@ -274,6 +308,24 @@ class TriangularExecutor:
                                           Decimal('0'), start_time, book_depth,
                                           bottleneck_depth_usd=min_depth,
                                           sizing_reason=sizing_reason)
+
+
+            # Handle OPEN orders differently based on leg type
+            if result.status == OrderStatus.OPEN and result.order_id:
+                if is_taker_leg:
+                    # IOC returned OPEN — cancel immediately
+                    logger.warning(f"TRI LEG {leg_num} IOC returned OPEN — cancelling")
+                    try:
+                        await self.client.cancel_order(symbol, result.order_id)
+                    except Exception:
+                        pass
+                    result.status = OrderStatus.CANCELLED
+                else:
+                    # MAKER leg: wait for fill with timeout
+                    result = await self._wait_and_cancel(
+                        symbol, result.order_id, trade_id, leg_num,
+                        max_wait=self._maker_fill_timeout_s,
+                    )
 
             if result.status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
                 logger.error(
@@ -302,8 +354,10 @@ class TriangularExecutor:
             quantity_out -= result.fee_amount  # Subtract fees
 
             logger.info(
-                f"TRI LEG {leg_num} FILLED: {side.upper()} {symbol} | "
-                f"qty={float(fill_qty):.8f} @ {float(fill_price):.6f} | "
+                f"TRI LEG {leg_num} {leg_type_str} FILLED: "
+                f"{side.upper()} {symbol} "
+                f"qty={float(fill_qty):.8f} @ {float(fill_price):.6f} "
+                f"in {leg_ms:.0f}ms ({fee_label}) | "
                 f"in={float(current_amount):.6f} {current_currency} -> "
                 f"out={float(quantity_out):.6f} {next_currency} | "
                 f"fee={float(result.fee_amount):.6f}"
@@ -313,6 +367,7 @@ class TriangularExecutor:
                 leg_number=leg_num, symbol=symbol, side=side,
                 status="filled", order_result=result,
                 quantity_in=current_amount, quantity_out=quantity_out,
+                fill_time_ms=leg_ms,
             ))
 
             current_amount = quantity_out
@@ -324,17 +379,23 @@ class TriangularExecutor:
         self._total_profit += profit
 
         exec_ms = (time.monotonic() - start_time) * 1000
+        total_fees = sum(l.order_result.fee_amount for l in legs if l.order_result and l.status == "filled")
+        fee_bps = float(total_fees / initial_amount * 10000) if initial_amount > 0 else 0
+        gross_profit = profit + total_fees
+        gross_bps = float(gross_profit / initial_amount * 10000) if initial_amount > 0 else 0
+        net_bps = float(profit / initial_amount * 10000) if initial_amount > 0 else 0
+        path_str = ' -> '.join(s[0] for s in path)
         logger.info(
-            f"TRI COMPLETE {trade_id}: "
-            f"Started {float(initial_amount):.8f} {start_currency} -> "
-            f"Ended {float(current_amount):.8f} {start_currency} | "
-            f"Profit: {float(profit):.8f} {start_currency} | "
-            f"Time: {exec_ms:.0f}ms"
+            f"TRI COMPLETE {trade_id}: {path_str} | "
+            f"gross={gross_bps:.1f}bps fees={fee_bps:.1f}bps net={net_bps:.1f}bps "
+            f"profit=${float(profit):.4f} | Time: {exec_ms:.0f}ms"
         )
 
+        leg_times = [l.fill_time_ms for l in legs if l.status == "filled"]
         result = self._build_result(
             trade_id, "filled", legs, initial_amount, current_amount, start_time, book_depth,
             bottleneck_depth_usd=min_depth, sizing_reason=sizing_reason,
+            leg_fill_times_ms=leg_times,
         )
         self._completed.append(result)
         return result
@@ -384,8 +445,9 @@ class TriangularExecutor:
                 return symbol, (8, 8)
 
         tasks = []
-        for symbol, side, _ in path:
-            price_side = 'bid' if side == 'buy' else 'ask'  # LIMIT_MAKER: rest in book
+        for i, (symbol, side, _) in enumerate(path):
+            # All-IOC: cross spread on every leg
+            price_side = 'ask' if side == 'buy' else 'bid'
             tasks.append(fetch_book(symbol, price_side))
             if symbol not in self._precision_cache:
                 tasks.append(fetch_precision(symbol))
@@ -449,6 +511,116 @@ class TriangularExecutor:
         quant = Decimal(10) ** -places
         return value.quantize(quant, rounding=ROUND_DOWN)
 
+
+    async def _wait_and_cancel(self, symbol: str, order_id: str, trade_id: str, leg_num: int, max_wait: float = 5.0) -> "OrderResult":
+        """Poll an OPEN order for fills, then cancel if still open. Returns final status."""
+        poll_interval = 1.0
+        elapsed = 0.0
+        last_result = None
+        while elapsed < max_wait:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            try:
+                last_result = await asyncio.wait_for(
+                    self.client.get_order_status(symbol, order_id),
+                    timeout=5.0,
+                )
+                if last_result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                    logger.info(f"TRI LEG {leg_num} filled after {elapsed:.0f}s wait: {last_result.status.value}")
+                    return last_result
+                if last_result.status in (OrderStatus.CANCELLED,):
+                    return last_result
+            except Exception as e:
+                logger.debug(f"Order status poll failed: {e}")
+
+        # Still open after max_wait — cancel with retry
+        logger.warning(f"TRI LEG {leg_num} still OPEN after {max_wait:.0f}s — cancelling order {order_id}")
+        for cancel_attempt in range(3):
+            cancel_says_filled = False
+            try:
+                await self.client.cancel_order(symbol, order_id)
+            except Exception as e:
+                err_str = str(e).lower()
+                if 'filled' in err_str or 'order completed' in err_str:
+                    logger.info(f"TRI LEG {leg_num} cancel says order already filled — treating as FILLED")
+                    cancel_says_filled = True
+                else:
+                    logger.error(f"TRI LEG {leg_num} cancel failed (attempt {cancel_attempt + 1}): {e}")
+
+            # Check status after cancel attempt
+            try:
+                last_result = await asyncio.wait_for(
+                    self.client.get_order_status(symbol, order_id),
+                    timeout=5.0,
+                )
+                if last_result.filled_quantity and last_result.filled_quantity > 0:
+                    fill_status = OrderStatus.FILLED if cancel_says_filled else OrderStatus.PARTIALLY_FILLED
+                    logger.info(
+                        f"TRI LEG {leg_num} fill detected after cancel: "
+                        f"{float(last_result.filled_quantity):.8f} {symbol} — {fill_status.value}"
+                    )
+                    last_result.status = fill_status
+                    return last_result
+                if cancel_says_filled:
+                    # Cancel said filled but status check shows no qty — force FILLED status
+                    logger.warning(
+                        f"TRI LEG {leg_num} cancel said filled but status shows no qty — marking FILLED anyway"
+                    )
+                    last_result.status = OrderStatus.FILLED
+                    return last_result
+                if last_result.status != OrderStatus.OPEN:
+                    return last_result  # Successfully cancelled
+                # Still OPEN — retry cancel
+                logger.warning(
+                    f"TRI LEG {leg_num} still OPEN after cancel attempt {cancel_attempt + 1} — retrying"
+                )
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"TRI LEG {leg_num} post-cancel status check failed: {e}")
+                if cancel_says_filled:
+                    # Cancel said filled, status check failed — build synthetic FILLED result
+                    logger.warning(f"TRI LEG {leg_num} cancel said filled, status unavailable — treating as FILLED")
+                    from ..exchanges.base import OrderResult as _OR, OrderSide as _OS, OrderType as _OT
+                    return _OR(
+                        exchange="mexc", symbol=symbol, order_id=order_id,
+                        client_order_id=None, status=OrderStatus.FILLED,
+                        side=_OS.BUY, order_type=_OT.LIMIT,
+                        requested_quantity=Decimal(0), filled_quantity=Decimal(0),
+                        average_fill_price=None, fee_amount=Decimal(0),
+                        fee_currency="USDT", timestamp=datetime.utcnow(),
+                        raw_response={"cancel_said_filled": True},
+                    )
+                break
+
+        # Exhausted retries
+        if last_result:
+            logger.error(
+                f"TRI LEG {leg_num} cancel exhausted 3 attempts — final status={last_result.status.value}"
+            )
+            return last_result
+        # Return a synthetic cancelled result
+        from ..exchanges.base import OrderResult as _OR, OrderSide as _OS, OrderType as _OT
+        return _OR(
+            exchange="mexc", symbol=symbol, order_id=order_id,
+            client_order_id=None, status=OrderStatus.CANCELLED,
+            side=_OS.BUY, order_type=_OT.LIMIT,
+            requested_quantity=Decimal(0), filled_quantity=Decimal(0),
+            average_fill_price=None, fee_amount=Decimal(0),
+            fee_currency="USDT", timestamp=datetime.utcnow(),
+            raw_response={},
+        )
+
+    async def _cancel_leg_order(self, symbol: str, order_id: str, trade_id: str, leg_num: int) -> None:
+        """Cancel an outstanding order for a failed leg to prevent stranded assets."""
+        try:
+            cancelled = await self.client.cancel_order(symbol, order_id)
+            if cancelled:
+                logger.info(f"TRI LEG {leg_num} order cancelled: {order_id} on {symbol}")
+            else:
+                logger.warning(f"TRI LEG {leg_num} cancel returned False: {order_id} on {symbol}")
+        except Exception as e:
+            logger.error(f"TRI LEG {leg_num} cancel error: {order_id} — {e}")
+
     async def _unwind(self, completed_legs: List[TriLegResult], trade_id: str) -> None:
         """Unwind completed legs in reverse order to recover starting currency."""
         filled_legs = [l for l in completed_legs if l.status == "filled"]
@@ -461,11 +633,15 @@ class TriangularExecutor:
             try:
                 base, quote = leg.symbol.split('/')
                 if leg.side == 'buy':
+                    # Reverse a BUY = SELL the base currency we received
                     reverse_side = OrderSide.SELL
-                    reverse_qty = leg.quantity_out
+                    reverse_qty = leg.quantity_out  # base currency received
                 else:
+                    # Reverse a SELL = BUY back the base currency we sold
+                    # FIX: was using quantity_out (quote currency), must use
+                    # quantity_in (base currency) to avoid catastrophic mispricing
                     reverse_side = OrderSide.BUY
-                    reverse_qty = leg.quantity_out
+                    reverse_qty = leg.quantity_in  # base currency that was sold
 
                 qty_prec = self._precision_cache.get(leg.symbol, (8, 8))[1]
                 reverse_qty = self._round_decimal(reverse_qty, qty_prec)
@@ -487,14 +663,21 @@ class TriangularExecutor:
                     self.client.place_order(order),
                     timeout=5.0,
                 )
-                leg.status = "unwound"
-                logger.info(
-                    f"TRI UNWIND leg {leg.leg_number}: {leg.symbol} "
-                    f"{'SELL' if leg.side == 'buy' else 'BUY'} "
-                    f"{float(reverse_qty):.8f} — {result.status.value}"
-                )
+                if result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                    leg.status = "unwound"
+                    logger.info(
+                        f"TRI UNWIND leg {leg.leg_number}: {leg.symbol} "
+                        f"{'SELL' if leg.side == 'buy' else 'BUY'} "
+                        f"{float(reverse_qty):.8f} — {result.status.value}"
+                    )
+                else:
+                    logger.error(
+                        f"TRI UNWIND leg {leg.leg_number} NOT FILLED: {leg.symbol} "
+                        f"status={result.status.value} qty={float(reverse_qty):.8f} "
+                        f"— TOKENS MAY BE STRANDED, inventory scanner will clean up"
+                    )
             except Exception as e:
-                logger.error(f"TRI UNWIND FAILED leg {leg.leg_number}: {e}")
+                logger.error(f"TRI UNWIND FAILED leg {leg.leg_number}: {e} — inventory scanner will clean up")
 
     async def _get_price(self, symbol: str, side: str) -> Optional[Decimal]:
         """Get current best price for a symbol."""
@@ -512,7 +695,8 @@ class TriangularExecutor:
                       end_amount: Decimal, start_time: float,
                       book_depth: Optional[Dict] = None,
                       bottleneck_depth_usd: float = 0.0,
-                      sizing_reason: str = "") -> TriExecutionResult:
+                      sizing_reason: str = "",
+                      leg_fill_times_ms: Optional[List[float]] = None) -> TriExecutionResult:
         total_fees = sum(
             (l.order_result.fee_amount if l.order_result else Decimal('0'))
             for l in legs
@@ -526,6 +710,7 @@ class TriangularExecutor:
             profit_usd=end_amount - start_amount,
             total_fees_usd=total_fees,
             execution_time_ms=(time.monotonic() - start_time) * 1000,
+            leg_fill_times_ms=leg_fill_times_ms or [],
             book_depth=book_depth,
             bottleneck_depth_usd=bottleneck_depth_usd,
             sizing_reason=sizing_reason,
@@ -535,6 +720,7 @@ class TriangularExecutor:
     def _optimal_trade_size(depths: List[float], max_trade_usd: float,
                             min_trade_usd: float = 50.0,
                             depth_fraction: float = 0.15,
+                            min_depth_fraction: float = 0.0,
                             edge_bps: Optional[float] = None,
                             edge_thresholds: Optional[Dict[str, float]] = None,
                             ) -> Tuple[float, str]:
@@ -579,6 +765,17 @@ class TriangularExecutor:
 
         optimal = round(base_size * edge_factor, 2)
 
+        # Min depth fraction check: skip if trade is too small relative to book
+        # (empirically, trades < 5% of bottleneck depth have ~0% fill rate)
+        actual_frac = optimal / min_depth if min_depth > 0 else 0.0
+        if min_depth_fraction > 0 and actual_frac < min_depth_fraction:
+            reason = (
+                f"low_frac|depth=${min_depth:.0f}|trade=${optimal:.0f}"
+                f"|frac={actual_frac:.1%}<min{min_depth_fraction:.0%}"
+                f"|edge={edge_label}({edge_factor}x)"
+            )
+            return 0.0, reason
+
         if optimal < min_trade_usd:
             reason = (
                 f"too_thin|depth=${min_depth:.0f}|{depth_fraction:.0%}=${depth_size:.0f}"
@@ -608,9 +805,9 @@ class TriangularExecutor:
                 })
                 continue
 
-            # For LIMIT_MAKER: BUY rests at bid, SELL rests at ask
-            # Depth we care about = the side we're joining
-            levels = book.bids[:5] if side == 'buy' else book.asks[:5]
+            # For IOC: BUY consumes asks, SELL consumes bids
+            # Depth we care about = the side we're taking from
+            levels = book.asks[:5] if side == 'buy' else book.bids[:5]
             depth_usd = sum(
                 float(lvl.price * lvl.quantity) for lvl in levels
             )

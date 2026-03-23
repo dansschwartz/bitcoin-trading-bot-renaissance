@@ -2,8 +2,8 @@
 MEXC exchange client — PRIMARY exchange for arbitrage.
 Uses ccxt for REST API, real WebSocket for streaming market data.
 
-CRITICAL: MEXC 0% maker fee is our structural edge.
-All orders default to LIMIT_MAKER (post-only).
+MEXC exchange client — supports both maker (0%) and taker (0.05%) orders.
+IOC taker orders are used for triangular arb execution.
 """
 import asyncio
 import json
@@ -13,6 +13,8 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Callable, Awaitable, Dict, List
 
+import hashlib
+import hmac
 import math
 
 import aiohttp
@@ -70,6 +72,10 @@ class MEXCClient(ExchangeClient):
         self.volume_limiter = None
         # Shared aiohttp session for REST calls (reuses TCP connections)
         self._http_session: Optional[aiohttp.ClientSession] = None
+        self._ticker_session: Optional[aiohttp.ClientSession] = None  # Dedicated session for bookTicker
+        self._ticker_cache: Optional[Dict[str, dict]] = None
+        self._ticker_cache_ts: float = 0.0
+        self._ticker_cache_ttl: float = 10.0  # Reuse cached tickers for 10s
 
     async def connect(self) -> None:
         config = {
@@ -78,7 +84,12 @@ class MEXCClient(ExchangeClient):
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'spot',
-                'fetchMarkets': ['spot'],  # Skip contract API (geo-blocked on VPS)
+                'fetchMarkets': {           # ccxt 4.x format — disable contract API (geo-blocked)
+                    'types': {
+                        'spot': True,
+                        'swap': False,
+                    },
+                },
             },
         }
         if not self._api_key:
@@ -86,21 +97,77 @@ class MEXCClient(ExchangeClient):
             config.pop('secret')
 
         self._exchange = ccxt_async.mexc(config)
+        self._exchange.has["fetchCurrencies"] = False  # Skip capital/config/getall (needs Wallet permission)
         self._http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5),
+            timeout=aiohttp.ClientTimeout(total=30),
+            headers=_HTTP_HEADERS,
+        )
+        self._ticker_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=60),
             headers=_HTTP_HEADERS,
         )
 
+        # Try ccxt load_markets first; fall back to direct REST if geo-blocked
         try:
             await self._exchange.load_markets()
-            logger.info(f"MEXC connected — {len(self._exchange.markets)} markets loaded")
+            logger.info(f"MEXC connected (ccxt) — {len(self._exchange.markets)} markets loaded")
         except Exception as e:
-            logger.warning(f"MEXC market load failed (read-only mode): {e}")
+            logger.warning(f"MEXC ccxt load_markets failed: {e}, using direct REST")
+            await self._load_spot_markets_direct()
+
+    async def _load_spot_markets_direct(self) -> None:
+        """Load spot markets via direct REST call, bypassing ccxt load_markets."""
+        url = "https://api.mexc.com/api/v3/exchangeInfo"
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as session:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            raise Exception(f"HTTP {resp.status}")
+                        data = await resp.json()
+                self._exchange.markets = {}
+                self._exchange.markets_by_id = {}
+                for sym in data.get("symbols", []):
+                    base, quote = sym["baseAsset"], sym["quoteAsset"]
+                    symbol = f"{base}/{quote}"
+                    price_prec = 10 ** -int(sym.get("quotePrecision", 8))   # TICK_SIZE mode
+                    amount_prec = 10 ** -int(sym.get("baseAssetPrecision", 8))
+                    market = {
+                        "id": sym["symbol"], "symbol": symbol,
+                        "base": base, "quote": quote,
+                        "baseId": base, "quoteId": quote,
+                        "spot": True, "swap": False, "active": sym.get("status") == "1",
+                        "type": "spot", "linear": False, "inverse": False,
+                        "precision": {"amount": amount_prec, "price": price_prec},
+                        "limits": {
+                            "amount": {"min": float(sym.get("baseSizePrecision", "0.000001")),
+                                       "max": None},
+                            "price": {"min": None, "max": None},
+                            "cost": {"min": float(sym.get("quoteAmountPrecision", "1")),
+                                     "max": float(sym.get("maxQuoteAmount", "1000000"))},
+                        },
+                        "maker": 0.0, "taker": 0.0005,
+                    }
+                    self._exchange.markets[symbol] = market
+                    self._exchange.markets_by_id[sym["symbol"]] = market
+                logger.info(f"MEXC connected (direct REST) — {len(self._exchange.markets)} spot markets loaded")
+                return
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning(f"MEXC direct market load attempt {attempt+1} failed: {e}, retrying in 5s")
+                    await asyncio.sleep(5)
+                else:
+                    logger.error(f"MEXC direct market load failed after 3 attempts: {e}")
 
     async def disconnect(self) -> None:
         self._ws_running = False
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()
+        if self._ticker_session:
+            await self._ticker_session.close()
+            self._ticker_session = None
         if self._http_session:
             await self._http_session.close()
             self._http_session = None
@@ -118,7 +185,7 @@ class MEXCClient(ExchangeClient):
         """
         try:
             return await asyncio.wait_for(
-                self._fetch_order_book_direct(symbol, depth), timeout=3
+                self._fetch_order_book_direct(symbol, depth), timeout=10
             )
         except (asyncio.TimeoutError, Exception):
             # Event loop too busy for aiohttp — use sync HTTP in thread
@@ -571,21 +638,32 @@ class MEXCClient(ExchangeClient):
         }
 
     async def get_all_tickers(self) -> Dict[str, dict]:
-        """Fetch all tickers via direct REST (avoids ccxt load_markets overhead)."""
-        return await self._fetch_all_tickers_direct()
+        """Fetch all tickers via direct REST (avoids ccxt load_markets overhead).
+        
+        Returns cached data if available and fresh (within TTL).
+        """
+        import time as _time
+        now = _time.monotonic()
+        if self._ticker_cache and (now - self._ticker_cache_ts) < self._ticker_cache_ttl:
+            return self._ticker_cache
+        result = await self._fetch_all_tickers_direct()
+        self._ticker_cache = result
+        self._ticker_cache_ts = now
+        return result
 
     async def _fetch_all_tickers_direct(self) -> Dict[str, dict]:
         """Fetch all tickers directly from MEXC spot REST API, bypassing ccxt.
 
+        Uses a persistent dedicated session to avoid contention with order book fetches.
         Retries on 403/429 with backoff.
         """
         url = "https://api.mexc.com/api/v3/ticker/bookTicker"
-        session = self._http_session or aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5), headers=_HTTP_HEADERS)
-        close_after = self._http_session is None
+        session = self._ticker_session or self._http_session
+        if session is None:
+            raise Exception("No HTTP session available for bookTicker")
         data = None
-        try:
-            for attempt in range(3):
+        for attempt in range(3):
+            try:
                 async with session.get(url) as resp:
                     if resp.status in (403, 429):
                         wait = (attempt + 1) * 2
@@ -598,9 +676,12 @@ class MEXCClient(ExchangeClient):
                         raise Exception(f"MEXC REST {resp.status}")
                     data = await resp.json()
                     break
-        finally:
-            if close_after:
-                await session.close()
+            except asyncio.TimeoutError:
+                if attempt < 2:
+                    logger.warning(f"bookTicker timeout (attempt {attempt+1}), retrying in 3s")
+                    await asyncio.sleep(3)
+                    continue
+                raise
         if data is None:
             raise Exception("MEXC bookTicker fetch returned no data")
         result = {}
@@ -643,16 +724,189 @@ class MEXCClient(ExchangeClient):
     # --- Trading ---
 
     async def place_order(self, order: OrderRequest) -> OrderResult:
+        """Route orders: paper → _paper_fill, live → _place_order_direct."""
         if self.paper_trading:
             return self._paper_fill(order)
+        return await self._place_order_direct(order)
 
+    async def _place_order_direct(self, order: OrderRequest) -> OrderResult:
+        """Place order via MEXC REST API directly, bypassing ccxt precision bugs.
+
+        ccxt v4.5.0 strips trailing zeros in TICK_SIZE mode, causing MEXC to
+        reject orders with "price must be greater than minimum price precision".
+        This method formats price/qty strings with exact decimal places.
+        """
+        # Get required decimal places from ccxt market data
+        symbol_raw = order.symbol.replace('/', '')
+        market = {}
+        if self._exchange and self._exchange.markets and order.symbol in self._exchange.markets:
+            market = self._exchange.markets[order.symbol]
+
+        price_tick = market.get('precision', {}).get('price', 0.00000001)
+        qty_tick = market.get('precision', {}).get('amount', 0.00000001)
+        price_dp = self._tick_size_to_decimals(price_tick)
+        qty_dp = self._tick_size_to_decimals(qty_tick)
+
+        # Format with exact decimal places (padded zeros)
+        price_str = f"{float(order.price):.{price_dp}f}" if order.price else None
+        qty_str = f"{float(order.quantity):.{qty_dp}f}"
+
+        # Validate
+        if float(qty_str) <= 0:
+            logger.error(f"Order rejected pre-submit: {order.symbol} qty={qty_str} <= 0")
+            return OrderResult(
+                exchange="mexc", symbol=order.symbol,
+                order_id="", client_order_id=order.client_order_id,
+                status=OrderStatus.REJECTED, side=order.side,
+                order_type=order.order_type,
+                requested_quantity=order.quantity,
+                filled_quantity=Decimal('0'),
+                average_fill_price=None, fee_amount=Decimal('0'),
+                fee_currency="USDT", timestamp=datetime.utcnow(),
+                raw_response={"error": "quantity <= 0 after formatting"},
+            )
+
+        # Build order type string
+        if order.order_type == OrderType.LIMIT_MAKER:
+            order_type = "LIMIT"
+            tif = "GTX"  # Post-only → 0% maker fee
+        elif order.order_type == OrderType.MARKET:
+            order_type = "MARKET"
+            tif = None
+        else:
+            order_type = "LIMIT"
+            tif = order.time_in_force.value if order.time_in_force else "GTC"
+
+        # Build params
+        ts = str(int(time.time() * 1000))
+        params = {
+            'symbol': symbol_raw,
+            'side': order.side.value.upper(),
+            'type': order_type,
+            'quantity': qty_str,
+            'timestamp': ts,
+            'recvWindow': '5000',
+        }
+        if price_str and order_type != "MARKET":
+            params['price'] = price_str
+        if tif:
+            params['timeInForce'] = tif
+        if order.client_order_id:
+            params['newClientOrderId'] = order.client_order_id
+
+        # Sign request (same pattern as _fetch_usdt_balance_direct)
+        query = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
+        sig = hmac.new(
+            self._api_secret.encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        url = f"https://api.mexc.com/api/v3/order?{query}&signature={sig}"
+
+        logger.info(
+            f"DIRECT ORDER: {order.side.value.upper()} {order.symbol} "
+            f"qty={qty_str} price={price_str} type={order_type}"
+            f"{' GTX' if tif == 'GTX' else ''}"
+        )
+
+        session = self._http_session
+        if not session:
+            logger.error("No HTTP session for direct order — falling back to ccxt")
+            return await self._place_order_ccxt(order)
+
+        try:
+            async with session.post(url, headers={
+                'X-MEXC-APIKEY': self._api_key,
+                'Content-Type': 'application/json',
+            }) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    error_msg = data.get('msg', str(data))
+                    error_code = data.get('code', resp.status)
+                    logger.error(
+                        f"MEXC direct order failed ({resp.status}): "
+                        f"code={error_code} msg={error_msg}"
+                    )
+                    return OrderResult(
+                        exchange="mexc", symbol=order.symbol,
+                        order_id="", client_order_id=order.client_order_id,
+                        status=OrderStatus.REJECTED, side=order.side,
+                        order_type=order.order_type,
+                        requested_quantity=order.quantity,
+                        filled_quantity=Decimal('0'),
+                        average_fill_price=None, fee_amount=Decimal('0'),
+                        fee_currency="USDT", timestamp=datetime.utcnow(),
+                        raw_response=data,
+                    )
+
+                # Parse successful response
+                order_id = str(data.get('orderId', ''))
+                status_str = data.get('status', '').upper()
+                status_map = {
+                    'NEW': OrderStatus.OPEN,
+                    'FILLED': OrderStatus.FILLED,
+                    'PARTIALLY_FILLED': OrderStatus.PARTIALLY_FILLED,
+                    'CANCELED': OrderStatus.CANCELLED,
+                    'CANCELLED': OrderStatus.CANCELLED,
+                }
+                status = status_map.get(status_str, OrderStatus.OPEN)
+
+                filled_qty = Decimal(str(data.get('executedQty', '0') or '0'))
+                avg_price = None
+                cost = Decimal(str(data.get('cummulativeQuoteQty', '0') or '0'))
+                if filled_qty > 0 and cost > 0:
+                    avg_price = cost / filled_qty
+
+                # Calculate taker fee (MEXC deducts from received asset)
+                # GTX (post-only) = 0% maker; IOC/MARKET = 0.05% taker
+                fee_amount = Decimal('0')
+                if tif != 'GTX' and filled_qty > 0:
+                    taker_rate = Decimal('0.0005')
+                    if order.side == OrderSide.BUY:
+                        fee_amount = filled_qty * taker_rate      # fee in base
+                    else:
+                        fee_amount = cost * taker_rate             # fee in quote
+
+                logger.info(
+                    f"DIRECT ORDER RESULT: {order.symbol} "
+                    f"status={status_str} orderId={order_id} "
+                    f"filled={float(filled_qty)} fee={float(fee_amount):.6f}"
+                )
+
+                return OrderResult(
+                    exchange="mexc", symbol=order.symbol,
+                    order_id=order_id,
+                    client_order_id=order.client_order_id,
+                    status=status, side=order.side,
+                    order_type=order.order_type,
+                    requested_quantity=order.quantity,
+                    filled_quantity=filled_qty,
+                    average_fill_price=avg_price,
+                    fee_amount=fee_amount,
+                    fee_currency="USDT",
+                    timestamp=datetime.utcnow(),
+                    raw_response=data,
+                )
+        except Exception as e:
+            logger.error(f"MEXC direct order exception: {e}")
+            return OrderResult(
+                exchange="mexc", symbol=order.symbol,
+                order_id="", client_order_id=order.client_order_id,
+                status=OrderStatus.REJECTED, side=order.side,
+                order_type=order.order_type,
+                requested_quantity=order.quantity,
+                filled_quantity=Decimal('0'),
+                average_fill_price=None, fee_amount=Decimal('0'),
+                fee_currency="USDT", timestamp=datetime.utcnow(),
+                raw_response={"error": str(e)},
+            )
+
+    async def _place_order_ccxt(self, order: OrderRequest) -> OrderResult:
+        """Place order via ccxt (legacy fallback)."""
         ccxt_symbol = order.symbol
         params = {}
 
-        # CRITICAL: Enforce maker-only on MEXC
         if order.order_type == OrderType.LIMIT_MAKER:
             order_type_str = 'limit'
-            params['timeInForce'] = 'GTX'  # Post-only
+            params['timeInForce'] = 'GTX'
         elif order.order_type == OrderType.MARKET:
             order_type_str = 'market'
         else:
@@ -673,7 +927,7 @@ class MEXCClient(ExchangeClient):
             )
             return self._parse_order_result(result, order)
         except Exception as e:
-            logger.error(f"MEXC order failed: {e}")
+            logger.error(f"MEXC ccxt order failed: {e}")
             return OrderResult(
                 exchange="mexc", symbol=order.symbol,
                 order_id="", client_order_id=order.client_order_id,
@@ -697,8 +951,73 @@ class MEXCClient(ExchangeClient):
             return False
 
     async def get_order_status(self, symbol: str, order_id: str) -> OrderResult:
-        result = await self._exchange.fetch_order(order_id, symbol)
-        return self._parse_order_result(result, None)
+        """Get order status — try ccxt first, fall back to direct REST."""
+        try:
+            result = await self._exchange.fetch_order(order_id, symbol)
+            return self._parse_order_result(result, None)
+        except Exception as e:
+            logger.debug(f"ccxt fetch_order failed for {order_id}: {e}")
+            return await self._get_order_status_direct(symbol, order_id)
+
+    async def _get_order_status_direct(self, symbol: str, order_id: str) -> OrderResult:
+        """Get order status via MEXC REST API directly."""
+        symbol_raw = symbol.replace('/', '')
+        ts = str(int(time.time() * 1000))
+        params = {
+            'symbol': symbol_raw,
+            'orderId': order_id,
+            'timestamp': ts,
+            'recvWindow': '5000',
+        }
+        query = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
+        sig = hmac.new(
+            self._api_secret.encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        url = f"https://api.mexc.com/api/v3/order?{query}&signature={sig}"
+
+        session = self._http_session
+        if not session:
+            raise RuntimeError("No HTTP session for direct order status")
+
+        async with session.get(url, headers={
+            'X-MEXC-APIKEY': self._api_key,
+        }) as resp:
+            data = await resp.json()
+            if resp.status != 200:
+                raise RuntimeError(f"MEXC order status failed: {data}")
+
+            status_str = data.get('status', '').upper()
+            status_map = {
+                'NEW': OrderStatus.OPEN,
+                'FILLED': OrderStatus.FILLED,
+                'PARTIALLY_FILLED': OrderStatus.PARTIALLY_FILLED,
+                'CANCELED': OrderStatus.CANCELLED,
+                'CANCELLED': OrderStatus.CANCELLED,
+            }
+            status = status_map.get(status_str, OrderStatus.OPEN)
+            filled_qty = Decimal(str(data.get('executedQty', '0') or '0'))
+            avg_price = None
+            cost = Decimal(str(data.get('cummulativeQuoteQty', '0') or '0'))
+            if filled_qty > 0 and cost > 0:
+                avg_price = cost / filled_qty
+
+            side_str = data.get('side', 'BUY').upper()
+            side = OrderSide.BUY if side_str == 'BUY' else OrderSide.SELL
+
+            return OrderResult(
+                exchange="mexc", symbol=symbol,
+                order_id=order_id,
+                client_order_id=data.get('clientOrderId'),
+                status=status, side=side,
+                order_type=OrderType.LIMIT,
+                requested_quantity=Decimal(str(data.get('origQty', '0') or '0')),
+                filled_quantity=filled_qty,
+                average_fill_price=avg_price,
+                fee_amount=Decimal('0'),
+                fee_currency="USDT",
+                timestamp=datetime.utcnow(),
+                raw_response=data,
+            )
 
     # --- Account ---
 
@@ -798,7 +1117,7 @@ class MEXCClient(ExchangeClient):
         raw_sym = self._normalized_to_mexc_sym(symbol)
         url = f"https://api.mexc.com/api/v3/depth?symbol={raw_sym}&limit={depth}"
         session = self._http_session or aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5), headers=_HTTP_HEADERS)
+            timeout=aiohttp.ClientTimeout(total=30), headers=_HTTP_HEADERS)
         close_after = self._http_session is None
 
         try:

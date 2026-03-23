@@ -136,6 +136,19 @@ class PerformanceTracker:
             conn.execute("ALTER TABLE arb_trades ADD COLUMN path TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        # IOC tracking columns (Change 7)
+        for col, coltype in [
+            ("order_type", "TEXT DEFAULT 'LIMIT_MAKER'"),
+            ("leg1_fill_ms", "INTEGER"),
+            ("leg2_fill_ms", "INTEGER"),
+            ("leg3_fill_ms", "INTEGER"),
+            ("total_fees_paid_bps", "REAL DEFAULT 0.0"),
+            ("unwind_cost_usd", "REAL DEFAULT 0.0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {coltype}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         # Realistic cross-exchange cost columns (Part B)
         for col, coltype in [
             ("withdrawal_fee_usd", "REAL DEFAULT 0"),
@@ -249,8 +262,7 @@ class PerformanceTracker:
                 currencies.append(next_curr)
             currency_path = "→".join(currencies)
 
-        # For failed/unwound trades, profit_usd = end(0) - start(500) = -500
-        # which is wrong — the unwind recovers capital. Use 0 for non-filled.
+        # For failed/unwound trades, actual profit = 0 (unwind recovers capital)
         if result.status != "filled":
             effective_profit = Decimal('0')
         else:
@@ -260,15 +272,28 @@ class PerformanceTracker:
         start = float(result.start_amount) if result.start_amount else 1.0
         profit = float(effective_profit)
         fees = float(result.total_fees_usd)
-        spread_bps = (profit / start) * 10000 if start > 0 else 0.0
+        net_spread_bps = (profit / start) * 10000 if start > 0 else 0.0
         cost_bps = (fees / start) * 10000 if start > 0 else 0.0
 
-        # Expected profit at detection time (from opportunity's profit_bps)
+        # Expected gross spread at detection time (from opportunity's profit_bps)
+        # This is recorded even for non-filled trades (signal quality metric)
+        expected_gross_bps = 0.0
         expected_profit = 0.0
         if opportunity and hasattr(opportunity, 'profit_bps'):
-            expected_profit = float(opportunity.profit_bps) / 10000.0 * start
+            expected_gross_bps = float(opportunity.profit_bps)
+            expected_profit = expected_gross_bps / 10000.0 * start
         else:
-            expected_profit = profit  # Fallback to actual
+            expected_gross_bps = net_spread_bps + cost_bps
+            expected_profit = profit
+
+        # Per-leg fill times
+        leg_times = getattr(result, 'leg_fill_times_ms', [])
+        leg1_ms = int(leg_times[0]) if len(leg_times) > 0 else None
+        leg2_ms = int(leg_times[1]) if len(leg_times) > 1 else None
+        leg3_ms = int(leg_times[2]) if len(leg_times) > 2 else None
+
+        # Fee tracking
+        total_fees_paid_bps = cost_bps if result.status == "filled" else 0.0
 
         # Extract leg-1 and leg-3 fill prices for buy_price / sell_price
         buy_price = 0.0
@@ -314,8 +339,8 @@ class PerformanceTracker:
             'buy_price': buy_price,
             'sell_price': sell_price,
             'quantity': float(result.start_amount),
-            'gross_spread_bps': spread_bps + cost_bps,  # before fees
-            'net_spread_bps': spread_bps,                # after fees
+            'gross_spread_bps': expected_gross_bps,      # signal quality (from opportunity)
+            'net_spread_bps': net_spread_bps,             # actual realized spread after fees
             'expected_profit_usd': expected_profit,
             'actual_profit_usd': profit,
             'buy_fee': fees / 2,
@@ -333,6 +358,12 @@ class PerformanceTracker:
             'path': currency_path,
             'bottleneck_depth_usd': bottleneck_depth,
             'sizing_reason': sizing_reason_str,
+            'order_type': 'IOC',
+            'leg1_fill_ms': leg1_ms,
+            'leg2_fill_ms': leg2_ms,
+            'leg3_fill_ms': leg3_ms,
+            'total_fees_paid_bps': total_fees_paid_bps,
+            'unwind_cost_usd': 0.0,
         }
 
         self._trades.append(trade)

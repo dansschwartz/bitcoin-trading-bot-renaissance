@@ -43,6 +43,7 @@ from arbitrage.risk.arb_risk import ArbitrageRiskEngine
 from arbitrage.inventory.manager import InventoryManager
 from arbitrage.tracking.performance import PerformanceTracker
 from arbitrage.exchanges.base import Trade
+from arbitrage.market_maker.hedged_mm import HedgedMarketMaker
 from arbitrage.safety.contract_verifier import ContractVerifier
 from arbitrage.safety.volume_limiter import VolumeParticipationLimiter
 from arbitrage.detector.pair_discovery import PairDiscoveryEngine
@@ -165,6 +166,18 @@ class ArbitrageOrchestrator:
         # Support modules (tracker must be created before funding_arb and triangular_arb)
         self.inventory = InventoryManager(self.mexc, self.binance)
         self.tracker = PerformanceTracker()
+
+        # Hedged Market Maker
+        mm_cfg = self.config.get("hedged_market_maker", {})
+        mm_enabled = mm_cfg.get("enabled", False)
+        self.hedged_mm = None
+        if mm_enabled:
+            self.hedged_mm = HedgedMarketMaker(
+                mexc_client=self.mexc,
+                config=mm_cfg,
+                db_path=self.tracker.db_path if self.tracker else "data/arbitrage.db",
+            )
+            logger.info("Hedged Market Maker initialized")
 
         # Temporal pattern analyzer — mines trade history for hour/dow bias
         db_path = self.config.get('db_path', 'data/arbitrage.db')
@@ -392,6 +405,10 @@ class ArbitrageOrchestrator:
             asyncio.create_task(self._run_velocity_cache_writer(), name="velocity_cache"),
             asyncio.create_task(self._run_edge_decay(), name="edge_decay"),
             asyncio.create_task(self._run_strategy_allocator(), name="strategy_allocator"),
+            *(
+                [asyncio.create_task(self._run_hedged_mm(), name="hedged_mm")]
+                if self.hedged_mm else []
+            ),
         ]
 
         logger.info(f"All {len(tasks)} subsystems launched")
@@ -1000,6 +1017,22 @@ class ArbitrageOrchestrator:
         logger.info("=" * 60)
 
 
+    async def _run_hedged_mm(self):
+        """Run hedged market maker strategy."""
+        await asyncio.sleep(20)  # Let other systems stabilize
+        logger.info("Starting Hedged Market Maker...")
+        try:
+            await self.hedged_mm.start()
+        except asyncio.CancelledError:
+            logger.info("Hedged MM task cancelled")
+            if self.hedged_mm:
+                await self.hedged_mm.stop()
+        except Exception as e:
+            logger.error(f"Hedged MM fatal error: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+
 async def main():
     """Entry point for standalone arbitrage engine."""
     import argparse
@@ -1029,5 +1062,8 @@ async def main():
     await orchestrator.start()
 
 
+
+
 if __name__ == "__main__":
     asyncio.run(main())
+

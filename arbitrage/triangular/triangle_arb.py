@@ -9,18 +9,23 @@ EXAMPLE:
   Step 3: Sell ETH for USDT  (ETH/USDT)
   Result: If cycle rate > 1.0, we profit.
 
-On MEXC: 0% maker fee on ALL three legs = pure edge capture.
+On MEXC: All-IOC taker (5 bps/leg). Total cost = 15 bps for 3-leg, 20 bps for 4-leg.
 Challenges: tiny edges, must execute all 3 legs near-simultaneously.
 """
 import asyncio
 import logging
 import traceback
 import time
+import json
+import os
+import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
+
+from ..utils.tick_check import get_tick_size_cached, check_tick_viability
 
 logger = logging.getLogger("arb.triangular")
 
@@ -125,6 +130,7 @@ class TriangularArbitrage:
             self._min_trade_usd = tri_cfg.get('min_trade_usd', 50)
             self._depth_fraction = tri_cfg.get('max_depth_fraction',
                                                tri_cfg.get('depth_fraction', 0.15))
+            self._min_depth_fraction = tri_cfg.get('min_depth_fraction', 0.0)
             self._dynamic_sizing = tri_cfg.get('dynamic_sizing_enabled', True)
             # New: raised ceiling (overrides MAX_TRADE_USD for executor calls)
             self._max_single_trade_usd = tri_cfg.get('max_single_trade_usd',
@@ -148,6 +154,7 @@ class TriangularArbitrage:
         else:
             self._min_trade_usd = 50
             self._depth_fraction = 0.15
+            self._min_depth_fraction = 0.0
             self._dynamic_sizing = True
             self._max_single_trade_usd = 15000
             self._max_capital_per_cycle = 25000
@@ -158,9 +165,24 @@ class TriangularArbitrage:
             self._quad_min_profit_bps = Decimal('6.0')
 
         self.temporal_bias = None  # Set by orchestrator after construction
+
+        # Dynamic wallet-based trade sizing
+        self._balance_cache_usd = 0.0
+        self._balance_cache_ts = 0.0
+        self._balance_cache_ttl = 300.0  # Refresh every 5 minutes
+        self._max_trade_pct = 0.20  # 20% of wallet per trade
+        self._abs_max_trade_usd = 2000.0  # Hard ceiling
+        if config:
+            tri_cfg = config.get('triangular', {})
+            self._max_trade_pct = tri_cfg.get('max_trade_pct', 0.20)
+            self._abs_max_trade_usd = tri_cfg.get('abs_max_trade_usd', 2000.0)
         self._running = False
         self._scan_count = 0
         self._opportunities_found = 0
+        # Scan rate tracking (per-minute)
+        self._scan_rate_count = 0
+        self._scan_rate_opps = 0
+        self._scan_rate_reset = 0.0  # initialized in run()
         self._signals_submitted = 0
         self._signals_skipped_balance = 0
         self._signals_skipped_size = 0
@@ -197,7 +219,7 @@ class TriangularArbitrage:
             'lower_if_fill_rate_above': 0.60,
             'step_size_bps': 0.5,
             'floor_bps': 3.0,
-            'ceiling_bps': 15.0,
+            'ceiling_bps': 30.0,
         }
         self._attempts_since_threshold_check = 0
         if config:
@@ -209,6 +231,32 @@ class TriangularArbitrage:
         # Staleness filter — prevents hammering failed paths
         self._staleness_filter = StalenessFilter(cooldown_seconds=15)
         self._staleness_skips = 0
+
+        # Path depth scoring — prioritize paths with proven deep books
+        self._path_depth_cache: Dict[str, dict] = {}  # path -> {avg_depth, fill_rate, fills}
+        self._path_depth_cache_ts: float = 0.0
+        self._path_depth_cache_ttl: float = 1800.0  # Refresh every 30 minutes
+        self._path_allowlist_enabled = False
+        self._min_avg_depth_usd = 133.0  # Will be recomputed dynamically below
+        self._depth_skips = 0
+
+        # Inventory scanner — auto-sell stranded tokens from partial fills
+        self._last_inventory_cleanup = 0.0
+        self._inventory_cleanup_interval = 60.0  # Check every 60 seconds
+        self._inventory_cleanups = 0
+        if config:
+            tri_cfg = config.get('triangular', {})
+            self._path_allowlist_enabled = tri_cfg.get('path_allowlist_enabled', False)
+            # Dynamic min_avg_depth_usd: derived from min_trade_usd / depth_fraction
+            cfg_depth = tri_cfg.get('min_avg_depth_usd', 'auto')
+            if cfg_depth == 'auto' or cfg_depth is None:
+                self._min_avg_depth_usd = self._min_trade_usd / self._depth_fraction
+            else:
+                self._min_avg_depth_usd = float(cfg_depth)
+            logger.info(
+                f"TRI ALLOWLIST: min_depth=${self._min_avg_depth_usd:.0f} "
+                f"(derived: ${self._min_trade_usd} floor / {self._depth_fraction*100:.0f}% participation)"
+            )
 
         # 4-leg diagnostic counters
         self._quad_signals_this_cycle = 0
@@ -222,19 +270,114 @@ class TriangularArbitrage:
         }
         self._quad_diag_cycle_count = 0
 
+    async def _get_usdt_balance(self) -> float:
+        """Fetch current MEXC USDT balance. Cached — refreshes every 5 minutes."""
+        now = time.monotonic()
+        if (now - self._balance_cache_ts) < self._balance_cache_ttl:
+            return self._balance_cache_usd
+
+        # Try ccxt first, then direct REST as fallback
+        balance = await self._fetch_usdt_balance_ccxt()
+        if balance is None:
+            balance = await self._fetch_usdt_balance_direct()
+        if balance is None:
+            logger.error(f"All balance fetch methods failed — using cached ${self._balance_cache_usd:.2f}")
+            return self._balance_cache_usd
+
+        if balance < 25:
+            logger.warning(f"USDT balance critically low: ${balance:.2f}")
+
+        self._balance_cache_usd = balance
+        self._balance_cache_ts = now
+        logger.info(f"Wallet balance refreshed: ${balance:.2f} USDT")
+        return balance
+
+    async def _fetch_usdt_balance_ccxt(self):
+        """Try fetching balance via ccxt."""
+        try:
+            balances = await self.client.get_balances()
+            usdt = balances.get("USDT")
+            return float(usdt.free) if usdt else 0.0
+        except Exception as e:
+            logger.debug(f"ccxt balance fetch failed: {e}")
+            return None
+
+    async def _fetch_usdt_balance_direct(self):
+        """Fetch USDT balance via direct REST call (bypasses ccxt issues)."""
+        try:
+            import hmac
+            import hashlib
+            import aiohttp as _aiohttp
+            api_key = self.client._api_key
+            api_secret = self.client._api_secret
+            if not api_key or not api_secret:
+                return None
+            ts = str(int(time.time() * 1000))
+            params = f"timestamp={ts}&recvWindow=5000"
+            sig = hmac.new(api_secret.encode(), params.encode(), hashlib.sha256).hexdigest()
+            url = f"https://api.mexc.com/api/v3/account?{params}&signature={sig}"
+            session = self.client._http_session
+            if not session:
+                return None
+            async with session.get(url, headers={"X-MEXC-APIKEY": api_key}, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    logger.debug(f"Direct balance REST returned {resp.status}")
+                    return None
+                data = await resp.json()
+                for b in data.get("balances", []):
+                    if b.get("asset") == "USDT":
+                        return float(b.get("free", 0))
+                return 0.0
+        except Exception as e:
+            logger.debug(f"Direct REST balance fetch failed: {e}")
+            return None
+
+
+    def _compute_max_trade_usd(self, wallet_balance: float) -> float:
+        """Dynamic trade size = wallet_balance * max_trade_pct, clamped to [floor, ceiling]."""
+        dynamic_max = wallet_balance * self._max_trade_pct
+        result = max(float(self._min_trade_usd), min(dynamic_max, self._abs_max_trade_usd))
+        logger.debug(
+            f"Dynamic sizing: wallet=${wallet_balance:.2f} x {self._max_trade_pct*100:.0f}% "
+            f"= ${dynamic_max:.2f} -> capped at ${result:.2f}"
+        )
+        return result
+
+    async def _get_dynamic_trade_usd(self) -> float:
+        """Get the current dynamic max trade USD, fetching balance if needed."""
+        wallet = await self._get_usdt_balance()
+        if wallet <= 0:
+            return float(self._max_single_trade_usd)  # Fallback to static config
+        return self._compute_max_trade_usd(wallet)
+
     async def run(self):
         self._running = True
+        self._last_cache_save_time = 0.0
         logger.info("TriangularArbitrage scanner started")
 
-        # Build initial pair graph — retry with backoff until success
-        attempt = 0
-        while self._running:
-            attempt += 1
-            if await self._build_pair_graph():
-                break
-            backoff = min(30 * attempt, 300)  # 30s, 60s, 90s, ... capped at 5min
-            logger.warning(f"TriangularArbitrage: pair graph build failed (attempt {attempt}), retrying in {backoff}s")
-            await asyncio.sleep(backoff)
+        # Try loading cached pair graph for instant startup
+        cache_loaded = self._load_pair_graph_cache()
+
+        if not cache_loaded:
+            # No cache — build pair graph with blocking retry (existing behavior)
+            attempt = 0
+            while self._running:
+                attempt += 1
+                if await self._build_pair_graph():
+                    break
+                backoff = min(30 * attempt, 300)  # 30s, 60s, 90s, ... capped at 5min
+                logger.warning(f"TriangularArbitrage: pair graph build failed (attempt {attempt}), retrying in {backoff}s")
+                await asyncio.sleep(backoff)
+        else:
+            # Cache loaded — kick off a background refresh (non-blocking)
+            async def _background_refresh():
+                try:
+                    if await self._build_pair_graph():
+                        logger.info("Pair graph refreshed from live data (background)")
+                except Exception as e:
+                    logger.debug(f"Background pair graph refresh failed: {e}")
+            asyncio.ensure_future(_background_refresh())
+
         if not self._running:
             return
 
@@ -242,18 +385,50 @@ class TriangularArbitrage:
         try:
             if hasattr(self.client, 'subscribe_all_tickers'):
                 await self.client.subscribe_all_tickers()
-                logger.info("TriangularArbitrage: WebSocket ticker feed requested")
+                logger.info(
+                f"TRI CONFIG: min_net_profit={float(self.MIN_NET_PROFIT_BPS):.1f}bps "
+                f"cost=5.0bps (hybrid: leg1 taker only)"
+            )
+            logger.info("TriangularArbitrage: WebSocket ticker feed requested")
         except Exception as e:
             logger.warning(f"WebSocket ticker feed unavailable: {e}")
 
         while self._running:
             try:
+                scan_start = time.time()
                 # Hybrid data source: prefer WebSocket, fallback to REST
                 tickers, data_source, ticker_age_ms = await self._get_tickers()
                 self._update_graph(tickers)
 
+                # Periodically save pair graph cache to disk (every 5 minutes)
+                now_mono = time.monotonic()
+                if now_mono - self._last_cache_save_time >= 300:
+                    self._save_pair_graph_cache(tickers)
+                    self._last_cache_save_time = now_mono
+
                 # Scan for profitable cycles (3-leg + 4-leg)
                 opportunities = self._find_profitable_cycles(tickers)
+
+                # Scan duration tracking
+                scan_ms = (time.time() - scan_start) * 1000
+                if scan_ms > 1000:
+                    logger.warning(f"TRI SCAN SLOW: {scan_ms:.0f}ms (> 1s interval)")
+
+                # Scan rate tracking (per-minute summary)
+                self._scan_rate_count += 1
+                self._scan_rate_opps += len(opportunities)
+                if self._scan_rate_reset == 0:
+                    self._scan_rate_reset = time.time()
+                elapsed_rate = time.time() - self._scan_rate_reset
+                if elapsed_rate >= 60:
+                    logger.info(
+                        f"TRI SCANNER RATE: {self._scan_rate_count} scans/min, "
+                        f"{self._scan_rate_opps} opportunities/min, "
+                        f"avg {elapsed_rate/self._scan_rate_count:.1f}s per scan"
+                    )
+                    self._scan_rate_count = 0
+                    self._scan_rate_opps = 0
+                    self._scan_rate_reset = time.time()
 
                 # Competition detector: record edge sizes
                 self._record_edges(opportunities)
@@ -321,12 +496,14 @@ class TriangularArbitrage:
                         continue
 
                     try:
+                        dynamic_trade_usd = await self._get_dynamic_trade_usd()
                         result = await self.tri_executor.execute(
                             path=opp.path,
                             start_currency=opp.start_currency,
-                            trade_usd=Decimal(str(self._max_single_trade_usd)),
+                            trade_usd=Decimal(str(dynamic_trade_usd)),
                             min_trade_usd=self._min_trade_usd,
                             depth_fraction=self._depth_fraction,
+                            min_depth_fraction=self._min_depth_fraction,
                             edge_bps=float(opp.profit_bps),
                             edge_thresholds=self._edge_thresholds,
                         )
@@ -426,12 +603,14 @@ class TriangularArbitrage:
                         continue
 
                     try:
+                        dynamic_trade_usd = await self._get_dynamic_trade_usd()
                         result = await self.tri_executor.execute(
                             path=opp.path,
                             start_currency=opp.start_currency,
-                            trade_usd=Decimal(str(self._max_single_trade_usd)),
+                            trade_usd=Decimal(str(dynamic_trade_usd)),
                             min_trade_usd=self._min_trade_usd,
                             depth_fraction=self._depth_fraction,
+                            min_depth_fraction=self._min_depth_fraction,
                             edge_bps=float(opp.profit_bps),
                             edge_thresholds=self._edge_thresholds,
                         )
@@ -493,6 +672,9 @@ class TriangularArbitrage:
 
                 self._scan_count += 1
 
+                # Inventory scanner: sell any stranded tokens from partial fills
+                await self._cleanup_stranded_inventory()
+
                 # Adaptive threshold: adjust min_profit_bps based on fill data
                 self._adapt_min_profit_threshold()
 
@@ -539,9 +721,12 @@ class TriangularArbitrage:
             self._update_graph(tickers)
             logger.info(f"Pair graph built with {len(self._pair_graph)} currencies, "
                        f"{sum(len(v) for v in self._pair_graph.values())} edges")
+            self._save_pair_graph_cache(tickers)
             return True
         except Exception as e:
-            logger.error(f"Failed to build pair graph: {e}")
+            import traceback
+            logger.error(f"Failed to build pair graph: {type(e).__name__}: {e}")
+            logger.error("Pair graph traceback: " + traceback.format_exc())
             return False
 
     def _update_graph(self, tickers: Dict[str, dict]):
@@ -579,10 +764,63 @@ class TriangularArbitrage:
                     'symbol': symbol, 'rate': Decimal('1') / ask, 'side': 'buy',
                 }
 
+
+    def _save_pair_graph_cache(self, tickers: Dict[str, dict]) -> None:
+        """Persist ticker data to disk for fast startup."""
+        try:
+            cache = {
+                'timestamp': time.time(),
+                'tickers': {
+                    sym: {k: str(v) for k, v in t.items()}
+                    for sym, t in tickers.items()
+                },
+            }
+            cache_path = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'pair_graph_cache.json')
+            with open(cache_path, 'w') as f:
+                json.dump(cache, f)
+            logger.info(f"Pair graph cache saved: {len(tickers)} tickers")
+        except Exception as e:
+            logger.debug(f"Failed to save pair graph cache: {e}")
+
+    def _load_pair_graph_cache(self, max_age_hours: float = 48.0) -> bool:
+        """Load cached ticker data from disk and rebuild pair graph. Returns True on success."""
+        try:
+            cache_path = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'pair_graph_cache.json')
+            with open(cache_path, 'r') as f:
+                cache = json.load(f)
+            age_hours = (time.time() - cache['timestamp']) / 3600
+            if age_hours > max_age_hours:
+                logger.warning(f"Pair graph cache too old ({age_hours:.1f}h), ignoring")
+                return False
+            tickers = {}
+            for sym, t in cache['tickers'].items():
+                converted = {}
+                for k, v in t.items():
+                    if k == 'symbol':
+                        converted[k] = v
+                    else:
+                        try:
+                            converted[k] = Decimal(v)
+                        except Exception:
+                            converted[k] = v
+                tickers[sym] = converted
+            self._update_graph(tickers)
+            currencies = len(self._pair_graph)
+            edges = sum(len(v) for v in self._pair_graph.values())
+            logger.info(f"Pair graph loaded from cache ({age_hours:.1f}h old): {currencies} currencies, {edges} edges")
+            return True
+        except FileNotFoundError:
+            logger.info("No pair graph cache found — will build from scratch")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to load pair graph cache: {e}")
+            return False
+
     def _find_profitable_cycles(self, tickers: Dict) -> List[TrianglePath]:
         """Find all profitable 3-step and 4-step cycles starting from each start currency."""
         opportunities = []
-        fee = self.costs.FEES.get("mexc", {}).get("spot", {}).get("maker", Decimal('0'))
+        # Hybrid: only leg 1 pays taker (5 bps), legs 2-3 are maker (0 bps)
+        taker_fee = self.costs.FEES.get("mexc", {}).get("spot", {}).get("taker", Decimal('0.0005'))
 
         for start in self.START_CURRENCIES:
             if start not in self._pair_graph:
@@ -613,8 +851,21 @@ class TriangularArbitrage:
                         continue
 
                     profit_bps = (cycle_rate - 1) * 10000
-                    total_fee_bps = fee * 3 * 10000
+                    total_fee_bps = taker_fee * 1 * 10000  # Hybrid: only leg 1 pays taker
                     net_profit_bps = profit_bps - total_fee_bps
+
+                    # Tick size viability check — reject if rounding > 50% of profit
+                    if float(net_profit_bps) > 0 and hasattr(self.client, '_exchange'):
+                        _markets = getattr(self.client._exchange, 'markets', {})
+                        _total_tick_bps = Decimal('0')
+                        for _esym in [edge_1['symbol'], edge_2['symbol'], edge_3['symbol']]:
+                            _tick = get_tick_size_cached(_markets, _esym)
+                            if _tick:
+                                _eprice = float(tickers.get(_esym, {}).get('bid', 0) or 0)
+                                if _eprice > 0:
+                                    _total_tick_bps += Decimal(str((_tick / _eprice) * 10000))
+                        if _total_tick_bps > net_profit_bps * Decimal('0.5'):
+                            continue  # Tick rounding kills profitability
 
                     if net_profit_bps > self.MIN_NET_PROFIT_BPS:
                         leg_symbols = [edge_1['symbol'], edge_2['symbol'], edge_3['symbol']]
@@ -638,7 +889,7 @@ class TriangularArbitrage:
                         ))
 
             # --- 4-leg quadrangles ---
-            quad_opps = self._find_quadrangles(start, fee)
+            quad_opps = self._find_quadrangles(start, taker_fee)
             opportunities.extend(quad_opps)
 
         opportunities.sort(key=lambda x: x.profit_bps, reverse=True)
@@ -651,7 +902,7 @@ class TriangularArbitrage:
         which eliminates ~95% of search space.
         """
         results = []
-        total_fee_bps = fee * 4 * 10000  # 4 legs
+        total_fee_bps = fee * 1 * 10000  # Hybrid: only leg 1 pays taker
 
         if start not in self._pair_graph:
             return results
@@ -696,6 +947,7 @@ class TriangularArbitrage:
 
                     profit_bps = (cycle_rate - 1) * 10000
                     net_profit_bps = profit_bps - total_fee_bps
+
 
                     if net_profit_bps > self.MIN_NET_PROFIT_BPS:
                         leg_symbols = [
@@ -785,30 +1037,204 @@ class TriangularArbitrage:
                     f"{cfg['lower_if_fill_rate_above']:.0%})"
                 )
                 self.MIN_NET_PROFIT_BPS = Decimal(str(new_threshold))
+
+        # Hard floor: NEVER go below cost + buffer regardless of adaptive logic
+        cost_floor_bps = float(cfg.get('floor_bps', 7.0))
+        if float(self.MIN_NET_PROFIT_BPS) < cost_floor_bps:
+            logger.warning(
+                f"TRI THRESHOLD FLOOR: adaptive tried to go below "
+                f"{cost_floor_bps} bps — clamped to floor"
+            )
+            self.MIN_NET_PROFIT_BPS = Decimal(str(cost_floor_bps))
         else:
             logger.debug(
                 f"ADAPTIVE THRESHOLD: Holding at {current:.1f}bps "
                 f"(marginal fill rate {fill_rate:.1%})"
             )
 
+    async def _cleanup_stranded_inventory(self) -> None:
+        """Sell any non-USDT/USDC tokens with >$5 value back to USDT.
+
+        This is a safety net for partial fills where the unwind failed or
+        zombie OPEN orders that filled after the executor moved on.
+        Runs every 60 seconds during the scan loop.
+        """
+        now = time.time()
+        if now - self._last_inventory_cleanup < self._inventory_cleanup_interval:
+            return
+        self._last_inventory_cleanup = now
+
+        try:
+            balances = await self.client.get_balances()
+            if not balances:
+                return
+
+            skip_currencies = {'USDT', 'USDC', 'USD', 'BUSD', 'DAI', 'TUSD', 'FDUSD'}
+            to_sell = []
+
+            for currency, bal in balances.items():
+                if currency in skip_currencies:
+                    continue
+                free = float(bal.free) if hasattr(bal, 'free') else float(bal.get('free', 0))
+                if free <= 0:
+                    continue
+
+                # Get USD value
+                symbol = f"{currency}/USDT"
+                try:
+                    book = await self.tri_executor.client.get_order_book(symbol, depth=1)
+                    price = float(book.best_bid) if book.best_bid else 0
+                except Exception:
+                    price = 0
+
+                if price <= 0:
+                    continue
+
+                usd_value = free * price
+                if usd_value > 5.0:
+                    to_sell.append({
+                        'currency': currency,
+                        'symbol': symbol,
+                        'amount': free,
+                        'price': price,
+                        'usd_value': usd_value,
+                    })
+
+            if not to_sell:
+                return
+
+            from ..exchanges.base import OrderRequest, OrderSide, OrderType, TimeInForce
+
+            for item in to_sell:
+                try:
+                    # Get precision for this symbol
+                    info = await self.tri_executor.client.get_symbol_info(item['symbol'])
+                    qty_prec = info.get('quantity_precision', 8)
+                    qty_prec = self.tri_executor._safe_precision(qty_prec)
+                    amount = self.tri_executor._round_decimal(
+                        Decimal(str(item['amount'])), qty_prec
+                    )
+                    if amount <= 0:
+                        continue
+
+                    order = OrderRequest(
+                        exchange="mexc",
+                        symbol=item['symbol'],
+                        side=OrderSide.SELL,
+                        order_type=OrderType.MARKET,
+                        quantity=amount,
+                        time_in_force=TimeInForce.IOC,
+                        client_order_id=f"cleanup_{item['currency']}_{int(time.time())}",
+                    )
+                    result = await asyncio.wait_for(
+                        self.tri_executor.client.place_order(order),
+                        timeout=10.0,
+                    )
+                    self._inventory_cleanups += 1
+                    logger.warning(
+                        f"INVENTORY CLEANUP: Sold {float(amount):.8f} {item['currency']} "
+                        f"(~${item['usd_value']:.2f}) via {item['symbol']} MARKET — "
+                        f"status={result.status.value}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"INVENTORY CLEANUP FAILED: {item['currency']} "
+                        f"({float(item['amount']):.8f} ~${item['usd_value']:.2f}): {e}"
+                    )
+
+        except Exception as e:
+            logger.debug(f"Inventory cleanup check failed: {e}")
+
+    def _load_path_depth_stats(self) -> None:
+        """Load average bottleneck depth per path from arb_trades (last 7 days, filled only).
+
+        Populates self._path_depth_cache with {path: {avg_depth, fill_rate, fills, total}}.
+        Called periodically (every 30 min) to stay current.
+        """
+        now = time.time()
+        if now - self._path_depth_cache_ts < self._path_depth_cache_ttl and self._path_depth_cache:
+            return  # Cache still fresh
+
+        if not self.tracker:
+            return
+
+        try:
+            conn = sqlite3.connect(self.tracker.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT path, "
+                "  COUNT(*) as total, "
+                "  SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as fills, "
+                "  AVG(CASE WHEN status='filled' AND bottleneck_depth_usd > 0 "
+                "      THEN bottleneck_depth_usd END) as avg_fill_depth, "
+                "  AVG(CASE WHEN bottleneck_depth_usd > 0 "
+                "      THEN bottleneck_depth_usd END) as avg_depth "
+                "FROM arb_trades "
+                "WHERE strategy = 'triangular' "
+                "  AND timestamp > datetime('now', '-7 days') "
+                "GROUP BY path "
+                "HAVING total >= 5"
+            ).fetchall()
+            conn.close()
+
+            new_cache = {}
+            for row in rows:
+                path = row['path']
+                total = row['total']
+                fills = row['fills']
+                avg_fill_depth = row['avg_fill_depth'] or 0.0
+                avg_depth = row['avg_depth'] or 0.0
+                fill_rate = fills / total if total > 0 else 0.0
+                new_cache[path] = {
+                    'avg_depth': avg_fill_depth if avg_fill_depth > 0 else avg_depth,
+                    'fill_rate': fill_rate,
+                    'fills': fills,
+                    'total': total,
+                }
+
+            self._path_depth_cache = new_cache
+            self._path_depth_cache_ts = now
+
+            # Log top paths by depth
+            top_paths = sorted(new_cache.items(), key=lambda x: x[1]['avg_depth'], reverse=True)[:10]
+            if top_paths:
+                top_summary = ", ".join(
+                    f"{p}({d['avg_depth']:.0f})" for p, d in top_paths[:5]
+                )
+                logger.info(
+                    f"PATH DEPTH STATS refreshed: {len(new_cache)} paths | "
+                    f"allowlist={'ON' if self._path_allowlist_enabled else 'OFF'} "
+                    f"(min_depth=${self._min_avg_depth_usd:.0f}) | "
+                    f"depth_skips={self._depth_skips} | top: {top_summary}"
+                )
+        except Exception as e:
+            logger.debug(f"Failed to load path depth stats: {e}")
+
     def _rank_opportunities(self, opportunities: List[TrianglePath]) -> List[TrianglePath]:
-        """Sort opportunities by expected value, using path performance data.
+        """Sort opportunities by expected value, using depth reliability and fill rate.
 
         Ranking formula:
-            score = profit_bps × path_fill_rate
+            score = profit_bps × fill_rate × depth_factor
 
         - profit_bps: detected profit for this specific opportunity
-        - path_fill_rate: historical fill rate (default 0.5 for unknown paths)
+        - fill_rate: historical fill rate (default 0.5 for unknown paths)
+        - depth_factor: min(avg_bottleneck_depth / min_avg_depth_usd, 1.0)
+          A 6bps edge on a $50K book scores higher than 10bps on a $500 book.
 
         Deprioritized paths (fill_rate < 30% after 50+ attempts) are moved to the back.
+        Paths below min_avg_depth_usd are filtered out when allowlist is enabled.
         """
         if not self.tracker:
             return opportunities  # No tracker = can't rank
+
+        # Refresh depth cache if stale
+        self._load_path_depth_stats()
 
         scored = []
         for opp in opportunities:
             path_key = self._opp_path_key(opp)
             perf = self.tracker.get_path_performance(path_key)
+            depth_info = self._path_depth_cache.get(path_key)
 
             fill_rate = 0.5  # Default for unknown paths
             is_deprioritized = False
@@ -816,7 +1242,18 @@ class TriangularArbitrage:
                 fill_rate = perf.get('fill_rate', 0.5)
                 is_deprioritized = bool(perf.get('is_deprioritized', 0))
 
-            score = float(opp.profit_bps) * fill_rate
+            # Depth factor: scale score by book depth reliability
+            avg_depth = depth_info['avg_depth'] if depth_info else 0.0
+            depth_factor = min(avg_depth / self._min_avg_depth_usd, 1.0) if avg_depth > 0 else 0.5
+
+            # Allowlist filter: skip paths with insufficient proven depth
+            if self._path_allowlist_enabled and depth_info and depth_info['total'] >= 20:
+                if avg_depth < self._min_avg_depth_usd:
+                    self._depth_skips += 1
+                    continue  # Skip — proven shallow path
+            # Unknown paths (no depth_info) are allowed through for discovery
+
+            score = float(opp.profit_bps) * fill_rate * depth_factor
             scored.append((opp, score, is_deprioritized))
 
         # Sort: non-deprioritized first (by score desc), then deprioritized (by score desc)
@@ -824,6 +1261,16 @@ class TriangularArbitrage:
         return [s[0] for s in scored]
 
     async def _preflight_freshness_check(self, opp: TrianglePath) -> bool:
+        """Preflight freshness check with 2s timeout (permissive on timeout)."""
+        try:
+            return await asyncio.wait_for(
+                self._preflight_freshness_check_inner(opp), timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            self._preflight_stats['passed'] += 1
+            return True
+
+    async def _preflight_freshness_check_inner(self, opp: TrianglePath) -> bool:
         """Re-fetch the bottleneck leg's price and verify the edge still exists.
 
         The bottleneck leg is the one with the smallest book depth (if depth
@@ -915,8 +1362,10 @@ class TriangularArbitrage:
                         continue
                     break
 
-        fee = self.costs.FEES.get("mexc", {}).get("spot", {}).get("maker", Decimal('0'))
-        total_fee_bps = fee * len(opp.path) * 10000
+        # Hybrid cost: only leg 1 pays taker fee
+        fee = self.costs.FEES.get("mexc", {}).get("spot", {}).get("taker", Decimal('0.0005'))
+        num_legs = len(opp.path)
+        total_fee_bps = fee * 1 * 10000  # Hybrid: only leg 1 is IOC taker
         new_profit_bps = (new_cycle_rate - 1) * 10000 - total_fee_bps
 
         if new_profit_bps < self.MIN_NET_PROFIT_BPS:
@@ -1034,6 +1483,10 @@ class TriangularArbitrage:
             "signals_skipped_capital": self._signals_skipped_capital,
             "preflight": self._preflight_stats.copy(),
             "staleness_skips": self._staleness_skips,
+            "depth_skips": self._depth_skips,
+            "inventory_cleanups": self._inventory_cleanups,
+            "path_depth_cache_size": len(self._path_depth_cache),
+            "path_allowlist_enabled": self._path_allowlist_enabled,
             "staleness_active_cooldowns": self._staleness_filter.active_cooldowns,
             "temporal_skips": self._temporal_skips,
             "observation_mode": self.OBSERVATION_MODE,
