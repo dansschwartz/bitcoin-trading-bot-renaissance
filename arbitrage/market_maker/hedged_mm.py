@@ -269,10 +269,23 @@ class HedgedMarketMaker:
                 total_available = usdc_free  # USDC primary — MM posts on TOKEN/USDC pairs
                 deployable = total_available * self.max_capital_pct
 
+                # Cap by capital allocator budget if available
+                allocator = getattr(self, 'capital_allocator', None)
+                alloc_cap = None
+                if allocator:
+                    try:
+                        budget = await allocator.get_available_budget("market_maker")
+                        alloc_cap = budget.get("USDC", 0) + budget.get("USDT", 0)
+                        if alloc_cap > 0:
+                            deployable = min(deployable, alloc_cap)
+                    except Exception as e:
+                        logger.warning(f"MM CAPITAL: allocator check failed: {e}")
+
                 logger.info(
                     f"MM CAPITAL: USDC_free=${usdc_free:.2f} USDT_free=${usdt_free:.2f} "
                     f"total={total_available:.2f} deployable={deployable:.2f} "
                     f"({self.max_capital_pct*100:.0f}% cap)"
+                    f"{f' alloc_cap=${alloc_cap:.0f}' if alloc_cap is not None else ''}"
                 )
                 return deployable
 

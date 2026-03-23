@@ -109,6 +109,7 @@ triangular:
   exchange: mexc
   start_currencies:
     - USDT
+    - USDC
   scan_interval_ms: 1000            # REST polling interval (was 5000)
   scan_interval_ms_ws: 500          # WebSocket mode: 500ms (data already in memory)
   scan_interval_ms_rest: 1000       # REST fallback interval (was 5000)

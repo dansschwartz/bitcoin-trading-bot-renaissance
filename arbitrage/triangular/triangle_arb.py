@@ -84,7 +84,7 @@ class TriangularArbitrage:
     SCAN_INTERVAL_SECONDS = 5.0           # REST polling interval
     SCAN_INTERVAL_WS = 0.5               # WebSocket mode: scan every 500ms
     MAX_TRADE_USD = Decimal('500')        # Configurable via YAML
-    START_CURRENCIES = ["USDT", "BTC", "ETH"]
+    START_CURRENCIES = ["USDT", "USDC", "BTC", "ETH"]
     MAX_SIGNALS_PER_CYCLE = 3             # Max signals pushed per 60s cycle
     OBSERVATION_MODE = False              # Execute trades (was True)
 
@@ -272,38 +272,51 @@ class TriangularArbitrage:
 
     async def _get_usdt_balance(self) -> float:
         """Fetch current MEXC USDT balance. Cached — refreshes every 5 minutes."""
+        return await self._get_currency_balance("USDT")
+
+    async def _get_currency_balance(self, currency: str = "USDT") -> float:
+        """Fetch current MEXC balance for a given currency. Cached per currency."""
         now = time.monotonic()
-        if (now - self._balance_cache_ts) < self._balance_cache_ttl:
-            return self._balance_cache_usd
+        cache_key = f"_balance_cache_{currency}"
+        cache_ts_key = f"_balance_cache_ts_{currency}"
+        cached_val = getattr(self, cache_key, 0.0)
+        cached_ts = getattr(self, cache_ts_key, 0.0)
+
+        if (now - cached_ts) < self._balance_cache_ttl:
+            return cached_val
 
         # Try ccxt first, then direct REST as fallback
-        balance = await self._fetch_usdt_balance_ccxt()
+        balance = await self._fetch_balance_ccxt(currency)
         if balance is None:
-            balance = await self._fetch_usdt_balance_direct()
+            balance = await self._fetch_balance_direct(currency)
         if balance is None:
-            logger.error(f"All balance fetch methods failed — using cached ${self._balance_cache_usd:.2f}")
-            return self._balance_cache_usd
+            logger.error(f"All balance fetch methods failed for {currency} — using cached ${cached_val:.2f}")
+            return cached_val
 
         if balance < 25:
-            logger.warning(f"USDT balance critically low: ${balance:.2f}")
+            logger.warning(f"{currency} balance critically low: ${balance:.2f}")
 
-        self._balance_cache_usd = balance
-        self._balance_cache_ts = now
-        logger.info(f"Wallet balance refreshed: ${balance:.2f} USDT")
+        setattr(self, cache_key, balance)
+        setattr(self, cache_ts_key, now)
+        # Also update legacy USDT cache for backward compat
+        if currency == "USDT":
+            self._balance_cache_usd = balance
+            self._balance_cache_ts = now
+        logger.info(f"Wallet balance refreshed: ${balance:.2f} {currency}")
         return balance
 
-    async def _fetch_usdt_balance_ccxt(self):
+    async def _fetch_balance_ccxt(self, currency: str = "USDT"):
         """Try fetching balance via ccxt."""
         try:
             balances = await self.client.get_balances()
-            usdt = balances.get("USDT")
-            return float(usdt.free) if usdt else 0.0
+            bal = balances.get(currency)
+            return float(bal.free) if bal else 0.0
         except Exception as e:
-            logger.debug(f"ccxt balance fetch failed: {e}")
+            logger.debug(f"ccxt balance fetch failed for {currency}: {e}")
             return None
 
-    async def _fetch_usdt_balance_direct(self):
-        """Fetch USDT balance via direct REST call (bypasses ccxt issues)."""
+    async def _fetch_balance_direct(self, currency: str = "USDT"):
+        """Fetch balance via direct REST call (bypasses ccxt issues)."""
         try:
             import hmac
             import hashlib
@@ -325,13 +338,16 @@ class TriangularArbitrage:
                     return None
                 data = await resp.json()
                 for b in data.get("balances", []):
-                    if b.get("asset") == "USDT":
+                    if b.get("asset") == currency:
                         return float(b.get("free", 0))
                 return 0.0
         except Exception as e:
-            logger.debug(f"Direct REST balance fetch failed: {e}")
+            logger.debug(f"Direct REST balance fetch failed for {currency}: {e}")
             return None
 
+    # Keep old method names as aliases for backward compatibility
+    _fetch_usdt_balance_ccxt = lambda self: self._fetch_balance_ccxt("USDT")
+    _fetch_usdt_balance_direct = lambda self: self._fetch_balance_direct("USDT")
 
     def _compute_max_trade_usd(self, wallet_balance: float) -> float:
         """Dynamic trade size = wallet_balance * max_trade_pct, clamped to [floor, ceiling]."""
@@ -343,9 +359,26 @@ class TriangularArbitrage:
         )
         return result
 
-    async def _get_dynamic_trade_usd(self) -> float:
-        """Get the current dynamic max trade USD, fetching balance if needed."""
-        wallet = await self._get_usdt_balance()
+    async def _get_dynamic_trade_usd(self, start_currency: str = "USDT") -> float:
+        """Get the current dynamic max trade USD for the given start currency."""
+        # For stablecoin start currencies, use their balance directly
+        if start_currency in ("USDT", "USDC", "BUSD"):
+            wallet = await self._get_currency_balance(start_currency)
+        else:
+            # Non-stablecoin: fall back to USDT balance
+            wallet = await self._get_currency_balance("USDT")
+
+        # Cap by capital allocator budget if available
+        allocator = getattr(self, 'capital_allocator', None)
+        if allocator and start_currency in ("USDT", "USDC"):
+            try:
+                budget = await allocator.get_available_budget("triangular")
+                alloc_limit = budget.get(start_currency, 0)
+                if alloc_limit > 0:
+                    wallet = min(wallet, alloc_limit)
+            except Exception:
+                pass
+
         if wallet <= 0:
             return float(self._max_single_trade_usd)  # Fallback to static config
         return self._compute_max_trade_usd(wallet)
@@ -496,7 +529,7 @@ class TriangularArbitrage:
                         continue
 
                     try:
-                        dynamic_trade_usd = await self._get_dynamic_trade_usd()
+                        dynamic_trade_usd = await self._get_dynamic_trade_usd(opp.start_currency)
                         result = await self.tri_executor.execute(
                             path=opp.path,
                             start_currency=opp.start_currency,
@@ -603,7 +636,7 @@ class TriangularArbitrage:
                         continue
 
                     try:
-                        dynamic_trade_usd = await self._get_dynamic_trade_usd()
+                        dynamic_trade_usd = await self._get_dynamic_trade_usd(opp.start_currency)
                         result = await self.tri_executor.execute(
                             path=opp.path,
                             start_currency=opp.start_currency,

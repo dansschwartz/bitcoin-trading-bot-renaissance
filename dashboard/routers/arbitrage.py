@@ -2011,6 +2011,36 @@ async def arb_exhaust_snapshots(request: Request):
 
 
 
+@router.get("/capital")
+async def arb_capital_allocation(request: Request):
+    """Capital allocation — budget splits between triangular arb and market maker."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if not orch:
+        return {"error": "Orchestrator not running"}
+
+    allocator = getattr(orch, "capital_allocator", None)
+    if not allocator:
+        return {"error": "Capital allocator not initialized"}
+
+    try:
+        summary = allocator.get_summary()
+        total_usd = await allocator.get_total_usd()
+        tri_budget = await allocator.get_available_budget("triangular")
+        mm_budget = await allocator.get_available_budget("market_maker")
+        return _sanitize_for_json({
+            "total_usd": total_usd,
+            "allocations": summary["allocations"],
+            "deployed": summary["deployed"],
+            "absolute_min_free": summary["absolute_min_free"],
+            "budgets": {
+                "triangular": tri_budget,
+                "market_maker": mm_budget,
+            },
+        })
+    except Exception as e:
+        return {"error": f"Capital allocation query failed: {e}"}
+
+
 def _sanitize_for_json(obj):
     """Convert Decimal and other non-JSON types to float/str."""
     from decimal import Decimal

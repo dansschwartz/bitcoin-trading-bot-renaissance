@@ -55,6 +55,7 @@ from arbitrage.analytics.strategy_allocator import StrategyAllocator
 from arbitrage.analytics.exhaust_capture import ExhaustCapture
 from arbitrage.pairs.discovery import MexcPairDiscovery
 from arbitrage.pairs.pair_manager import ExpandedPairManager
+from arbitrage.capital_allocator import CapitalAllocator
 
 logger = logging.getLogger("arb.orchestrator")
 
@@ -249,6 +250,40 @@ class ArbitrageOrchestrator:
             observation_mode=True,
             config=self.config,
         )
+
+        # Capital allocator — prevents modules from starving each other
+        async def _balance_getter():
+            """Fetch MEXC balances for capital allocator."""
+            import hmac, hashlib
+            api_key = getattr(self.mexc, '_api_key', '')
+            api_secret = getattr(self.mexc, '_api_secret', '')
+            if not api_key or not api_secret:
+                return {"USDT": 0.0, "USDC": 0.0}
+            try:
+                import requests as _req
+                ts = str(int(time.time() * 1000))
+                params = {'timestamp': ts, 'recvWindow': '60000'}
+                query = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
+                _sig = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+                url = f"https://api.mexc.com/api/v3/account?{query}&signature={_sig}"
+                resp = _req.get(url, headers={'X-MEXC-APIKEY': api_key, 'Content-Type': 'application/json'}, timeout=8)
+                data = resp.json()
+                result = {"USDT": 0.0, "USDC": 0.0}
+                for bal in data.get('balances', []):
+                    asset = bal.get('asset', '')
+                    if asset in result:
+                        result[asset] = float(bal.get('free', 0))
+                return result
+            except Exception as e:
+                logger.warning(f"Capital allocator balance fetch failed: {e}")
+                return {"USDT": 0.0, "USDC": 0.0}
+
+        self.capital_allocator = CapitalAllocator(_balance_getter)
+
+        # Wire allocator into modules
+        self.triangular_arb.capital_allocator = self.capital_allocator
+        if self.hedged_mm:
+            self.hedged_mm.capital_allocator = self.capital_allocator
 
         # Wire temporal bias into detectors
         self.cross_exchange_detector.temporal_bias = self.temporal_bias
@@ -889,6 +924,18 @@ class ArbitrageOrchestrator:
                 )
         except Exception:
             pass
+        # Capital allocation status
+        try:
+            cap_summary = self.capital_allocator.get_summary()
+            deployed = cap_summary.get('deployed', {})
+            tri_dep = deployed.get('triangular', 0)
+            mm_dep = deployed.get('market_maker', 0)
+            logger.info(
+                f"  Capital: tri=40% mm=50% rsv=10% | "
+                f"deployed: tri=${tri_dep:.0f} mm=${mm_dep:.0f}"
+            )
+        except Exception:
+            pass
         logger.info("=" * 60)
 
     def get_full_status(self) -> dict:
@@ -974,6 +1021,10 @@ class ArbitrageOrchestrator:
             allocator_stats = self.strategy_allocator.get_allocation_report()
         except Exception:
             allocator_stats = {}
+        try:
+            capital_alloc_stats = self.capital_allocator.get_summary()
+        except Exception:
+            capital_alloc_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -997,6 +1048,7 @@ class ArbitrageOrchestrator:
             "capital_velocity": velocity_stats,
             "edge_decay": edge_decay_stats,
             "strategy_allocation": allocator_stats,
+            "capital_allocation": capital_alloc_stats,
         }
 
     def _log_final_summary(self):
