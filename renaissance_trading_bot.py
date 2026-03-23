@@ -1232,6 +1232,8 @@ class RenaissanceTradingBot:
                 self.arbitrage_orchestrator = None
         elif self.arbitrage_enabled and not ARBITRAGE_AVAILABLE:
             self.logger.warning("Arbitrage enabled in config but module not available")
+        # Reference to unified price feed (available after orchestrator init)
+        self._unified_price_feed = getattr(self.arbitrage_orchestrator, 'price_feed', None) if self.arbitrage_orchestrator else None
 
         # ── Multi-Exchange Signal Bridge ──
         self.multi_exchange_bridge = None
@@ -6148,16 +6150,35 @@ class RenaissanceTradingBot:
                     self.logger.warning(f"Strategy A cycle error: {_pex_err}")
 
             # ── Polymarket Reversal Strategy ("BTC Already Told You") ──
-            if hasattr(self, 'reversal_strategy') and self.reversal_strategy and self._scan_prices:
+            # Build _scan_prices: prefer Binance WS (1s-fresh), fallback to _sa_prices / _last_prices
+            _rev_prices: Dict[str, float] = {}
+            if self._unified_price_feed and self._unified_price_feed.is_healthy():
+                _feed_map = {"BTC-USD": "BTC/USDT", "ETH-USD": "ETH/USDT",
+                             "SOL-USD": "SOL/USDT", "XRP-USD": "XRP/USDT",
+                             "DOGE-USD": "DOGE/USDT"}
+                for _rev_key, _rev_sym in _feed_map.items():
+                    _rev_t = self._unified_price_feed.get_ticker(_rev_sym)
+                    if _rev_t and _rev_t.get("last_price"):
+                        _rev_prices[_rev_key] = float(_rev_t["last_price"])
+            if not _rev_prices:
+                # Fallback: use _sa_prices or _last_prices from this cycle
+                try:
+                    _rev_prices = dict(_sa_prices)  # noqa: F821 — may not exist if Strategy A block skipped
+                except NameError:
+                    pass
+                if not _rev_prices and hasattr(self, '_last_prices'):
+                    _rev_prices = dict(self._last_prices)
+
+            if hasattr(self, 'reversal_strategy') and self.reversal_strategy and _rev_prices:
                 try:
                     # Update BTC price for intra-window tracking
-                    btc_price = self._scan_prices.get("BTC-USD", 0)
+                    btc_price = _rev_prices.get("BTC-USD", 0)
                     if btc_price and btc_price > 0:
                         self.reversal_strategy.update_btc_price(btc_price)
 
                     # Check for contrarian reversal opportunities
                     bets = self.reversal_strategy.check_and_execute(
-                        current_prices=self._scan_prices,
+                        current_prices=_rev_prices,
                         bankroll=getattr(self, '_polymarket_bankroll', 500.0),
                     )
 
@@ -6419,6 +6440,33 @@ class RenaissanceTradingBot:
                 await self.arbitrage_orchestrator.stop()
             except Exception:
                 pass
+
+    # ──────────────────────────────────────────────
+    #  BTC Price Relay (Binance WS → Reversal Strategy)
+    # ──────────────────────────────────────────────
+    async def _run_btc_price_relay(self):
+        """Feed BTC price to reversal strategy every 10s from Binance WS."""
+        relay_count = 0
+        while True:
+            try:
+                await asyncio.sleep(10)
+                if not self._unified_price_feed:
+                    continue
+                btc = self._unified_price_feed.get_ticker("BTC/USDT")
+                if btc and btc.get("last_price"):
+                    price = float(btc["last_price"])
+                    if price > 0:
+                        self.reversal_strategy.update_btc_price(price)
+                        relay_count += 1
+                        if relay_count % 60 == 1:  # Log every ~10 minutes
+                            self.logger.debug(
+                                f"BTC price relay: ${price:,.2f} "
+                                f"(relay #{relay_count}, feed age {self._unified_price_feed.get_age_ms():.0f}ms)"
+                            )
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                self.logger.debug(f"BTC price relay error: {e}")
 
     # ──────────────────────────────────────────────
     #  Liquidation Cascade Detector (Module D)
@@ -7209,6 +7257,11 @@ class RenaissanceTradingBot:
         if self.arbitrage_orchestrator:
             self.logger.info("Launching arbitrage engine...")
             self._track_task(self._run_arbitrage_engine())
+
+        # Start BTC price relay (feeds Binance WS price to reversal strategy every 10s)
+        if self._unified_price_feed and self.reversal_strategy:
+            self.logger.info("Launching BTC price relay (10s from Binance WS)...")
+            self._track_task(self._run_btc_price_relay())
 
         # ── Module D: Start Liquidation Cascade Detector ──
         if self.liquidation_detector:

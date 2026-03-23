@@ -2061,3 +2061,25 @@ def _sanitize_for_json(obj):
     if isinstance(obj, (list, tuple)):
         return [_sanitize_for_json(v) for v in obj]
     return obj
+
+
+# ─── Unified Price Feed Health Endpoint ───
+
+price_feed_router = APIRouter(prefix="/api/price-feed", tags=["price-feed"])
+
+
+@price_feed_router.get("/health")
+async def price_feed_health(request: Request):
+    """Return Binance unified price feed health status."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    if orch and hasattr(orch, "price_feed"):
+        try:
+            health = orch.price_feed.get_health()
+            provider_stats = orch.ticker_provider.get_stats() if hasattr(orch, "ticker_provider") else {}
+            return _sanitize_for_json({
+                **health,
+                "provider": provider_stats,
+            })
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+    return {"status": "unavailable", "note": "Orchestrator not in this process"}

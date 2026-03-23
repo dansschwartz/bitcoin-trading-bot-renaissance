@@ -94,8 +94,9 @@ class TriangularArbitrage:
     BLOCKED_QUOTE_CURRENCIES = {"BTC", "ETH"}
 
     def __init__(self, mexc_client, cost_model, risk_engine, signal_queue: asyncio.Queue,
-                 config: Optional[dict] = None, tracker=None):
+                 config: Optional[dict] = None, tracker=None, ticker_provider=None):
         self.client = mexc_client
+        self._ticker_provider = ticker_provider
         self.costs = cost_model
         self.risk = risk_engine
         self.signal_queue = signal_queue
@@ -414,17 +415,24 @@ class TriangularArbitrage:
         if not self._running:
             return
 
-        # Start WebSocket all-ticker feed (non-blocking)
-        try:
-            if hasattr(self.client, 'subscribe_all_tickers'):
-                await self.client.subscribe_all_tickers()
-                logger.info(
+        # Start ticker feed (non-blocking)
+        if self._ticker_provider:
+            logger.info("TriangularArbitrage: using HybridTickerProvider (Binance WS primary)")
+            logger.info(
                 f"TRI CONFIG: min_net_profit={float(self.MIN_NET_PROFIT_BPS):.1f}bps "
                 f"cost=5.0bps (hybrid: leg1 taker only)"
             )
-            logger.info("TriangularArbitrage: WebSocket ticker feed requested")
-        except Exception as e:
-            logger.warning(f"WebSocket ticker feed unavailable: {e}")
+        else:
+            try:
+                if hasattr(self.client, 'subscribe_all_tickers'):
+                    await self.client.subscribe_all_tickers()
+                    logger.info(
+                        f"TRI CONFIG: min_net_profit={float(self.MIN_NET_PROFIT_BPS):.1f}bps "
+                        f"cost=5.0bps (hybrid: leg1 taker only)"
+                    )
+                logger.info("TriangularArbitrage: MEXC WebSocket ticker feed requested")
+            except Exception as e:
+                logger.warning(f"WebSocket ticker feed unavailable: {e}")
 
         while self._running:
             try:
@@ -724,26 +732,30 @@ class TriangularArbitrage:
                 data_source = "rest"  # default for interval calc on error
 
             # Dynamic interval: faster with WebSocket, slower with REST
-            interval = self.SCAN_INTERVAL_WS if data_source == "websocket" else self.SCAN_INTERVAL_SECONDS
+            interval = self.SCAN_INTERVAL_WS if data_source in ("websocket", "binance_ws") else self.SCAN_INTERVAL_SECONDS
             await asyncio.sleep(interval)
 
     def stop(self):
         self._running = False
 
     async def _get_tickers(self) -> Tuple[Dict[str, dict], str, float]:
-        """Hybrid data source: prefer WebSocket tickers, fallback to REST.
+        """Hybrid data source: prefer HybridTickerProvider, then MEXC WS, then REST.
 
         Returns:
             (tickers_dict, data_source, age_ms)
         """
-        # Try WebSocket tickers first
+        # 1. HybridTickerProvider (Binance WS -> MEXC REST)
+        if self._ticker_provider:
+            return await self._ticker_provider.get_tickers()
+
+        # 2. Legacy: MEXC WS tickers
         if hasattr(self.client, 'get_ws_tickers'):
             ws_tickers = self.client.get_ws_tickers()
             if ws_tickers and len(ws_tickers) > 100:
                 age_ms = self.client.get_ws_ticker_age_ms()
                 return ws_tickers, "websocket", age_ms
 
-        # Fallback to REST
+        # 3. Fallback: MEXC REST
         tickers = await self.client.get_all_tickers()
         return tickers, "rest", 0.0
 

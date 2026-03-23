@@ -56,6 +56,7 @@ from arbitrage.analytics.exhaust_capture import ExhaustCapture
 from arbitrage.pairs.discovery import MexcPairDiscovery
 from arbitrage.pairs.pair_manager import ExpandedPairManager
 from arbitrage.capital_allocator import CapitalAllocator
+from arbitrage.feeds.unified_price_feed import BinanceUnifiedPriceFeed, HybridTickerProvider
 
 logger = logging.getLogger("arb.orchestrator")
 
@@ -228,9 +229,14 @@ class ArbitrageOrchestrator:
             config=self.config,
         )
 
+        # Unified price feed: Binance WS primary, MEXC REST fallback
+        self.price_feed = BinanceUnifiedPriceFeed()
+        self.ticker_provider = HybridTickerProvider(self.price_feed, self.mexc)
+
         self.triangular_arb = TriangularArbitrage(
             self.mexc, self.cost_model, self.risk_engine, self.signal_queue,
             config=self.config, tracker=self.tracker,
+            ticker_provider=self.ticker_provider,
         )
 
         # Bybit triangular arb (separate instance, separate config)
@@ -366,6 +372,13 @@ class ArbitrageOrchestrator:
                 logger.error(f"Exchange {names[i]} connect failed: {result}")
         logger.info(f"Exchange connections complete ({len(connect_tasks)} exchanges)")
 
+        # Start Binance unified price feed (non-blocking WS task)
+        try:
+            await self.price_feed.start()
+            logger.info("Binance unified price feed started")
+        except Exception as e:
+            logger.warning(f"Binance price feed start failed (degrading to MEXC REST): {e}")
+
         # Contract verification cache (try to populate, degrade gracefully)
         try:
             await self.contract_verifier.refresh_cache()
@@ -457,6 +470,7 @@ class ArbitrageOrchestrator:
 
     async def stop(self):
         self._running = False
+        await self.price_feed.stop()
         self.cross_exchange_detector.stop()
         self.pair_discovery.stop()
         self.funding_arb.stop()
@@ -1025,6 +1039,14 @@ class ArbitrageOrchestrator:
             capital_alloc_stats = self.capital_allocator.get_summary()
         except Exception:
             capital_alloc_stats = {}
+        try:
+            price_feed_stats = self.price_feed.get_health()
+        except Exception:
+            price_feed_stats = {}
+        try:
+            ticker_provider_stats = self.ticker_provider.get_stats()
+        except Exception:
+            ticker_provider_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -1049,6 +1071,8 @@ class ArbitrageOrchestrator:
             "edge_decay": edge_decay_stats,
             "strategy_allocation": allocator_stats,
             "capital_allocation": capital_alloc_stats,
+            "price_feed": price_feed_stats,
+            "ticker_provider": ticker_provider_stats,
         }
 
     def _log_final_summary(self):
