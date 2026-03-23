@@ -2015,30 +2015,37 @@ async def arb_exhaust_snapshots(request: Request):
 async def arb_capital_allocation(request: Request):
     """Capital allocation — budget splits between triangular arb and market maker."""
     orch = getattr(request.app.state, "arb_orchestrator", None)
-    if not orch:
-        return {"error": "Orchestrator not running"}
 
-    allocator = getattr(orch, "capital_allocator", None)
-    if not allocator:
-        return {"error": "Capital allocator not initialized"}
+    # Try live orchestrator first
+    if orch:
+        allocator = getattr(orch, "capital_allocator", None)
+        if allocator:
+            try:
+                summary = allocator.get_summary()
+                total_usd = await allocator.get_total_usd()
+                tri_budget = await allocator.get_available_budget("triangular")
+                mm_budget = await allocator.get_available_budget("market_maker")
+                return _sanitize_for_json({
+                    "total_usd": total_usd,
+                    "allocations": summary["allocations"],
+                    "deployed": summary["deployed"],
+                    "absolute_min_free": summary["absolute_min_free"],
+                    "budgets": {
+                        "triangular": tri_budget,
+                        "market_maker": mm_budget,
+                    },
+                })
+            except Exception as e:
+                logger.warning(f"Capital allocator live query failed: {e}")
 
-    try:
-        summary = allocator.get_summary()
-        total_usd = await allocator.get_total_usd()
-        tri_budget = await allocator.get_available_budget("triangular")
-        mm_budget = await allocator.get_available_budget("market_maker")
-        return _sanitize_for_json({
-            "total_usd": total_usd,
-            "allocations": summary["allocations"],
-            "deployed": summary["deployed"],
-            "absolute_min_free": summary["absolute_min_free"],
-            "budgets": {
-                "triangular": tri_budget,
-                "market_maker": mm_budget,
-            },
-        })
-    except Exception as e:
-        return {"error": f"Capital allocation query failed: {e}"}
+    # Fallback: return static allocation config
+    return {
+        "allocations": {"triangular": 0.40, "market_maker": 0.50, "reserve": 0.10},
+        "deployed": {"triangular": 0.0, "market_maker": 0.0},
+        "absolute_min_free": 50.0,
+        "note": "Static config — live orchestrator not in this process. "
+                "Live data visible in arb logs (Capital: line).",
+    }
 
 
 def _sanitize_for_json(obj):
