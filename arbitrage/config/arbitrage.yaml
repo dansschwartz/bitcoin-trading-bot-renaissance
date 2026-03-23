@@ -136,9 +136,9 @@ triangular:
   path_allowlist_enabled: true   # Filter out paths with avg bottleneck depth < min_avg_depth_usd
   min_avg_depth_usd: auto        # Computed: min_trade_usd / max_depth_fraction (was 5000)
   edge_scaling:                     # Edge-quality scaling: small edges → smaller positions
-    thin_bps: 5                     # <5 bps → 0.5x size
-    moderate_bps: 10                # 5-10 bps → 0.75x size
-    full_bps: 20                    # ≥10 bps → 1.0x size
+    thin_bps: 5                     # <5 bps → 0.5x size (never hit — min_net_profit=7)
+    moderate_bps: 7                 # 5-7 bps → 0.75x size (never hit — min_net_profit=7)
+    full_bps: 7                     # ≥7 bps → 1.0x size (all valid trades get full size)
 
 quadrangular:
   enabled: true
