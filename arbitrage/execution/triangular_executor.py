@@ -765,16 +765,12 @@ class TriangularExecutor:
 
         optimal = round(base_size * edge_factor, 2)
 
-        # Min depth fraction check: skip if trade is too small relative to book
-        # (empirically, trades < 5% of bottleneck depth have ~0% fill rate)
+        # Max depth fraction guard: skip if trade would consume too much of the
+        # book (market impact risk). The depth_fraction cap above already limits
+        # this, but min_depth_fraction acts as a second safety net.
+        # NOTE: previously this was inverted (blocked SMALL fractions), which
+        # killed all trades since $20 / $500+ depth = <5%. Fixed 2026-03-23.
         actual_frac = optimal / min_depth if min_depth > 0 else 0.0
-        if min_depth_fraction > 0 and actual_frac < min_depth_fraction:
-            reason = (
-                f"low_frac|depth=${min_depth:.0f}|trade=${optimal:.0f}"
-                f"|frac={actual_frac:.1%}<min{min_depth_fraction:.0%}"
-                f"|edge={edge_label}({edge_factor}x)"
-            )
-            return 0.0, reason
 
         if optimal < min_trade_usd:
             reason = (
