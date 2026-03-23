@@ -62,7 +62,7 @@ INSTRUMENTS: Dict[str, InstrumentConfig] = {
     # 15-minute direction markets (2-bar / 10-min ML horizon, 53.3% acc)
     # Optimizer: SOL profitable, BTC marginal (cheap tokens only), XRP zero edge
     "btc_15m": InstrumentConfig("BTC", "BTC-USD", "BTC-USD", "btc-updown-15m-{ts}",
-                                kelly_fraction=0.25, max_bet_usd=20.0),
+                                kelly_fraction=0.25, max_bet_usd=20.0, enabled=False),
     "eth_15m": InstrumentConfig("ETH", "ETH-USD", "ETH-USD", "eth-updown-15m-{ts}", enabled=False),
     "sol_15m": InstrumentConfig("SOL", "SOL-USD", "SOL-USD", "sol-updown-15m-{ts}",
                                 kelly_fraction=0.65, max_bet_usd=30.0),
@@ -78,6 +78,9 @@ INSTRUMENTS: Dict[str, InstrumentConfig] = {
                                timeframe=5, kelly_fraction=0.65, max_bet_usd=20.0, lead_asset="BTC"),
     "xrp_5m": InstrumentConfig("XRP", "XRP-USD", "XRP-USD", "xrp-updown-5m-{ts}",
                                timeframe=5, kelly_fraction=0.4, max_bet_usd=25.0, lead_asset="BTC", enabled=False),
+    # DOGE: best calibration accuracy (52.4%), uses BTC crash model as proxy
+    "doge_5m": InstrumentConfig("DOGE", "DOGE-USD", "DOGE-USD", "doge-updown-5m-{ts}",
+                                timeframe=5, kelly_fraction=0.5, max_bet_usd=15.0, lead_asset="BTC"),
 }
 
 
