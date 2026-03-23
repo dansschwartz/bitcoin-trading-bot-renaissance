@@ -19,8 +19,13 @@ import websockets
 
 logger = logging.getLogger("arb.feeds.unified")
 
-# Binance combined stream endpoint (up to 1024 streams per connection)
-BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream"
+# Binance combined stream endpoints (up to 1024 streams per connection)
+# Port 443 is more firewall-friendly; 9443 is the traditional endpoint.
+BINANCE_WS_ENDPOINTS = [
+    "wss://stream.binance.com:443/stream",
+    "wss://stream.binance.com:9443/stream",
+    "wss://data-stream.binance.vision/stream",  # AWS backup
+]
 
 # Key assets that get real bid/ask from bookTicker streams
 BOOK_TICKER_ASSETS = ["btcusdt", "ethusdt", "solusdt", "dogeusdt", "xrpusdt"]
@@ -63,6 +68,7 @@ class BinanceUnifiedPriceFeed:
         self._task: Optional[asyncio.Task] = None
         self._connect_time: float = 0.0
         self._reconnect_count: int = 0
+        self._endpoint_idx: int = 0  # cycles through BINANCE_WS_ENDPOINTS
 
     async def start(self) -> None:
         """Spawn background WebSocket task."""
@@ -142,23 +148,40 @@ class BinanceUnifiedPriceFeed:
     # ─── Internal WebSocket Logic ───
 
     async def _ws_loop(self) -> None:
-        """Outer loop: reconnection with exponential backoff."""
+        """Outer loop: reconnection with exponential backoff + endpoint cycling."""
         backoff = 1
+        consecutive_failures = 0
         while self._running:
             try:
                 await self._ws_session()
                 # Clean disconnect (max age reached) — reconnect immediately
                 backoff = 1
+                consecutive_failures = 0
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 self._reconnect_count += 1
-                logger.warning(
-                    f"Binance WS disconnected: {type(e).__name__}: {e} "
-                    f"— reconnecting in {backoff}s"
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                consecutive_failures += 1
+                # Cycle to next endpoint on failure
+                self._endpoint_idx = (self._endpoint_idx + 1) % len(BINANCE_WS_ENDPOINTS)
+                next_ep = BINANCE_WS_ENDPOINTS[self._endpoint_idx].split("//")[1].split("/")[0]
+                # After 6 consecutive failures, enter long cooldown (5 min)
+                if consecutive_failures >= 6:
+                    cooldown = 300
+                    logger.warning(
+                        f"Binance WS {consecutive_failures} consecutive failures, "
+                        f"cooling down {cooldown}s before retry on {next_ep}"
+                    )
+                    await asyncio.sleep(cooldown)
+                    consecutive_failures = 0
+                    backoff = 1
+                else:
+                    logger.warning(
+                        f"Binance WS disconnected: {type(e).__name__}: {e} "
+                        f"— reconnecting in {backoff}s to {next_ep}"
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
 
     async def _ws_session(self) -> None:
         """Single WebSocket session on the combined stream."""
@@ -167,17 +190,22 @@ class BinanceUnifiedPriceFeed:
         for sym in BOOK_TICKER_ASSETS:
             streams.append(f"{sym}@bookTicker")
         stream_param = "/".join(streams)
-        url = f"{BINANCE_WS_BASE}?streams={stream_param}"
+        base = BINANCE_WS_ENDPOINTS[self._endpoint_idx % len(BINANCE_WS_ENDPOINTS)]
+        url = f"{base}?streams={stream_param}"
 
         self._connect_time = time.monotonic()
         max_age_sec = WS_MAX_AGE_HOURS * 3600
 
+        # Generous timeouts for CPU-starved VPS:
+        # - ping_interval=30: less frequent pings = less event loop pressure
+        # - ping_timeout=30: tolerate up to 30s of event loop lag
+        # - open_timeout=60: TLS handshake can be slow under load
         async with websockets.connect(
             url,
-            ping_interval=20,
-            ping_timeout=10,
-            close_timeout=5,
-            open_timeout=30,
+            ping_interval=30,
+            ping_timeout=30,
+            close_timeout=10,
+            open_timeout=60,
         ) as ws:
             logger.info(
                 f"Binance combined WS connected ({len(streams)} streams: "
