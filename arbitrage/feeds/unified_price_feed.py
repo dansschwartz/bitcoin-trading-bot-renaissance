@@ -342,7 +342,7 @@ class BinanceUnifiedPriceFeed:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                logger.debug(f"Futures WS error: {type(e).__name__}: {e}")
+                logger.warning(f"Futures WS error: {type(e).__name__}: {e}")
 
             self._liq_connected = False
             if not self._running:
