@@ -96,7 +96,7 @@ funding_rate:
   max_leverage: 3.0
 
 triangular:
-  min_net_profit_bps: 7.0            # 5 bps cost (only leg 1 taker) + 2 bps buffer
+  min_net_profit_bps: 5.0            # 5 bps cost (only leg 1 taker) + 0 bps buffer — breakeven floor
   execution_mode: hybrid_ioc_maker  # Leg 1 = IOC taker, Legs 2-3 = LIMIT_MAKER
   leg1_order_type: IOC              # taker, crosses spread
   leg2_order_type: LIMIT_MAKER      # maker, rests on book, 0 bps
@@ -115,7 +115,7 @@ triangular:
   scan_interval_ms_rest: 1000       # REST fallback interval (was 5000)
   max_single_trade_usd: 50          # Safe fallback if balance fetch fails
   max_trade_usd: 150                # Fallback only if balance fetch fails
-  min_trade_usd: 15                 # Hard floor — $15 @ 7bps edge = $0.01 profit (above 5bps fee cost)
+  min_trade_usd: 15                 # Hard floor — $15 @ 5bps edge = breakeven (covers 5bps fee cost)
   max_trade_pct: 0.40               # 20% of wallet per trade (dynamic sizing)
   abs_max_trade_usd: 2000           # Hard ceiling regardless of balance
   max_depth_fraction: 0.20          # Use at most 20% of thinnest leg's depth (raised from 15% to unblock thin books)
@@ -131,14 +131,14 @@ triangular:
     raise_if_fill_rate_below: 0.25  # Raise threshold if marginal trades fill <25%
     lower_if_fill_rate_above: 0.60  # Lower threshold if marginal trades fill >60%
     step_size_bps: 0.5              # Adjust by 0.5 bps at a time
-    floor_bps: 7.0                  # Never below cost floor (5 bps) + 2 bps buffer
+    floor_bps: 5.0                  # Never below cost floor (5 bps) — adaptive won't drop below breakeven
     ceiling_bps: 30.0               # Never go above 30.0 bps
   path_allowlist_enabled: true   # Filter out paths with avg bottleneck depth < min_avg_depth_usd
   min_avg_depth_usd: auto        # Computed: min_trade_usd / max_depth_fraction (was 5000)
   edge_scaling:                     # Edge-quality scaling: small edges → smaller positions
-    thin_bps: 5                     # <5 bps → 0.5x size (never hit — min_net_profit=7)
-    moderate_bps: 7                 # 5-7 bps → 0.75x size (never hit — min_net_profit=7)
-    full_bps: 7                     # ≥7 bps → 1.0x size (all valid trades get full size)
+    thin_bps: 5                     # <5 bps → 0.5x size (at breakeven — half size)
+    moderate_bps: 7                 # 5-7 bps → 0.75x size (small profit — 3/4 size)
+    full_bps: 10                    # ≥10 bps → 1.0x size (clear profit — full size)
 
 quadrangular:
   enabled: true
