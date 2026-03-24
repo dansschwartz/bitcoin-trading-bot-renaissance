@@ -214,22 +214,30 @@ def run_once(client, dry_run: bool = False) -> int:
             processed += 1
             continue
 
-        # Check if bet is still timely (within 5 min of creation)
-        created = bet.get("created_at", "")
-        if created:
-            try:
-                created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                age_sec = (datetime.now(timezone.utc) - created_dt).total_seconds()
-                if age_sec > 300:
-                    logger.warning(
-                        f"SKIP #{bet_id}: too old ({age_sec:.0f}s > 300s)"
-                    )
-                    confirm_bet(bet_id, "", "expired",
-                                f"bet was {age_sec:.0f}s old at relay time")
-                    processed += 1
-                    continue
-            except Exception:
-                pass  # can't parse time — execute anyway
+        # Check if market is still open using window_start + timeframe
+        window_start = bet.get("window_start", 0)
+        timeframe = bet.get("timeframe", "")
+        if window_start and window_start > 0:
+            # Parse timeframe: "5m" → 300s, "15m" → 900s
+            tf_sec = 300  # default 5m
+            if timeframe:
+                try:
+                    tf_sec = int(timeframe.replace("m", "")) * 60
+                except (ValueError, AttributeError):
+                    pass
+            market_end = window_start + tf_sec
+            now_epoch = time.time()
+            # Skip if market already ended (with 30s grace for execution)
+            if now_epoch > market_end + 30:
+                age = now_epoch - market_end
+                logger.warning(
+                    f"SKIP #{bet_id}: market expired {age:.0f}s ago "
+                    f"(window_start={window_start}, tf={timeframe})"
+                )
+                confirm_bet(bet_id, "", "expired",
+                            f"market ended {age:.0f}s before relay")
+                processed += 1
+                continue
 
         result = execute_bet(client, bet)
         ok = confirm_bet(
