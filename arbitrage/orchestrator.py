@@ -233,10 +233,13 @@ class ArbitrageOrchestrator:
         self.price_feed = BinanceUnifiedPriceFeed()
         self.ticker_provider = HybridTickerProvider(self.price_feed, self.mexc)
 
+        # Triangular arb uses MEXC REST tickers directly (not Binance WS).
+        # Tri arb finds intra-exchange price inconsistencies — needs MEXC prices,
+        # not Binance prices, since trades execute on MEXC.
         self.triangular_arb = TriangularArbitrage(
             self.mexc, self.cost_model, self.risk_engine, self.signal_queue,
             config=self.config, tracker=self.tracker,
-            ticker_provider=self.ticker_provider,
+            ticker_provider=None,
         )
 
         # Bybit triangular arb (separate instance, separate config)
