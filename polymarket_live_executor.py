@@ -355,10 +355,26 @@ class PolymarketLiveExecutor:
 
         except Exception as e:
             error_msg = str(e)[:500]
-            fill_status = "error"
-            logger.error(f"[LIVE] Order FAILED: {e}")
+            # Geo-block or other CLOB error → queue for local relay
+            is_geoblock = "restricted in your region" in error_msg.lower() or "geoblock" in error_msg.lower()
+            if is_geoblock:
+                fill_status = "pending_relay"
+                logger.info(
+                    f"[LIVE] Geo-blocked — queued for local relay: "
+                    f"{asset} {direction} ${bet_amount:.2f}"
+                )
+            else:
+                fill_status = "error"
+                logger.error(f"[LIVE] Order FAILED: {e}")
 
         # Record in database
+        if fill_status == "pending_relay":
+            db_status = "pending_relay"
+        elif fill_status in ("placed", "filled"):
+            db_status = "open"
+        else:
+            db_status = "error"
+
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute("""
@@ -372,8 +388,7 @@ class PolymarketLiveExecutor:
                 asset, timeframe, slug, question, window_start,
                 direction, edge, confidence, crowd_price,
                 order_id, token_id, "BUY", entry_price, bet_amount, shares,
-                order_placed_at, fill_status, error_msg,
-                "open" if fill_status in ("placed", "filled") else "error",
+                order_placed_at, fill_status, error_msg, db_status,
             ))
             conn.commit()
         except Exception as e:
@@ -392,6 +407,58 @@ class PolymarketLiveExecutor:
             "amount": bet_amount,
             "error": error_msg,
         }
+
+    def get_pending_relay_bets(self) -> list:
+        """Return bets awaiting local relay execution."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("""
+                SELECT id, asset, timeframe, slug, question, window_start,
+                       direction, predicted_edge, ml_confidence, crowd_price_at_decision,
+                       token_id, order_price, order_size_usd, order_shares,
+                       order_placed_at, created_at
+                FROM polymarket_live_bets
+                WHERE status = 'pending_relay'
+                ORDER BY created_at ASC
+            """).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    def confirm_relay_bet(self, bet_id: int, order_id: str, fill_status: str,
+                          error_msg: str = "") -> bool:
+        """Update a pending_relay bet after local execution."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            if fill_status in ("placed", "filled"):
+                conn.execute("""
+                    UPDATE polymarket_live_bets
+                    SET status='open', order_id=?, fill_status=?,
+                        filled_at=?, error_message=NULL
+                    WHERE id=? AND status='pending_relay'
+                """, (order_id, fill_status,
+                      datetime.now(timezone.utc).isoformat(), bet_id))
+            else:
+                conn.execute("""
+                    UPDATE polymarket_live_bets
+                    SET status='error', order_id=?, fill_status=?, error_message=?
+                    WHERE id=? AND status='pending_relay'
+                """, (order_id, fill_status, error_msg[:500], bet_id))
+            conn.commit()
+            affected = conn.total_changes
+            logger.info(
+                f"[LIVE] Relay confirmed: bet #{bet_id} → {fill_status} "
+                f"(order={order_id or 'none'})"
+            )
+            return affected > 0
+        except Exception as e:
+            logger.error(f"[LIVE] Relay confirm failed: {e}")
+            return False
+        finally:
+            conn.close()
 
     def check_live_resolutions(self) -> None:
         """
@@ -506,6 +573,7 @@ class PolymarketLiveExecutor:
                     SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as losses,
                     SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_bets,
                     SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) as errors,
+                    SUM(CASE WHEN status='pending_relay' THEN 1 ELSE 0 END) as pending_relay,
                     COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN pnl ELSE 0 END), 0) as total_pnl,
                     COALESCE(SUM(order_size_usd), 0) as total_wagered,
                     AVG(slippage_bps) as avg_slippage,
@@ -546,6 +614,7 @@ class PolymarketLiveExecutor:
             "losses": stats["losses"] or 0,
             "open_bets": stats["open_bets"] or 0,
             "errors": stats["errors"] or 0,
+            "pending_relay": stats["pending_relay"] or 0,
             "win_rate": round((stats["wins"] or 0) / resolved * 100, 1) if resolved > 0 else 0,
             "total_pnl": round(float(stats["total_pnl"]), 2),
             "total_wagered": round(float(stats["total_wagered"] or 0), 2),

@@ -939,3 +939,78 @@ async def polymarket_kill_switch(request: Request):
         logger.warning("[LIVE] *** KILL SWITCH ACTIVATED — live execution disabled ***")
         return {"killed": True, "live_enabled": False}
     return {"killed": False, "error": "Live executor not available in this process"}
+
+
+# ─── Local Relay Endpoints (for geo-blocked VPS → local Mac execution) ───
+
+
+@router.get("/live/pending")
+async def polymarket_live_pending(request: Request):
+    """Return bets awaiting relay execution from a local (non-geo-blocked) machine."""
+    bot = getattr(request.app.state, "bot", None)
+    if bot and hasattr(bot, "polymarket_live_executor") and bot.polymarket_live_executor:
+        return {"pending": bot.polymarket_live_executor.get_pending_relay_bets()}
+
+    # Fallback: read from DB directly
+    try:
+        with _conn() as c:
+            if not _table_exists(c, "polymarket_live_bets"):
+                return {"pending": []}
+            rows = c.execute("""
+                SELECT id, asset, timeframe, slug, question, window_start,
+                       direction, predicted_edge, ml_confidence, crowd_price_at_decision,
+                       token_id, order_price, order_size_usd, order_shares,
+                       order_placed_at, created_at
+                FROM polymarket_live_bets
+                WHERE status = 'pending_relay'
+                ORDER BY created_at ASC
+            """).fetchall()
+            return {"pending": [dict(r) for r in rows]}
+    except Exception as e:
+        return {"pending": [], "error": str(e)}
+
+
+@router.post("/live/confirm")
+async def polymarket_live_confirm(request: Request):
+    """Confirm relay execution result from local machine."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "error": "invalid JSON body"}
+
+    bet_id = body.get("bet_id")
+    order_id = body.get("order_id", "")
+    fill_status = body.get("fill_status", "error")
+    error_msg = body.get("error", "")
+
+    if not bet_id:
+        return {"ok": False, "error": "bet_id required"}
+
+    bot = getattr(request.app.state, "bot", None)
+    if bot and hasattr(bot, "polymarket_live_executor") and bot.polymarket_live_executor:
+        ok = bot.polymarket_live_executor.confirm_relay_bet(
+            int(bet_id), order_id, fill_status, error_msg,
+        )
+        return {"ok": ok, "bet_id": bet_id, "fill_status": fill_status}
+
+    # Fallback: write to DB directly
+    try:
+        with _conn() as c:
+            now = datetime.now(timezone.utc).isoformat()
+            if fill_status in ("placed", "filled"):
+                c.execute("""
+                    UPDATE polymarket_live_bets
+                    SET status='open', order_id=?, fill_status=?,
+                        filled_at=?, error_message=NULL
+                    WHERE id=? AND status='pending_relay'
+                """, (order_id, fill_status, now, int(bet_id)))
+            else:
+                c.execute("""
+                    UPDATE polymarket_live_bets
+                    SET status='error', order_id=?, fill_status=?, error_message=?
+                    WHERE id=? AND status='pending_relay'
+                """, (order_id, fill_status, error_msg[:500], int(bet_id)))
+            c.commit()
+            return {"ok": True, "bet_id": bet_id, "fill_status": fill_status}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
