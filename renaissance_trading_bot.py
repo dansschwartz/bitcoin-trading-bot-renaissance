@@ -6144,59 +6144,9 @@ class RenaissanceTradingBot:
                     if _rb_exits:
                         self.logger.info(f"RANDOM BASELINE: {len(_rb_exits)} shadow exits")
 
-            # ── Strategy A: Confirmed Momentum (runs ONCE per cycle, after all prices collected) ──
-            if self.polymarket_executor:
-                try:
-                    _sa_prices = dict(self._last_prices) if hasattr(self, '_last_prices') else {}
-
-                    # Fetch fresh Binance prices for Strategy A instruments.
-                    # _last_prices is often empty on first cycles because the stale-data
-                    # gate (>60s) skips pairs when preloading takes 20+ min.
-                    _sa_needed = {"BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT",
-                                  "SOL-USD": "SOLUSDT", "XRP-USD": "XRPUSDT"}
-                    _sa_missing = [k for k in _sa_needed if k not in _sa_prices or _sa_prices[k] <= 0]
-                    if _sa_missing:
-                        try:
-                            import requests as _sa_req
-                            _sa_resp = _sa_req.get(
-                                "https://api.binance.com/api/v3/ticker/price",
-                                timeout=5,
-                            )
-                            if _sa_resp.status_code == 200:
-                                _sa_tickers = {t['symbol']: float(t['price'])
-                                               for t in _sa_resp.json()}
-                                for _pair, _sym in _sa_needed.items():
-                                    _px = _sa_tickers.get(_sym, 0)
-                                    if _px > 0:
-                                        _sa_prices[_pair] = _px
-                                self.logger.info(
-                                    f"Strategy A: fetched {len(_sa_missing)} fresh prices from Binance"
-                                )
-                        except Exception as _fp_err:
-                            self.logger.debug(f"Strategy A fresh price fetch failed: {_fp_err}")
-
-                    _sa_regime = "unknown"
-                    if self.regime_overlay and self.regime_overlay.enabled:
-                        _sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
-                    if not hasattr(self, '_sa_ml_cache'):
-                        self._sa_ml_cache = {}
-                    # Pass cross_data for BTC lead-lag timing features
-                    _sa_cross = getattr(self, '_latest_cross_data', None)
-                    await self.polymarket_executor.execute_cycle(
-                        ml_predictions=self._sa_ml_cache,
-                        current_prices=_sa_prices,
-                        current_regime=_sa_regime,
-                        cross_data=_sa_cross,
-                    )
-                except Exception as _pex_err:
-                    self.logger.warning(f"Strategy A cycle error: {_pex_err}")
-
-            # Check live bet resolutions (separate from paper)
-            if self.polymarket_live_executor:
-                try:
-                    self.polymarket_live_executor.check_live_resolutions()
-                except Exception as _lr_err:
-                    self.logger.debug(f"Live resolution check error: {_lr_err}")
+            # ── Strategy A: now runs on its own 60s background loop (_run_strategy_a_loop) ──
+            # ML predictions (_sa_ml_cache) are still populated here by the main cycle
+            # and consumed by the independent Strategy A loop.
 
             # ── Polymarket Reversal Strategy ("BTC Already Told You") ──
             # Build _scan_prices: prefer Binance WS (1s-fresh), fallback to _sa_prices / _last_prices
@@ -6516,6 +6466,81 @@ class RenaissanceTradingBot:
                 return
             except Exception as e:
                 self.logger.debug(f"BTC price relay error: {e}")
+
+    # ──────────────────────────────────────────────
+    #  Strategy A Independent Loop (60s cycle)
+    # ──────────────────────────────────────────────
+    async def _run_strategy_a_loop(self):
+        """Run Strategy A on its own 60s timer, decoupled from main pair scanning."""
+        cycle_count = 0
+        while True:
+            try:
+                await asyncio.sleep(60)
+                cycle_count += 1
+
+                # 1. Fetch fresh prices from Binance (cheap, ~200ms)
+                sa_prices = dict(self._last_prices) if hasattr(self, '_last_prices') else {}
+                sa_needed = {"BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT",
+                             "SOL-USD": "SOLUSDT", "XRP-USD": "XRPUSDT",
+                             "DOGE-USD": "DOGEUSDT"}
+                try:
+                    import requests as _sa_req
+                    _resp = _sa_req.get(
+                        "https://api.binance.com/api/v3/ticker/price",
+                        timeout=5,
+                    )
+                    if _resp.status_code == 200:
+                        _tickers = {t['symbol']: float(t['price']) for t in _resp.json()}
+                        for _pair, _sym in sa_needed.items():
+                            _px = _tickers.get(_sym, 0)
+                            if _px > 0:
+                                sa_prices[_pair] = _px
+                except Exception:
+                    pass
+
+                # Need at least SOL price for any instrument
+                if "SOL-USD" not in sa_prices or sa_prices["SOL-USD"] <= 0:
+                    continue
+
+                # 2. Get regime
+                sa_regime = "unknown"
+                if self.regime_overlay and self.regime_overlay.enabled:
+                    sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
+
+                # 3. Get cached ML predictions (populated by main cycle)
+                if not hasattr(self, '_sa_ml_cache'):
+                    self._sa_ml_cache = {}
+
+                # 4. Cross-data for timing features
+                sa_cross = getattr(self, '_latest_cross_data', None)
+
+                # 5. Execute cycle
+                await self.polymarket_executor.execute_cycle(
+                    ml_predictions=self._sa_ml_cache,
+                    current_prices=sa_prices,
+                    current_regime=sa_regime,
+                    cross_data=sa_cross,
+                )
+
+                # 6. Check live resolutions
+                if self.polymarket_live_executor:
+                    try:
+                        self.polymarket_live_executor.check_live_resolutions()
+                    except Exception:
+                        pass
+
+                if cycle_count % 10 == 1:
+                    self.logger.info(
+                        f"Strategy A loop: cycle #{cycle_count}, "
+                        f"prices={len(sa_prices)}, ml_cache={len(self._sa_ml_cache)}, "
+                        f"regime={sa_regime}"
+                    )
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                self.logger.warning(f"Strategy A loop error: {e}")
+                await asyncio.sleep(10)
 
     # ──────────────────────────────────────────────
     #  Liquidation Cascade Detector (Module D)
@@ -7311,6 +7336,11 @@ class RenaissanceTradingBot:
         if self._unified_price_feed and self.reversal_strategy:
             self.logger.info("Launching BTC price relay (10s from Binance WS)...")
             self._track_task(self._run_btc_price_relay())
+
+        # ── Strategy A: Independent 60s loop (decoupled from main cycle) ──
+        if self.polymarket_executor:
+            self.logger.info("Launching Strategy A independent loop (60s cycle)...")
+            self._track_task(self._run_strategy_a_loop())
 
         # ── Module D: Start Liquidation Cascade Detector ──
         if self.liquidation_detector:

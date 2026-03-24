@@ -37,13 +37,13 @@ logger = logging.getLogger("polymarket.live")
 # =====================================================================
 
 # Only these assets can be traded live
-LIVE_ASSETS = {"SOL"}  # Start with SOL only. Add DOGE after 100+ paper bets.
+LIVE_ASSETS = {"SOL", "DOGE"}  # SOL + DOGE (both have 5m instruments enabled)
 
 # Maximum bet size in USD
-MAX_LIVE_BET_USD = 2.00  # $2 for first 50 bets. Human can raise later.
+MAX_LIVE_BET_USD = 20.00  # Raised to match Kelly max ($20)
 
 # Daily loss limit
-DAILY_LOSS_LIMIT_USD = 20.00  # Stop if we lose $20 in one day
+DAILY_LOSS_LIMIT_USD = 200.00  # Stop if we lose $200 in one day
 
 # Maximum number of open live positions
 MAX_OPEN_LIVE_POSITIONS = 5

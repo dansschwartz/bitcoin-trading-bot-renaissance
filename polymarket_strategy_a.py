@@ -1072,7 +1072,7 @@ class StrategyAExecutor:
                     "asset": inst.asset,
                     "direction": direction,
                     "entry_price": token_cost,
-                    "bet_amount": min(bet_amount, 2.0),  # Hard cap $2
+                    "bet_amount": min(bet_amount, 20.0),  # Match Kelly max
                     "token_id": token_id,
                     "slug": slug,
                     "question": market.get("question", ""),
