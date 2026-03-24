@@ -73,6 +73,7 @@ def create_app(
     app.include_router(agents.router)
     app.include_router(arbitrage.router)
     app.include_router(arbitrage.price_feed_router)
+    app.include_router(arbitrage.liquidation_router)
     app.include_router(breakout.router)
     app.include_router(polymarket.router)
     app.include_router(audit.router)

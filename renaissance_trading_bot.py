@@ -1259,6 +1259,14 @@ class RenaissanceTradingBot:
         # Reference to unified price feed (available after orchestrator init)
         self._unified_price_feed = getattr(self.arbitrage_orchestrator, 'price_feed', None) if self.arbitrage_orchestrator else None
 
+        # Wire liquidation feed into reversal strategy and timing features
+        if self._unified_price_feed:
+            if self.reversal_strategy:
+                self.reversal_strategy._price_feed = self._unified_price_feed
+                self.logger.info("Reversal strategy: wired to liquidation feed")
+            if hasattr(self, 'timing_engine') and self.timing_engine:
+                self.timing_engine._price_feed = self._unified_price_feed
+
         # ── Multi-Exchange Signal Bridge ──
         self.multi_exchange_bridge = None
         me_cfg = self.config.get("multi_exchange_signals", {})
@@ -4675,6 +4683,16 @@ class RenaissanceTradingBot:
                                         'taker_buy_vol', 'taker_sell_vol', 'fear_greed']:
                                 _vals = [h.get(_dk, float('nan')) for h in _hist]
                                 _deriv_series[_dk] = pd.Series(_vals)
+
+                            # Inject real-time liquidation data (scalar values)
+                            if self._unified_price_feed:
+                                _liq_sym = product_id.replace("-USD", "/USDT")
+                                _liq_stats = self._unified_price_feed.get_liquidation_stats(_liq_sym)
+                                if _liq_stats:
+                                    _deriv_series['liq_long_usd_5m'] = _liq_stats.get('long_usd_5m', 0)
+                                    _deriv_series['liq_short_usd_5m'] = _liq_stats.get('short_usd_5m', 0)
+                                    _deriv_series['liq_cascade_active'] = _liq_stats.get('cascade_active', False)
+
                             market_data['_derivatives_data'] = _deriv_series
                 except Exception as _de:
                     self.logger.debug(f"Derivatives fetch skipped for {product_id}: {_de}")

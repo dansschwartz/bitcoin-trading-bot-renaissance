@@ -210,6 +210,10 @@ class ReversalStrategy:
     4. Check if altcoin market is still priced for the OLD trend
     5. If all conditions met: place contrarian bet on the altcoin
 
+    When a liquidation cascade is active (from the Binance Futures feed),
+    the confidence multiplier increases: forced selling has a mechanical end,
+    so the recovery is predictable.
+
     This runs as a SEPARATE strategy alongside Strategy A.
     Strategy A bets early (t=0) with the ML prediction.
     This strategy bets late (t=4) against the crowd, using BTC lead-lag.
@@ -227,6 +231,9 @@ class ReversalStrategy:
 
         # Track which windows we've already bet on (prevent duplicates)
         self._bet_windows: set = set()  # (asset, window_start)
+
+        # Reference to unified price feed (set externally by bot)
+        self._price_feed = None
 
         self._init_db()
 
@@ -431,6 +438,62 @@ class ReversalStrategy:
             if bet_size < 1.0:
                 continue
 
+            # ── Liquidation cascade confidence boost ──
+            # When a cascade is active, forced selling is mechanical and has
+            # a predictable end. The recovery after cascade exhaustion is the
+            # highest-conviction reversal signal.
+            liq_boost = 1.0
+            liq_info = {}
+
+            if self._price_feed:
+                alt_binance_sym = f"{asset}/USDT"
+                alt_liq = self._price_feed.get_liquidation_stats(alt_binance_sym)
+                btc_liq = self._price_feed.get_liquidation_stats("BTC/USDT")
+
+                if alt_liq:
+                    liq_info["altcoin_long_liq_5m"] = alt_liq.get("long_usd_5m", 0)
+                    liq_info["altcoin_cascade"] = alt_liq.get("cascade_active", False)
+                    liq_info["altcoin_imbalance"] = alt_liq.get("imbalance_ratio", 1.0)
+
+                if btc_liq:
+                    liq_info["btc_long_liq_5m"] = btc_liq.get("long_usd_5m", 0)
+                    liq_info["btc_cascade"] = btc_liq.get("cascade_active", False)
+
+                if reversal["reversal_direction"] == "up":
+                    # BTC reversed UP → we bet altcoin UP
+                    # Long cascade = forced selling ending → recovery
+                    if alt_liq and alt_liq.get("cascade_active"):
+                        liq_boost = 1.5
+                        logger.info(
+                            f"[REVERSAL] CASCADE BOOST: {asset} long cascade active "
+                            f"(${alt_liq.get('long_usd_5m', 0):,.0f} in 5m). "
+                            f"Forced selling exhausting → recovery likely."
+                        )
+                    elif btc_liq and btc_liq.get("cascade_active"):
+                        liq_boost = 1.3
+                        logger.info(
+                            f"[REVERSAL] BTC CASCADE BOOST: BTC long cascade active "
+                            f"(${btc_liq.get('long_usd_5m', 0):,.0f}). "
+                            f"BTC reversing + cascade ending → altcoin recovery likely."
+                        )
+                    # Extreme imbalance extra boost
+                    if alt_liq and alt_liq.get("imbalance_ratio", 1) > 5.0:
+                        liq_boost *= 1.2
+
+                elif reversal["reversal_direction"] == "down":
+                    # BTC reversed DOWN → we bet altcoin DOWN
+                    # Short squeeze = forced buying ending → sell-off
+                    if alt_liq and alt_liq.get("squeeze_active"):
+                        liq_boost = 1.5
+                    elif btc_liq and btc_liq.get("squeeze_active"):
+                        liq_boost = 1.3
+
+            # Apply cascade boost (capped at 2x)
+            bet_size = min(bet_size * min(liq_boost, 2.0), MAX_BET_SIZE)
+
+            if bet_size < 1.0:
+                continue
+
             shares = bet_size / entry_price
             potential_profit = shares * (1.0 - entry_price) * 0.99  # 1% fee
 
@@ -445,7 +508,11 @@ class ReversalStrategy:
                 f"  {asset}: still {-alt_move_pct:+.3f}% (divergence: {divergence:.3f}%)\n"
                 f"  Crowd: {crowd_price:.0%} UP | Seconds left: {seconds_left:.0f}s\n"
                 f"  Breakeven accuracy: {entry_price:.0%} | Payout ratio: "
-                f"{(1.0-entry_price)/entry_price:.1f}:1"
+                f"{(1.0-entry_price)/entry_price:.1f}:1\n"
+                f"  Liquidation: boost={liq_boost:.1f}x | "
+                f"altcoin_cascade={liq_info.get('altcoin_cascade', False)} | "
+                f"btc_cascade={liq_info.get('btc_cascade', False)} | "
+                f"alt_long_liqs_5m=${liq_info.get('altcoin_long_liq_5m', 0):,.0f}"
             )
 
             # Record the bet

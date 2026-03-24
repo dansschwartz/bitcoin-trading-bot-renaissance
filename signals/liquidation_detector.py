@@ -723,6 +723,63 @@ class LiquidationCascadeDetector:
 
     # ----- signal construction --------------------------------------------
 
+    def enrich_with_realtime_liquidations(
+        self, symbol: str, price_feed
+    ) -> Optional[Dict[str, Any]]:
+        """Enhance cascade risk assessment with actual liquidation data.
+
+        The existing detector predicts cascades from funding/OI.
+        This method adds confirmation from real liquidation flow via the
+        unified price feed's Binance Futures !forceOrder@arr stream.
+
+        Args:
+            symbol: Binance symbol (e.g. 'BTCUSDT')
+            price_feed: BinanceUnifiedPriceFeed instance with liquidation tracking
+
+        Returns:
+            Dict with real-time liquidation stats, or None if unavailable.
+        """
+        if not price_feed or not hasattr(price_feed, 'get_liquidation_stats'):
+            return None
+
+        # Convert BTCUSDT → BTC/USDT
+        normalized = symbol
+        for quote in ("USDT", "USDC", "BTC", "ETH", "BNB"):
+            if symbol.endswith(quote):
+                base = symbol[:-len(quote)]
+                if base:
+                    normalized = f"{base}/{quote}"
+                    break
+
+        liq = price_feed.get_liquidation_stats(normalized)
+        if not liq:
+            return None
+
+        cascade_confirmed = liq.get("cascade_active", False)
+        squeeze_confirmed = liq.get("squeeze_active", False)
+
+        # Merge real-time data into the REST-based risk assessment
+        base_risk = self._current_risk.get(symbol, {})
+        base_score = float(base_risk.get("risk_score", 0.0))
+
+        # Boost risk score if real liquidations confirm the prediction
+        realtime_boost = 0.0
+        if cascade_confirmed or squeeze_confirmed:
+            realtime_boost = 0.3  # strong confirmation
+        elif liq.get("long_usd_5m", 0) > 100_000 or liq.get("short_usd_5m", 0) > 100_000:
+            realtime_boost = 0.1  # mild activity
+
+        return {
+            "long_liq_5m_usd": liq.get("long_usd_5m", 0),
+            "short_liq_5m_usd": liq.get("short_usd_5m", 0),
+            "imbalance_ratio": liq.get("imbalance_ratio", 1.0),
+            "cascade_active": cascade_confirmed,
+            "squeeze_active": squeeze_confirmed,
+            "cascade_confirmed": cascade_confirmed,
+            "realtime_boost": realtime_boost,
+            "enhanced_risk_score": min(base_score + realtime_boost, 1.0),
+        }
+
     def _build_signal(
         self,
         symbol: str,

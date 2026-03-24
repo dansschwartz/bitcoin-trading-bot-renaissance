@@ -78,7 +78,7 @@ N_CROSS_FEATURES = 15   # Number of cross-asset features
 N_DERIVATIVES_FEATURES = 7  # funding_rate_z, oi_change_pct, long_short_ratio,
                             # taker_buy_sell_ratio, has_derivatives_data,
                             # fear_greed_norm, fear_greed_roc
-# Total real features: 46 single-pair + 15 cross-asset + 7 derivatives = 68, padded to 98
+# Total real features: 46 single-pair + 15 cross-asset + 7 derivatives + 4 liquidation = 72, padded to 98
 
 # Feature audit tracking — logs once per pair per process lifetime
 _feature_audit_logged: set = set()
@@ -1119,6 +1119,35 @@ def _build_derivatives_features(
     feats['has_derivatives_data'] = pd.Series(
         1.0 if has_deriv else 0.0, index=idx
     )
+
+    # ── 4 liquidation features (use padding slots, no INPUT_DIM change) ────
+    # These are scalar values from the real-time liquidation feed, broadcast
+    # across all rows (they represent the CURRENT state, not historical).
+    if derivatives_data is not None:
+        liq_long = float(derivatives_data.get('liq_long_usd_5m', 0) or 0)
+        liq_short = float(derivatives_data.get('liq_short_usd_5m', 0) or 0)
+        liq_total = liq_long + liq_short
+
+        import math
+        feats['liq_long_volume_z'] = pd.Series(
+            math.log1p(liq_long / 100_000), index=idx
+        )
+        feats['liq_short_volume_z'] = pd.Series(
+            math.log1p(liq_short / 100_000), index=idx
+        )
+        feats['liq_imbalance'] = pd.Series(
+            (liq_long - liq_short) / liq_total if liq_total > 0 else 0.0,
+            index=idx,
+        )
+        feats['liq_cascade_active'] = pd.Series(
+            1.0 if derivatives_data.get('liq_cascade_active') else 0.0,
+            index=idx,
+        )
+    else:
+        feats['liq_long_volume_z'] = pd.Series(0.0, index=idx)
+        feats['liq_short_volume_z'] = pd.Series(0.0, index=idx)
+        feats['liq_imbalance'] = pd.Series(0.0, index=idx)
+        feats['liq_cascade_active'] = pd.Series(0.0, index=idx)
 
     return feats
 

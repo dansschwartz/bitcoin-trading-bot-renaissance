@@ -260,6 +260,60 @@ class TimingFeatureEngine:
         # Clamp to safe range
         return max(0.80, min(1.15, boost))
 
+    def get_cascade_risk(self, asset: str) -> Dict:
+        """Assess whether conditions are ripe for a liquidation cascade.
+
+        Uses the unified price feed's real-time liquidation data to assess
+        how fragile the market is right now.
+
+        Returns:
+            Dict with risk_level, direction, description.
+        """
+        result = {
+            "risk_level": "normal",     # normal, elevated, critical
+            "direction": "none",        # long_cascade, short_squeeze
+            "description": "",
+        }
+
+        if not hasattr(self, '_price_feed') or not self._price_feed:
+            return result
+
+        binance_sym = f"{asset.upper()}/USDT"
+        liq = self._price_feed.get_liquidation_stats(binance_sym)
+        if not liq:
+            return result
+
+        imbalance = liq.get("imbalance_ratio", 1.0)
+        cascade = liq.get("cascade_active", False)
+        squeeze = liq.get("squeeze_active", False)
+
+        if cascade:
+            result["risk_level"] = "critical"
+            result["direction"] = "long_cascade"
+            result["description"] = (
+                f"CASCADE ACTIVE: ${liq.get('long_usd_5m', 0):,.0f} in long liquidations (5m)"
+            )
+        elif squeeze:
+            result["risk_level"] = "critical"
+            result["direction"] = "short_squeeze"
+            result["description"] = (
+                f"SQUEEZE ACTIVE: ${liq.get('short_usd_5m', 0):,.0f} in short liquidations (5m)"
+            )
+        elif imbalance > 3.0:
+            result["risk_level"] = "elevated"
+            result["direction"] = "long_cascade_building"
+            result["description"] = (
+                f"Liquidation imbalance {imbalance:.1f}x longs — cascade risk elevated"
+            )
+        elif imbalance < 0.33 and liq.get("short_usd_5m", 0) > 50_000:
+            result["risk_level"] = "elevated"
+            result["direction"] = "short_squeeze_building"
+            result["description"] = (
+                f"Liquidation imbalance {1/max(imbalance,0.01):.1f}x shorts — squeeze risk elevated"
+            )
+
+        return result
+
     def get_stats(self) -> Dict:
         """Return engine statistics for dashboard."""
         return {

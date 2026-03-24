@@ -2083,3 +2083,74 @@ async def price_feed_health(request: Request):
         except Exception as e:
             return {"status": "error", "error": str(e)}
     return {"status": "unavailable", "note": "Orchestrator not in this process"}
+
+
+# ─── Liquidation Feed Endpoints ───
+
+liquidation_router = APIRouter(prefix="/api/liquidations", tags=["liquidations"])
+
+
+@liquidation_router.get("")
+async def liquidation_stats(request: Request):
+    """Real-time liquidation data across all pairs from Binance Futures."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    feed = getattr(orch, "price_feed", None) if orch else None
+    if not feed or not hasattr(feed, "get_all_liquidation_stats"):
+        return {"status": "unavailable", "note": "Liquidation feed not available"}
+
+    try:
+        import time as _time
+        stats = feed.get_all_liquidation_stats()
+
+        # Sort by total liquidation volume
+        sorted_stats = dict(sorted(
+            stats.items(),
+            key=lambda x: x[1].get("long_usd_5m", 0) + x[1].get("short_usd_5m", 0),
+            reverse=True,
+        ))
+
+        return _sanitize_for_json({
+            "timestamp": _time.time(),
+            "feed_connected": feed._liq_connected,
+            "total_orders_received": feed._liq_count,
+            "pairs_with_liquidations": len(sorted_stats),
+            "active_cascades": [
+                sym for sym, s in sorted_stats.items()
+                if s.get("cascade_active")
+            ],
+            "active_squeezes": [
+                sym for sym, s in sorted_stats.items()
+                if s.get("squeeze_active")
+            ],
+            "top_liquidations": dict(list(sorted_stats.items())[:20]),
+        })
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@liquidation_router.get("/{symbol}")
+async def liquidation_symbol(symbol: str, request: Request):
+    """Liquidation data for a specific symbol (e.g. BTC/USDT or BTCUSDT)."""
+    orch = getattr(request.app.state, "arb_orchestrator", None)
+    feed = getattr(orch, "price_feed", None) if orch else None
+    if not feed or not hasattr(feed, "get_liquidation_stats"):
+        return {"status": "unavailable"}
+
+    try:
+        # Accept both BTC/USDT and BTCUSDT formats
+        lookup = symbol.replace("_", "/").replace("-", "/")
+        if "/" not in lookup:
+            # Try to normalize BTCUSDT → BTC/USDT
+            for quote in ("USDT", "USDC", "BTC", "ETH", "BNB"):
+                if lookup.upper().endswith(quote):
+                    base = lookup.upper()[:-len(quote)]
+                    if base:
+                        lookup = f"{base}/{quote}"
+                        break
+
+        stats = feed.get_liquidation_stats(lookup)
+        if stats:
+            return _sanitize_for_json(stats)
+        return {"error": f"No liquidation data for {symbol} (tried {lookup})"}
+    except Exception as e:
+        return {"error": str(e)}
