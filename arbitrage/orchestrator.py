@@ -382,6 +382,13 @@ class ArbitrageOrchestrator:
         except Exception as e:
             logger.warning(f"Binance price feed start failed (degrading to MEXC REST): {e}")
 
+        # Start MEXC all-ticker WS feed (powers triangular arb scanner)
+        try:
+            await self.mexc.subscribe_all_tickers()
+            logger.info("MEXC all-ticker WS feed started (tri arb scanner)")
+        except Exception as e:
+            logger.warning(f"MEXC all-ticker WS failed (tri arb will use REST fallback): {e}")
+
         # Contract verification cache (try to populate, degrade gracefully)
         try:
             await self.contract_verifier.refresh_cache()
