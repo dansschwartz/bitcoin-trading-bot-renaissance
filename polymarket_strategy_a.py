@@ -777,7 +777,7 @@ class StrategyAExecutor:
                         else:
                             self.logger.warning(f"[LIVE] Bet failed: {live_result}")
                     else:
-                        self.logger.debug(f"[LIVE] Skipped ({reason})")
+                        self.logger.info(f"[LIVE] Skipped ({reason})")
                 except Exception as _live_err:
                     self.logger.warning(f"[LIVE] Live bet error: {_live_err}")
                 finally:

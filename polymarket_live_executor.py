@@ -463,6 +463,7 @@ class PolymarketLiveExecutor:
     def check_live_resolutions(self) -> None:
         """
         Check resolution of open live bets via Gamma API.
+        Force-expires bets that are >30min past their market window.
         Records results in polymarket_live_bets table.
         """
         conn = sqlite3.connect(self.db_path)
@@ -477,8 +478,26 @@ class PolymarketLiveExecutor:
             return
 
         import requests
+        now_ts = int(time.time())
 
         for bet in open_bets:
+            # Force-expire if >30min past market window end
+            ws = bet["window_start"] or 0
+            tf_str = bet["timeframe"] or "15m"
+            tf_secs = 300 if "5m" in tf_str else 900
+            if ws > 0 and now_ts > ws + tf_secs + 1800:
+                conn.execute(
+                    "UPDATE polymarket_live_bets SET status='expired', "
+                    "resolved_at=? WHERE id=?",
+                    (datetime.now(timezone.utc).isoformat(), bet["id"]),
+                )
+                conn.commit()
+                logger.info(
+                    f"[LIVE] Force-expired stale bet id={bet['id']} "
+                    f"{bet['asset']} {bet['direction']} "
+                    f"(window_start={ws}, {(now_ts - ws - tf_secs)//60}min past expiry)"
+                )
+                continue
             slug = bet["slug"]
             if not slug:
                 continue
