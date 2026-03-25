@@ -21,6 +21,7 @@ Usage:
 import asyncio
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -325,10 +326,14 @@ class SimpleUpBetter:
                 from py_clob_client.clob_types import OrderArgs
                 from py_clob_client.order_builder.constants import BUY
 
+                # Round price DOWN (2dp), round shares UP so order_total >= $1 min
+                order_price = round(up_price, 2)
+                order_shares = math.ceil(shares * 100) / 100  # ceil to 2dp
+
                 order_args = OrderArgs(
                     token_id=token_id,
-                    price=round(up_price, 2),
-                    size=round(shares, 2),
+                    price=order_price,
+                    size=order_shares,
                     side=BUY,
                 )
 
