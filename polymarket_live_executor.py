@@ -174,11 +174,20 @@ class PolymarketLiveExecutor:
             return
 
         try:
-            self._clob_client = ClobClient(
-                host="https://clob.polymarket.com",
-                chain_id=137,  # Polygon
-                key=secrets["private_key"],
-            )
+            # Polymarket uses proxy wallets — need signature_type=1 (POLY_PROXY)
+            # and funder=proxy_wallet_address for orders to use the proxy balance
+            proxy_addr = secrets.get("proxy_wallet_address", "")
+            init_kwargs = {
+                "host": "https://clob.polymarket.com",
+                "chain_id": 137,  # Polygon
+                "key": secrets["private_key"],
+            }
+            if proxy_addr:
+                init_kwargs["signature_type"] = 1  # POLY_PROXY
+                init_kwargs["funder"] = proxy_addr
+                logger.info(f"[LIVE] Using proxy wallet: {proxy_addr[:10]}...{proxy_addr[-6:]}")
+
+            self._clob_client = ClobClient(**init_kwargs)
 
             # Derive API credentials (required for order placement)
             self._api_creds = self._clob_client.create_or_derive_api_creds()
