@@ -39,9 +39,8 @@ logger = logging.getLogger("simple_up_bet")
 GAMMA_API = "https://gamma-api.polymarket.com/markets"
 ASSETS = ["SOL", "DOGE"]
 WINDOW_SEC = 300        # 5-minute windows
-BET_TIMING_SEC = 180    # Bet at T+3:00 into window
+BET_TIMING_SEC = 270    # Bet at T+4:30 (30s before close)
 BET_AMOUNT_USD = 1.00   # $1 per bet
-MAX_ENTRY_PRICE = 0.30  # ONLY bet when UP costs $0.30 or less
 DIRECTION = "UP"        # Always UP
 DAILY_BET_LIMIT = 100   # Max bets per day
 DAILY_LOSS_CAP = 50.0   # Stop if down $50 today
@@ -66,7 +65,6 @@ class SimpleUpBetter:
         self._daily_date = ""
         self._placed_windows: set = set()  # (asset, window_ts) tuples already bet
         self._market_cache: Dict[str, dict] = {}  # slug -> {data, fetched_at}
-        self._skips_today = 0  # Track how many windows skipped (UP too expensive)
 
         self._init_db()
         self._init_clob_client()
@@ -166,18 +164,21 @@ class SimpleUpBetter:
             return
 
         try:
-            self._clob_client = ClobClient(
-                host="https://clob.polymarket.com",
-                chain_id=137,
-                key=secrets["private_key"],
-                creds={
-                    "api_key": secrets["api_key"],
-                    "api_secret": secrets["api_secret"],
-                    "api_passphrase": secrets["api_passphrase"],
-                },
-                signature_type=secrets.get("signature_type", 1),
-                funder=secrets.get("funder", secrets["wallet_address"]),
-            )
+            proxy_addr = secrets.get("proxy_wallet_address", "")
+            init_kwargs = {
+                "host": "https://clob.polymarket.com",
+                "chain_id": 137,
+                "key": secrets["private_key"],
+            }
+            if proxy_addr:
+                init_kwargs["signature_type"] = 1  # POLY_PROXY
+                init_kwargs["funder"] = proxy_addr
+
+            self._clob_client = ClobClient(**init_kwargs)
+
+            # Derive API creds (returns ApiCreds object, not a dict)
+            api_creds = self._clob_client.create_or_derive_api_creds()
+            self._clob_client.set_api_creds(api_creds)
 
             server_time = self._clob_client.get_server_time()
             logger.info(f"[SIMPLE] CLOB client connected (server_time={server_time})")
@@ -304,12 +305,11 @@ class SimpleUpBetter:
             if self._daily_date:
                 logger.info(
                     f"[SIMPLE] Daily reset. Yesterday: {self._bet_count_today} bets, "
-                    f"${self._loss_today:.2f} losses, {self._skips_today} skips"
+                    f"${self._loss_today:.2f} losses"
                 )
             self._daily_date = today
             self._bet_count_today = 0
             self._loss_today = 0.0
-            self._skips_today = 0
             self._placed_windows.clear()
 
         if self._bet_count_today >= DAILY_BET_LIMIT:
@@ -349,32 +349,12 @@ class SimpleUpBetter:
             logger.debug(f"[SIMPLE] {asset}: bad price {up_price}")
             return None
 
-        # ── THE ONLY FILTER: crowd must think DOWN (UP is cheap) ──
-        # If UP costs more than $0.30, the crowd already thinks UP and
-        # there's no asymmetric payoff — skip it
-        if up_price > MAX_ENTRY_PRICE:
-            logger.info(
-                f"[SIMPLE] {asset}: SKIP — UP costs ${up_price:.2f} "
-                f"(>${MAX_ENTRY_PRICE}). No edge when crowd agrees with UP."
-            )
-            self._skips_today += 1
-            # Mark this window as "seen" so we don't log again
-            self._placed_windows.add((asset, window_ts))
-            return None
-
-        # Asymmetric payoff math
         shares = BET_AMOUNT_USD / up_price
-        potential_profit = shares * (1.0 - up_price)
-        breakeven_wr = up_price  # At $0.20 entry, need 20% WR to break even
 
         logger.info(
-            f"[SIMPLE] *** BET: {asset} UP ${BET_AMOUNT_USD} ***\n"
-            f"  Slug: {slug}\n"
-            f"  Crowd: UP=${up_price:.2f} DOWN=${down_price:.2f}\n"
-            f"  Entry: ${up_price:.3f} for {shares:.2f} shares\n"
-            f"  If win: +${potential_profit:.2f} ({potential_profit/BET_AMOUNT_USD:.0%} return)\n"
-            f"  Breakeven win rate: {breakeven_wr:.0%}\n"
-            f"  Window: {elapsed:.0f}s elapsed"
+            f"[SIMPLE] *** BET: {asset} UP ${BET_AMOUNT_USD} @ ${up_price:.3f} "
+            f"({shares:.2f} shares) | crowd: UP={up_price:.2f}/DOWN={down_price:.2f} "
+            f"| {elapsed:.0f}s into window"
         )
 
         order_id = ""
@@ -657,9 +637,8 @@ class SimpleUpBetter:
             win_rate = (won / resolved * 100) if resolved > 0 else 0
 
             return {
-                "strategy": "Contrarian $1 UP (crowd says DOWN)",
-                "direction": "UP (only when UP <= $0.30)",
-                "max_entry_price": MAX_ENTRY_PRICE,
+                "strategy": "$1 UP every window (30s before close)",
+                "direction": "UP (always)",
                 "bet_size": BET_AMOUNT_USD,
                 "assets": ASSETS,
                 "live_enabled": self.live_enabled,
@@ -674,7 +653,6 @@ class SimpleUpBetter:
                 "avg_entry_price": round(float(avg_entry or 0), 3),
                 "today_bets": today_total,
                 "today_pnl": round(float(today_pnl), 4),
-                "skips_today": self._skips_today,
                 "daily_bet_limit": DAILY_BET_LIMIT,
                 "daily_loss_cap": DAILY_LOSS_CAP,
                 "per_asset": per_asset,
@@ -691,11 +669,9 @@ class SimpleUpBetter:
         Also periodically checks resolutions.
         """
         logger.info(
-            f"[SIMPLE] Starting: $1 UP on {ASSETS} when UP <= ${MAX_ENTRY_PRICE} "
-            f"at T+{BET_TIMING_SEC}s (live={'YES' if self.live_enabled else 'NO'})\n"
-            f"  Max daily bets: {DAILY_BET_LIMIT}\n"
-            f"  Max daily loss: ${DAILY_LOSS_CAP}\n"
-            f"  Skips when UP > ${MAX_ENTRY_PRICE} (no bet if crowd agrees with UP)"
+            f"[SIMPLE] Starting: $1 UP on {ASSETS} every 5m window "
+            f"at T+{BET_TIMING_SEC}s (30s before close) "
+            f"(live={'YES' if self.live_enabled else 'NO'})"
         )
 
         last_resolution_check = 0
@@ -727,8 +703,7 @@ class SimpleUpBetter:
                     open_bets = self._count_open()
                     logger.info(
                         f"[SIMPLE] Heartbeat | bets={self._bet_count_today} | "
-                        f"skips={self._skips_today} | open={open_bets} | "
-                        f"daily_loss=${self._loss_today:.2f}"
+                        f"open={open_bets} | daily_loss=${self._loss_today:.2f}"
                     )
                     last_heartbeat = now
 

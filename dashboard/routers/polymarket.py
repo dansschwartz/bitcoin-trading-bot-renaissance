@@ -1088,9 +1088,8 @@ async def simple_up_stats():
             win_rate = (won / resolved * 100) if resolved > 0 else 0
 
             return {
-                "strategy": "Contrarian $1 UP (crowd says DOWN)",
-                "direction": "UP (only when UP <= $0.30)",
-                "max_entry_price": 0.30,
+                "strategy": "$1 UP every window (30s before close)",
+                "direction": "UP (always)",
                 "bet_size": 1.00,
                 "assets": ["SOL", "DOGE"],
                 "total_bets": total,
