@@ -573,9 +573,9 @@
         "initial_bankroll": 500.0,
         "max_positions": 10,
         "live_enabled": true,
-        "live_assets": ["SOL"],
-        "max_live_bet_usd": 2.0,
-        "daily_loss_limit_usd": 20.0
+        "live_assets": ["SOL", "DOGE"],
+        "max_live_bet_usd": 20.0,
+        "daily_loss_limit_usd": 200.0
     },
     "adverse_selection_bps": {
         "BTCUSDT": 0.05,
