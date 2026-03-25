@@ -86,6 +86,12 @@ except ImportError as _rev_err:
     REVERSAL_STRATEGY_AVAILABLE = False
     logging.getLogger(__name__).warning(f"Reversal Strategy import failed: {_rev_err}")
 try:
+    from simple_up_bet import SimpleUpBetter
+    SIMPLE_UP_AVAILABLE = True
+except ImportError as _su_err:
+    SIMPLE_UP_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"SimpleUpBetter import failed: {_su_err}")
+try:
     from sub_bar_scanner import SubBarScanner
     SUB_BAR_SCANNER_AVAILABLE = True
 except ImportError:
@@ -1026,6 +1032,19 @@ class RenaissanceTradingBot:
             except Exception as _rev_err:
                 self.logger.warning(f"Reversal Strategy init failed: {_rev_err}")
                 self.reversal_strategy = None
+
+        # Initialize Simple $1 UP Baseline Strategy
+        self.simple_better = None
+        if SIMPLE_UP_AVAILABLE:
+            try:
+                self.simple_better = SimpleUpBetter(db_path=scanner_db)
+                self.logger.info(
+                    f"Simple UP better: initialized "
+                    f"(live={'YES' if self.simple_better.live_enabled else 'NO'})"
+                )
+            except Exception as _su_err:
+                self.logger.warning(f"SimpleUpBetter init failed: {_su_err}")
+                self.simple_better = None
 
         # Initialize Cascade data collector (Polymarket crowd pricing for lead-lag validation)
         self.cascade_collector = None
@@ -6168,31 +6187,25 @@ class RenaissanceTradingBot:
                 if not _rev_prices and hasattr(self, '_last_prices'):
                     _rev_prices = dict(self._last_prices)
 
-            if hasattr(self, 'reversal_strategy') and self.reversal_strategy and _rev_prices:
-                try:
-                    # Update BTC price for intra-window tracking
-                    btc_price = _rev_prices.get("BTC-USD", 0)
-                    if btc_price and btc_price > 0:
-                        self.reversal_strategy.update_btc_price(btc_price)
-
-                    # Check for contrarian reversal opportunities
-                    bets = self.reversal_strategy.check_and_execute(
-                        current_prices=_rev_prices,
-                        bankroll=getattr(self, '_polymarket_bankroll', 500.0),
-                    )
-
-                    if bets:
-                        for b in bets:
-                            self.logger.info(
-                                f"[REVERSAL] Placed: {b['asset']} {b['direction']} "
-                                f"@ ${b['entry_price']:.2f} for ${b['bet_amount']:.2f}"
-                            )
-
-                    # Check resolutions of previous bets
-                    self.reversal_strategy.check_resolutions()
-
-                except Exception as _rev_err:
-                    self.logger.debug(f"Reversal strategy error: {_rev_err}")
+            # DISABLED: Reversal strategy — replaced by simple_up_bet baseline test
+            # if hasattr(self, 'reversal_strategy') and self.reversal_strategy and _rev_prices:
+            #     try:
+            #         btc_price = _rev_prices.get("BTC-USD", 0)
+            #         if btc_price and btc_price > 0:
+            #             self.reversal_strategy.update_btc_price(btc_price)
+            #         bets = self.reversal_strategy.check_and_execute(
+            #             current_prices=_rev_prices,
+            #             bankroll=getattr(self, '_polymarket_bankroll', 500.0),
+            #         )
+            #         if bets:
+            #             for b in bets:
+            #                 self.logger.info(
+            #                     f"[REVERSAL] Placed: {b['asset']} {b['direction']} "
+            #                     f"@ ${b['entry_price']:.2f} for ${b['bet_amount']:.2f}"
+            #                 )
+            #         self.reversal_strategy.check_resolutions()
+            #     except Exception as _rev_err:
+            #         self.logger.debug(f"Reversal strategy error: {_rev_err}")
 
             cycle_time = time.time() - cycle_start
             self.logger.info(
@@ -7332,15 +7345,20 @@ class RenaissanceTradingBot:
             self.logger.info("Launching arbitrage engine...")
             self._track_task(self._run_arbitrage_engine())
 
-        # Start BTC price relay (feeds Binance WS price to reversal strategy every 10s)
-        if self._unified_price_feed and self.reversal_strategy:
-            self.logger.info("Launching BTC price relay (10s from Binance WS)...")
-            self._track_task(self._run_btc_price_relay())
+        # DISABLED: BTC price relay — only feeds reversal strategy (replaced by simple_up_bet)
+        # if self._unified_price_feed and self.reversal_strategy:
+        #     self.logger.info("Launching BTC price relay (10s from Binance WS)...")
+        #     self._track_task(self._run_btc_price_relay())
 
-        # ── Strategy A: Independent 60s loop (decoupled from main cycle) ──
-        if self.polymarket_executor:
-            self.logger.info("Launching Strategy A independent loop (60s cycle)...")
-            self._track_task(self._run_strategy_a_loop())
+        # DISABLED: Strategy A — replaced by simple_up_bet baseline test
+        # if self.polymarket_executor:
+        #     self.logger.info("Launching Strategy A independent loop (60s cycle)...")
+        #     self._track_task(self._run_strategy_a_loop())
+
+        # ── Simple $1 UP Baseline Strategy ──
+        if self.simple_better:
+            self.logger.info("Launching Simple UP better ($1 UP at T+3:00)...")
+            self._track_task(self.simple_better.run())
 
         # ── Module D: Start Liquidation Cascade Detector ──
         if self.liquidation_detector:

@@ -1014,3 +1014,87 @@ async def polymarket_live_confirm(request: Request):
             return {"ok": True, "bet_id": bet_id, "fill_status": fill_status}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── Simple $1 UP Baseline Strategy ──
+
+@router.get("/simple")
+async def simple_up_stats():
+    """Simple $1 UP baseline strategy stats."""
+    try:
+        with _conn() as conn:
+            if not _table_exists(conn, "simple_up_bets"):
+                return {"error": "simple_up_bets table not found — strategy not yet started"}
+
+            total = conn.execute("SELECT COUNT(*) FROM simple_up_bets").fetchone()[0]
+            won = conn.execute(
+                "SELECT COUNT(*) FROM simple_up_bets WHERE result='WON'"
+            ).fetchone()[0]
+            lost = conn.execute(
+                "SELECT COUNT(*) FROM simple_up_bets WHERE result='LOST'"
+            ).fetchone()[0]
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM simple_up_bets WHERE result IS NULL"
+            ).fetchone()[0]
+            expired = conn.execute(
+                "SELECT COUNT(*) FROM simple_up_bets WHERE result='expired'"
+            ).fetchone()[0]
+            total_pnl = conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM simple_up_bets WHERE pnl IS NOT NULL"
+            ).fetchone()[0]
+
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today_total = conn.execute(
+                "SELECT COUNT(*) FROM simple_up_bets WHERE date(created_at) = ?",
+                (today,),
+            ).fetchone()[0]
+            today_pnl = conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM simple_up_bets "
+                "WHERE pnl IS NOT NULL AND date(created_at) = ?",
+                (today,),
+            ).fetchone()[0]
+
+            # Per-asset breakdown
+            per_asset = {}
+            for asset in ("SOL", "DOGE"):
+                row = conn.execute("""
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN result='WON' THEN 1 ELSE 0 END) as wins,
+                           SUM(CASE WHEN result='LOST' THEN 1 ELSE 0 END) as losses,
+                           COALESCE(SUM(pnl), 0) as pnl
+                    FROM simple_up_bets WHERE asset=?
+                """, (asset,)).fetchone()
+                per_asset[asset] = {
+                    "total": row[0], "wins": row[1],
+                    "losses": row[2], "pnl": round(float(row[3]), 4),
+                }
+
+            # Recent bets
+            recent = conn.execute("""
+                SELECT asset, window_ts, slug, entry_price, order_status,
+                       result, pnl, created_at
+                FROM simple_up_bets ORDER BY id DESC LIMIT 20
+            """).fetchall()
+
+            resolved = won + lost
+            win_rate = (won / resolved * 100) if resolved > 0 else 0
+
+            return {
+                "strategy": "Simple $1 UP",
+                "direction": "UP (always)",
+                "bet_size": 1.00,
+                "assets": ["SOL", "DOGE"],
+                "total_bets": total,
+                "won": won,
+                "lost": lost,
+                "pending": pending,
+                "expired": expired,
+                "win_rate": round(win_rate, 1),
+                "total_pnl": round(float(total_pnl), 4),
+                "today_bets": today_total,
+                "today_pnl": round(float(today_pnl), 4),
+                "per_asset": per_asset,
+                "recent_bets": [dict(r) for r in recent],
+            }
+    except Exception as e:
+        return {"error": str(e)}
