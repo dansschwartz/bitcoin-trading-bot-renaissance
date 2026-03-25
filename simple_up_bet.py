@@ -1,21 +1,24 @@
 """
-simple_up_bet.py — Dead-simple $1 UP baseline strategy.
+simple_up_bet.py — Contrarian $1 UP bet when crowd says DOWN.
 
-Purpose:
-    Verify the Polymarket execution pipeline works end-to-end.
-    Always bets $1 UP on SOL and DOGE 5-minute markets at T+3:00
-    into each window. No ML, no models, no complexity.
+ONLY bets when UP costs $0.30 or less (crowd is 70%+ on DOWN).
+Enters at T+3:00 of each 5-minute window.
+No ML. No models. No predictions. No calibration.
 
-Design:
-    - Checks every 1 second for 5-minute window alignment
-    - At T+180s (3 min into window), places $1 UP on SOL and DOGE
-    - Resolves via Gamma API 60s after window close
-    - Daily limits: 100 bets, $50 loss cap
-    - All bets tracked in `simple_up_bets` SQLite table
+The thesis: after 3 minutes of a 5-minute window, if the asset
+went down and the crowd piled on DOWN (pricing UP at $0.10-$0.30),
+reversals happen often enough that buying the cheap UP side
+is profitable. We only need 30% win rate at $0.30 entry.
 
-Usage:
-    Launched as an async task from renaissance_trading_bot.py.
-    Can also be run standalone: python simple_up_bet.py
+The math:
+  Entry $0.30 -> $1 buys 3.33 shares -> win pays $3.33 -> profit $2.33
+  Entry $0.20 -> $1 buys 5.00 shares -> win pays $5.00 -> profit $4.00
+  Entry $0.10 -> $1 buys 10.0 shares -> win pays $10.0 -> profit $9.00
+
+Assets: SOL 5m, DOGE 5m
+Bet size: $1.00 fixed
+Direction: UP always (but ONLY when UP <= $0.30)
+Entry time: T+180s (3 minutes into window)
 """
 
 import asyncio
@@ -26,7 +29,7 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import requests
 
@@ -38,31 +41,32 @@ ASSETS = ["SOL", "DOGE"]
 WINDOW_SEC = 300        # 5-minute windows
 BET_TIMING_SEC = 180    # Bet at T+3:00 into window
 BET_AMOUNT_USD = 1.00   # $1 per bet
+MAX_ENTRY_PRICE = 0.30  # ONLY bet when UP costs $0.30 or less
 DIRECTION = "UP"        # Always UP
 DAILY_BET_LIMIT = 100   # Max bets per day
 DAILY_LOSS_CAP = 50.0   # Stop if down $50 today
 RESOLUTION_DELAY = 60   # Check resolution 60s after window close
 DB_PATH = "data/renaissance_bot.db"
+SECRETS_PATH = "config/polymarket_secrets.json"
 
 
 class SimpleUpBetter:
     """
-    Dead-simple baseline: $1 UP on SOL+DOGE 5m markets at T+3:00.
-
-    No ML. No models. Just verifying the pipeline works and testing
-    whether UP has a structural edge on 5m crypto markets.
+    Contrarian Polymarket bot.
+    Wait 3 minutes. If UP is cheap (<=MAX_ENTRY_PRICE), bet $1.
+    If UP is expensive (>MAX_ENTRY_PRICE), skip — crowd already agrees with UP.
     """
 
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
         self._clob_client = None
-        self._api_creds = None
         self.live_enabled = False
         self._bet_count_today = 0
         self._loss_today = 0.0
         self._daily_date = ""
         self._placed_windows: set = set()  # (asset, window_ts) tuples already bet
         self._market_cache: Dict[str, dict] = {}  # slug -> {data, fetched_at}
+        self._skips_today = 0  # Track how many windows skipped (UP too expensive)
 
         self._init_db()
         self._init_clob_client()
@@ -82,16 +86,26 @@ class SimpleUpBetter:
                 question TEXT,
                 direction TEXT DEFAULT 'UP',
                 bet_amount REAL DEFAULT 1.0,
+
+                -- Crowd pricing at entry
+                crowd_up_price REAL,
+                crowd_down_price REAL,
+                entry_time_in_window REAL,
+
+                -- Order execution
                 token_id TEXT,
                 order_id TEXT,
                 entry_price REAL,
                 shares REAL,
                 order_status TEXT DEFAULT 'pending',
                 fill_status TEXT,
+                error TEXT,
+
+                -- Resolution
                 result TEXT,
                 pnl REAL,
                 resolved_at TEXT,
-                error TEXT,
+
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(asset, window_ts)
             )
@@ -101,9 +115,20 @@ class SimpleUpBetter:
             ON simple_up_bets(order_status)
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_simple_created
-            ON simple_up_bets(created_at)
+            CREATE INDEX IF NOT EXISTS idx_simple_result
+            ON simple_up_bets(result)
         """)
+        # Migrate: add columns if missing (table may exist from v1)
+        existing_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(simple_up_bets)").fetchall()
+        }
+        for col, typedef in [
+            ("crowd_up_price", "REAL"),
+            ("crowd_down_price", "REAL"),
+            ("entry_time_in_window", "REAL"),
+        ]:
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE simple_up_bets ADD COLUMN {col} {typedef}")
         conn.commit()
         conn.close()
         logger.info("[SIMPLE] DB table simple_up_bets ready")
@@ -113,9 +138,8 @@ class SimpleUpBetter:
     def _load_secrets(self) -> dict:
         """Load Polymarket wallet secrets."""
         paths = [
-            os.path.join("config", "polymarket_secrets.json"),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "config", "polymarket_secrets.json"),
+            SECRETS_PATH,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), SECRETS_PATH),
         ]
         for path in paths:
             if os.path.exists(path):
@@ -142,20 +166,18 @@ class SimpleUpBetter:
             return
 
         try:
-            proxy_addr = secrets.get("proxy_wallet_address", "")
-            init_kwargs = {
-                "host": "https://clob.polymarket.com",
-                "chain_id": 137,
-                "key": secrets["private_key"],
-            }
-            if proxy_addr:
-                init_kwargs["signature_type"] = 1  # POLY_PROXY
-                init_kwargs["funder"] = proxy_addr
-                logger.info(f"[SIMPLE] Using proxy wallet: {proxy_addr[:10]}...{proxy_addr[-6:]}")
-
-            self._clob_client = ClobClient(**init_kwargs)
-            self._api_creds = self._clob_client.create_or_derive_api_creds()
-            self._clob_client.set_api_creds(self._api_creds)
+            self._clob_client = ClobClient(
+                host="https://clob.polymarket.com",
+                chain_id=137,
+                key=secrets["private_key"],
+                creds={
+                    "api_key": secrets["api_key"],
+                    "api_secret": secrets["api_secret"],
+                    "api_passphrase": secrets["api_passphrase"],
+                },
+                signature_type=secrets.get("signature_type", 1),
+                funder=secrets.get("funder", secrets["wallet_address"]),
+            )
 
             server_time = self._clob_client.get_server_time()
             logger.info(f"[SIMPLE] CLOB client connected (server_time={server_time})")
@@ -202,10 +224,10 @@ class SimpleUpBetter:
         now = int(time.time())
         return (now // WINDOW_SEC) * WINDOW_SEC
 
-    def _seconds_into_window(self) -> int:
+    def _seconds_into_window(self) -> float:
         """How many seconds into the current 5-minute window are we?"""
-        now = int(time.time())
-        window_ts = (now // WINDOW_SEC) * WINDOW_SEC
+        now = time.time()
+        window_ts = math.floor(now / WINDOW_SEC) * WINDOW_SEC
         return now - window_ts
 
     def _build_slug(self, asset: str, window_ts: int) -> str:
@@ -214,7 +236,6 @@ class SimpleUpBetter:
 
     def _fetch_market(self, slug: str) -> Optional[dict]:
         """Fetch market data from Gamma API with caching."""
-        # Check cache
         cached = self._market_cache.get(slug)
         if cached and (time.time() - cached["fetched_at"]) < 120:
             return cached["data"]
@@ -223,43 +244,52 @@ class SimpleUpBetter:
             resp = requests.get(
                 GAMMA_API,
                 params={"slug": slug},
-                timeout=10,
+                timeout=5,
             )
             if resp.status_code != 200:
-                logger.debug(f"[SIMPLE] Gamma API {resp.status_code} for {slug}")
                 return None
 
             markets = resp.json()
-            if not markets:
-                logger.debug(f"[SIMPLE] No market found for slug: {slug}")
+            if not markets or not isinstance(markets, list):
                 return None
 
-            market = markets[0] if isinstance(markets, list) else markets
+            # Find non-closed, non-resolved market
+            for m in markets:
+                if m.get("closed") or m.get("resolved"):
+                    continue
+                self._market_cache[slug] = {"data": m, "fetched_at": time.time()}
+                return m
+
+            # Fallback: return first market (for resolution checks)
+            market = markets[0]
             self._market_cache[slug] = {"data": market, "fetched_at": time.time()}
             return market
 
         except Exception as e:
-            logger.warning(f"[SIMPLE] Gamma API error for {slug}: {e}")
+            logger.debug(f"[SIMPLE] Gamma API error for {slug}: {e}")
             return None
 
     def _parse_market(self, market: dict) -> Optional[dict]:
-        """Extract token_id and price for UP (Yes) outcome."""
+        """Extract token_id and prices for UP (Yes) outcome."""
         try:
-            outcomes = json.loads(market.get("outcomePrices", "[]"))
-            token_ids = json.loads(market.get("clobTokenIds", "[]"))
+            prices = market.get("outcomePrices", "[]")
+            if isinstance(prices, str):
+                prices = json.loads(prices)
+            token_ids = market.get("clobTokenIds", "[]")
+            if isinstance(token_ids, str):
+                token_ids = json.loads(token_ids)
 
-            if len(outcomes) < 2 or len(token_ids) < 2:
+            if not prices or len(prices) < 2 or not token_ids or len(token_ids) < 1:
                 return None
 
-            # Index 0 = Up/Yes, Index 1 = Down/No
-            up_price = float(outcomes[0])
+            up_price = float(prices[0])
             up_token_id = token_ids[0]
 
             return {
                 "up_price": up_price,
+                "down_price": float(prices[1]) if len(prices) > 1 else 1.0 - up_price,
                 "up_token_id": up_token_id,
                 "question": market.get("question", ""),
-                "condition_id": market.get("conditionId", ""),
             }
         except Exception as e:
             logger.debug(f"[SIMPLE] Parse error: {e}")
@@ -271,12 +301,16 @@ class SimpleUpBetter:
         """Check if we're within daily limits. Returns (ok, reason)."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != self._daily_date:
-            # New day — reset counters
+            if self._daily_date:
+                logger.info(
+                    f"[SIMPLE] Daily reset. Yesterday: {self._bet_count_today} bets, "
+                    f"${self._loss_today:.2f} losses, {self._skips_today} skips"
+                )
             self._daily_date = today
             self._bet_count_today = 0
             self._loss_today = 0.0
+            self._skips_today = 0
             self._placed_windows.clear()
-            logger.info("[SIMPLE] New day — counters reset")
 
         if self._bet_count_today >= DAILY_BET_LIMIT:
             return False, f"daily_bet_limit ({self._bet_count_today}/{DAILY_BET_LIMIT})"
@@ -288,9 +322,9 @@ class SimpleUpBetter:
 
     # ── Bet Placement ──
 
-    def _place_bet(self, asset: str, window_ts: int) -> Optional[dict]:
+    def _place_bet(self, asset: str, window_ts: int, elapsed: float) -> Optional[dict]:
         """
-        Place a $1 UP bet on the given asset's 5m market.
+        Place a $1 UP bet — but ONLY if UP costs $0.30 or less.
         Returns bet record dict or None.
         """
         slug = self._build_slug(asset, window_ts)
@@ -298,23 +332,51 @@ class SimpleUpBetter:
         # Discover market
         market = self._fetch_market(slug)
         if not market:
-            logger.info(f"[SIMPLE] No market for {slug} — skipping")
+            logger.debug(f"[SIMPLE] {asset}: market {slug} not found")
             return None
 
         parsed = self._parse_market(market)
         if not parsed:
-            logger.info(f"[SIMPLE] Can't parse market {slug} — skipping")
+            logger.debug(f"[SIMPLE] {asset}: can't parse market {slug}")
             return None
 
         up_price = parsed["up_price"]
+        down_price = parsed["down_price"]
         token_id = parsed["up_token_id"]
         question = parsed["question"]
 
         if up_price <= 0 or up_price >= 1:
-            logger.info(f"[SIMPLE] Bad price {up_price} for {slug}")
+            logger.debug(f"[SIMPLE] {asset}: bad price {up_price}")
             return None
 
+        # ── THE ONLY FILTER: crowd must think DOWN (UP is cheap) ──
+        # If UP costs more than $0.30, the crowd already thinks UP and
+        # there's no asymmetric payoff — skip it
+        if up_price > MAX_ENTRY_PRICE:
+            logger.info(
+                f"[SIMPLE] {asset}: SKIP — UP costs ${up_price:.2f} "
+                f"(>${MAX_ENTRY_PRICE}). No edge when crowd agrees with UP."
+            )
+            self._skips_today += 1
+            # Mark this window as "seen" so we don't log again
+            self._placed_windows.add((asset, window_ts))
+            return None
+
+        # Asymmetric payoff math
         shares = BET_AMOUNT_USD / up_price
+        potential_profit = shares * (1.0 - up_price)
+        breakeven_wr = up_price  # At $0.20 entry, need 20% WR to break even
+
+        logger.info(
+            f"[SIMPLE] *** BET: {asset} UP ${BET_AMOUNT_USD} ***\n"
+            f"  Slug: {slug}\n"
+            f"  Crowd: UP=${up_price:.2f} DOWN=${down_price:.2f}\n"
+            f"  Entry: ${up_price:.3f} for {shares:.2f} shares\n"
+            f"  If win: +${potential_profit:.2f} ({potential_profit/BET_AMOUNT_USD:.0%} return)\n"
+            f"  Breakeven win rate: {breakeven_wr:.0%}\n"
+            f"  Window: {elapsed:.0f}s elapsed"
+        )
+
         order_id = ""
         order_status = "paper"
         fill_status = "paper"
@@ -326,7 +388,7 @@ class SimpleUpBetter:
                 from py_clob_client.clob_types import OrderArgs
                 from py_clob_client.order_builder.constants import BUY
 
-                # Round price DOWN (2dp), round shares UP so order_total >= $1 min
+                # Round price to 2dp, ceil shares so order_total >= $1 CLOB minimum
                 order_price = round(up_price, 2)
                 order_shares = math.ceil(shares * 100) / 100  # ceil to 2dp
 
@@ -348,12 +410,9 @@ class SimpleUpBetter:
                     )
                     success = result.get("success", True)
                     if success and order_id and order_id != "unknown":
-                        order_status = "live"
+                        order_status = "placed"
                         fill_status = "placed"
-                        logger.info(
-                            f"[SIMPLE] LIVE BET: {asset} UP @ ${up_price:.3f} "
-                            f"for ${BET_AMOUNT_USD} | order={order_id}"
-                        )
+                        logger.info(f"[SIMPLE] Order placed: {order_id}")
                     else:
                         order_status = "rejected"
                         fill_status = "rejected"
@@ -366,15 +425,9 @@ class SimpleUpBetter:
 
             except Exception as e:
                 error = str(e)[:500]
-                is_geoblock = any(kw in error.lower() for kw in ["restricted", "geoblock"])
-                if is_geoblock:
-                    order_status = "pending_relay"
-                    fill_status = "pending_relay"
-                    logger.info(f"[SIMPLE] Geo-blocked — queued relay: {asset} UP ${BET_AMOUNT_USD}")
-                else:
-                    order_status = "error"
-                    fill_status = "error"
-                    logger.warning(f"[SIMPLE] Order failed: {e}")
+                order_status = "error"
+                fill_status = "error"
+                logger.warning(f"[SIMPLE] Order error: {e}")
         else:
             logger.info(
                 f"[SIMPLE] PAPER BET: {asset} UP @ ${up_price:.3f} "
@@ -387,11 +440,13 @@ class SimpleUpBetter:
             conn.execute("""
                 INSERT OR IGNORE INTO simple_up_bets
                 (asset, window_ts, slug, question, direction, bet_amount,
+                 crowd_up_price, crowd_down_price, entry_time_in_window,
                  token_id, order_id, entry_price, shares,
                  order_status, fill_status, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 asset, window_ts, slug, question, DIRECTION, BET_AMOUNT_USD,
+                up_price, down_price, elapsed,
                 token_id, order_id, up_price, shares,
                 order_status, fill_status, error,
             ))
@@ -423,11 +478,11 @@ class SimpleUpBetter:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
-            # Find bets where window has ended + RESOLUTION_DELAY
             open_bets = conn.execute("""
                 SELECT id, asset, window_ts, slug, entry_price, shares, bet_amount
                 FROM simple_up_bets
                 WHERE result IS NULL
+                  AND order_status IN ('placed', 'paper')
                   AND window_ts + ? + ? < ?
             """, (WINDOW_SEC, RESOLUTION_DELAY, now)).fetchall()
 
@@ -445,14 +500,13 @@ class SimpleUpBetter:
         bet_id = bet["id"]
         entry_price = bet["entry_price"]
         bet_amount = bet["bet_amount"]
+        now = int(time.time())
+        window_end = bet["window_ts"] + WINDOW_SEC
 
         market = self._fetch_market(slug)
         if not market:
-            # Force-expire if 30+ min past window end
-            now = int(time.time())
-            window_end = bet["window_ts"] + WINDOW_SEC
             if now - window_end > 1800:
-                logger.info(f"[SIMPLE] Force-expiring bet {bet_id} (30min past window)")
+                logger.info(f"[SIMPLE] Force-expiring bet {bet_id} (30min past, no market data)")
                 conn.execute(
                     "UPDATE simple_up_bets SET result='expired', pnl=0, "
                     "resolved_at=? WHERE id=?",
@@ -463,64 +517,53 @@ class SimpleUpBetter:
 
         # Check if market is resolved
         resolved = market.get("resolved", False)
-        if not resolved:
-            # Price-based fallback: if 2+ min past window end, check asset price
-            now = int(time.time())
-            window_end = bet["window_ts"] + WINDOW_SEC
-            if now - window_end >= 120:
-                # Use outcome prices to infer result
-                try:
-                    outcomes = json.loads(market.get("outcomePrices", "[]"))
-                    if len(outcomes) >= 2:
-                        up_price_now = float(outcomes[0])
-                        # If UP price > 0.90, market resolved UP; if < 0.10, DOWN
-                        if up_price_now >= 0.90:
-                            self._record_resolution(conn, bet_id, "WON", bet_amount, entry_price)
-                            return
-                        elif up_price_now <= 0.10:
-                            self._record_resolution(conn, bet_id, "LOST", bet_amount, entry_price)
-                            return
-                except Exception:
-                    pass
 
-            # Force-expire after 30 min
-            if now - window_end > 1800:
-                logger.info(f"[SIMPLE] Force-expiring bet {bet_id}")
-                conn.execute(
-                    "UPDATE simple_up_bets SET result='expired', pnl=0, "
-                    "resolved_at=? WHERE id=?",
-                    (datetime.now(timezone.utc).isoformat(), bet_id),
-                )
-                conn.commit()
+        if resolved:
+            # Explicit resolution
+            prices = market.get("outcomePrices", "[]")
+            if isinstance(prices, str):
+                prices = json.loads(prices)
+
+            if prices and len(prices) >= 1:
+                up_final = float(prices[0])
+                if up_final >= 0.90:
+                    self._record_resolution(conn, bet_id, "WON", bet_amount, entry_price)
+                elif up_final <= 0.10:
+                    self._record_resolution(conn, bet_id, "LOST", bet_amount, entry_price)
+                else:
+                    self._record_resolution(conn, bet_id, "expired", bet_amount, entry_price)
             return
 
-        # Market explicitly resolved
-        try:
-            winning_outcome = market.get("winningOutcome", "")
-            if winning_outcome.upper() in ("UP", "YES"):
-                self._record_resolution(conn, bet_id, "WON", bet_amount, entry_price)
-            elif winning_outcome.upper() in ("DOWN", "NO"):
-                self._record_resolution(conn, bet_id, "LOST", bet_amount, entry_price)
-            else:
-                # Ambiguous — check outcome prices
-                outcomes = json.loads(market.get("outcomePrices", "[]"))
-                if len(outcomes) >= 2:
-                    up_final = float(outcomes[0])
-                    if up_final >= 0.90:
-                        self._record_resolution(conn, bet_id, "WON", bet_amount, entry_price)
-                    elif up_final <= 0.10:
-                        self._record_resolution(conn, bet_id, "LOST", bet_amount, entry_price)
-                    else:
-                        self._record_resolution(conn, bet_id, "expired", bet_amount, entry_price)
-        except Exception as e:
-            logger.warning(f"[SIMPLE] Resolution parse error for bet {bet_id}: {e}")
+        # Not resolved yet — price-based fallback after 2 min
+        if now - window_end >= 120:
+            prices = market.get("outcomePrices", "[]")
+            if isinstance(prices, str):
+                prices = json.loads(prices)
+            if prices and len(prices) >= 1:
+                up_now = float(prices[0])
+                if up_now >= 0.90:
+                    self._record_resolution(conn, bet_id, "WON", bet_amount, entry_price)
+                    return
+                elif up_now <= 0.10:
+                    self._record_resolution(conn, bet_id, "LOST", bet_amount, entry_price)
+                    return
+
+        # Force-expire after 30 min
+        if now - window_end > 1800:
+            logger.info(f"[SIMPLE] Force-expiring bet {bet_id}")
+            conn.execute(
+                "UPDATE simple_up_bets SET result='expired', pnl=0, "
+                "resolved_at=? WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), bet_id),
+            )
+            conn.commit()
 
     def _record_resolution(self, conn: sqlite3.Connection, bet_id: int,
                            result: str, bet_amount: float, entry_price: float) -> None:
         """Record the resolution of a bet."""
         if result == "WON":
             # Payout = shares * $1.00 (binary pays $1 per share on win)
-            # Profit = payout - cost = (bet_amount / entry_price) * 1.0 - bet_amount
+            # Profit = payout - cost = (bet_amount / entry_price) - bet_amount
             pnl = bet_amount * (1.0 / entry_price - 1.0)
         elif result == "LOST":
             pnl = -bet_amount
@@ -537,9 +580,11 @@ class SimpleUpBetter:
         if pnl < 0:
             self._loss_today += abs(pnl)
 
+        emoji = "+++" if result == "WON" else "---"
         logger.info(
-            f"[SIMPLE] Resolved bet {bet_id}: {result} | "
-            f"PnL: ${pnl:+.4f} | Entry: ${entry_price:.3f}"
+            f"[SIMPLE] {emoji} Bet {bet_id}: {result} | "
+            f"PnL: ${pnl:+.4f} | Entry: ${entry_price:.3f} | "
+            f"Daily: ${self._loss_today:.2f} loss"
         )
 
     # ── Stats ──
@@ -563,11 +608,16 @@ class SimpleUpBetter:
             expired = conn.execute(
                 "SELECT COUNT(*) FROM simple_up_bets WHERE result='expired'"
             ).fetchone()[0]
+            errors = conn.execute(
+                "SELECT COUNT(*) FROM simple_up_bets WHERE order_status='error'"
+            ).fetchone()[0]
             total_pnl = conn.execute(
                 "SELECT COALESCE(SUM(pnl), 0) FROM simple_up_bets WHERE pnl IS NOT NULL"
             ).fetchone()[0]
+            avg_entry = conn.execute(
+                "SELECT AVG(entry_price) FROM simple_up_bets WHERE order_status IN ('placed','paper')"
+            ).fetchone()[0]
 
-            # Today's stats
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             today_total = conn.execute(
                 "SELECT COUNT(*) FROM simple_up_bets WHERE date(created_at) = ?",
@@ -580,7 +630,7 @@ class SimpleUpBetter:
             ).fetchone()[0]
 
             # Per-asset breakdown
-            assets = {}
+            per_asset = {}
             for asset in ASSETS:
                 row = conn.execute("""
                     SELECT COUNT(*) as total,
@@ -589,21 +639,17 @@ class SimpleUpBetter:
                            COALESCE(SUM(pnl), 0) as pnl
                     FROM simple_up_bets WHERE asset=?
                 """, (asset,)).fetchone()
-                assets[asset] = {
-                    "total": row[0],
-                    "wins": row[1],
-                    "losses": row[2],
-                    "pnl": round(float(row[3]), 4),
+                per_asset[asset] = {
+                    "total": row[0], "wins": row[1],
+                    "losses": row[2], "pnl": round(float(row[3]), 4),
                 }
 
             # Recent bets
             recent = conn.execute("""
-                SELECT asset, window_ts, slug, entry_price, order_status,
-                       result, pnl, created_at
-                FROM simple_up_bets
-                ORDER BY id DESC LIMIT 20
+                SELECT asset, window_ts, slug, crowd_up_price, entry_price,
+                       order_status, result, pnl, created_at
+                FROM simple_up_bets ORDER BY id DESC LIMIT 20
             """).fetchall()
-            recent_list = [dict(r) for r in recent]
 
             conn.close()
 
@@ -611,8 +657,9 @@ class SimpleUpBetter:
             win_rate = (won / resolved * 100) if resolved > 0 else 0
 
             return {
-                "strategy": "Simple $1 UP",
-                "direction": "UP (always)",
+                "strategy": "Contrarian $1 UP (crowd says DOWN)",
+                "direction": "UP (only when UP <= $0.30)",
+                "max_entry_price": MAX_ENTRY_PRICE,
                 "bet_size": BET_AMOUNT_USD,
                 "assets": ASSETS,
                 "live_enabled": self.live_enabled,
@@ -621,14 +668,17 @@ class SimpleUpBetter:
                 "lost": lost,
                 "pending": pending,
                 "expired": expired,
+                "errors": errors,
                 "win_rate": round(win_rate, 1),
                 "total_pnl": round(float(total_pnl), 4),
+                "avg_entry_price": round(float(avg_entry or 0), 3),
                 "today_bets": today_total,
                 "today_pnl": round(float(today_pnl), 4),
+                "skips_today": self._skips_today,
                 "daily_bet_limit": DAILY_BET_LIMIT,
                 "daily_loss_cap": DAILY_LOSS_CAP,
-                "per_asset": assets,
-                "recent_bets": recent_list,
+                "per_asset": per_asset,
+                "recent_bets": [dict(r) for r in recent],
             }
         except Exception as e:
             return {"error": str(e)}
@@ -641,38 +691,67 @@ class SimpleUpBetter:
         Also periodically checks resolutions.
         """
         logger.info(
-            f"[SIMPLE] Starting: $1 UP on {ASSETS} at T+{BET_TIMING_SEC}s "
-            f"(live={'YES' if self.live_enabled else 'NO'})"
+            f"[SIMPLE] Starting: $1 UP on {ASSETS} when UP <= ${MAX_ENTRY_PRICE} "
+            f"at T+{BET_TIMING_SEC}s (live={'YES' if self.live_enabled else 'NO'})\n"
+            f"  Max daily bets: {DAILY_BET_LIMIT}\n"
+            f"  Max daily loss: ${DAILY_LOSS_CAP}\n"
+            f"  Skips when UP > ${MAX_ENTRY_PRICE} (no bet if crowd agrees with UP)"
         )
 
         last_resolution_check = 0
+        last_heartbeat = 0
 
         while True:
             try:
+                now = time.time()
                 secs_in = self._seconds_into_window()
                 window_ts = self._get_current_window_ts()
 
-                # ── Bet at T+180s ──
+                # ── Bet at T+180s (with 5s window to handle timing jitter) ──
                 if BET_TIMING_SEC <= secs_in < BET_TIMING_SEC + 5:
                     ok, reason = self._check_daily_limits()
                     if ok:
                         for asset in ASSETS:
                             if (asset, window_ts) not in self._placed_windows:
-                                self._place_bet(asset, window_ts)
+                                self._place_bet(asset, window_ts, secs_in)
                     elif secs_in < BET_TIMING_SEC + 2:
-                        # Log once per window
                         logger.info(f"[SIMPLE] Skipping: {reason}")
 
                 # ── Check resolutions every 30s ──
-                now = time.time()
                 if now - last_resolution_check > 30:
                     self._check_resolutions()
                     last_resolution_check = now
+
+                # ── Heartbeat every 5 minutes ──
+                if now - last_heartbeat > 300:
+                    open_bets = self._count_open()
+                    logger.info(
+                        f"[SIMPLE] Heartbeat | bets={self._bet_count_today} | "
+                        f"skips={self._skips_today} | open={open_bets} | "
+                        f"daily_loss=${self._loss_today:.2f}"
+                    )
+                    last_heartbeat = now
 
             except Exception as e:
                 logger.error(f"[SIMPLE] Loop error: {e}", exc_info=True)
 
             await asyncio.sleep(1)
+
+    def _count_open(self) -> int:
+        """Count open bets."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            n = conn.execute(
+                "SELECT COUNT(*) FROM simple_up_bets WHERE result IS NULL"
+            ).fetchone()[0]
+            conn.close()
+            return n
+        except Exception:
+            return 0
+
+    async def stop(self) -> None:
+        """Stop the loop (for clean shutdown)."""
+        pass  # Loop exits when bot shuts down
 
 
 # ── Standalone Entry Point ──

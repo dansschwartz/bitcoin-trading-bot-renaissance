@@ -1069,10 +1069,18 @@ async def simple_up_stats():
                     "losses": row[2], "pnl": round(float(row[3]), 4),
                 }
 
-            # Recent bets
+            errors = conn.execute(
+                "SELECT COUNT(*) FROM simple_up_bets WHERE order_status='error'"
+            ).fetchone()[0]
+            avg_entry = conn.execute(
+                "SELECT AVG(entry_price) FROM simple_up_bets "
+                "WHERE order_status IN ('placed','paper')"
+            ).fetchone()[0]
+
+            # Recent bets (include crowd prices)
             recent = conn.execute("""
-                SELECT asset, window_ts, slug, entry_price, order_status,
-                       result, pnl, created_at
+                SELECT asset, window_ts, slug, crowd_up_price, entry_price,
+                       order_status, result, pnl, created_at
                 FROM simple_up_bets ORDER BY id DESC LIMIT 20
             """).fetchall()
 
@@ -1080,8 +1088,9 @@ async def simple_up_stats():
             win_rate = (won / resolved * 100) if resolved > 0 else 0
 
             return {
-                "strategy": "Simple $1 UP",
-                "direction": "UP (always)",
+                "strategy": "Contrarian $1 UP (crowd says DOWN)",
+                "direction": "UP (only when UP <= $0.30)",
+                "max_entry_price": 0.30,
                 "bet_size": 1.00,
                 "assets": ["SOL", "DOGE"],
                 "total_bets": total,
@@ -1089,8 +1098,10 @@ async def simple_up_stats():
                 "lost": lost,
                 "pending": pending,
                 "expired": expired,
+                "errors": errors,
                 "win_rate": round(win_rate, 1),
                 "total_pnl": round(float(total_pnl), 4),
+                "avg_entry_price": round(float(avg_entry or 0), 3),
                 "today_bets": today_total,
                 "today_pnl": round(float(today_pnl), 4),
                 "per_asset": per_asset,
