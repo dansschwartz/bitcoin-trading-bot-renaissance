@@ -24,18 +24,21 @@ PHASE_1_PAIRS = [
 
 @dataclass
 class UnifiedPairView:
-    """Combined view of one trading pair across exchanges (MEXC, Binance, optional KuCoin)."""
+    """Combined view of one trading pair across exchanges (MEXC, Binance, optional KuCoin, optional Binance US)."""
     symbol: str
     mexc_book: Optional[OrderBook] = None
     binance_book: Optional[OrderBook] = None
     kucoin_book: Optional[OrderBook] = None
+    binance_us_book: Optional[OrderBook] = None
     mexc_last_update: datetime = field(default_factory=datetime.utcnow)
     binance_last_update: datetime = field(default_factory=datetime.utcnow)
     kucoin_last_update: datetime = field(default_factory=datetime.utcnow)
+    binance_us_last_update: datetime = field(default_factory=datetime.utcnow)
     # Tracking
     mexc_update_count: int = 0
     binance_update_count: int = 0
     kucoin_update_count: int = 0
+    binance_us_update_count: int = 0
 
     @property
     def is_fresh(self) -> bool:
@@ -48,6 +51,9 @@ class UnifiedPairView:
         # KuCoin freshness only required if book exists
         if self.kucoin_book is not None:
             fresh = fresh and (now - self.kucoin_last_update) < max_age
+        # Binance US freshness only required if book exists
+        if self.binance_us_book is not None:
+            fresh = fresh and (now - self.binance_us_last_update) < max_age
         return fresh
 
     @property
@@ -61,6 +67,25 @@ class UnifiedPairView:
             and self.binance_book.best_bid is not None
             and self.binance_book.best_ask is not None
         )
+
+    @property
+    def has_any_cross_exchange_books(self) -> bool:
+        """True if MEXC has a book AND at least one other exchange has a book.
+        Used by the detector to allow MEXC↔BinanceUS arb even when Binance Intl is down."""
+        if self.mexc_book is None or self.mexc_book.best_bid is None:
+            return False
+        now = datetime.utcnow()
+        max_age = timedelta(seconds=90)
+        if (now - self.mexc_last_update) >= max_age:
+            return False
+        for book, ts in [
+            (self.binance_book, self.binance_last_update),
+            (self.kucoin_book, self.kucoin_last_update),
+            (self.binance_us_book, self.binance_us_last_update),
+        ]:
+            if book is not None and book.best_bid is not None and (now - ts) < max_age:
+                return True
+        return False
 
     def get_cross_exchange_spread(self) -> Optional[dict]:
         """
@@ -135,13 +160,29 @@ class UnifiedPairView:
         if spread:
             results.append(spread)
 
-        # MEXC vs KuCoin (new)
+        # MEXC vs KuCoin
         if self.kucoin_book and self.mexc_book:
             kc_spread = self._cross_spread_between(
                 "mexc", self.mexc_book, "kucoin", self.kucoin_book
             )
             if kc_spread:
                 results.append(kc_spread)
+
+        # MEXC vs Binance US (most profitable route: 0.1 bps total cost)
+        if self.binance_us_book and self.mexc_book:
+            bus_spread = self._cross_spread_between(
+                "mexc", self.mexc_book, "binance_us", self.binance_us_book
+            )
+            if bus_spread:
+                results.append(bus_spread)
+
+        # Binance International vs Binance US
+        if self.binance_us_book and self.binance_book:
+            b_bus_spread = self._cross_spread_between(
+                "binance", self.binance_book, "binance_us", self.binance_us_book
+            )
+            if b_bus_spread:
+                results.append(b_bus_spread)
 
         return results
 
@@ -200,16 +241,20 @@ class UnifiedBookManager:
     """
 
     def __init__(self, mexc_client, binance_client, pairs: Optional[List[str]] = None,
-                 bar_aggregator=None, kucoin=None):
+                 bar_aggregator=None, kucoin=None, binance_us=None,
+                 skip_mexc_ws: bool = False):
         self.mexc = mexc_client
         self.binance = binance_client
         self.kucoin = kucoin  # Optional KuCoin spoke exchange
+        self.binance_us = binance_us  # Optional Binance US spoke exchange
         self.monitored_pairs = pairs or PHASE_1_PAIRS
         self._initial_pairs: List[str] = list(self.monitored_pairs)  # Static pairs (never demoted)
         self.pairs: Dict[str, UnifiedPairView] = {}
         self._bar_aggregator = bar_aggregator
         self._running = False
         self._validation_task = None
+        self._skip_mexc_ws = skip_mexc_ws  # When True, MEXC WS subscriptions are skipped (relay provides data)
+        self._mexc_relay_hook = None  # Optional callback: async (pair, book) -> None
 
     async def start(self):
         self._running = True
@@ -219,11 +264,12 @@ class UnifiedBookManager:
 
         tasks = []
         for pair in self.monitored_pairs:
-            tasks.append(self.mexc.subscribe_order_book(
-                pair,
-                callback=lambda book, p=pair: self._on_mexc_update(p, book),
-                depth=20,
-            ))
+            if not self._skip_mexc_ws:
+                tasks.append(self.mexc.subscribe_order_book(
+                    pair,
+                    callback=lambda book, p=pair: self._on_mexc_update(p, book),
+                    depth=20,
+                ))
             tasks.append(self.binance.subscribe_order_book(
                 pair,
                 callback=lambda book, p=pair: self._on_binance_update(p, book),
@@ -235,11 +281,19 @@ class UnifiedBookManager:
                     callback=lambda book, p=pair: self._on_kucoin_update(p, book),
                     depth=20,
                 ))
+            if self.binance_us:
+                tasks.append(self.binance_us.subscribe_order_book(
+                    pair,
+                    callback=lambda book, p=pair: self._on_binance_us_update(p, book),
+                    depth=20,
+                ))
 
         self._validation_task = asyncio.create_task(self._validation_loop())
 
         kc_tag = " + KuCoin" if self.kucoin else ""
-        logger.info(f"UnifiedBookManager started — monitoring {len(self.monitored_pairs)} pairs (MEXC + Binance{kc_tag})")
+        bus_tag = " + BinanceUS" if self.binance_us else ""
+        relay_tag = " [MEXC via relay]" if self._skip_mexc_ws else ""
+        logger.info(f"UnifiedBookManager started — monitoring {len(self.monitored_pairs)} pairs (MEXC + Binance{kc_tag}{bus_tag}){relay_tag}")
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def stop(self):
@@ -269,6 +323,15 @@ class UnifiedBookManager:
                 self.pairs[pair].binance_last_update = datetime.utcnow()
         except Exception as e:
             logger.debug(f"Binance initial fetch failed for dynamic pair {pair}: {e}")
+        # Binance US: initial REST fetch if available
+        if self.binance_us:
+            try:
+                rest_book = await self.binance_us.get_order_book(pair, depth=20)
+                if pair in self.pairs:
+                    self.pairs[pair].binance_us_book = rest_book
+                    self.pairs[pair].binance_us_last_update = datetime.utcnow()
+            except Exception as e:
+                logger.debug(f"Binance US initial fetch failed for dynamic pair {pair}: {e}")
         return True
 
     async def remove_pair(self, pair: str) -> bool:
@@ -302,6 +365,12 @@ class UnifiedBookManager:
                     )
                 except Exception:
                     pass
+            # Relay hook — broadcast to remote clients (Bangalore → US)
+            if self._mexc_relay_hook:
+                try:
+                    await self._mexc_relay_hook(pair, book)
+                except Exception:
+                    pass
         else:
             # Silently ignore — dynamic pairs may be demoted but WS subscription lingers
             pass
@@ -328,6 +397,14 @@ class UnifiedBookManager:
             self.pairs[pair].kucoin_update_count += 1
             if self.pairs[pair].kucoin_update_count == 1:
                 logger.info(f"KuCoin first book for {pair}: bid={book.best_bid} ask={book.best_ask}")
+
+    async def _on_binance_us_update(self, pair: str, book: OrderBook):
+        if pair in self.pairs:
+            self.pairs[pair].binance_us_book = book
+            self.pairs[pair].binance_us_last_update = datetime.utcnow()
+            self.pairs[pair].binance_us_update_count += 1
+            if self.pairs[pair].binance_us_update_count == 1:
+                logger.info(f"Binance US first book for {pair}: bid={book.best_bid} ask={book.best_ask}")
 
     async def _refresh_pair(self, pair: str) -> None:
         """REST-refresh a single pair on both exchanges (used by validation loop)."""
@@ -379,6 +456,7 @@ class UnifiedBookManager:
         SOCK_TIMEOUT = 5.0   # OS-level socket timeout per request
         CYCLE_INTERVAL = 15  # seconds between refresh cycles
         PAIR_DELAY = 0.10    # 100ms between pairs (rate limiting)
+        WS_FRESH_THRESHOLD = 5.0  # skip REST if WS/relay data is younger than this (seconds)
         _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
 
         _URLS = {
@@ -388,6 +466,8 @@ class UnifiedBookManager:
                         lambda p: p.replace("/", "")),
             "kucoin": ("https://api.kucoin.com/api/v1/market/orderbook/level2_20?symbol={sym}",
                        lambda p: p.replace("/", "-")),
+            "binance_us": ("https://api.binance.us/api/v3/depth?symbol={sym}&limit=20",
+                           lambda p: p.replace("/", "")),
         }
 
         def _fetch(exchange: str, pair: str) -> Optional[dict]:
@@ -423,68 +503,104 @@ class UnifiedBookManager:
                 continue
 
             t_start = _time.monotonic()
-            mexc_ok = binance_ok = kucoin_ok = 0
-            mexc_fail = binance_fail = kucoin_fail = 0
+            mexc_ws = mexc_rest = mexc_fail = 0
+            binance_ws = binance_rest = binance_fail = 0
+            kucoin_ws = kucoin_rest = kucoin_fail = 0
+            binance_us_ws = binance_us_rest = binance_us_fail = 0
             has_kucoin = self.kucoin is not None
+            has_binance_us = self.binance_us is not None
 
             for pair in pairs:
                 if not self._running:
                     break
 
                 # --- MEXC ---
-                data = _fetch("mexc", pair)
-                if data and "bids" in data:
-                    book = _parse_book("mexc", pair, data)
-                    if book and pair in self.pairs:
-                        self.pairs[pair].mexc_book = book
-                        self.pairs[pair].mexc_last_update = datetime.utcnow()
-                        self.pairs[pair].mexc_update_count += 1
-                        mexc_ok += 1
+                if pair in self.pairs:
+                    _age = (datetime.utcnow() - self.pairs[pair].mexc_last_update).total_seconds()
+                    if _age < WS_FRESH_THRESHOLD:
+                        mexc_ws += 1
                     else:
-                        mexc_fail += 1
-                else:
-                    mexc_fail += 1
+                        data = _fetch("mexc", pair)
+                        if data and "bids" in data:
+                            book = _parse_book("mexc", pair, data)
+                            if book:
+                                self.pairs[pair].mexc_book = book
+                                self.pairs[pair].mexc_last_update = datetime.utcnow()
+                                self.pairs[pair].mexc_update_count += 1
+                                mexc_rest += 1
+                            else:
+                                mexc_fail += 1
+                        else:
+                            mexc_fail += 1
 
                 # --- Binance ---
-                data = _fetch("binance", pair)
-                if data and "bids" in data:
-                    book = _parse_book("binance", pair, data)
-                    if book and pair in self.pairs:
-                        self.pairs[pair].binance_book = book
-                        self.pairs[pair].binance_last_update = datetime.utcnow()
-                        self.pairs[pair].binance_update_count += 1
-                        binance_ok += 1
+                if pair in self.pairs:
+                    _age = (datetime.utcnow() - self.pairs[pair].binance_last_update).total_seconds()
+                    if _age < WS_FRESH_THRESHOLD:
+                        binance_ws += 1
                     else:
-                        binance_fail += 1
-                else:
-                    binance_fail += 1
+                        data = _fetch("binance", pair)
+                        if data and "bids" in data:
+                            book = _parse_book("binance", pair, data)
+                            if book:
+                                self.pairs[pair].binance_book = book
+                                self.pairs[pair].binance_last_update = datetime.utcnow()
+                                self.pairs[pair].binance_update_count += 1
+                                binance_rest += 1
+                            else:
+                                binance_fail += 1
+                        else:
+                            binance_fail += 1
 
                 # --- KuCoin ---
-                if has_kucoin:
-                    data = _fetch("kucoin", pair)
-                    if data and data.get("code") == "200000" and "data" in data:
-                        try:
-                            rest_book = self.kucoin._parse_rest_book(pair, data["data"])
-                            if pair in self.pairs:
+                if has_kucoin and pair in self.pairs:
+                    _age = (datetime.utcnow() - self.pairs[pair].kucoin_last_update).total_seconds()
+                    if _age < WS_FRESH_THRESHOLD:
+                        kucoin_ws += 1
+                    else:
+                        data = _fetch("kucoin", pair)
+                        if data and data.get("code") == "200000" and "data" in data:
+                            try:
+                                rest_book = self.kucoin._parse_rest_book(pair, data["data"])
                                 self.pairs[pair].kucoin_book = rest_book
                                 self.pairs[pair].kucoin_last_update = datetime.utcnow()
                                 self.pairs[pair].kucoin_update_count += 1
-                                kucoin_ok += 1
-                        except Exception:
+                                kucoin_rest += 1
+                            except Exception:
+                                kucoin_fail += 1
+                        else:
                             kucoin_fail += 1
+
+                # --- Binance US ---
+                if has_binance_us and pair in self.pairs:
+                    _age = (datetime.utcnow() - self.pairs[pair].binance_us_last_update).total_seconds()
+                    if _age < WS_FRESH_THRESHOLD:
+                        binance_us_ws += 1
                     else:
-                        kucoin_fail += 1
+                        data = _fetch("binance_us", pair)
+                        if data and "bids" in data:
+                            book = _parse_book("binance_us", pair, data)
+                            if book:
+                                self.pairs[pair].binance_us_book = book
+                                self.pairs[pair].binance_us_last_update = datetime.utcnow()
+                                self.pairs[pair].binance_us_update_count += 1
+                                binance_us_rest += 1
+                            else:
+                                binance_us_fail += 1
+                        else:
+                            binance_us_fail += 1
 
                 _time.sleep(PAIR_DELAY)
 
             elapsed = _time.monotonic() - t_start
             tradeable = sum(1 for v in self.pairs.values() if v.is_tradeable)
-            kc_str = f" | KuCoin {kucoin_ok}ok/{kucoin_fail}fail" if has_kucoin else ""
+            kc_str = f" | KuCoin {kucoin_ws}ws/{kucoin_rest}rest/{kucoin_fail}fail" if has_kucoin else ""
+            bus_str = f" | BinanceUS {binance_us_ws}ws/{binance_us_rest}rest/{binance_us_fail}fail" if has_binance_us else ""
             logger.info(
                 f"Book refresh: {len(pairs)} pairs | "
-                f"MEXC {mexc_ok}ok/{mexc_fail}fail | "
-                f"Binance {binance_ok}ok/{binance_fail}fail"
-                f"{kc_str} | "
+                f"MEXC {mexc_ws}ws/{mexc_rest}rest/{mexc_fail}fail | "
+                f"Binance {binance_ws}ws/{binance_rest}rest/{binance_fail}fail"
+                f"{kc_str}{bus_str} | "
                 f"{tradeable} tradeable | {elapsed:.1f}s"
             )
 
@@ -508,7 +624,7 @@ class UnifiedBookManager:
     def get_status(self) -> dict:
         fresh = sum(1 for v in self.pairs.values() if v.is_tradeable)
         total_updates = sum(
-            v.mexc_update_count + v.binance_update_count + v.kucoin_update_count
+            v.mexc_update_count + v.binance_update_count + v.kucoin_update_count + v.binance_us_update_count
             for v in self.pairs.values()
         )
         return {
@@ -516,15 +632,18 @@ class UnifiedBookManager:
             "tradeable_pairs": fresh,
             "total_updates": total_updates,
             "kucoin_enabled": self.kucoin is not None,
+            "binance_us_enabled": self.binance_us is not None,
             "pairs": {
                 p: {
                     "tradeable": v.is_tradeable,
                     "mexc_updates": v.mexc_update_count,
                     "binance_updates": v.binance_update_count,
                     "kucoin_updates": v.kucoin_update_count,
+                    "binance_us_updates": v.binance_us_update_count,
                     "mexc_spread": float(v.mexc_book.spread_bps) if v.mexc_book and v.mexc_book.spread_bps else None,
                     "binance_spread": float(v.binance_book.spread_bps) if v.binance_book and v.binance_book.spread_bps else None,
                     "kucoin_spread": float(v.kucoin_book.spread_bps) if v.kucoin_book and v.kucoin_book.spread_bps else None,
+                    "binance_us_spread": float(v.binance_us_book.spread_bps) if v.binance_us_book and v.binance_us_book.spread_bps else None,
                 }
                 for p, v in self.pairs.items()
             }
