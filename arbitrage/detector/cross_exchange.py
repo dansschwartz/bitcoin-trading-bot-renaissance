@@ -109,7 +109,7 @@ class CrossExchangeDetector:
             for pair in self.books.pairs:
                 view = self.books.pairs[pair]
 
-                if not view.is_tradeable:
+                if not view.has_any_cross_exchange_books:
                     continue
 
                 # Layer 1: Contract/blocklist verification (cached, runs once per token)
@@ -130,14 +130,31 @@ class CrossExchangeDetector:
                             self._price_sanity_skips += 1
                             continue
 
-                    # Calculate costs
-                    cost_est = self.costs.estimate_arbitrage_cost(
-                        symbol=pair,
-                        buy_exchange=spread_info['buy_exchange'],
-                        sell_exchange=spread_info['sell_exchange'],
-                        buy_price=spread_info['buy_price'],
-                        sell_price=spread_info['sell_price'],
-                    )
+                    # Calculate costs for MEXC↔BinanceUS route
+                    # IOC-IOC: MEXC taker 5bps + BinUS taker 1bps + timing 0.1bps = 6.1bps
+                    # (LIMIT_MAKER not viable from US — MEXC WS geo-blocked, REST 15s stale)
+                    _exchanges = {spread_info['buy_exchange'], spread_info['sell_exchange']}
+                    if _exchanges == {'mexc', 'binance_us'}:
+                        from ..costs.model import CostEstimate
+                        _mexc_fee = Decimal('5.0')  # MEXC taker
+                        _bus_fee = Decimal('1.0')    # BinUS taker
+                        cost_est = CostEstimate(
+                            total_cost_bps=Decimal('6.1'),
+                            buy_fee_bps=(_mexc_fee if spread_info['buy_exchange'] == 'mexc' else _bus_fee),
+                            sell_fee_bps=(_mexc_fee if spread_info['sell_exchange'] == 'mexc' else _bus_fee),
+                            buy_slippage_bps=Decimal('0'), sell_slippage_bps=Decimal('0'),
+                            timing_cost_bps=Decimal('0.1'),
+                            taker_maker_cost_bps=Decimal('1.1'),
+                            taker_taker_cost_bps=Decimal('6.1'),
+                        )
+                    else:
+                        cost_est = self.costs.estimate_arbitrage_cost(
+                            symbol=pair,
+                            buy_exchange=spread_info['buy_exchange'],
+                            sell_exchange=spread_info['sell_exchange'],
+                            buy_price=spread_info['buy_price'],
+                            sell_price=spread_info['sell_price'],
+                        )
 
                     net_spread = spread_info['gross_spread_bps'] - cost_est.total_cost_bps
 

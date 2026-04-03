@@ -768,8 +768,8 @@ class MEXCClient(ExchangeClient):
 
         # Build order type string
         if order.order_type == OrderType.LIMIT_MAKER:
-            order_type = "LIMIT"
-            tif = "GTX"  # Post-only → 0% maker fee
+            order_type = "LIMIT_MAKER"  # MEXC native post-only type (rejects if would take)
+            tif = None  # LIMIT_MAKER doesn't use timeInForce on MEXC
         elif order.order_type == OrderType.MARKET:
             order_type = "MARKET"
             tif = None
@@ -905,8 +905,7 @@ class MEXCClient(ExchangeClient):
         params = {}
 
         if order.order_type == OrderType.LIMIT_MAKER:
-            order_type_str = 'limit'
-            params['timeInForce'] = 'GTX'
+            order_type_str = 'LIMIT_MAKER'  # ccxt maps this to MEXC's native post-only type
         elif order.order_type == OrderType.MARKET:
             order_type_str = 'market'
         else:

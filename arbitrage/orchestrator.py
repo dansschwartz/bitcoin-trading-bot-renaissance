@@ -12,6 +12,8 @@ import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import signal as sig
 import sys
 import time
@@ -29,6 +31,7 @@ from arbitrage.exchanges.mexc_client import MEXCClient
 from arbitrage.exchanges.binance_client import BinanceClient
 from arbitrage.exchanges.bybit_client import BybitClient
 from arbitrage.exchanges.kucoin_client import KuCoinClient
+from arbitrage.exchanges.binance_us_client import BinanceUSClient
 from arbitrage.orderbook.unified_book import UnifiedBookManager
 from arbitrage.costs.model import ArbitrageCostModel
 from arbitrage.detector.cross_exchange import CrossExchangeDetector
@@ -41,6 +44,7 @@ from arbitrage.pairs.pairs_arb import PairsArbitrage
 from arbitrage.triangular.triangle_arb import TriangularArbitrage
 from arbitrage.risk.arb_risk import ArbitrageRiskEngine
 from arbitrage.inventory.manager import InventoryManager
+from arbitrage.inventory.rebalancer import SpotRebalancer
 from arbitrage.tracking.performance import PerformanceTracker
 from arbitrage.exchanges.base import Trade
 from arbitrage.market_maker.hedged_mm import HedgedMarketMaker
@@ -57,6 +61,8 @@ from arbitrage.pairs.discovery import MexcPairDiscovery
 from arbitrage.pairs.pair_manager import ExpandedPairManager
 from arbitrage.capital_allocator import CapitalAllocator
 from arbitrage.feeds.unified_price_feed import BinanceUnifiedPriceFeed, HybridTickerProvider
+from arbitrage.relay.server import OrderBookRelayServer
+from arbitrage.relay.client import OrderBookRelayClient
 
 logger = logging.getLogger("arb.orchestrator")
 
@@ -112,17 +118,54 @@ class ArbitrageOrchestrator:
         if self.kucoin:
             logger.info("KuCoin spoke exchange ENABLED")
 
+        # Binance US exchange client (spoke, for cross-exchange arb — 0% maker, 0.01% taker)
+        binance_us_enabled = self.config.get('exchanges', {}).get('binance_us_enabled', False)
+        self.binance_us = BinanceUSClient(
+            api_key=os.getenv('BINANCE_US_API_KEY', ''),
+            api_secret=os.getenv('BINANCE_US_API_SECRET', ''),
+            paper_trading=paper,
+        ) if binance_us_enabled else None
+        if self.binance_us:
+            logger.info("Binance US spoke exchange ENABLED (Tier 0: 0% maker, 0.01% taker)")
+
         # BarAggregator for trade/book data
         self.bar_aggregator = self._init_bar_aggregator()
 
         # Core modules — combine phase_1 (large-cap) + phase_2 (mid-cap) pairs
         pairs_cfg = self.config.get('pairs', {})
         pairs = pairs_cfg.get('phase_1', []) + pairs_cfg.get('phase_2', [])
+
+        # Relay client replaces MEXC WS on the US side
+        relay_client_cfg = self.config.get('relay_client', {})
+        skip_mexc_ws = relay_client_cfg.get('enabled', False)
+
         self.book_manager = UnifiedBookManager(
             self.mexc, self.binance, pairs=pairs,
             bar_aggregator=self.bar_aggregator,
             kucoin=self.kucoin,
+            binance_us=self.binance_us,
+            skip_mexc_ws=skip_mexc_ws,
         )
+
+        # Order book relay: Bangalore server / US client
+        relay_server_cfg = self.config.get('relay_server', {})
+        self.relay_server = None
+        if relay_server_cfg.get('enabled', False):
+            self.relay_server = OrderBookRelayServer(
+                host=relay_server_cfg.get('host', '0.0.0.0'),
+                port=relay_server_cfg.get('port', 8765),
+                auth_token=os.getenv('RELAY_AUTH_TOKEN', ''),
+            )
+
+        self.relay_client = None
+        if relay_client_cfg.get('enabled', False):
+            self.relay_client = OrderBookRelayClient(
+                relay_url=relay_client_cfg['url'],
+                auth_token=os.getenv('RELAY_AUTH_TOKEN', ''),
+                pairs=pairs,
+                book_manager=self.book_manager,
+                reconnect_max_backoff=relay_client_cfg.get('reconnect_max_backoff_seconds', 30.0),
+            )
         self.cost_model = ArbitrageCostModel()
         self.risk_engine = ArbitrageRiskEngine(self.config.get('risk', {}))
 
@@ -133,6 +176,7 @@ class ArbitrageOrchestrator:
         self.contract_verifier = ContractVerifier(
             self.mexc, self.binance,
             kucoin_client=self.kucoin,
+            binance_us_client=self.binance_us,
             config=self.config,
         )
 
@@ -144,6 +188,8 @@ class ArbitrageOrchestrator:
         self.binance.volume_limiter = self.volume_limiter
         if self.kucoin:
             self.kucoin.volume_limiter = self.volume_limiter
+        if self.binance_us:
+            self.binance_us.volume_limiter = self.volume_limiter
 
         # Dynamic pair discovery for cross-exchange arb
         self.pair_discovery = PairDiscoveryEngine(
@@ -163,11 +209,18 @@ class ArbitrageOrchestrator:
         self.executor = ArbitrageExecutor(
             self.mexc, self.binance, self.cost_model, self.risk_engine,
             config=self.config, book_manager=self.book_manager,
-            kucoin_client=self.kucoin,
+            kucoin_client=self.kucoin, binance_us_client=self.binance_us,
         )
         # Support modules (tracker must be created before funding_arb and triangular_arb)
         self.inventory = InventoryManager(self.mexc, self.binance)
         self.tracker = PerformanceTracker()
+
+        # Spot rebalancer — keeps wallets funded for cross-exchange arb
+        rebal_cfg = self.config.get('auto_rebalance', {})
+        rebal_clients = {"mexc": self.mexc}
+        if self.binance_us:
+            rebal_clients["binance_us"] = self.binance_us
+        self.rebalancer = SpotRebalancer(clients=rebal_clients, config=rebal_cfg)
 
         # Hedged Market Maker
         mm_cfg = self.config.get("hedged_market_maker", {})
@@ -368,10 +421,12 @@ class ArbitrageOrchestrator:
             connect_tasks.append(self.bybit.connect())
         if self.kucoin:
             connect_tasks.append(self.kucoin.connect())
+        if self.binance_us:
+            connect_tasks.append(self.binance_us.connect())
         results = await asyncio.gather(*connect_tasks, return_exceptions=True)
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                names = ["mexc", "binance"] + (["bybit"] if self.bybit else []) + (["kucoin"] if self.kucoin else [])
+                names = ["mexc", "binance"] + (["bybit"] if self.bybit else []) + (["kucoin"] if self.kucoin else []) + (["binance_us"] if self.binance_us else [])
                 logger.error(f"Exchange {names[i]} connect failed: {result}")
         logger.info(f"Exchange connections complete ({len(connect_tasks)} exchanges)")
 
@@ -419,6 +474,12 @@ class ArbitrageOrchestrator:
             except Exception as e:
                 logger.warning(f"Expanded pair manager init failed: {e}")
 
+        # Start relay server (Bangalore side) — must happen before book_manager.start()
+        if self.relay_server:
+            await self.relay_server.start()
+            self.book_manager._mexc_relay_hook = self.relay_server.broadcast_book
+            logger.info("Relay server started — broadcasting MEXC books to remote clients")
+
         # Start all async tasks
         cross_exchange_enabled = self.config.get('cross_exchange', {}).get('enabled', True)
         if not cross_exchange_enabled:
@@ -453,6 +514,7 @@ class ArbitrageOrchestrator:
             ),
             asyncio.create_task(self._run_monitoring(), name="monitoring"),
             asyncio.create_task(self._run_inventory_checks(), name="inventory"),
+            asyncio.create_task(self._run_rebalancer(), name="rebalancer"),
             asyncio.create_task(self._subscribe_trade_feeds(), name="trade_feeds"),
             asyncio.create_task(self._run_fee_monitor(), name="fee_monitor"),
             asyncio.create_task(self._run_temporal_refresh(), name="temporal_refresh"),
@@ -467,6 +529,10 @@ class ArbitrageOrchestrator:
                 [asyncio.create_task(self._run_hedged_mm(), name="hedged_mm")]
                 if self.hedged_mm else []
             ),
+            *(
+                [asyncio.create_task(self._run_relay_client(), name="relay_client")]
+                if self.relay_client else []
+            ),
         ]
 
         logger.info(f"All {len(tasks)} subsystems launched")
@@ -480,6 +546,10 @@ class ArbitrageOrchestrator:
 
     async def stop(self):
         self._running = False
+        if self.relay_client:
+            await self.relay_client.stop()
+        if self.relay_server:
+            await self.relay_server.stop()
         await self.price_feed.stop()
         self.cross_exchange_detector.stop()
         self.pair_discovery.stop()
@@ -497,6 +567,8 @@ class ArbitrageOrchestrator:
             disconnect_tasks.append(self.bybit.disconnect())
         if self.kucoin:
             disconnect_tasks.append(self.kucoin.disconnect())
+        if self.binance_us:
+            disconnect_tasks.append(self.binance_us.disconnect())
         await asyncio.gather(*disconnect_tasks, return_exceptions=True)
         logger.info("Arbitrage engine stopped")
         self._log_final_summary()
@@ -554,6 +626,13 @@ class ArbitrageOrchestrator:
 
                 # Execute
                 result = await self.executor.execute_arbitrage(signal)
+
+                # Track inventory misses and successful cross-exchange trades
+                # for dynamic seed promotion/demotion
+                if result.status == "insufficient_balance":
+                    self.rebalancer.record_inventory_miss(signal.symbol)
+                if result.status == "filled" and signal.signal_type == "cross_exchange":
+                    self.rebalancer.record_trade(signal.symbol)
 
                 # Track
                 self.tracker.record_trade(result)
@@ -767,6 +846,29 @@ class ArbitrageOrchestrator:
                 logger.debug(f"Inventory check error: {e}")
             await asyncio.sleep(interval)
 
+    async def _run_rebalancer(self):
+        """Periodic spot rebalancing — keeps wallets funded for arb."""
+        rebal_cfg = self.config.get('auto_rebalance', {})
+        if not rebal_cfg.get('enabled', False):
+            logger.info("Auto-rebalancer disabled")
+            return
+
+        # Wait for books + balances to stabilize before first rebalance
+        await asyncio.sleep(60)
+        interval = rebal_cfg.get('check_interval_minutes', 30) * 60
+
+        while self._running:
+            try:
+                trades = await self.rebalancer.check_and_rebalance()
+                if trades:
+                    logger.info(
+                        f"REBALANCER: executed {len(trades)} trades | "
+                        f"total: ${sum(float(t.usdt_value) for t in trades):.2f}"
+                    )
+            except Exception as e:
+                logger.error(f"Rebalancer error: {e}")
+            await asyncio.sleep(interval)
+
     async def _run_fee_monitor(self):
         """Periodically verify MEXC maker fee is still 0%.
 
@@ -838,10 +940,13 @@ class ArbitrageOrchestrator:
             try:
                 await self.mexc.subscribe_trades(pair, self._on_trade)
                 await self.binance.subscribe_trades(pair, self._on_trade)
+                if self.binance_us:
+                    await self.binance_us.subscribe_trades(pair, self._on_trade)
             except Exception as e:
                 logger.debug(f"Trade subscribe error for {pair}: {e}")
 
-        logger.info(f"Trade feeds subscribed for {len(pairs)} pairs on both exchanges")
+        n_exchanges = 2 + (1 if self.binance_us else 0)
+        logger.info(f"Trade feeds subscribed for {len(pairs)} pairs on {n_exchanges} exchanges")
 
         # Keep task alive
         while self._running:
@@ -948,6 +1053,39 @@ class ArbitrageOrchestrator:
                 )
         except Exception:
             pass
+        # Dynamic seed status
+        try:
+            ds_status = self.rebalancer.get_dynamic_seeds_status()
+            if ds_status['dynamic_seed_count'] > 0 or ds_status['pending_promotions']:
+                seed_names = ', '.join(ds_status['seeds'].keys()) or 'none'
+                pending = ', '.join(f"{b}({n})" for b, n in ds_status['pending_promotions'].items()) or 'none'
+                logger.info(
+                    f"  Dynamic seeds: {ds_status['dynamic_seed_count']} active [{seed_names}] | "
+                    f"pending: {pending}"
+                )
+        except Exception:
+            pass
+        # Relay status
+        if self.relay_server:
+            try:
+                rs = self.relay_server.get_status()
+                logger.info(
+                    f"  Relay server: {rs['connected_clients']} clients | "
+                    f"{rs['messages_sent']} msgs sent | seq={rs['sequence']}"
+                )
+            except Exception:
+                pass
+        if self.relay_client:
+            try:
+                rc = self.relay_client.get_status()
+                age_str = f"{rc['last_message_age_seconds']:.1f}s" if rc['last_message_age_seconds'] is not None else "never"
+                logger.info(
+                    f"  Relay client: {'CONNECTED' if rc['connected'] else 'DISCONNECTED'} | "
+                    f"{rc['messages_received']} msgs | last={age_str} | "
+                    f"gaps={rc['sequence_gaps']} | reconnects={rc['reconnect_count']}"
+                )
+            except Exception:
+                pass
         # Capital allocation status
         try:
             cap_summary = self.capital_allocator.get_summary()
@@ -1057,6 +1195,18 @@ class ArbitrageOrchestrator:
             ticker_provider_stats = self.ticker_provider.get_stats()
         except Exception:
             ticker_provider_stats = {}
+        try:
+            dynamic_seeds_stats = self.rebalancer.get_dynamic_seeds_status()
+        except Exception:
+            dynamic_seeds_stats = {}
+        try:
+            relay_server_stats = self.relay_server.get_status() if self.relay_server else {}
+        except Exception:
+            relay_server_stats = {}
+        try:
+            relay_client_stats = self.relay_client.get_status() if self.relay_client else {}
+        except Exception:
+            relay_client_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -1083,6 +1233,9 @@ class ArbitrageOrchestrator:
             "capital_allocation": capital_alloc_stats,
             "price_feed": price_feed_stats,
             "ticker_provider": ticker_provider_stats,
+            "dynamic_seeds": dynamic_seeds_stats,
+            "relay_server": relay_server_stats,
+            "relay_client": relay_client_stats,
         }
 
     def _log_final_summary(self):
@@ -1102,6 +1255,17 @@ class ArbitrageOrchestrator:
                 logger.info(f"  {strategy}: {stats['trades']} trades, ${stats['profit_usd']:.2f} profit")
         logger.info("=" * 60)
 
+
+    async def _run_relay_client(self):
+        """Run the order book relay client (receives MEXC books from Bangalore)."""
+        await asyncio.sleep(3)  # Wait for book manager to initialize
+        logger.info(f"Starting relay client → {self.relay_client._url}")
+        try:
+            await self.relay_client.start()
+        except asyncio.CancelledError:
+            logger.info("Relay client task cancelled")
+        except Exception as e:
+            logger.error(f"Relay client fatal error: {e}")
 
     async def _run_hedged_mm(self):
         """Run hedged market maker strategy."""

@@ -129,14 +129,14 @@ class TriangularExecutor:
         )
         min_depth = min(leg_depths) if leg_depths and all(d > 0 for d in leg_depths) else 0.0
 
-        # Determine tier for logging
+        # Determine tier for logging — use min_trade_usd as floor, not hardcoded $20
         if optimal_size >= 5000:
             tier = "LARGE"
         elif optimal_size >= 1500:
             tier = "FULL"
         elif optimal_size >= 500:
             tier = "MEDIUM"
-        elif optimal_size >= 20:
+        elif optimal_size > 0:
             tier = "SMALL"
         else:
             tier = "SKIP"

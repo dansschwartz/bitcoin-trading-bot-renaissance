@@ -1115,6 +1115,9 @@ class TriangularArbitrage:
                 return
 
             skip_currencies = {'USDT', 'USDC', 'USD', 'BUSD', 'DAI', 'TUSD', 'FDUSD'}
+            # Also skip assets pre-positioned for cross-exchange arb
+            cross_arb_reserves = set(self.config.get('inventory_cleanup_skip', []))
+            skip_currencies |= cross_arb_reserves
             to_sell = []
 
             for currency, bal in balances.items():

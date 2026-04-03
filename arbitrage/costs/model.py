@@ -63,6 +63,16 @@ class ArbitrageCostModel:
                 "taker": Decimal('0.0006'),
             },
         },
+        "binance_us": {
+            "spot": {
+                "maker": Decimal('0.0000'),   # 0.00% Tier 0
+                "taker": Decimal('0.0001'),   # 0.01% Tier 0
+            },
+            "futures": {
+                "maker": Decimal('0.0000'),
+                "taker": Decimal('0.0001'),
+            },
+        },
     }
 
     def __init__(self):
@@ -146,9 +156,10 @@ class ArbitrageCostModel:
         # small slippage from book depth). These are overridden once we have
         # 10+ execution samples via the learning mechanism above.
         base_slippage = {
-            "mexc": Decimal('0.0'),    # LIMIT_MAKER: zero slippage
+            "mexc": Decimal('0.0'),        # LIMIT_MAKER: zero slippage
             "binance": Decimal('0.5'),
             "kucoin": Decimal('0.5'),
+            "binance_us": Decimal('0.0'),  # LIMIT_MAKER: zero slippage
         }
         return base_slippage.get(exchange, Decimal('1.0'))
 

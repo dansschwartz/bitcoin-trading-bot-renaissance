@@ -26,6 +26,15 @@ logger = logging.getLogger("arb.safety")
 # Native chain tokens that have no contract address
 NATIVE_TOKENS: Set[str] = {"BTC", "ETH", "SOL", "DOT", "ATOM", "XRP", "ADA", "ALGO", "NEAR"}
 
+# Well-known tokens that are safe for on-exchange-only trading (no cross-chain transfers).
+# Contract addresses may differ across exchanges due to network routing, proxy contracts,
+# or formatting — but these are the same tokens. Price sanity check still applies.
+TRUSTED_TOKENS: Set[str] = {
+    "FET", "UNI", "LINK", "ZEN", "AAVE", "SHIB", "VET", "IOTA", "PEPE",
+    "DOGE", "BNB", "HBAR", "AVAX", "BCH", "LTC", "SUI", "XLM", "POL",
+    "TFUEL", "ICP", "ZEC", "NEAR",
+}
+
 # APPEND-ONLY — tokens permanently blocked due to insufficient orderbook depth.
 # Paper trader fills at theoretical prices but real execution would fail.
 # NEVER remove entries from this set. Only add new ones.
@@ -46,15 +55,19 @@ class ContractVerifier:
         mexc_client,
         binance_client,
         kucoin_client=None,
+        binance_us_client=None,
         config: Optional[dict] = None,
         cache_ttl_hours: int = 24,
     ):
         self.mexc = mexc_client
         self.binance = binance_client
         self.kucoin = kucoin_client
+        self.binance_us = binance_us_client
         self._clients: Dict[str, object] = {"mexc": mexc_client, "binance": binance_client}
         if kucoin_client:
             self._clients["kucoin"] = kucoin_client
+        if binance_us_client:
+            self._clients["binance_us"] = binance_us_client
         self.cache_ttl = cache_ttl_hours * 3600
         self._config = config or {}
 
@@ -99,6 +112,11 @@ class ContractVerifier:
         if self.kucoin:
             kucoin_data = await self._fetch_exchange_currencies("kucoin")
             self._currency_cache["kucoin"] = kucoin_data
+
+        # Binance US (optional)
+        if self.binance_us:
+            binance_us_data = await self._fetch_exchange_currencies("binance_us")
+            self._currency_cache["binance_us"] = binance_us_data
 
         self._cache_timestamp = time.time()
         self._stats["cache_refreshes"] += 1
@@ -178,6 +196,12 @@ class ContractVerifier:
         - All shared networks have different contract addresses
         """
         base = symbol.split("/")[0] if "/" in symbol else symbol
+
+        # Trusted tokens: known to be the same on all major exchanges.
+        # For on-exchange-only arb (no transfers), contract comparison is unnecessary.
+        # Price sanity check still catches truly different tokens.
+        if base in TRUSTED_TOKENS or base in NATIVE_TOKENS:
+            return True
 
         # Collect exchange data for this token
         exchange_nets: Dict[str, Dict] = {}
@@ -408,5 +432,6 @@ class ContractVerifier:
             "mexc_tokens_cached": len(self._currency_cache.get("mexc", {})),
             "binance_tokens_cached": len(self._currency_cache.get("binance", {})),
             "kucoin_tokens_cached": len(self._currency_cache.get("kucoin", {})),
+            "binance_us_tokens_cached": len(self._currency_cache.get("binance_us", {})),
             **self._stats,
         }
