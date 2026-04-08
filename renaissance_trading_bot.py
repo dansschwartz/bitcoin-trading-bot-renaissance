@@ -80,7 +80,7 @@ SIMPLE_UP_AVAILABLE = False
 # NEW: 0x8dxd-style spread capture bot
 try:
     from polymarket_rtds import PolymarketRTDS
-    from polymarket_spread_capture import SpreadCaptureEngine
+    from polymarket_spread_capture import SpreadCaptureEngine, ASSETS as SC_ASSETS
     SPREAD_CAPTURE_AVAILABLE = True
 except ImportError as _sc_err:
     SPREAD_CAPTURE_AVAILABLE = False
@@ -996,8 +996,8 @@ class RenaissanceTradingBot:
                 self.rtds = PolymarketRTDS()
                 self.spread_capture = SpreadCaptureEngine(rtds=self.rtds)
                 self.logger.info(
-                    "Spread Capture Engine: initialized "
-                    "(0x8dxd strategy — BTC+ETH, 5m+15m, CLOB limit orders)"
+                    f"Spread Capture Engine: initialized "
+                    f"(0x8dxd strategy — {len(SC_ASSETS)} assets, 5m+15m, CLOB limit orders)"
                 )
             except Exception as _sc_err:
                 self.logger.warning(f"Spread Capture init failed: {_sc_err}")
@@ -7297,7 +7297,7 @@ class RenaissanceTradingBot:
         if self.rtds and self.spread_capture:
             self.logger.info("Launching RTDS WebSocket (Binance + Chainlink prices)...")
             self._track_task(self.rtds.connect())
-            self.logger.info("Launching Spread Capture Engine (0x8dxd strategy, BTC+ETH 5m+15m)...")
+            self.logger.info(f"Launching Spread Capture Engine (0x8dxd strategy, {len(SC_ASSETS)} assets, 5m+15m)...")
             sc_task = self._track_task(self.spread_capture.run())
             def _sc_done(t, log=self.logger):
                 if t.cancelled():

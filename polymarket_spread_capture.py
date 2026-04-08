@@ -381,7 +381,8 @@ class SpreadCaptureEngine:
                         elapsed = now - window_start
 
                         # New window? Start Phase 1
-                        if slug not in self._positions and elapsed < PHASE1_ENTRY_DELAY + 10:
+                        # Allow up to 60s for entry (14 markets x ~2s each = ~28s)
+                        if slug not in self._positions and elapsed < 60:
                             if elapsed >= PHASE1_ENTRY_DELAY:
                                 # Global exposure cap
                                 if global_exposure >= MAX_GLOBAL_EXPOSURE:
@@ -478,7 +479,7 @@ class SpreadCaptureEngine:
         # Fetch market data (token IDs)
         market_data = self._fetch_market(slug)
         if not market_data:
-            logger.debug(f"[SC] {asset} {timeframe}: market {slug} not found")
+            logger.info(f"[SC] {asset} {timeframe}: market {slug} not found (Gamma returned empty)")
             return
 
         # Determine favorite side from Chainlink momentum
@@ -840,7 +841,7 @@ class SpreadCaptureEngine:
 
             return None
         except Exception as e:
-            logger.debug(f"Market fetch error: {e}")
+            logger.warning(f"[SC] Market fetch error for {slug}: {e}")
             return None
 
     def _get_clob_prices(self, pos: WindowPosition) -> Tuple[Optional[float], Optional[float]]:
