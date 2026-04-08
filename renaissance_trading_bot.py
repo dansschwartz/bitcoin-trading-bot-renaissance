@@ -7298,7 +7298,15 @@ class RenaissanceTradingBot:
             self.logger.info("Launching RTDS WebSocket (Binance + Chainlink prices)...")
             self._track_task(self.rtds.connect())
             self.logger.info("Launching Spread Capture Engine (0x8dxd strategy, BTC+ETH 5m+15m)...")
-            self._track_task(self.spread_capture.run())
+            sc_task = self._track_task(self.spread_capture.run())
+            def _sc_done(t, log=self.logger):
+                if t.cancelled():
+                    log.warning("Spread capture task was CANCELLED")
+                elif t.exception():
+                    log.error(f"Spread capture task DIED: {t.exception()!r}", exc_info=t.exception())
+                else:
+                    log.info("Spread capture task finished normally")
+            sc_task.add_done_callback(_sc_done)
 
         # ── Module D: Start Liquidation Cascade Detector ──
         if self.liquidation_detector:

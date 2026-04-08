@@ -74,7 +74,12 @@ class PolymarketRTDS:
 
         while self._running:
             try:
-                async with websockets.connect(RTDS_URL, ping_interval=5) as ws:
+                async with websockets.connect(
+                    RTDS_URL,
+                    ping_interval=30,
+                    ping_timeout=10,
+                    open_timeout=15,
+                ) as ws:
                     self._ws = ws
                     self._connected = True
                     logger.info(f"RTDS connected to {RTDS_URL}")
