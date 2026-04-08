@@ -72,6 +72,12 @@ MIN_REBUY_INTERVAL = 10.0        # Minimum seconds between underdog buys
 REBUY_PRICE_IMPROVEMENT = 0.02   # Only rebuy if price improved by $0.02
 MAX_FILLS_PER_WINDOW = 15        # Max Phase 2 fills per window
 
+# MANDATORY HEDGE DEADLINE — never stay naked past this point
+# If Phase 2 hasn't bought the underdog by this time, buy at market price.
+# This guarantees we always have both sides by the deadline.
+MANDATORY_HEDGE_5M = 60          # 1 minute into a 5-min window
+MANDATORY_HEDGE_15M = 120        # 2 minutes into a 15-min window
+
 # Phase 3: Sell/rotation — DISABLED for first 50 windows per spec
 SELL_ENABLED = False             # Start disabled, enable after first 50 windows
 SELL_LOSS_THRESHOLD = 0.70       # Sell losing side if it drops below this % of entry
@@ -458,6 +464,29 @@ class SpreadCaptureEngine:
                             await self._accumulate_underdog(
                                 pos, "NO", no_price, elapsed, cl_direction
                             )
+
+                    # -- MANDATORY HEDGE DEADLINE --
+                    # If by the deadline we still only have ONE side,
+                    # buy the other side at market price. Never be naked.
+                    hedge_deadline = MANDATORY_HEDGE_5M if pos.timeframe == "5m" else MANDATORY_HEDGE_15M
+                    has_both = pos.net_yes_shares > 0 and pos.net_no_shares > 0
+                    if elapsed >= hedge_deadline and not has_both:
+                        underdog_side = "NO" if pos.favorite_side == "YES" else "YES"
+                        hedge_price = no_price if underdog_side == "NO" else yes_price
+                        if hedge_price and hedge_price > 0:
+                            # Match share count of favorite side
+                            fav_shares = pos.net_yes_shares if pos.favorite_side == "YES" else pos.net_no_shares
+                            hedge_shares = max(fav_shares * TARGET_BALANCE_RATIO, 1.0)
+                            cost = hedge_shares * hedge_price
+                            if pos.total_cost + cost <= MAX_EXPOSURE_PER_WINDOW:
+                                await self._place_order(pos, underdog_side, hedge_price, hedge_shares, phase=2)
+                                pos.phase2_triggered = True
+                                logger.info(
+                                    f"[SC] *** MANDATORY HEDGE: {pos.asset} {pos.timeframe} "
+                                    f"+{hedge_shares:.1f} {underdog_side} @ ${hedge_price:.2f} "
+                                    f"(${cost:.2f}) | Deadline T+{hedge_deadline}s | "
+                                    f"Pair: ${pos.pair_cost:.3f}"
+                                )
 
                     # -- PHASE 3: Sell/rotation --
                     if SELL_ENABLED and elapsed > 60 and elapsed < window_seconds - 60:
