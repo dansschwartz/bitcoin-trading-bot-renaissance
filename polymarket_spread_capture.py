@@ -478,6 +478,10 @@ class SpreadCaptureEngine:
                             fav_shares = pos.net_yes_shares if pos.favorite_side == "YES" else pos.net_no_shares
                             hedge_shares = max(fav_shares * TARGET_BALANCE_RATIO, 1.0)
                             cost = hedge_shares * hedge_price
+                            # Ensure minimum $1 order (CLOB requirement)
+                            if cost < 1.00 and hedge_price > 0:
+                                hedge_shares = max(hedge_shares, 1.00 / hedge_price)
+                                cost = hedge_shares * hedge_price
                             if pos.total_cost + cost <= MAX_EXPOSURE_PER_WINDOW:
                                 await self._place_order(pos, underdog_side, hedge_price, hedge_shares, phase=2)
                                 pos.phase2_triggered = True
@@ -685,8 +689,13 @@ class SpreadCaptureEngine:
                       MAX_GLOBAL_EXPOSURE - self._get_global_exposure())
         buy_amount = min(buy_amount, max_buy)
 
-        if buy_amount < 0.50:
-            return
+        if buy_amount < 1.00:
+            # CLOB minimum order size is $1
+            if current_price > 0 and current_price <= UNDERDOG_THRESHOLD:
+                # Bump up to minimum
+                buy_amount = 1.00
+            else:
+                return
 
         shares = buy_amount / current_price if current_price > 0 else 0
         if shares < 1:
