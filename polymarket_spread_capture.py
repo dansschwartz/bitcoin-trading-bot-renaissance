@@ -203,6 +203,7 @@ class SpreadCaptureEngine:
         self._clob_client = None
         self._running = False
         self._positions: Dict[str, WindowPosition] = {}  # slug -> position
+        self._pending_orders: List[dict] = []  # Orders awaiting fill verification
         self._daily_pnl = 0.0
         self._daily_date = ""
         self._daily_windows = 0
@@ -450,6 +451,108 @@ class SpreadCaptureEngine:
             logger.warning(f"[SC] Active window save error: {e}")
 
     # ═══════════════════════════════════════════════════════════
+    # PENDING ORDER VERIFICATION (non-blocking fill check)
+    # ═══════════════════════════════════════════════════════════
+
+    async def _process_pending_orders(self):
+        """Check all pending orders for fills. Credit verified fills, cancel stale ones.
+
+        Called at the start of each main loop iteration. Each order gets
+        up to 3 checks (at ~1s intervals = 3s total). After 3 checks,
+        we do a final check + cancel if still unfilled.
+        """
+        if not self._pending_orders:
+            return
+
+        still_pending = []
+        for order in self._pending_orders:
+            order_id = order["order_id"]
+            slug = order["slug"]
+            order["checks"] += 1
+
+            # Position may have been resolved while order was pending
+            pos = self._positions.get(slug)
+            if not pos or pos.status != "active":
+                # Cancel orphaned order
+                await asyncio.to_thread(self._cancel_order_sync, order_id)
+                continue
+
+            # Check order status (non-blocking via thread)
+            resp = await asyncio.to_thread(self._get_order_sync, order_id)
+            if not resp:
+                if order["checks"] >= 4:
+                    continue  # Give up after 4 failed status checks
+                still_pending.append(order)
+                continue
+
+            status = str(resp.get("status", "")).upper()
+            size_matched = float(
+                resp.get("sizeMatched", 0) or resp.get("size_matched", 0) or 0
+            )
+            filled_price = float(resp.get("price", 0) or 0)
+
+            if status in ("MATCHED", "FILLED") or size_matched > 0:
+                # VERIFIED FILL — credit shares
+                actual_shares = size_matched if size_matched > 0 else float(
+                    resp.get("size", 0) or 0
+                )
+                actual_price = filled_price if filled_price > 0 else order["price"]
+                amount = actual_price * actual_shares
+
+                if order["is_buy"]:
+                    if order["side"] == "YES":
+                        pos.yes_shares += actual_shares
+                        pos.yes_cost += amount
+                        pos.yes_orders += 1
+                    else:
+                        pos.no_shares += actual_shares
+                        pos.no_cost += amount
+                        pos.no_orders += 1
+                    self._record_fill(
+                        slug, order["side"], actual_price, actual_shares,
+                        amount, order_id, order["phase"]
+                    )
+                else:
+                    # SELL fill
+                    revenue = actual_price * actual_shares
+                    if order["side"] == "YES":
+                        pos.yes_sold_shares += actual_shares
+                        pos.yes_sold_revenue += revenue
+                    else:
+                        pos.no_sold_shares += actual_shares
+                        pos.no_sold_revenue += revenue
+                    self._record_fill(
+                        slug, f"SELL_{order['side']}", actual_price,
+                        actual_shares, revenue, order_id, order["phase"]
+                    )
+
+                self._save_active_window(pos)
+                action = "FILL" if order["is_buy"] else "SELL"
+                logger.info(
+                    f"[SC] VERIFIED {action}: {order_id[:12]}... | "
+                    f"{actual_shares:.1f} {order['side']} @ ${actual_price:.2f} "
+                    f"(${amount:.2f})"
+                )
+
+            elif order["checks"] >= 3:
+                # 3+ checks (~3s elapsed) — cancel unfilled order
+                logger.info(
+                    f"[SC] Order {order_id[:12]}... unfilled after "
+                    f"{order['checks']} checks — cancelling"
+                )
+                await asyncio.to_thread(self._cancel_order_sync, order_id)
+                logger.info(
+                    f"[SC] Order {order_id[:12]}... NOT FILLED — "
+                    f"{order['shares']:.1f} {order['side']} "
+                    f"{'shares' if order['is_buy'] else 'sell'} NOT credited"
+                )
+            else:
+                # Still open, check again next iteration
+                still_pending.append(order)
+
+        self._pending_orders = still_pending
+
+    # ═══════════════════════════════════════════════════════════
     # MAIN LOOP
     # ═══════════════════════════════════════════════════════════
 
@@ -488,6 +591,9 @@ class SpreadCaptureEngine:
                     logger.warning(f"Daily loss limit (${self._daily_pnl:.2f}). Paused.")
                     await asyncio.sleep(60)
                     continue
+
+                # ── STEP 0: Verify pending orders from last iteration ──
+                await self._process_pending_orders()
 
                 # ── STEP 1: Process EXISTING positions FIRST ──
                 # This runs before new entries so that Phase 4 (pre-exit)
@@ -767,13 +873,20 @@ class SpreadCaptureEngine:
             return  # Don't buy more of the favorite in Phase 2
 
         # Target shares: achieve TARGET_BALANCE_RATIO
-        target_underdog_shares = favorite_shares * TARGET_BALANCE_RATIO
+        # If favorite_shares=0 (Phase 1 fill still pending/didn't fill),
+        # use default target based on expected Phase 1 size
+        if favorite_shares <= 0:
+            default_fav = INITIAL_BET_SIZE / PHASE1_FAVORITE_PRICE  # ~10 shares
+            target_underdog_shares = default_fav * TARGET_BALANCE_RATIO
+        else:
+            target_underdog_shares = favorite_shares * TARGET_BALANCE_RATIO
         shares_needed = target_underdog_shares - underdog_shares
 
         if shares_needed <= 0:
             # Already balanced — only buy if truly penny-priced
             if current_price <= UNDERDOG_PENNY_THRESHOLD:
-                shares_needed = favorite_shares * 0.1  # Small top-up
+                top_up_base = favorite_shares if favorite_shares > 0 else (INITIAL_BET_SIZE / PHASE1_FAVORITE_PRICE)
+                shares_needed = top_up_base * 0.1  # Small top-up
             else:
                 return
 
@@ -842,7 +955,7 @@ class SpreadCaptureEngine:
                 # NO is losing badly — sell some to recover capital
                 sell_shares = pos.net_no_shares * 0.3  # Sell 30%
                 if sell_shares > 0 and no_price > 0.01:
-                    await self._sell_order(pos, "NO", no_price, sell_shares)
+                    await self._sell_order(pos, "NO", no_price, sell_shares, phase=3)
                     pos.phase = 3
                     logger.info(
                         f"[SC] ROTATION: Selling {sell_shares:.1f} NO @ ${no_price:.3f} "
@@ -854,7 +967,7 @@ class SpreadCaptureEngine:
             if yes_price < pos.avg_yes_price * SELL_LOSS_THRESHOLD:
                 sell_shares = pos.net_yes_shares * 0.3
                 if sell_shares > 0 and yes_price > 0.01:
-                    await self._sell_order(pos, "YES", yes_price, sell_shares)
+                    await self._sell_order(pos, "YES", yes_price, sell_shares, phase=3)
                     pos.phase = 3
                     logger.info(
                         f"[SC] ROTATION: Selling {sell_shares:.1f} YES @ ${yes_price:.3f} "
@@ -1029,20 +1142,17 @@ class SpreadCaptureEngine:
     async def _place_order(self, pos: WindowPosition, side: str,
                             price: float, shares: float, phase: int) -> Optional[str]:
         """
-        Place a BUY order on the CLOB and VERIFY it fills.
+        Post a BUY order on the CLOB and queue it for fill verification.
 
-        Bug 2 fix: Does NOT credit shares until fill is confirmed
-        via get_order(). If order doesn't fill within 10 seconds,
-        it is cancelled and no shares are credited.
-
-        Bug 3 fix: Saves active window state to DB after every
-        verified fill, so positions survive bot restarts.
+        NON-BLOCKING: Posts the order and adds it to _pending_orders.
+        Shares are NOT credited here — they're credited when
+        _process_pending_orders() verifies the fill next loop iteration.
+        This keeps the main loop fast (~1s per order, not 7s).
         """
         if not self._clob_client:
             logger.warning("[SC] No CLOB client")
             return None
 
-        # Round price to nearest cent (0x8dxd uses round cents)
         price = round(price, 2)
         shares = round(shares, 2)
 
@@ -1064,41 +1174,18 @@ class SpreadCaptureEngine:
                 logger.warning(f"[SC] No orderID returned for {side} buy")
                 return None
 
-            # *** BUG 2 FIX: Verify fill before crediting ***
-            filled, filled_shares, filled_price = await self._verify_fill(order_id)
-
-            if not filled or filled_shares <= 0:
-                logger.info(
-                    f"[SC] Order {order_id[:12]}... NOT FILLED — "
-                    f"{shares:.1f} {side} shares NOT credited"
-                )
-                return None
-
-            # Use actual filled amounts, not assumed
-            actual_price = filled_price if filled_price > 0 else price
-            actual_shares = filled_shares
-            amount = actual_price * actual_shares
-
-            # Credit VERIFIED fill only
-            if side == "YES":
-                pos.yes_shares += actual_shares
-                pos.yes_cost += amount
-                pos.yes_orders += 1
-            else:
-                pos.no_shares += actual_shares
-                pos.no_cost += amount
-                pos.no_orders += 1
-
-            # Record verified fill
-            self._record_fill(pos.slug, side, actual_price, actual_shares, amount, order_id, phase)
-
-            # *** BUG 3 FIX: Persist state after every fill ***
-            self._save_active_window(pos)
-
-            logger.info(
-                f"[SC] VERIFIED FILL: {order_id[:12]}... | "
-                f"{actual_shares:.1f} {side} @ ${actual_price:.2f} (${amount:.2f})"
-            )
+            # Queue for verification — don't block the loop
+            self._pending_orders.append({
+                "order_id": order_id,
+                "slug": pos.slug,
+                "side": side,
+                "price": price,
+                "shares": shares,
+                "phase": phase,
+                "is_buy": True,
+                "posted_at": time.time(),
+                "checks": 0,
+            })
             return order_id
 
         except Exception as e:
@@ -1106,12 +1193,12 @@ class SpreadCaptureEngine:
             return None
 
     async def _sell_order(self, pos: WindowPosition, side: str,
-                           price: float, shares: float) -> Optional[str]:
+                           price: float, shares: float,
+                           phase: int = 4) -> Optional[str]:
         """
-        Place a SELL order and verify fill.
+        Post a SELL order on the CLOB and queue for fill verification.
 
-        Bug 2 fix: Same fill verification as _place_order.
-        Bug 3 fix: Saves state after verified fill.
+        NON-BLOCKING: Same pattern as _place_order.
         """
         if not self._clob_client:
             return None
@@ -1136,40 +1223,18 @@ class SpreadCaptureEngine:
                 logger.warning(f"[SC] No orderID returned for {side} sell")
                 return None
 
-            # *** BUG 2 FIX: Verify fill before crediting ***
-            filled, filled_shares, filled_price = await self._verify_fill(order_id)
-
-            if not filled or filled_shares <= 0:
-                logger.info(
-                    f"[SC] Sell {order_id[:12]}... NOT FILLED — "
-                    f"{shares:.1f} {side} sell NOT credited"
-                )
-                return None
-
-            actual_price = filled_price if filled_price > 0 else price
-            actual_shares = filled_shares
-            revenue = actual_price * actual_shares
-
-            if side == "YES":
-                pos.yes_sold_shares += actual_shares
-                pos.yes_sold_revenue += revenue
-            else:
-                pos.no_sold_shares += actual_shares
-                pos.no_sold_revenue += revenue
-
-            self._record_fill(
-                pos.slug, f"SELL_{side}", actual_price, actual_shares,
-                revenue, order_id, 4  # Phase 4 = pre-resolution exit
-            )
-
-            # *** BUG 3 FIX: Persist state ***
-            self._save_active_window(pos)
-
-            logger.info(
-                f"[SC] VERIFIED SELL: {order_id[:12]}... | "
-                f"{actual_shares:.1f} SELL_{side} @ ${actual_price:.2f} "
-                f"(${revenue:.2f} revenue)"
-            )
+            # Queue for verification
+            self._pending_orders.append({
+                "order_id": order_id,
+                "slug": pos.slug,
+                "side": side,
+                "price": price,
+                "shares": shares,
+                "phase": phase,
+                "is_buy": False,
+                "posted_at": time.time(),
+                "checks": 0,
+            })
             return order_id
 
         except Exception as e:
@@ -1458,8 +1523,11 @@ class SpreadCaptureEngine:
         return result
 
     async def stop(self):
-        """Graceful shutdown — save all active positions to DB."""
+        """Graceful shutdown — process pending orders and save positions."""
         self._running = False
+        # Final verification pass for any pending orders
+        if self._pending_orders:
+            await self._process_pending_orders()
         for slug, pos in self._positions.items():
             if pos.status == "active":
                 self._save_active_window(pos)
