@@ -146,6 +146,9 @@ class WindowPosition:
     resolution: str = ""    # UP, DOWN
     pnl: float = 0.0
 
+    # Pre-resolution exit tracking (Bug 1 fix)
+    exit_attempted: bool = False
+
     @property
     def avg_yes_price(self) -> float:
         return self.yes_cost / self.yes_shares if self.yes_shares > 0 else 0
@@ -213,6 +216,7 @@ class SpreadCaptureEngine:
 
         self._init_db()
         self._init_clob()
+        self._load_active_windows()  # Bug 3 fix: restore state from DB
 
     def _get_global_exposure(self) -> float:
         """Total $ deployed across ALL active windows."""
@@ -291,6 +295,19 @@ class SpreadCaptureEngine:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Bug 3 fix: Add columns needed for position persistence
+        for col, typedef in [
+            ("yes_token_id", "TEXT DEFAULT ''"),
+            ("no_token_id", "TEXT DEFAULT ''"),
+            ("market_id", "TEXT DEFAULT ''"),
+            ("favorite_side", "TEXT DEFAULT ''"),
+            ("phase2_fills", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE spread_capture_windows ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
         conn.commit()
         conn.close()
         logger.info("Spread capture DB initialized")
@@ -335,6 +352,108 @@ class SpreadCaptureEngine:
             logger.info(f"[SC] CLOB client initialized (server_time={server_time})")
         except Exception as e:
             logger.error(f"CLOB init failed: {e}")
+
+    # ═══════════════════════════════════════════════════════════
+    # BUG 3 FIX: POSITION PERSISTENCE
+    # ═══════════════════════════════════════════════════════════
+
+    def _load_active_windows(self):
+        """Load active window positions from DB on startup.
+
+        Prevents orphan fills by restoring in-memory state from the
+        last known DB snapshot. Each fill triggers a DB save, so the
+        data is always current.
+        """
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT * FROM spread_capture_windows WHERE status = 'active'
+            """).fetchall()
+            conn.close()
+
+            loaded = 0
+            for row in rows:
+                slug = row["slug"]
+                if slug in self._positions:
+                    continue  # Already loaded
+
+                pos = WindowPosition(
+                    asset=row["asset"],
+                    timeframe=row["timeframe"],
+                    window_start=row["window_start"],
+                    slug=slug,
+                    market_id=row["market_id"] or "" if "market_id" in row.keys() else "",
+                    yes_token_id=row["yes_token_id"] or "" if "yes_token_id" in row.keys() else "",
+                    no_token_id=row["no_token_id"] or "" if "no_token_id" in row.keys() else "",
+                    yes_shares=row["yes_shares"] or 0,
+                    yes_cost=row["yes_cost"] or 0,
+                    yes_orders=row["yes_orders"] or 0,
+                    no_shares=row["no_shares"] or 0,
+                    no_cost=row["no_cost"] or 0,
+                    no_orders=row["no_orders"] or 0,
+                    yes_sold_shares=row["yes_sold_shares"] or 0,
+                    yes_sold_revenue=row["yes_sold_revenue"] or 0,
+                    no_sold_shares=row["no_sold_shares"] or 0,
+                    no_sold_revenue=row["no_sold_revenue"] or 0,
+                    chainlink_start_price=row["chainlink_start"] or 0,
+                    phase=row["max_phase"] or 0,
+                    phase2_triggered=bool(row["phase2_triggered"]) if row["phase2_triggered"] else False,
+                    favorite_side=row["favorite_side"] or "" if "favorite_side" in row.keys() else "",
+                    phase2_fills=row["phase2_fills"] or 0 if "phase2_fills" in row.keys() else 0,
+                    status="active",
+                )
+
+                self._positions[slug] = pos
+                loaded += 1
+
+            if loaded:
+                logger.info(
+                    f"[SC] *** RESTORED {loaded} active positions from DB ***\n"
+                    f"  Slugs: {[s for s in self._positions.keys()][:5]}..."
+                )
+        except Exception as e:
+            logger.warning(f"[SC] Failed to load active windows: {e}")
+
+    def _save_active_window(self, pos: WindowPosition):
+        """Save/update active window state to DB.
+
+        Called after every verified fill so that position state
+        survives bot restarts. Uses INSERT OR REPLACE keyed on
+        the UNIQUE(asset, timeframe, window_start) constraint.
+        """
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("""
+                INSERT OR REPLACE INTO spread_capture_windows
+                (asset, timeframe, slug, window_start,
+                 yes_shares, yes_cost, yes_avg_price, yes_orders,
+                 no_shares, no_cost, no_avg_price, no_orders,
+                 yes_sold_shares, yes_sold_revenue,
+                 no_sold_shares, no_sold_revenue,
+                 pair_cost, total_deployed, guaranteed_profit, is_arb,
+                 chainlink_start, max_phase, phase2_triggered, status,
+                 yes_token_id, no_token_id, market_id, favorite_side, phase2_fills)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                pos.asset, pos.timeframe, pos.slug, pos.window_start,
+                pos.yes_shares, pos.yes_cost, pos.avg_yes_price, pos.yes_orders,
+                pos.no_shares, pos.no_cost, pos.avg_no_price, pos.no_orders,
+                pos.yes_sold_shares, pos.yes_sold_revenue,
+                pos.no_sold_shares, pos.no_sold_revenue,
+                pos.pair_cost, pos.total_cost, pos.guaranteed_profit,
+                1 if pos.is_arb else 0,
+                pos.chainlink_start_price, pos.phase,
+                1 if pos.phase2_triggered else 0,
+                "active",
+                pos.yes_token_id, pos.no_token_id, pos.market_id,
+                pos.favorite_side, pos.phase2_fills,
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"[SC] Active window save error: {e}")
 
     # ═══════════════════════════════════════════════════════════
     # MAIN LOOP
@@ -496,6 +615,16 @@ class SpreadCaptureEngine:
                     if SELL_ENABLED and elapsed > 60 and elapsed < window_seconds - 60:
                         await self._check_rotation(pos, yes_price, no_price, cl_direction)
 
+                    # -- PHASE 4: Pre-resolution exit (Bug 1 fix) --
+                    # Sell winning shares before market closes to convert
+                    # conditional tokens to USDC. Prevents trapped shares.
+                    exit_start = window_seconds - 20  # 20 seconds before end
+                    exit_end = window_seconds - 5     # Stop 5s before end
+                    if exit_start <= elapsed < exit_end:
+                        await self._pre_resolution_exit(
+                            pos, yes_price, no_price, cl_direction
+                        )
+
                     # Log status periodically
                     if int(now) % 30 < 2:
                         fav = pos.favorite_side or "?"
@@ -579,6 +708,9 @@ class SpreadCaptureEngine:
 
         self._positions[slug] = pos
         self._daily_windows += 1
+
+        # Save initial state to DB immediately (Bug 3 fix)
+        self._save_active_window(pos)
 
         # Buy FAVORITE side at crowd price (capped at PHASE1_FAVORITE_PRICE)
         if favorite_side == "YES":
@@ -761,6 +893,149 @@ class SpreadCaptureEngine:
                     )
 
     # ═══════════════════════════════════════════════════════════
+    # BUG 1 FIX: PRE-RESOLUTION EXIT (AUTO-REDEMPTION)
+    # ═══════════════════════════════════════════════════════════
+
+    async def _pre_resolution_exit(self, pos: WindowPosition,
+                                     yes_price: float, no_price: float,
+                                     cl_direction: Optional[str]):
+        """
+        Sell winning shares before the market closes.
+
+        Determines the likely winner from Chainlink direction and sells
+        the winning side at ~$0.95 to convert conditional tokens to USDC.
+        Without this, winning tokens stay trapped as unredeemed shares
+        that require complex on-chain CTF redemption.
+
+        Risk analysis:
+        - If we correctly predict the winner and sell: lose ~5% vs redemption
+        - If we wrongly predict and sell the loser: we get $0.95 for $0 tokens (free money!)
+        - So this trade is ALWAYS profitable in expectation.
+        """
+        if not cl_direction:
+            return
+
+        # Don't retry
+        if pos.exit_attempted:
+            return
+
+        # Determine winning side from Chainlink
+        if cl_direction == "UP":
+            winning_side = "YES"
+            winning_shares = pos.net_yes_shares
+            current_price = yes_price
+        else:
+            winning_side = "NO"
+            winning_shares = pos.net_no_shares
+            current_price = no_price
+
+        if winning_shares <= 0:
+            pos.exit_attempted = True
+            return
+
+        # Sell at 95 cents — high enough to capture value, low enough to fill
+        sell_price = 0.95
+        if current_price and current_price > 0.90:
+            sell_price = min(0.95, round(current_price - 0.01, 2))
+        elif current_price and current_price > 0.80:
+            sell_price = round(current_price - 0.02, 2)
+        else:
+            # Price suspiciously low — Chainlink direction might be wrong
+            # Still sell — if we're wrong about winner, this is free money
+            sell_price = max(0.80, round(current_price, 2)) if current_price else 0.90
+
+        # Floor at $0.80 — below this something is wrong
+        if sell_price < 0.80:
+            logger.warning(
+                f"[SC] Pre-exit: {pos.asset} {winning_side} price too low "
+                f"(${sell_price:.2f}), skipping"
+            )
+            pos.exit_attempted = True
+            return
+
+        pos.exit_attempted = True
+        order_id = await self._sell_order(pos, winning_side, sell_price, winning_shares)
+
+        if order_id:
+            logger.info(
+                f"[SC] *** PRE-EXIT: {pos.asset} {pos.timeframe} | "
+                f"Sold {winning_shares:.1f} {winning_side} @ ${sell_price:.2f} | "
+                f"CL: {cl_direction} | Revenue: ${winning_shares * sell_price:.2f}"
+            )
+        else:
+            logger.warning(
+                f"[SC] Pre-exit FAILED: {pos.asset} {pos.timeframe} | "
+                f"Tried to sell {winning_shares:.1f} {winning_side} @ ${sell_price:.2f}"
+            )
+
+    # ═══════════════════════════════════════════════════════════
+    # BUG 2 FIX: FILL VERIFICATION
+    # ═══════════════════════════════════════════════════════════
+
+    def _get_order_sync(self, order_id: str) -> Optional[dict]:
+        """Check order status on the CLOB. (Blocking)"""
+        try:
+            return self._clob_client.get_order(order_id)
+        except Exception as e:
+            logger.debug(f"[SC] Order status check error: {e}")
+            return None
+
+    def _cancel_order_sync(self, order_id: str) -> bool:
+        """Cancel an unfilled order. (Blocking)"""
+        try:
+            self._clob_client.cancel(order_id)
+            return True
+        except Exception as e:
+            logger.debug(f"[SC] Cancel error: {e}")
+            return False
+
+    async def _verify_fill(self, order_id: str) -> Tuple[bool, float, float]:
+        """
+        Wait for an order to fill, with timeout.
+
+        Returns: (filled, filled_shares, filled_price)
+
+        Polls order status after 5 seconds. If still unfilled after
+        10 seconds total, cancels the order and returns (False, 0, 0).
+        This prevents the bot from crediting phantom shares.
+        """
+        if not order_id or order_id in ("unknown", "error"):
+            return False, 0.0, 0.0
+
+        # First check after 5 seconds
+        await asyncio.sleep(5)
+
+        order = await asyncio.to_thread(self._get_order_sync, order_id)
+        if order:
+            status = str(order.get("status", "")).upper()
+            size_matched = float(order.get("sizeMatched", 0) or order.get("size_matched", 0) or 0)
+            price = float(order.get("price", 0) or 0)
+
+            if status in ("MATCHED", "FILLED") or size_matched > 0:
+                actual_shares = size_matched if size_matched > 0 else float(order.get("size", 0) or 0)
+                return True, actual_shares, price
+
+            # If not filled yet, wait 5 more seconds
+            if status in ("OPEN", "LIVE", "ACTIVE", ""):
+                await asyncio.sleep(5)
+                order = await asyncio.to_thread(self._get_order_sync, order_id)
+                if order:
+                    status = str(order.get("status", "")).upper()
+                    size_matched = float(order.get("sizeMatched", 0) or order.get("size_matched", 0) or 0)
+                    price = float(order.get("price", 0) or 0)
+
+                    if status in ("MATCHED", "FILLED") or size_matched > 0:
+                        actual_shares = size_matched if size_matched > 0 else float(order.get("size", 0) or 0)
+                        return True, actual_shares, price
+
+                # Still not filled — cancel
+                logger.info(f"[SC] Order {order_id[:12]}... unfilled after 10s — cancelling")
+                await asyncio.to_thread(self._cancel_order_sync, order_id)
+                return False, 0.0, 0.0
+
+        return False, 0.0, 0.0
+
+    # ═══════════════════════════════════════════════════════════
     # ORDER EXECUTION
     # ═══════════════════════════════════════════════════════════
 
@@ -781,10 +1056,14 @@ class SpreadCaptureEngine:
     async def _place_order(self, pos: WindowPosition, side: str,
                             price: float, shares: float, phase: int) -> Optional[str]:
         """
-        Place a BUY order on the CLOB.
+        Place a BUY order on the CLOB and VERIFY it fills.
 
-        Uses limit orders at round cent prices (87% of 0x8dxd's orders).
-        Order posting runs in a thread to avoid blocking the event loop.
+        Bug 2 fix: Does NOT credit shares until fill is confirmed
+        via get_order(). If order doesn't fill within 10 seconds,
+        it is cancelled and no shares are credited.
+
+        Bug 3 fix: Saves active window state to DB after every
+        verified fill, so positions survive bot restarts.
         """
         if not self._clob_client:
             logger.warning("[SC] No CLOB client")
@@ -806,22 +1085,47 @@ class SpreadCaptureEngine:
             result = await asyncio.to_thread(
                 self._post_order_sync, token_id, price, shares, True
             )
-            order_id = result.get("orderID", "unknown") if result else "error"
+            order_id = result.get("orderID", "") if result else ""
 
-            # Update position
-            amount = price * shares
+            if not order_id:
+                logger.warning(f"[SC] No orderID returned for {side} buy")
+                return None
+
+            # *** BUG 2 FIX: Verify fill before crediting ***
+            filled, filled_shares, filled_price = await self._verify_fill(order_id)
+
+            if not filled or filled_shares <= 0:
+                logger.info(
+                    f"[SC] Order {order_id[:12]}... NOT FILLED — "
+                    f"{shares:.1f} {side} shares NOT credited"
+                )
+                return None
+
+            # Use actual filled amounts, not assumed
+            actual_price = filled_price if filled_price > 0 else price
+            actual_shares = filled_shares
+            amount = actual_price * actual_shares
+
+            # Credit VERIFIED fill only
             if side == "YES":
-                pos.yes_shares += shares
+                pos.yes_shares += actual_shares
                 pos.yes_cost += amount
                 pos.yes_orders += 1
             else:
-                pos.no_shares += shares
+                pos.no_shares += actual_shares
                 pos.no_cost += amount
                 pos.no_orders += 1
 
-            # Record fill
-            self._record_fill(pos.slug, side, price, shares, amount, order_id, phase)
+            # Record verified fill
+            self._record_fill(pos.slug, side, actual_price, actual_shares, amount, order_id, phase)
 
+            # *** BUG 3 FIX: Persist state after every fill ***
+            self._save_active_window(pos)
+
+            logger.info(
+                f"[SC] VERIFIED FILL: {order_id[:12]}... | "
+                f"{actual_shares:.1f} {side} @ ${actual_price:.2f} (${amount:.2f})"
+            )
             return order_id
 
         except Exception as e:
@@ -830,12 +1134,20 @@ class SpreadCaptureEngine:
 
     async def _sell_order(self, pos: WindowPosition, side: str,
                            price: float, shares: float) -> Optional[str]:
-        """Place a SELL order (non-blocking via thread)."""
+        """
+        Place a SELL order and verify fill.
+
+        Bug 2 fix: Same fill verification as _place_order.
+        Bug 3 fix: Saves state after verified fill.
+        """
         if not self._clob_client:
             return None
 
         price = round(price, 2)
         shares = round(shares, 2)
+
+        if price <= 0 or shares <= 0:
+            return None
 
         token_id = pos.yes_token_id if side == "YES" else pos.no_token_id
         if not token_id:
@@ -845,20 +1157,46 @@ class SpreadCaptureEngine:
             result = await asyncio.to_thread(
                 self._post_order_sync, token_id, price, shares, False
             )
-            order_id = result.get("orderID", "unknown") if result else "error"
+            order_id = result.get("orderID", "") if result else ""
 
-            revenue = price * shares
+            if not order_id:
+                logger.warning(f"[SC] No orderID returned for {side} sell")
+                return None
+
+            # *** BUG 2 FIX: Verify fill before crediting ***
+            filled, filled_shares, filled_price = await self._verify_fill(order_id)
+
+            if not filled or filled_shares <= 0:
+                logger.info(
+                    f"[SC] Sell {order_id[:12]}... NOT FILLED — "
+                    f"{shares:.1f} {side} sell NOT credited"
+                )
+                return None
+
+            actual_price = filled_price if filled_price > 0 else price
+            actual_shares = filled_shares
+            revenue = actual_price * actual_shares
+
             if side == "YES":
-                pos.yes_sold_shares += shares
+                pos.yes_sold_shares += actual_shares
                 pos.yes_sold_revenue += revenue
             else:
-                pos.no_sold_shares += shares
+                pos.no_sold_shares += actual_shares
                 pos.no_sold_revenue += revenue
 
             self._record_fill(
-                pos.slug, f"SELL_{side}", price, shares, revenue, order_id, 3
+                pos.slug, f"SELL_{side}", actual_price, actual_shares,
+                revenue, order_id, 4  # Phase 4 = pre-resolution exit
             )
 
+            # *** BUG 3 FIX: Persist state ***
+            self._save_active_window(pos)
+
+            logger.info(
+                f"[SC] VERIFIED SELL: {order_id[:12]}... | "
+                f"{actual_shares:.1f} SELL_{side} @ ${actual_price:.2f} "
+                f"(${revenue:.2f} revenue)"
+            )
             return order_id
 
         except Exception as e:
@@ -1036,7 +1374,7 @@ class SpreadCaptureEngine:
             return None
 
     def _save_window(self, pos: WindowPosition):
-        """Save completed window to database."""
+        """Save completed (resolved) window to database."""
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.execute("""
@@ -1048,9 +1386,10 @@ class SpreadCaptureEngine:
                  no_sold_shares, no_sold_revenue,
                  pair_cost, total_deployed, guaranteed_profit, is_arb,
                  chainlink_start, resolution, pnl,
-                 pnl_pct, max_phase, phase2_triggered, status, resolved_at)
+                 pnl_pct, max_phase, phase2_triggered, status, resolved_at,
+                 yes_token_id, no_token_id, market_id, favorite_side, phase2_fills)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 pos.asset, pos.timeframe, pos.slug, pos.window_start,
                 pos.yes_shares, pos.yes_cost, pos.avg_yes_price, pos.yes_orders,
@@ -1064,6 +1403,8 @@ class SpreadCaptureEngine:
                 pos.phase, 1 if pos.phase2_triggered else 0,
                 pos.status,
                 datetime.now(timezone.utc).isoformat(),
+                pos.yes_token_id, pos.no_token_id, pos.market_id,
+                pos.favorite_side, pos.phase2_fills,
             ))
             conn.commit()
             conn.close()
@@ -1144,4 +1485,9 @@ class SpreadCaptureEngine:
         return result
 
     async def stop(self):
+        """Graceful shutdown — save all active positions to DB."""
         self._running = False
+        for slug, pos in self._positions.items():
+            if pos.status == "active":
+                self._save_active_window(pos)
+        logger.info(f"[SC] Saved {len(self._positions)} positions on shutdown")
