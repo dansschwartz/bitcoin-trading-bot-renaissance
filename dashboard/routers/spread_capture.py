@@ -1,13 +1,17 @@
 """Spread Capture dashboard endpoints — 0x8dxd strategy monitoring.
 
 All endpoints are READ-ONLY. No trading logic is modified.
+Includes on-chain wallet balance tracking as ground truth P&L source.
 """
 
 import logging
 import sqlite3
 import time
-from typing import Any
+import threading
+from datetime import datetime, timezone
+from typing import Any, Optional
 
+import requests as http_requests
 from fastapi import APIRouter, Request
 
 logger = logging.getLogger(__name__)
@@ -15,6 +19,123 @@ router = APIRouter(prefix="/api/spread-capture", tags=["spread-capture"])
 
 DB_PATH = "data/renaissance_bot.db"
 
+# ─── On-chain wallet tracking ────────────────────────────────
+WALLET_ADDRESS = "0x183b2c70dA92Ef34c7C6eE68D515AA6E54e897d1"
+USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDCe on Polygon
+
+# balanceOf(address) function selector
+BALANCE_OF_SELECTOR = "0x70a08231"
+
+# Multiple RPCs for reliability (Tenderly works from DO, polygon-rpc.com sometimes fails)
+POLYGON_RPCS = [
+    "https://polygon.gateway.tenderly.co",
+    "https://polygon-rpc.com",
+    "https://rpc.ankr.com/polygon",
+]
+
+# In-memory cache for wallet balance (refreshed every 30s by background thread)
+_wallet_cache = {
+    "usdc_balance": 0.0,
+    "last_updated": 0.0,
+    "rpc_used": "",
+    "error": "",
+}
+_wallet_lock = threading.Lock()
+_wallet_thread: Optional[threading.Thread] = None
+
+
+def _fetch_usdc_balance() -> tuple[float, str]:
+    """Fetch USDCe balance from Polygon via JSON-RPC. Returns (balance, rpc_used)."""
+    addr_padded = WALLET_ADDRESS[2:].lower().zfill(64)
+    call_data = BALANCE_OF_SELECTOR + addr_padded
+
+    for rpc_url in POLYGON_RPCS:
+        try:
+            resp = http_requests.post(
+                rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_call",
+                    "params": [{"to": USDC_CONTRACT, "data": call_data}, "latest"],
+                    "id": 1,
+                },
+                timeout=8,
+            )
+            result = resp.json().get("result", "0x0")
+            if result and result != "0x" and len(result) > 2:
+                wei = int(result, 16)
+                return wei / 1_000_000, rpc_url.split("/")[2]
+        except Exception:
+            continue
+    return 0.0, "failed"
+
+
+def _wallet_poll_loop():
+    """Background thread: poll wallet balance every 30 seconds."""
+    while True:
+        try:
+            balance, rpc = _fetch_usdc_balance()
+            now = time.time()
+            with _wallet_lock:
+                _wallet_cache["usdc_balance"] = balance
+                _wallet_cache["last_updated"] = now
+                _wallet_cache["rpc_used"] = rpc
+                _wallet_cache["error"] = "" if rpc != "failed" else "all RPCs failed"
+
+            # Log balance to DB for historical tracking
+            if balance > 0:
+                _log_balance(balance)
+
+        except Exception as e:
+            with _wallet_lock:
+                _wallet_cache["error"] = str(e)
+
+        time.sleep(30)
+
+
+def _start_wallet_tracker():
+    """Start the background wallet balance poller (once)."""
+    global _wallet_thread
+    if _wallet_thread is not None and _wallet_thread.is_alive():
+        return
+    _wallet_thread = threading.Thread(target=_wallet_poll_loop, daemon=True, name="wallet-tracker")
+    _wallet_thread.start()
+    logger.info("Wallet balance tracker started (30s interval)")
+
+
+def _log_balance(balance: float):
+    """Append balance snapshot to DB table."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_balance_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                usdc_balance REAL NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        # Only insert if balance changed or >30s since last entry
+        last = conn.execute(
+            "SELECT usdc_balance, timestamp FROM wallet_balance_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        now = time.time()
+        if not last or abs(last[0] - balance) > 0.01 or (now - last[1]) > 300:
+            conn.execute(
+                "INSERT INTO wallet_balance_log (timestamp, usdc_balance) VALUES (?, ?)",
+                (now, round(balance, 6)),
+            )
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"Wallet log error: {e}")
+
+
+# Start tracker on module import
+_start_wallet_tracker()
+
+
+# ─── Helpers ──────────────────────────────────────────────────
 
 def _safe_query(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
     """Execute read-only query, returning empty list if table doesn't exist."""
@@ -32,13 +153,104 @@ def _safe_query(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
         return []
 
 
+def _get_db(request: Request) -> str:
+    cfg = getattr(request.app.state, "dashboard_config", None)
+    return cfg.db_path if cfg else DB_PATH
+
+
+def _get_engine(bot):
+    if bot and hasattr(bot, "spread_capture"):
+        return bot.spread_capture
+    return None
+
+
+def _get_rtds(bot):
+    if bot and hasattr(bot, "rtds"):
+        return bot.rtds
+    sc = _get_engine(bot)
+    if sc and hasattr(sc, "_rtds"):
+        return sc._rtds
+    return None
+
+
+# ─── Endpoints ────────────────────────────────────────────────
+
+@router.get("/wallet")
+async def spread_wallet(request: Request) -> dict[str, Any]:
+    """On-chain wallet balance — the GROUND TRUTH for P&L.
+
+    Returns current USDCe balance, starting balance (first snapshot today),
+    and actual P&L = current - starting.
+    """
+    with _wallet_lock:
+        balance = _wallet_cache["usdc_balance"]
+        last_updated = _wallet_cache["last_updated"]
+        rpc = _wallet_cache["rpc_used"]
+        error = _wallet_cache["error"]
+
+    # Get starting balance (first snapshot of the day)
+    db = _get_db(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    starting_rows = _safe_query(db, """
+        SELECT usdc_balance FROM wallet_balance_log
+        WHERE created_at >= ?
+        ORDER BY id ASC LIMIT 1
+    """, (today,))
+    starting = starting_rows[0]["usdc_balance"] if starting_rows else balance
+
+    # Get all-time first snapshot for total P&L
+    first_ever = _safe_query(db, """
+        SELECT usdc_balance FROM wallet_balance_log
+        ORDER BY id ASC LIMIT 1
+    """)
+    first_balance = first_ever[0]["usdc_balance"] if first_ever else balance
+
+    # Bot estimated P&L for comparison
+    bot_pnl_rows = _safe_query(db, """
+        SELECT COALESCE(SUM(pnl), 0) as total_pnl
+        FROM spread_capture_windows WHERE status = 'resolved'
+    """)
+    bot_pnl = bot_pnl_rows[0]["total_pnl"] if bot_pnl_rows else 0
+
+    actual_daily_pnl = round(balance - starting, 2)
+    actual_total_pnl = round(balance - first_balance, 2)
+    tracking_error = round(bot_pnl - actual_total_pnl, 2)
+
+    return {
+        "usdc_balance": round(balance, 2),
+        "last_updated": last_updated,
+        "rpc": rpc,
+        "error": error,
+        "starting_balance_today": round(starting, 2),
+        "first_balance_ever": round(first_balance, 2),
+        "actual_daily_pnl": actual_daily_pnl,
+        "actual_total_pnl": actual_total_pnl,
+        "bot_estimated_pnl": round(bot_pnl, 2),
+        "tracking_error": tracking_error,
+        "wallet_address": WALLET_ADDRESS,
+    }
+
+
+@router.get("/wallet-history")
+async def spread_wallet_history(request: Request, hours: int = 48) -> list[dict]:
+    """Wallet balance snapshots for charting the REAL P&L curve."""
+    db = _get_db(request)
+    cutoff = time.time() - hours * 3600
+    return _safe_query(db, """
+        SELECT timestamp, usdc_balance, created_at
+        FROM wallet_balance_log
+        WHERE timestamp >= ?
+        ORDER BY timestamp ASC
+    """, (cutoff,))
+
+
 @router.get("/summary")
 async def spread_summary(request: Request) -> dict[str, Any]:
     """Top-level summary: total P&L, win rate, active windows, pair cost stats."""
     bot = getattr(request.app.state, "bot", None)
     sc = _get_engine(bot)
 
-    # Live stats from engine if available
     if sc:
         try:
             stats = sc.get_stats()
@@ -48,7 +260,6 @@ async def spread_summary(request: Request) -> dict[str, Any]:
         except Exception as e:
             logger.warning(f"Spread summary live error: {e}")
 
-    # Fallback to DB
     db = _get_db(request)
     resolved = _safe_query(db, """
         SELECT
@@ -102,7 +313,6 @@ async def spread_active(request: Request) -> list[dict]:
         except Exception:
             pass
 
-    # Fallback: show active windows from DB
     db = _get_db(request)
     return _safe_query(db, """
         SELECT asset, timeframe, slug, window_start,
@@ -118,7 +328,6 @@ async def spread_active(request: Request) -> list[dict]:
 
 @router.get("/history")
 async def spread_history(request: Request, limit: int = 200, asset: str = "") -> list[dict]:
-    """Resolved windows with P&L."""
     db = _get_db(request)
     asset_filter = "AND asset = ?" if asset else ""
     params = (asset.upper(), limit) if asset else (limit,)
@@ -139,7 +348,6 @@ async def spread_history(request: Request, limit: int = 200, asset: str = "") ->
 
 @router.get("/fills")
 async def spread_fills(request: Request, limit: int = 200, slug: str = "") -> list[dict]:
-    """Recent order fills across all windows."""
     db = _get_db(request)
     slug_filter = "WHERE window_slug = ?" if slug else ""
     params = (slug, limit) if slug else (limit,)
@@ -154,9 +362,11 @@ async def spread_fills(request: Request, limit: int = 200, slug: str = "") -> li
 
 
 @router.get("/pnl-chart")
-async def spread_pnl_chart(request: Request) -> list[dict]:
-    """Cumulative P&L over time for chart rendering."""
+async def spread_pnl_chart(request: Request) -> dict[str, Any]:
+    """Cumulative P&L chart with BOTH bot estimated and wallet actual lines."""
     db = _get_db(request)
+
+    # Bot estimated cumulative P&L
     rows = _safe_query(db, """
         SELECT resolved_at as ts, pnl, pair_cost, asset, timeframe
         FROM spread_capture_windows
@@ -164,10 +374,10 @@ async def spread_pnl_chart(request: Request) -> list[dict]:
         ORDER BY resolved_at ASC
     """)
     cumulative = 0.0
-    result = []
+    bot_series = []
     for row in rows:
         cumulative += row.get("pnl", 0) or 0
-        result.append({
+        bot_series.append({
             "ts": row["ts"],
             "pnl": round(row.get("pnl", 0) or 0, 3),
             "cumulative": round(cumulative, 3),
@@ -175,12 +385,30 @@ async def spread_pnl_chart(request: Request) -> list[dict]:
             "asset": row.get("asset", ""),
             "timeframe": row.get("timeframe", ""),
         })
-    return result
+
+    # Wallet balance history for actual P&L line
+    wallet_rows = _safe_query(db, """
+        SELECT created_at as ts, usdc_balance
+        FROM wallet_balance_log
+        ORDER BY timestamp ASC
+    """)
+    first_bal = wallet_rows[0]["usdc_balance"] if wallet_rows else 0
+    wallet_series = []
+    for wr in wallet_rows:
+        wallet_series.append({
+            "ts": wr["ts"],
+            "wallet_pnl": round(wr["usdc_balance"] - first_bal, 2),
+            "wallet_balance": round(wr["usdc_balance"], 2),
+        })
+
+    return {
+        "bot_series": bot_series,
+        "wallet_series": wallet_series,
+    }
 
 
 @router.get("/by-asset")
 async def spread_by_asset(request: Request) -> list[dict]:
-    """Performance breakdown by asset."""
     db = _get_db(request)
     return _safe_query(db, """
         SELECT asset,
@@ -200,7 +428,6 @@ async def spread_by_asset(request: Request) -> list[dict]:
 
 @router.get("/by-timeframe")
 async def spread_by_timeframe(request: Request) -> list[dict]:
-    """Performance breakdown by timeframe (5m vs 15m)."""
     db = _get_db(request)
     return _safe_query(db, """
         SELECT timeframe,
@@ -218,7 +445,6 @@ async def spread_by_timeframe(request: Request) -> list[dict]:
 
 @router.get("/rtds")
 async def spread_rtds(request: Request) -> dict[str, Any]:
-    """Live RTDS oracle feed status."""
     bot = getattr(request.app.state, "bot", None)
     rtds = _get_rtds(bot)
     if rtds:
@@ -231,7 +457,6 @@ async def spread_rtds(request: Request) -> dict[str, Any]:
 
 @router.get("/hourly")
 async def spread_hourly(request: Request, hours: int = 48) -> list[dict]:
-    """Hourly P&L aggregation."""
     db = _get_db(request)
     return _safe_query(db, """
         SELECT strftime('%Y-%m-%d %H:00', resolved_at) as hour,
@@ -249,7 +474,6 @@ async def spread_hourly(request: Request, hours: int = 48) -> list[dict]:
 
 @router.get("/pair-cost-distribution")
 async def spread_pair_cost_dist(request: Request) -> list[dict]:
-    """Distribution of pair costs for histogram."""
     db = _get_db(request)
     return _safe_query(db, """
         SELECT
@@ -274,32 +498,22 @@ async def spread_pair_cost_dist(request: Request) -> list[dict]:
 
 @router.get("/fill-rate")
 async def spread_fill_rate(request: Request) -> dict[str, Any]:
-    """Fill rate and phase distribution stats."""
     db = _get_db(request)
 
     phase_dist = _safe_query(db, """
-        SELECT phase,
-               COUNT(*) as count,
+        SELECT phase, COUNT(*) as count,
                ROUND(SUM(amount_usd), 2) as total_usd
-        FROM spread_capture_fills
-        GROUP BY phase
-        ORDER BY phase
+        FROM spread_capture_fills GROUP BY phase ORDER BY phase
     """)
-
     side_dist = _safe_query(db, """
-        SELECT side,
-               COUNT(*) as count,
+        SELECT side, COUNT(*) as count,
                ROUND(AVG(price), 3) as avg_price,
                ROUND(SUM(amount_usd), 2) as total_usd
-        FROM spread_capture_fills
-        GROUP BY side
+        FROM spread_capture_fills GROUP BY side
     """)
-
     total_fills = _safe_query(db, "SELECT COUNT(*) as cnt FROM spread_capture_fills")
-    total = total_fills[0]["cnt"] if total_fills else 0
-
     return {
-        "total_fills": total,
+        "total_fills": total_fills[0]["cnt"] if total_fills else 0,
         "by_phase": phase_dist,
         "by_side": side_dist,
     }
@@ -307,37 +521,11 @@ async def spread_fill_rate(request: Request) -> dict[str, Any]:
 
 @router.get("/errors")
 async def spread_errors(request: Request, limit: int = 50) -> list[dict]:
-    """Windows that ended in error status."""
     db = _get_db(request)
     return _safe_query(db, """
         SELECT id, asset, timeframe, slug, window_start,
                pair_cost, total_deployed, status, created_at
         FROM spread_capture_windows
         WHERE status = 'error'
-        ORDER BY created_at DESC
-        LIMIT ?
+        ORDER BY created_at DESC LIMIT ?
     """, (limit,))
-
-
-# ─── Helpers ──────────────────────────────────────────────────
-
-def _get_db(request: Request) -> str:
-    return getattr(request.app.state, "dashboard_config", None) and request.app.state.dashboard_config.db_path or DB_PATH
-
-
-def _get_engine(bot):
-    """Get SpreadCaptureEngine from bot if available."""
-    if bot and hasattr(bot, "spread_capture"):
-        return bot.spread_capture
-    return None
-
-
-def _get_rtds(bot):
-    """Get RTDS feed from bot if available."""
-    if bot and hasattr(bot, "rtds"):
-        return bot.rtds
-    # Also try via spread capture engine
-    sc = _get_engine(bot)
-    if sc and hasattr(sc, "_rtds"):
-        return sc._rtds
-    return None

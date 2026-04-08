@@ -215,7 +215,8 @@ export const api = {
     get<Record<string, unknown>[]>(`/api/spread-capture/history?limit=${limit}${asset ? `&asset=${asset}` : ''}`),
   scFills: (limit = 200, slug = '') =>
     get<Record<string, unknown>[]>(`/api/spread-capture/fills?limit=${limit}${slug ? `&slug=${slug}` : ''}`),
-  scPnlChart: () => get<Record<string, unknown>[]>('/api/spread-capture/pnl-chart'),
+  scPnlChart: () => get<Record<string, unknown>>('/api/spread-capture/pnl-chart'),
+  scWallet: () => get<Record<string, unknown>>('/api/spread-capture/wallet'),
   scByAsset: () => get<Record<string, unknown>[]>('/api/spread-capture/by-asset'),
   scRtds: () => get<Record<string, unknown>>('/api/spread-capture/rtds'),
   scHourly: (hours = 48) => get<Record<string, unknown>[]>(`/api/spread-capture/hourly?hours=${hours}`),
