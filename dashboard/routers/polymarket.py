@@ -1,4 +1,4 @@
-"""Polymarket dashboard endpoints — Strategy A v3."""
+"""Polymarket dashboard endpoints — Strategy A v3 + Spread Capture."""
 
 import json
 import logging
@@ -1108,3 +1108,124 @@ async def simple_up_stats():
             }
     except Exception as e:
         return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════
+# SPREAD CAPTURE ENDPOINTS (0x8dxd strategy)
+# ═══════════════════════════════════════════════════════════
+
+
+@router.get("/spread")
+async def spread_capture_stats(request: Request):
+    """Spread capture strategy stats — pair costs, arb rate, P&L."""
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            if not _table_exists(c, "spread_capture_windows"):
+                return {"strategy": "0x8dxd_spread_capture", "total_windows": 0, "error": "table not created yet"}
+
+            stats = c.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN is_arb = 1 THEN 1 ELSE 0 END) as arb_windows,
+                    COALESCE(SUM(pnl), 0) as total_pnl,
+                    COALESCE(AVG(pair_cost), 0) as avg_pair_cost,
+                    COALESCE(AVG(pnl), 0) as avg_pnl,
+                    COALESCE(SUM(total_deployed), 0) as total_deployed
+                FROM spread_capture_windows
+                WHERE status = 'resolved'
+            """).fetchone()
+
+            total = stats["total"] or 0
+            wins = stats["wins"] or 0
+
+            # Today's stats
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today_stats = c.execute("""
+                SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as pnl
+                FROM spread_capture_windows
+                WHERE status = 'resolved' AND date(resolved_at) = ?
+            """, (today,)).fetchone()
+
+            # Recent windows
+            recent = c.execute("""
+                SELECT asset, timeframe, slug, pair_cost, is_arb, resolution, pnl,
+                       yes_shares, no_shares, max_phase, resolved_at
+                FROM spread_capture_windows
+                WHERE status = 'resolved'
+                ORDER BY resolved_at DESC LIMIT 20
+            """).fetchall()
+
+            return {
+                "strategy": "0x8dxd_spread_capture",
+                "total_windows": total,
+                "wins": wins,
+                "losses": stats["losses"] or 0,
+                "win_rate": round(wins / max(total, 1) * 100, 1),
+                "arb_windows": stats["arb_windows"] or 0,
+                "arb_rate": round((stats["arb_windows"] or 0) / max(total, 1) * 100, 1),
+                "total_pnl": round(float(stats["total_pnl"]), 2),
+                "total_deployed": round(float(stats["total_deployed"]), 2),
+                "avg_pair_cost": round(float(stats["avg_pair_cost"]), 3),
+                "avg_pnl_per_window": round(float(stats["avg_pnl"]), 3),
+                "today_windows": today_stats["cnt"] or 0,
+                "today_pnl": round(float(today_stats["pnl"]), 2),
+                "recent": [dict(r) for r in recent],
+            }
+    except Exception as e:
+        return {"strategy": "0x8dxd_spread_capture", "error": str(e)}
+
+
+@router.get("/spread/fills")
+async def spread_capture_fills(request: Request, limit: int = 50, slug: str | None = None):
+    """Recent fills for the spread capture strategy."""
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            if not _table_exists(c, "spread_capture_fills"):
+                return {"fills": []}
+
+            if slug:
+                rows = c.execute("""
+                    SELECT * FROM spread_capture_fills
+                    WHERE window_slug = ?
+                    ORDER BY timestamp DESC LIMIT ?
+                """, (slug, limit)).fetchall()
+            else:
+                rows = c.execute("""
+                    SELECT * FROM spread_capture_fills
+                    ORDER BY timestamp DESC LIMIT ?
+                """, (limit,)).fetchall()
+
+            return {"fills": [dict(r) for r in rows]}
+    except Exception as e:
+        return {"fills": [], "error": str(e)}
+
+
+@router.get("/rtds")
+async def rtds_status(request: Request):
+    """RTDS WebSocket status — Binance + Chainlink prices.
+
+    NOTE: This endpoint needs the bot's RTDS reference to show live data.
+    Falls back to a basic status from the database if bot ref unavailable.
+    """
+    # Try to get live data from the bot's RTDS instance
+    bot = getattr(request.app.state, "bot", None)
+    if bot and hasattr(bot, "rtds") and bot.rtds:
+        return bot.rtds.get_status()
+
+    # Fallback: just confirm the table exists
+    cfg = request.app.state.dashboard_config
+    try:
+        with _conn(cfg.db_path) as c:
+            has_windows = _table_exists(c, "spread_capture_windows")
+            has_fills = _table_exists(c, "spread_capture_fills")
+            return {
+                "connected": False,
+                "note": "RTDS status requires live bot reference",
+                "spread_capture_tables": has_windows and has_fills,
+            }
+    except Exception as e:
+        return {"connected": False, "error": str(e)}

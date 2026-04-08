@@ -67,30 +67,24 @@ try:
     CASCADE_COLLECTOR_AVAILABLE = True
 except ImportError:
     CASCADE_COLLECTOR_AVAILABLE = False
+# DISABLED: Old Polymarket strategies — replaced by spread capture
+# from polymarket_strategy_a import StrategyAExecutor
+STRATEGY_A_AVAILABLE = False
+# from polymarket_live_executor import PolymarketLiveExecutor
+LIVE_EXECUTOR_AVAILABLE = False
+# from polymarket_reversal import ReversalStrategy
+REVERSAL_STRATEGY_AVAILABLE = False
+# from simple_up_bet import SimpleUpBetter
+SIMPLE_UP_AVAILABLE = False
+
+# NEW: 0x8dxd-style spread capture bot
 try:
-    from polymarket_strategy_a import StrategyAExecutor
-    STRATEGY_A_AVAILABLE = True
-except ImportError as _sa_err:
-    STRATEGY_A_AVAILABLE = False
-    logging.getLogger(__name__).warning(f"Strategy A import failed: {_sa_err}")
-try:
-    from polymarket_live_executor import PolymarketLiveExecutor
-    LIVE_EXECUTOR_AVAILABLE = True
-except ImportError as _le_err:
-    LIVE_EXECUTOR_AVAILABLE = False
-    logging.getLogger(__name__).warning(f"Live Executor import failed: {_le_err}")
-try:
-    from polymarket_reversal import ReversalStrategy
-    REVERSAL_STRATEGY_AVAILABLE = True
-except ImportError as _rev_err:
-    REVERSAL_STRATEGY_AVAILABLE = False
-    logging.getLogger(__name__).warning(f"Reversal Strategy import failed: {_rev_err}")
-try:
-    from simple_up_bet import SimpleUpBetter
-    SIMPLE_UP_AVAILABLE = True
-except ImportError as _su_err:
-    SIMPLE_UP_AVAILABLE = False
-    logging.getLogger(__name__).warning(f"SimpleUpBetter import failed: {_su_err}")
+    from polymarket_rtds import PolymarketRTDS
+    from polymarket_spread_capture import SpreadCaptureEngine
+    SPREAD_CAPTURE_AVAILABLE = True
+except ImportError as _sc_err:
+    SPREAD_CAPTURE_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"Spread Capture import failed: {_sc_err}")
 try:
     from sub_bar_scanner import SubBarScanner
     SUB_BAR_SCANNER_AVAILABLE = True
@@ -987,77 +981,28 @@ class RenaissanceTradingBot:
         self._last_poly_scan: Optional[datetime] = None
         self._latest_scanner_opportunities: List[dict] = []
 
-        # Initialize Polymarket Strategy A — Confirmed Momentum executor
+        # DISABLED: Old Polymarket strategies — replaced by spread capture
         self.polymarket_executor = None
-        if STRATEGY_A_AVAILABLE:
-            try:
-                self.polymarket_executor = StrategyAExecutor(
-                    config=self.config,
-                    db_path=scanner_db,
-                    logger=self.logger,
-                )
-                self.logger.info(
-                    f"Polymarket Strategy A: "
-                    f"{len([i for i in self.polymarket_executor.instruments.values() if i.enabled])} instruments | "
-                    f"Bankroll: ${self.polymarket_executor.bankroll:.2f}"
-                )
-            except Exception as _pe_err:
-                self.logger.warning(f"Strategy A init failed: {_pe_err}")
-                self.polymarket_executor = None
-
-        # Initialize Polymarket Live Executor (real CLOB orders for proven assets)
         self.polymarket_live_executor = None
-        if LIVE_EXECUTOR_AVAILABLE and self.polymarket_executor:
-            try:
-                self.polymarket_live_executor = PolymarketLiveExecutor(
-                    db_path=scanner_db,
-                    config=self.config,
-                )
-                # Wire into Strategy A so it can queue live bets alongside paper
-                self.polymarket_executor.live_executor = self.polymarket_live_executor
-                self.logger.info(
-                    f"Polymarket Live Executor: "
-                    f"{'ENABLED' if self.polymarket_live_executor.live_enabled else 'disabled (no wallet)'}"
-                )
-            except Exception as _le_err:
-                self.logger.warning(f"Live Executor init failed: {_le_err}")
-                self.polymarket_live_executor = None
-
-        # Initialize Polymarket Reversal Strategy — "BTC Already Told You"
         self.reversal_strategy = None
-        if REVERSAL_STRATEGY_AVAILABLE:
-            try:
-                self.reversal_strategy = ReversalStrategy(db_path=scanner_db)
-                self.logger.info("Polymarket Reversal Strategy: initialized (paper mode)")
-            except Exception as _rev_err:
-                self.logger.warning(f"Reversal Strategy init failed: {_rev_err}")
-                self.reversal_strategy = None
-
-        # Initialize Simple $1 UP Baseline Strategy
         self.simple_better = None
-        if SIMPLE_UP_AVAILABLE:
-            try:
-                self.simple_better = SimpleUpBetter(db_path=scanner_db)
-                self.logger.info(
-                    f"Simple UP better: initialized "
-                    f"(live={'YES' if self.simple_better.live_enabled else 'NO'})"
-                )
-            except Exception as _su_err:
-                self.logger.warning(f"SimpleUpBetter init failed: {_su_err}")
-                self.simple_better = None
-
-        # Initialize Cascade data collector (Polymarket crowd pricing for lead-lag validation)
         self.cascade_collector = None
-        if CASCADE_COLLECTOR_AVAILABLE:
+
+        # Initialize 0x8dxd-style Spread Capture Engine
+        self.rtds = None
+        self.spread_capture = None
+        if SPREAD_CAPTURE_AVAILABLE:
             try:
-                self.cascade_collector = CascadeDataCollector(
-                    bot=self,
-                    db_path=scanner_db,
-                    poll_interval=30,
+                self.rtds = PolymarketRTDS()
+                self.spread_capture = SpreadCaptureEngine(rtds=self.rtds)
+                self.logger.info(
+                    "Spread Capture Engine: initialized "
+                    "(0x8dxd strategy — BTC+ETH, 5m+15m, CLOB limit orders)"
                 )
-                self.logger.info("Cascade data collector initialized (30s poll interval)")
-            except Exception as _cc_err:
-                self.logger.warning(f"Cascade collector init failed: {_cc_err}")
+            except Exception as _sc_err:
+                self.logger.warning(f"Spread Capture init failed: {_sc_err}")
+                self.rtds = None
+                self.spread_capture = None
 
         # Initialize Sub-Bar Scanner (10-second early exit monitor)
         self.sub_bar_scanner = None
@@ -7345,20 +7290,15 @@ class RenaissanceTradingBot:
             self.logger.info("Launching arbitrage engine...")
             self._track_task(self._run_arbitrage_engine())
 
-        # DISABLED: BTC price relay — only feeds reversal strategy (replaced by simple_up_bet)
-        # if self._unified_price_feed and self.reversal_strategy:
-        #     self.logger.info("Launching BTC price relay (10s from Binance WS)...")
-        #     self._track_task(self._run_btc_price_relay())
+        # DISABLED: Old Polymarket strategies — all replaced by spread capture
+        # Strategy A, Live Executor, Reversal, Simple UP — all disabled
 
-        # DISABLED: Strategy A — replaced by simple_up_bet baseline test
-        # if self.polymarket_executor:
-        #     self.logger.info("Launching Strategy A independent loop (60s cycle)...")
-        #     self._track_task(self._run_strategy_a_loop())
-
-        # ── Simple $1 UP Baseline Strategy ──
-        if self.simple_better:
-            self.logger.info("Launching Simple UP better ($1 UP at T+3:00)...")
-            self._track_task(self.simple_better.run())
+        # ── 0x8dxd Spread Capture Engine ──
+        if self.rtds and self.spread_capture:
+            self.logger.info("Launching RTDS WebSocket (Binance + Chainlink prices)...")
+            self._track_task(self.rtds.connect())
+            self.logger.info("Launching Spread Capture Engine (0x8dxd strategy, BTC+ETH 5m+15m)...")
+            self._track_task(self.spread_capture.run())
 
         # ── Module D: Start Liquidation Cascade Detector ──
         if self.liquidation_detector:
