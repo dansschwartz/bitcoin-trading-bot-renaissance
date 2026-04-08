@@ -900,6 +900,10 @@ class SpreadCaptureEngine:
 
         if winning_shares <= 0:
             pos.exit_attempted = True
+            logger.debug(
+                f"[SC] Pre-exit: {pos.asset} {pos.timeframe} — "
+                f"no {winning_side} shares to sell (CL:{cl_direction})"
+            )
             return
 
         # Sell at 95 cents — high enough to capture value, low enough to fill
