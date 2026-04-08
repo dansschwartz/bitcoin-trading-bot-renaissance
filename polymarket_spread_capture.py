@@ -618,9 +618,12 @@ class SpreadCaptureEngine:
                     # -- PHASE 4: Pre-resolution exit (Bug 1 fix) --
                     # Sell winning shares before market closes to convert
                     # conditional tokens to USDC. Prevents trapped shares.
-                    exit_start = window_seconds - 20  # 20 seconds before end
-                    exit_end = window_seconds - 5     # Stop 5s before end
-                    if exit_start <= elapsed < exit_end:
+                    # Use fresh time.time() because fill verification delays
+                    # can make the loop-start `now` stale by 10s+ per order.
+                    actual_elapsed = time.time() - pos.window_start
+                    exit_start = window_seconds - 25  # 25 seconds before end
+                    exit_end = window_seconds - 3     # Stop 3s before end
+                    if exit_start <= actual_elapsed < exit_end:
                         await self._pre_resolution_exit(
                             pos, yes_price, no_price, cl_direction
                         )
@@ -1002,8 +1005,8 @@ class SpreadCaptureEngine:
         if not order_id or order_id in ("unknown", "error"):
             return False, 0.0, 0.0
 
-        # First check after 5 seconds
-        await asyncio.sleep(5)
+        # First check after 3 seconds
+        await asyncio.sleep(3)
 
         order = await asyncio.to_thread(self._get_order_sync, order_id)
         if order:
@@ -1015,9 +1018,9 @@ class SpreadCaptureEngine:
                 actual_shares = size_matched if size_matched > 0 else float(order.get("size", 0) or 0)
                 return True, actual_shares, price
 
-            # If not filled yet, wait 5 more seconds
+            # If not filled yet, wait 4 more seconds (7s total)
             if status in ("OPEN", "LIVE", "ACTIVE", ""):
-                await asyncio.sleep(5)
+                await asyncio.sleep(4)
                 order = await asyncio.to_thread(self._get_order_sync, order_id)
                 if order:
                     status = str(order.get("status", "")).upper()
@@ -1029,7 +1032,7 @@ class SpreadCaptureEngine:
                         return True, actual_shares, price
 
                 # Still not filled — cancel
-                logger.info(f"[SC] Order {order_id[:12]}... unfilled after 10s — cancelling")
+                logger.info(f"[SC] Order {order_id[:12]}... unfilled after 7s — cancelling")
                 await asyncio.to_thread(self._cancel_order_sync, order_id)
                 return False, 0.0, 0.0
 
