@@ -2,18 +2,18 @@
 polymarket_spread_capture.py — 0x8dxd-Style Spread Capture
 
 Replicates the #1 Polymarket crypto trader's strategy:
-- Buy BOTH sides of each 5m/15m direction market
-- Accumulate the underdog when it crashes to pennies
+- Buy the FAVORITE side at window open (Chainlink-based momentum)
+- Accumulate the UNDERDOG when it crashes to pennies (share-balanced)
 - Achieve pair cost < $1.00 for guaranteed profit
 - Optional sell/rotation if momentum reverses
 
 No direction prediction needed. +8.19% EV at 50/50 accuracy.
 
 Key parameters (from 0x8dxd analysis of 3,500 trades):
-- Assets: BTC + ETH only (15m and 5m)
-- Entry: within 30 seconds of window open
+- Assets: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE (5m and 15m)
+- Entry: within 30 seconds of window open — FAVORITE side only
 - 87% limit orders at round cent prices
-- 28 fills per window average, up to 121
+- Phase 2: share-based underdog accumulation (TARGET_BALANCE_RATIO=0.62)
 - Pair cost target: < $1.05 ideal, always < $1.20
 - Sell rate: 15% (rotation when momentum reverses)
 - Never skips a window
@@ -37,16 +37,15 @@ logger = logging.getLogger("spread_capture")
 # CONFIGURATION — Based on 0x8dxd's observed parameters
 # ═══════════════════════════════════════════════════════════════
 
-# Assets: 0x8dxd trades BTC and ETH only
+# All 7 crypto assets on Polymarket direction markets
 ASSETS = {
-    "BTC": {
-        "slug_5m": "btc-updown-5m",
-        "slug_15m": "btc-updown-15m",
-    },
-    "ETH": {
-        "slug_5m": "eth-updown-5m",
-        "slug_15m": "eth-updown-15m",
-    },
+    "BTC": {"slug_5m": "btc-updown-5m", "slug_15m": "btc-updown-15m"},
+    "ETH": {"slug_5m": "eth-updown-5m", "slug_15m": "eth-updown-15m"},
+    "SOL": {"slug_5m": "sol-updown-5m", "slug_15m": "sol-updown-15m"},
+    "XRP": {"slug_5m": "xrp-updown-5m", "slug_15m": "xrp-updown-15m"},
+    "DOGE": {"slug_5m": "doge-updown-5m", "slug_15m": "doge-updown-15m"},
+    "BNB": {"slug_5m": "bnb-updown-5m", "slug_15m": "bnb-updown-15m"},
+    "HYPE": {"slug_5m": "hype-updown-5m", "slug_15m": "hype-updown-15m"},
 }
 
 # Timeframes
@@ -55,21 +54,23 @@ TIMEFRAMES = {
     "15m": {"seconds": 900, "alignment": 900},
 }
 
-# Position sizing
-# 0x8dxd deploys ~$58/window on average. Start much smaller for testing.
-INITIAL_BET_SIZE = 2.00          # Total $ per side per window (start small!)
+# Position sizing — per spec
+INITIAL_BET_SIZE = 5.00          # $ per initial Phase 1 order (favorite side only)
 MAX_BET_SIZE = 20.00             # Maximum after proving it works
-UNDERDOG_MULTIPLIER = 3.0        # Buy 3x more of underdog vs initial position
 
-# Entry thresholds
+# Phase 1: Entry timing
 PHASE1_ENTRY_DELAY = 5           # Seconds after window open to start Phase 1
-PHASE1_YES_PRICE = 0.50          # Initial YES limit order price
-PHASE1_NO_PRICE = 0.50           # Initial NO limit order price
+PHASE1_FAVORITE_PRICE = 0.50     # Max price for favorite side buy
 
-# Phase 2: Underdog accumulation
-UNDERDOG_THRESHOLD = 0.20        # Buy aggressively when a side drops below this
-UNDERDOG_CHEAP_THRESHOLD = 0.10  # Buy VERY aggressively below this
+# Phase 2: Underdog accumulation — share-based balancing
+UNDERDOG_THRESHOLD = 0.20        # Start accumulating underdog below this price
+UNDERDOG_CHEAP_THRESHOLD = 0.10  # Buy more aggressively below this
 UNDERDOG_PENNY_THRESHOLD = 0.05  # Maximum accumulation below this
+TARGET_BALANCE_RATIO = 0.62      # Target: underdog_shares / favorite_shares
+MAX_UNHEDGED_RATIO = 3.0         # Stop if favorite > 3x underdog shares
+MIN_REBUY_INTERVAL = 10.0        # Minimum seconds between underdog buys
+REBUY_PRICE_IMPROVEMENT = 0.02   # Only rebuy if price improved by $0.02
+MAX_FILLS_PER_WINDOW = 15        # Max Phase 2 fills per window
 
 # Phase 3: Sell/rotation — DISABLED for first 50 windows per spec
 SELL_ENABLED = False             # Start disabled, enable after first 50 windows
@@ -85,6 +86,7 @@ PAIR_COST_GUARANTEED = 1.00      # Below this = guaranteed profit regardless
 MAX_DAILY_LOSS = 50.00           # Stop all trading if daily loss exceeds this
 MAX_WINDOWS_PER_DAY = 300        # Sanity limit
 MAX_EXPOSURE_PER_WINDOW = 50.00  # Never deploy more than this per window
+MAX_GLOBAL_EXPOSURE = 300.00     # Total $ across ALL active windows
 
 DB_PATH = "data/renaissance_bot.db"
 SECRETS_PATH = "config/polymarket_secrets.json"
@@ -126,6 +128,12 @@ class WindowPosition:
     # Phase tracking
     phase: int = 0  # 0=waiting, 1=initial, 2=underdog, 3=rotation
     phase2_triggered: bool = False
+    favorite_side: str = ""  # "YES" or "NO" — set in Phase 1
+
+    # Phase 2 cooldown tracking
+    last_underdog_buy_time: float = 0.0
+    last_underdog_buy_price: float = 0.0
+    phase2_fills: int = 0  # Number of Phase 2 fills in this window
 
     # Status
     status: str = "active"  # active, resolved, error
@@ -176,9 +184,9 @@ class SpreadCaptureEngine:
     0x8dxd-style spread capture on Polymarket direction markets.
 
     For each 5m/15m window:
-    Phase 1 (0-10s):  Place limit buys on BOTH YES and NO at ~$0.50
-    Phase 2 (10-180s): When underdog crashes, accumulate at $0.02-$0.15
-    Phase 3 (60-240s): If momentum reverses, sell losing side, rotate
+    Phase 1 (0-10s):  Buy FAVORITE side (Chainlink momentum direction)
+    Phase 2 (10-end): Accumulate underdog at pennies (share-balanced)
+    Phase 3 (optional): Sell losing side, rotate capital
 
     Result: pair_cost < $1.00 -> guaranteed profit regardless of outcome
     """
@@ -199,6 +207,10 @@ class SpreadCaptureEngine:
 
         self._init_db()
         self._init_clob()
+
+    def _get_global_exposure(self) -> float:
+        """Total $ deployed across ALL active windows."""
+        return sum(p.total_cost for p in self._positions.values() if p.status == "active")
 
     def _init_db(self):
         """Create tracking tables."""
@@ -359,6 +371,8 @@ class SpreadCaptureEngine:
                     continue
 
                 # Check for new windows to enter
+                global_exposure = self._get_global_exposure()
+
                 for asset, config in ASSETS.items():
                     for tf_name, tf_config in TIMEFRAMES.items():
                         alignment = tf_config["alignment"]
@@ -369,7 +383,11 @@ class SpreadCaptureEngine:
                         # New window? Start Phase 1
                         if slug not in self._positions and elapsed < PHASE1_ENTRY_DELAY + 10:
                             if elapsed >= PHASE1_ENTRY_DELAY:
+                                # Global exposure cap
+                                if global_exposure >= MAX_GLOBAL_EXPOSURE:
+                                    continue
                                 await self._enter_window(asset, tf_name, window_start, slug, config)
+                                global_exposure = self._get_global_exposure()
 
                 # Process active positions
                 for slug, pos in list(self._positions.items()):
@@ -413,11 +431,13 @@ class SpreadCaptureEngine:
 
                     # Log status periodically
                     if int(now) % 30 < 2:
+                        fav = pos.favorite_side or "?"
                         logger.info(
-                            f"[SC] {pos.asset} {pos.timeframe} | "
+                            f"[SC] {pos.asset} {pos.timeframe} fav={fav} | "
                             f"YES: {pos.net_yes_shares:.1f}sh@${pos.avg_yes_price:.3f} | "
                             f"NO: {pos.net_no_shares:.1f}sh@${pos.avg_no_price:.3f} | "
                             f"Pair: ${pos.pair_cost:.3f} | "
+                            f"P2:{pos.phase2_fills}/{MAX_FILLS_PER_WINDOW} | "
                             f"{'ARB' if pos.is_arb else 'DIR'} | "
                             f"CL:{cl_direction or '?'}"
                         )
@@ -436,16 +456,21 @@ class SpreadCaptureEngine:
                 await asyncio.sleep(5)
 
     # ═══════════════════════════════════════════════════════════
-    # PHASE 1: INITIAL ENTRY
+    # PHASE 1: INITIAL ENTRY — FAVORITE SIDE ONLY
     # ═══════════════════════════════════════════════════════════
 
     async def _enter_window(self, asset: str, timeframe: str,
                              window_start: int, slug: str, config: dict):
         """
-        Phase 1: Place initial limit orders on BOTH sides.
+        Phase 1: Buy the FAVORITE side only.
+
+        Uses Chainlink momentum direction at window open:
+        - If Chainlink is moving UP → crowd will buy YES → YES is favorite
+        - If Chainlink is moving DOWN → crowd will buy NO → NO is favorite
+        - If unknown → default to YES (50/50 doesn't matter, underdog accumulation is the edge)
 
         0x8dxd enters within 7-11 seconds of window open.
-        Initial orders at ~$0.45-$0.50 per side.
+        Only one side bought initially — the other side comes cheap in Phase 2.
         """
         # Record Chainlink start price for resolution tracking
         self._rtds.record_window_start(asset, window_start)
@@ -455,6 +480,14 @@ class SpreadCaptureEngine:
         if not market_data:
             logger.debug(f"[SC] {asset} {timeframe}: market {slug} not found")
             return
+
+        # Determine favorite side from Chainlink momentum
+        cl_direction = self._rtds.get_resolution_direction(asset, window_start)
+        if cl_direction == "DOWN":
+            favorite_side = "NO"
+        else:
+            # UP or unknown → default to YES
+            favorite_side = "YES"
 
         pos = WindowPosition(
             asset=asset,
@@ -466,85 +499,143 @@ class SpreadCaptureEngine:
             no_token_id=market_data.get("token_id_no", ""),
             chainlink_start_price=self._rtds.get_chainlink_price(asset) or 0,
             phase=1,
+            favorite_side=favorite_side,
         )
 
         self._positions[slug] = pos
         self._daily_windows += 1
 
-        # Place initial YES buy
-        yes_price = min(PHASE1_YES_PRICE, market_data.get("crowd_yes", 0.50))
-        yes_shares = INITIAL_BET_SIZE / yes_price if yes_price > 0 else 0
+        # Buy FAVORITE side only
+        crowd_yes = market_data.get("crowd_yes", 0.50)
+        if favorite_side == "YES":
+            buy_price = min(PHASE1_FAVORITE_PRICE, crowd_yes)
+        else:
+            buy_price = min(PHASE1_FAVORITE_PRICE, 1.0 - crowd_yes)
 
-        await self._place_order(pos, "YES", yes_price, yes_shares, phase=1)
+        buy_shares = INITIAL_BET_SIZE / buy_price if buy_price > 0 else 0
 
-        # Place initial NO buy
-        no_price = min(PHASE1_NO_PRICE, 1.0 - market_data.get("crowd_yes", 0.50))
-        no_shares = INITIAL_BET_SIZE / no_price if no_price > 0 else 0
+        await self._place_order(pos, favorite_side, buy_price, buy_shares, phase=1)
 
-        await self._place_order(pos, "NO", no_price, no_shares, phase=1)
-
+        underdog_side = "NO" if favorite_side == "YES" else "YES"
         logger.info(
             f"[SC] *** ENTERED: {asset} {timeframe} ***\n"
             f"  Slug: {slug}\n"
-            f"  YES: {yes_shares:.1f}sh @ ${yes_price:.2f}\n"
-            f"  NO: {no_shares:.1f}sh @ ${no_price:.2f}\n"
-            f"  Initial pair cost: ${yes_price + no_price:.3f}\n"
+            f"  Favorite: {favorite_side} @ ${buy_price:.2f} ({buy_shares:.1f}sh)\n"
+            f"  Underdog: {underdog_side} (waiting for crash)\n"
+            f"  CL direction: {cl_direction or 'unknown'}\n"
             f"  Chainlink start: ${pos.chainlink_start_price:.2f}"
         )
 
     # ═══════════════════════════════════════════════════════════
-    # PHASE 2: UNDERDOG ACCUMULATION
+    # PHASE 2: UNDERDOG ACCUMULATION (share-based balancing)
     # ═══════════════════════════════════════════════════════════
 
     async def _accumulate_underdog(self, pos: WindowPosition, side: str,
                                      current_price: float, elapsed: float,
                                      cl_direction: Optional[str]):
         """
-        Phase 2: Buy the cheap side aggressively.
+        Phase 2: Accumulate the cheap side using SHARE-BASED balancing.
 
-        When the crowd piles on one direction, the underdog crashes.
-        We accumulate it at pennies. This drives pair cost below $1.00.
+        Key differences from dollar-based:
+        - Size by SHARES needed to reach TARGET_BALANCE_RATIO (0.62)
+        - Enforce rebuy cooldown (MIN_REBUY_INTERVAL=10s)
+        - Require price improvement ($0.02) before rebuying
+        - Cap fills per window (MAX_FILLS_PER_WINDOW=15)
+        - Check global exposure cap
 
-        0x8dxd buys at $0.02-$0.15 on the underdog side.
-        76% of his trades happen AFTER the first 30 seconds.
+        This is the edge: buying underdog shares at $0.02-$0.15
+        when the crowd piles on one direction.
         """
-        # Don't over-accumulate
+        now = time.time()
+
+        # --- Guard checks ---
+
+        # Max fills per window
+        if pos.phase2_fills >= MAX_FILLS_PER_WINDOW:
+            return
+
+        # Per-window exposure cap
         if pos.total_cost >= MAX_EXPOSURE_PER_WINDOW:
             return
 
-        # Don't buy if pair cost already too high
+        # Global exposure cap
+        if self._get_global_exposure() >= MAX_GLOBAL_EXPOSURE:
+            return
+
+        # Rebuy cooldown
+        if now - pos.last_underdog_buy_time < MIN_REBUY_INTERVAL:
+            return
+
+        # Price improvement check — only rebuy if price dropped by at least $0.02
+        if pos.last_underdog_buy_price > 0:
+            if current_price >= pos.last_underdog_buy_price - REBUY_PRICE_IMPROVEMENT:
+                return
+
+        # Don't buy if pair cost already too high (both sides populated)
         if pos.pair_cost > PAIR_COST_MAX and pos.yes_shares > 0 and pos.no_shares > 0:
             return
 
-        # Size based on how cheap the underdog is
-        if current_price <= UNDERDOG_PENNY_THRESHOLD:
-            # Pennies! Buy aggressively
-            buy_amount = INITIAL_BET_SIZE * UNDERDOG_MULTIPLIER
-        elif current_price <= UNDERDOG_CHEAP_THRESHOLD:
-            # Cheap — buy moderately
-            buy_amount = INITIAL_BET_SIZE * 2.0
-        elif current_price <= UNDERDOG_THRESHOLD:
-            # Mild discount — buy small
-            buy_amount = INITIAL_BET_SIZE
-        else:
-            return
+        # --- Share-based sizing ---
 
-        # Cap total exposure
-        buy_amount = min(buy_amount, MAX_EXPOSURE_PER_WINDOW - pos.total_cost)
+        # Determine favorite vs underdog share counts
+        if pos.favorite_side == "YES":
+            favorite_shares = pos.net_yes_shares
+            underdog_shares = pos.net_no_shares
+        else:
+            favorite_shares = pos.net_no_shares
+            underdog_shares = pos.net_yes_shares
+
+        # Only accumulate the underdog side (opposite of favorite)
+        underdog_side = "NO" if pos.favorite_side == "YES" else "YES"
+        if side != underdog_side:
+            return  # Don't buy more of the favorite in Phase 2
+
+        # Target shares: achieve TARGET_BALANCE_RATIO
+        target_underdog_shares = favorite_shares * TARGET_BALANCE_RATIO
+        shares_needed = target_underdog_shares - underdog_shares
+
+        if shares_needed <= 0:
+            # Already balanced — only buy if truly penny-priced
+            if current_price <= UNDERDOG_PENNY_THRESHOLD:
+                shares_needed = favorite_shares * 0.1  # Small top-up
+            else:
+                return
+
+        # Check MAX_UNHEDGED_RATIO — don't let favorite get too far ahead
+        if favorite_shares > 0 and underdog_shares > 0:
+            ratio = favorite_shares / underdog_shares
+            if ratio > MAX_UNHEDGED_RATIO:
+                # Force larger underdog buy to rebalance
+                shares_needed = max(shares_needed, favorite_shares * 0.2)
+
+        # Cap by exposure limits
+        buy_amount = shares_needed * current_price
+        max_buy = min(MAX_EXPOSURE_PER_WINDOW - pos.total_cost,
+                      MAX_GLOBAL_EXPOSURE - self._get_global_exposure())
+        buy_amount = min(buy_amount, max_buy)
+
         if buy_amount < 0.50:
             return
 
         shares = buy_amount / current_price if current_price > 0 else 0
+        if shares < 1:
+            return
 
         await self._place_order(pos, side, current_price, shares, phase=2)
         pos.phase = 2
         pos.phase2_triggered = True
+        pos.last_underdog_buy_time = now
+        pos.last_underdog_buy_price = current_price
+        pos.phase2_fills += 1
 
         logger.info(
             f"[SC] UNDERDOG: {pos.asset} {side} @ ${current_price:.3f} "
-            f"({shares:.1f}sh for ${buy_amount:.2f}) | "
-            f"Pair cost now: ${pos.pair_cost:.3f} | "
-            f"CL says: {cl_direction or '?'}"
+            f"({shares:.1f}sh, ${buy_amount:.2f}) | "
+            f"Balance: {underdog_shares + shares:.0f}/{favorite_shares:.0f} "
+            f"({(underdog_shares + shares) / max(favorite_shares, 1) * 100:.0f}%) | "
+            f"Pair: ${pos.pair_cost:.3f} | "
+            f"Fill {pos.phase2_fills}/{MAX_FILLS_PER_WINDOW} | "
+            f"CL:{cl_direction or '?'}"
         )
 
     # ═══════════════════════════════════════════════════════════

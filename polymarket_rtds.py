@@ -25,16 +25,26 @@ logger = logging.getLogger("polymarket_rtds")
 
 RTDS_URL = "wss://ws-live-data.polymarket.com"
 
-# Symbols for subscription
+# Symbols for subscription — all 7 assets traded on Polymarket direction markets
 SYMBOLS = {
     "BTC": "btcusdt",
     "ETH": "ethusdt",
+    "SOL": "solusdt",
+    "XRP": "xrpusdt",
+    "DOGE": "dogeusdt",
+    "BNB": "bnbusdt",
+    "HYPE": "hypeusdt",
 }
 
 # Chainlink uses different format
 CHAINLINK_SYMBOLS = {
     "BTC": "btc/usd",
     "ETH": "eth/usd",
+    "SOL": "sol/usd",
+    "XRP": "xrp/usd",
+    "DOGE": "doge/usd",
+    "BNB": "bnb/usd",
+    "HYPE": "hype/usd",
 }
 
 
@@ -250,18 +260,27 @@ class PolymarketRTDS:
 
     def get_status(self) -> dict:
         """Return status dict for dashboard."""
-        return {
+        status = {
             "connected": self._connected,
-            "btc_binance": self.get_binance_price("BTC"),
-            "btc_chainlink": self.get_chainlink_price("BTC"),
-            "btc_spread": self.get_spread("BTC"),
-            "eth_binance": self.get_binance_price("ETH"),
-            "eth_chainlink": self.get_chainlink_price("ETH"),
-            "eth_spread": self.get_spread("ETH"),
             "last_binance_update": self._last_binance_update,
             "last_chainlink_update": self._last_chainlink_update,
             "window_starts_tracked": len(self._window_starts),
+            "assets": {},
         }
+        for asset in SYMBOLS:
+            status["assets"][asset] = {
+                "binance": self.get_binance_price(asset),
+                "chainlink": self.get_chainlink_price(asset),
+                "spread": self.get_spread(asset),
+            }
+        # Backward compat flat keys for BTC/ETH
+        status["btc_binance"] = self.get_binance_price("BTC")
+        status["btc_chainlink"] = self.get_chainlink_price("BTC")
+        status["btc_spread"] = self.get_spread("BTC")
+        status["eth_binance"] = self.get_binance_price("ETH")
+        status["eth_chainlink"] = self.get_chainlink_price("ETH")
+        status["eth_spread"] = self.get_spread("ETH")
+        return status
 
     async def stop(self):
         self._running = False
