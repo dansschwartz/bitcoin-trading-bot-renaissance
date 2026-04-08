@@ -382,8 +382,9 @@ class SpreadCaptureEngine:
                         elapsed = now - window_start
 
                         # New window? Start Phase 1
-                        # Allow up to 60s for entry (14 markets x ~2s each = ~28s)
-                        if slug not in self._positions and elapsed < 60:
+                        # Allow entry throughout the window (Phase 2 needs time too)
+                        window_seconds = tf_config["seconds"]
+                        if slug not in self._positions and elapsed < window_seconds - 30:
                             if elapsed >= PHASE1_ENTRY_DELAY:
                                 # Global exposure cap
                                 if global_exposure >= MAX_GLOBAL_EXPOSURE:
@@ -393,8 +394,8 @@ class SpreadCaptureEngine:
                                 global_exposure = self._get_global_exposure()
                                 new_entries += 1
 
-                # Log heartbeat every 60s
-                if int(now) % 60 < 2:
+                # Log heartbeat every 30s
+                if int(now) % 30 < 2:
                     active_count = len([p for p in self._positions.values() if p.status == "active"])
                     logger.info(
                         f"[SC] Heartbeat: {active_count} active windows | "
