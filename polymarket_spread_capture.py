@@ -72,12 +72,6 @@ MIN_REBUY_INTERVAL = 10.0        # Minimum seconds between underdog buys
 REBUY_PRICE_IMPROVEMENT = 0.02   # Only rebuy if price improved by $0.02
 MAX_FILLS_PER_WINDOW = 15        # Max Phase 2 fills per window
 
-# MANDATORY HEDGE DEADLINE — never stay naked past this point
-# If Phase 2 hasn't bought the underdog by this time, buy at market price.
-# This guarantees we always have both sides by the deadline.
-MANDATORY_HEDGE_5M = 60          # 1 minute into a 5-min window
-MANDATORY_HEDGE_15M = 120        # 2 minutes into a 15-min window
-
 # Phase 3: Sell/rotation — DISABLED for first 50 windows per spec
 SELL_ENABLED = False             # Start disabled, enable after first 50 windows
 SELL_LOSS_THRESHOLD = 0.70       # Sell losing side if it drops below this % of entry
@@ -495,39 +489,9 @@ class SpreadCaptureEngine:
                     await asyncio.sleep(60)
                     continue
 
-                # Check for new windows to enter
-                global_exposure = self._get_global_exposure()
-                new_entries = 0
-
-                for asset, config in ASSETS.items():
-                    for tf_name, tf_config in TIMEFRAMES.items():
-                        alignment = tf_config["alignment"]
-                        window_start = int(math.floor(now / alignment) * alignment)
-                        slug = f"{config[f'slug_{tf_name}']}-{window_start}"
-                        elapsed = now - window_start
-
-                        # New window? Start Phase 1
-                        # Allow entry throughout the window (Phase 2 needs time too)
-                        window_seconds = tf_config["seconds"]
-                        if slug not in self._positions and elapsed < window_seconds - 30:
-                            if elapsed >= PHASE1_ENTRY_DELAY:
-                                # Global exposure cap
-                                if global_exposure >= MAX_GLOBAL_EXPOSURE:
-                                    logger.info(f"[SC] Global exposure cap (${global_exposure:.0f}/{MAX_GLOBAL_EXPOSURE:.0f}), skipping {asset} {tf_name}")
-                                    continue
-                                await self._enter_window(asset, tf_name, window_start, slug, config)
-                                global_exposure = self._get_global_exposure()
-                                new_entries += 1
-
-                # Log heartbeat every 30s
-                if int(now) % 30 < 2:
-                    active_count = len([p for p in self._positions.values() if p.status == "active"])
-                    logger.info(
-                        f"[SC] Heartbeat: {active_count} active windows | "
-                        f"${global_exposure:.2f} deployed | "
-                        f"RTDS: {'Y' if self._rtds.is_connected else 'N'} | "
-                        f"CLOB: {'Y' if self._clob_client else 'N'}"
-                    )
+                # ── STEP 1: Process EXISTING positions FIRST ──
+                # This runs before new entries so that Phase 4 (pre-exit)
+                # fires on time even when entry processing takes 100s+.
 
                 # Split active positions: expired vs tradeable
                 expired_positions = []
@@ -563,7 +527,8 @@ class SpreadCaptureEngine:
                     if yes_price is None or no_price is None:
                         continue
 
-                    elapsed = now - pos.window_start
+                    # Use fresh time for accurate phase timing
+                    actual_elapsed = time.time() - pos.window_start
                     window_seconds = TIMEFRAMES[pos.timeframe]["seconds"]
 
                     # Get Chainlink direction
@@ -571,62 +536,32 @@ class SpreadCaptureEngine:
                         pos.asset, pos.window_start
                     )
 
-                    # -- PHASE 2: Underdog accumulation --
-                    if elapsed > 10 and elapsed < window_seconds - 30:
-                        # Is either side an underdog?
-                        if yes_price <= UNDERDOG_THRESHOLD:
-                            await self._accumulate_underdog(
-                                pos, "YES", yes_price, elapsed, cl_direction
-                            )
-
-                        if no_price <= UNDERDOG_THRESHOLD:
-                            await self._accumulate_underdog(
-                                pos, "NO", no_price, elapsed, cl_direction
-                            )
-
-                    # -- MANDATORY HEDGE DEADLINE --
-                    # If by the deadline we still only have ONE side,
-                    # buy the other side at market price. Never be naked.
-                    hedge_deadline = MANDATORY_HEDGE_5M if pos.timeframe == "5m" else MANDATORY_HEDGE_15M
-                    has_both = pos.net_yes_shares > 0 and pos.net_no_shares > 0
-                    if elapsed >= hedge_deadline and not has_both:
-                        underdog_side = "NO" if pos.favorite_side == "YES" else "YES"
-                        hedge_price = no_price if underdog_side == "NO" else yes_price
-                        if hedge_price and hedge_price > 0:
-                            # Match share count of favorite side
-                            fav_shares = pos.net_yes_shares if pos.favorite_side == "YES" else pos.net_no_shares
-                            hedge_shares = max(fav_shares * TARGET_BALANCE_RATIO, 1.0)
-                            cost = hedge_shares * hedge_price
-                            # Ensure minimum $1 order (CLOB requirement)
-                            if cost < 1.00 and hedge_price > 0:
-                                hedge_shares = max(hedge_shares, 1.00 / hedge_price)
-                                cost = hedge_shares * hedge_price
-                            if pos.total_cost + cost <= MAX_EXPOSURE_PER_WINDOW:
-                                await self._place_order(pos, underdog_side, hedge_price, hedge_shares, phase=2)
-                                pos.phase2_triggered = True
-                                logger.info(
-                                    f"[SC] *** MANDATORY HEDGE: {pos.asset} {pos.timeframe} "
-                                    f"+{hedge_shares:.1f} {underdog_side} @ ${hedge_price:.2f} "
-                                    f"(${cost:.2f}) | Deadline T+{hedge_deadline}s | "
-                                    f"Pair: ${pos.pair_cost:.3f}"
-                                )
-
-                    # -- PHASE 3: Sell/rotation --
-                    if SELL_ENABLED and elapsed > 60 and elapsed < window_seconds - 60:
-                        await self._check_rotation(pos, yes_price, no_price, cl_direction)
-
                     # -- PHASE 4: Pre-resolution exit (Bug 1 fix) --
-                    # Sell winning shares before market closes to convert
-                    # conditional tokens to USDC. Prevents trapped shares.
-                    # Use fresh time.time() because fill verification delays
-                    # can make the loop-start `now` stale by 10s+ per order.
-                    actual_elapsed = time.time() - pos.window_start
+                    # Check FIRST — this is time-critical. Must sell winning
+                    # shares before market closes to prevent trapped tokens.
                     exit_start = window_seconds - 25  # 25 seconds before end
                     exit_end = window_seconds - 3     # Stop 3s before end
                     if exit_start <= actual_elapsed < exit_end:
                         await self._pre_resolution_exit(
                             pos, yes_price, no_price, cl_direction
                         )
+
+                    # -- PHASE 2: Underdog accumulation --
+                    elif actual_elapsed > 10 and actual_elapsed < window_seconds - 30:
+                        # Is either side an underdog?
+                        if yes_price <= UNDERDOG_THRESHOLD:
+                            await self._accumulate_underdog(
+                                pos, "YES", yes_price, actual_elapsed, cl_direction
+                            )
+
+                        if no_price <= UNDERDOG_THRESHOLD:
+                            await self._accumulate_underdog(
+                                pos, "NO", no_price, actual_elapsed, cl_direction
+                            )
+
+                    # -- PHASE 3: Sell/rotation --
+                    if SELL_ENABLED and actual_elapsed > 60 and actual_elapsed < window_seconds - 60:
+                        await self._check_rotation(pos, yes_price, no_price, cl_direction)
 
                     # Log status periodically
                     if int(now) % 30 < 2:
@@ -647,6 +582,37 @@ class SpreadCaptureEngine:
                 # Resolve check every 30 seconds
                 if int(now) % 30 == 0:
                     await self._check_resolutions()
+
+                # ── STEP 2: Enter NEW windows ──
+                # Runs AFTER existing positions to avoid delaying Phase 4.
+                global_exposure = self._get_global_exposure()
+
+                for asset, config in ASSETS.items():
+                    for tf_name, tf_config in TIMEFRAMES.items():
+                        alignment = tf_config["alignment"]
+                        window_start = int(math.floor(now / alignment) * alignment)
+                        slug = f"{config[f'slug_{tf_name}']}-{window_start}"
+                        elapsed = now - window_start
+
+                        # New window? Start Phase 1
+                        window_seconds = tf_config["seconds"]
+                        if slug not in self._positions and elapsed < window_seconds - 30:
+                            if elapsed >= PHASE1_ENTRY_DELAY:
+                                # Global exposure cap
+                                if global_exposure >= MAX_GLOBAL_EXPOSURE:
+                                    continue
+                                await self._enter_window(asset, tf_name, window_start, slug, config)
+                                global_exposure = self._get_global_exposure()
+
+                # Log heartbeat every 30s
+                if int(now) % 30 < 2:
+                    active_count = len([p for p in self._positions.values() if p.status == "active"])
+                    logger.info(
+                        f"[SC] Heartbeat: {active_count} active windows | "
+                        f"${global_exposure:.2f} deployed | "
+                        f"RTDS: {'Y' if self._rtds.is_connected else 'N'} | "
+                        f"CLOB: {'Y' if self._clob_client else 'N'}"
+                    )
 
                 await asyncio.sleep(1.0)
 
