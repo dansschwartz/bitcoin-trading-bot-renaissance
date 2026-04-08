@@ -63,7 +63,7 @@ PHASE1_ENTRY_DELAY = 5           # Seconds after window open to start Phase 1
 PHASE1_FAVORITE_PRICE = 0.50     # Max price for favorite side buy
 
 # Phase 2: Underdog accumulation — share-based balancing
-UNDERDOG_THRESHOLD = 0.20        # Start accumulating underdog below this price
+UNDERDOG_THRESHOLD = 0.25        # Start accumulating underdog below this price
 UNDERDOG_CHEAP_THRESHOLD = 0.10  # Buy more aggressively below this
 UNDERDOG_PENNY_THRESHOLD = 0.05  # Maximum accumulation below this
 TARGET_BALANCE_RATIO = 0.62      # Target: underdog_shares / favorite_shares
@@ -435,7 +435,7 @@ class SpreadCaptureEngine:
                     if isinstance(prices, Exception):
                         continue
                     yes_price, no_price = prices
-                    if yes_price is None:
+                    if yes_price is None or no_price is None:
                         continue
 
                     elapsed = now - pos.window_start
@@ -466,10 +466,13 @@ class SpreadCaptureEngine:
                     # Log status periodically
                     if int(now) % 30 < 2:
                         fav = pos.favorite_side or "?"
+                        underdog_price = no_price if fav == "YES" else yes_price
                         logger.info(
                             f"[SC] {pos.asset} {pos.timeframe} fav={fav} | "
                             f"YES: {pos.net_yes_shares:.1f}sh@${pos.avg_yes_price:.3f} | "
                             f"NO: {pos.net_no_shares:.1f}sh@${pos.avg_no_price:.3f} | "
+                            f"CLOB: Y${yes_price:.2f}/N${no_price:.2f} | "
+                            f"UDog: ${underdog_price:.2f} (thr ${UNDERDOG_THRESHOLD}) | "
                             f"Pair: ${pos.pair_cost:.3f} | "
                             f"P2:{pos.phase2_fills}/{MAX_FILLS_PER_WINDOW} | "
                             f"{'ARB' if pos.is_arb else 'DIR'} | "
@@ -515,13 +518,18 @@ class SpreadCaptureEngine:
             logger.info(f"[SC] {asset} {timeframe}: market {slug} not found (Gamma returned empty)")
             return
 
-        # Determine favorite side from Chainlink momentum
-        cl_direction = self._rtds.get_resolution_direction(asset, window_start)
-        if cl_direction == "DOWN":
-            favorite_side = "NO"
-        else:
-            # UP or unknown → default to YES
+        # Determine favorite side from CROWD CONSENSUS (market price).
+        # At window open, Chainlink direction is meaningless — we just
+        # recorded the start price, so current == start → always "UP".
+        # Instead use crowd_yes: the market's implied YES probability.
+        crowd_yes = market_data.get("crowd_yes", 0.50)
+        if crowd_yes >= 0.50:
             favorite_side = "YES"
+        else:
+            favorite_side = "NO"
+
+        # Also get Chainlink direction for logging (not for decision)
+        cl_direction = self._rtds.get_resolution_direction(asset, window_start)
 
         pos = WindowPosition(
             asset=asset,
@@ -539,8 +547,7 @@ class SpreadCaptureEngine:
         self._positions[slug] = pos
         self._daily_windows += 1
 
-        # Buy FAVORITE side only
-        crowd_yes = market_data.get("crowd_yes", 0.50)
+        # Buy FAVORITE side at crowd price (capped at PHASE1_FAVORITE_PRICE)
         if favorite_side == "YES":
             buy_price = min(PHASE1_FAVORITE_PRICE, crowd_yes)
         else:
@@ -554,8 +561,9 @@ class SpreadCaptureEngine:
         logger.info(
             f"[SC] *** ENTERED: {asset} {timeframe} ***\n"
             f"  Slug: {slug}\n"
-            f"  Favorite: {favorite_side} @ ${buy_price:.2f} ({buy_shares:.1f}sh)\n"
-            f"  Underdog: {underdog_side} (waiting for crash)\n"
+            f"  Crowd YES: ${crowd_yes:.3f} → Favorite: {favorite_side}\n"
+            f"  Buy: {favorite_side} @ ${buy_price:.2f} ({buy_shares:.1f}sh)\n"
+            f"  Underdog: {underdog_side} (waiting for ≤${UNDERDOG_THRESHOLD})\n"
             f"  CL direction: {cl_direction or 'unknown'}\n"
             f"  Chainlink start: ${pos.chainlink_start_price:.2f}"
         )
