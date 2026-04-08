@@ -18,6 +18,7 @@ import Polymarket from './pages/Polymarket';
 import BreakoutBets from './pages/BreakoutBets';
 import BtcStraddle from './pages/BtcStraddle';
 import OracleTrading from './pages/OracleTrading';
+import SpreadCapture from './pages/SpreadCapture';
 
 export default function App() {
   return (
@@ -42,6 +43,7 @@ export default function App() {
                 <Route path="/polymarket" element={<Polymarket />} />
                 <Route path="/breakout-bets" element={<BreakoutBets />} />
                 <Route path="/oracle-trading" element={<OracleTrading />} />
+                <Route path="/spread" element={<SpreadCapture />} />
                 <Route path="/agents" element={<Agents />} />
                 <Route path="/intelligence" element={<Intelligence />} />
               </Routes>

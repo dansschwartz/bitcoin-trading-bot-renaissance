@@ -207,4 +207,18 @@ export const api = {
     get<Record<string, unknown>[]>(`/api/oracle-trading/equity/${pair}`),
   oracleTradingOpenTrades: () =>
     get<Record<string, unknown>[]>('/api/oracle-trading/open-trades'),
+
+  // Spread Capture (0x8dxd)
+  scSummary: () => get<Record<string, unknown>>('/api/spread-capture/summary'),
+  scActive: () => get<Record<string, unknown>[]>('/api/spread-capture/active'),
+  scHistory: (limit = 200, asset = '') =>
+    get<Record<string, unknown>[]>(`/api/spread-capture/history?limit=${limit}${asset ? `&asset=${asset}` : ''}`),
+  scFills: (limit = 200, slug = '') =>
+    get<Record<string, unknown>[]>(`/api/spread-capture/fills?limit=${limit}${slug ? `&slug=${slug}` : ''}`),
+  scPnlChart: () => get<Record<string, unknown>[]>('/api/spread-capture/pnl-chart'),
+  scByAsset: () => get<Record<string, unknown>[]>('/api/spread-capture/by-asset'),
+  scRtds: () => get<Record<string, unknown>>('/api/spread-capture/rtds'),
+  scHourly: (hours = 48) => get<Record<string, unknown>[]>(`/api/spread-capture/hourly?hours=${hours}`),
+  scPairCostDist: () => get<Record<string, unknown>[]>('/api/spread-capture/pair-cost-distribution'),
+  scFillRate: () => get<Record<string, unknown>>('/api/spread-capture/fill-rate'),
 };
