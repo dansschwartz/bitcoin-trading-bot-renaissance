@@ -278,7 +278,12 @@ class SpreadCaptureEngine:
         logger.info("Spread capture DB initialized")
 
     def _init_clob(self):
-        """Initialize CLOB client."""
+        """Initialize CLOB client.
+
+        Uses create_or_derive_api_creds() to get proper ApiCreds object
+        (not a raw dict) — the CLOB library requires attribute access
+        (creds.api_key) not dict access (creds["api_key"]).
+        """
         try:
             from py_clob_client.client import ClobClient
 
@@ -289,19 +294,27 @@ class SpreadCaptureEngine:
             with open(SECRETS_PATH) as f:
                 secrets = json.load(f)
 
-            self._clob_client = ClobClient(
-                host="https://clob.polymarket.com",
-                chain_id=137,
-                key=secrets["private_key"],
-                creds={
-                    "api_key": secrets["api_key"],
-                    "api_secret": secrets["api_secret"],
-                    "api_passphrase": secrets["api_passphrase"],
-                },
-                signature_type=secrets.get("signature_type", 1),
-                funder=secrets.get("funder", secrets["wallet_address"]),
-            )
-            logger.info("CLOB client initialized for spread capture")
+            # Build init kwargs — proxy wallet support
+            proxy_addr = secrets.get("proxy_wallet_address", "")
+            init_kwargs = {
+                "host": "https://clob.polymarket.com",
+                "chain_id": 137,
+                "key": secrets["private_key"],
+            }
+            if proxy_addr:
+                init_kwargs["signature_type"] = 1  # POLY_PROXY
+                init_kwargs["funder"] = proxy_addr
+                logger.info(f"[SC] Using proxy wallet: {proxy_addr[:10]}...{proxy_addr[-6:]}")
+
+            self._clob_client = ClobClient(**init_kwargs)
+
+            # Derive API credentials (returns ApiCreds object with .api_key etc.)
+            api_creds = self._clob_client.create_or_derive_api_creds()
+            self._clob_client.set_api_creds(api_creds)
+
+            # Verify connection
+            server_time = self._clob_client.get_server_time()
+            logger.info(f"[SC] CLOB client initialized (server_time={server_time})")
         except Exception as e:
             logger.error(f"CLOB init failed: {e}")
 
