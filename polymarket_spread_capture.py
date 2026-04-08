@@ -404,23 +404,42 @@ class SpreadCaptureEngine:
                         f"CLOB: {'Y' if self._clob_client else 'N'}"
                     )
 
-                # Process active positions
+                # Split active positions: expired vs tradeable
+                expired_positions = []
+                tradeable_positions = []
                 for slug, pos in list(self._positions.items()):
                     if pos.status != "active":
+                        continue
+                    elapsed = now - pos.window_start
+                    window_seconds = TIMEFRAMES[pos.timeframe]["seconds"]
+                    if elapsed > window_seconds + 30:
+                        expired_positions.append(pos)
+                    else:
+                        tradeable_positions.append(pos)
+
+                # Resolve expired windows
+                for pos in expired_positions:
+                    await self._resolve_window(pos)
+
+                # Batch fetch all CLOB prices concurrently (one thread per position)
+                if tradeable_positions:
+                    price_results = await asyncio.gather(
+                        *(self._get_clob_prices(p) for p in tradeable_positions),
+                        return_exceptions=True,
+                    )
+                else:
+                    price_results = []
+
+                # Process tradeable positions with pre-fetched prices
+                for pos, prices in zip(tradeable_positions, price_results):
+                    if isinstance(prices, Exception):
+                        continue
+                    yes_price, no_price = prices
+                    if yes_price is None:
                         continue
 
                     elapsed = now - pos.window_start
                     window_seconds = TIMEFRAMES[pos.timeframe]["seconds"]
-
-                    # Window expired? Resolve.
-                    if elapsed > window_seconds + 30:
-                        await self._resolve_window(pos)
-                        continue
-
-                    # Get current market prices from CLOB
-                    yes_price, no_price = self._get_clob_prices(pos)
-                    if yes_price is None:
-                        continue
 
                     # Get Chainlink direction
                     cl_direction = self._rtds.get_resolution_direction(
@@ -491,7 +510,7 @@ class SpreadCaptureEngine:
         self._rtds.record_window_start(asset, window_start)
 
         # Fetch market data (token IDs)
-        market_data = self._fetch_market(slug)
+        market_data = await self._fetch_market(slug)
         if not market_data:
             logger.info(f"[SC] {asset} {timeframe}: market {slug} not found (Gamma returned empty)")
             return
@@ -699,12 +718,27 @@ class SpreadCaptureEngine:
     # ORDER EXECUTION
     # ═══════════════════════════════════════════════════════════
 
+    def _post_order_sync(self, token_id: str, price: float,
+                          shares: float, is_buy: bool) -> Optional[dict]:
+        """Post order to CLOB. (Blocking — run via to_thread)"""
+        from py_clob_client.clob_types import OrderArgs
+        from py_clob_client.order_builder.constants import BUY, SELL
+
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=shares,
+            side=BUY if is_buy else SELL,
+        )
+        return self._clob_client.create_and_post_order(order_args)
+
     async def _place_order(self, pos: WindowPosition, side: str,
                             price: float, shares: float, phase: int) -> Optional[str]:
         """
         Place a BUY order on the CLOB.
 
         Uses limit orders at round cent prices (87% of 0x8dxd's orders).
+        Order posting runs in a thread to avoid blocking the event loop.
         """
         if not self._clob_client:
             logger.warning("[SC] No CLOB client")
@@ -723,17 +757,9 @@ class SpreadCaptureEngine:
             return None
 
         try:
-            from py_clob_client.clob_types import OrderArgs
-            from py_clob_client.order_builder.constants import BUY
-
-            order_args = OrderArgs(
-                token_id=token_id,
-                price=price,
-                size=shares,
-                side=BUY,
+            result = await asyncio.to_thread(
+                self._post_order_sync, token_id, price, shares, True
             )
-
-            result = self._clob_client.create_and_post_order(order_args)
             order_id = result.get("orderID", "unknown") if result else "error"
 
             # Update position
@@ -758,7 +784,7 @@ class SpreadCaptureEngine:
 
     async def _sell_order(self, pos: WindowPosition, side: str,
                            price: float, shares: float) -> Optional[str]:
-        """Place a SELL order."""
+        """Place a SELL order (non-blocking via thread)."""
         if not self._clob_client:
             return None
 
@@ -770,17 +796,9 @@ class SpreadCaptureEngine:
             return None
 
         try:
-            from py_clob_client.clob_types import OrderArgs
-            from py_clob_client.order_builder.constants import SELL
-
-            order_args = OrderArgs(
-                token_id=token_id,
-                price=price,
-                size=shares,
-                side=SELL,
+            result = await asyncio.to_thread(
+                self._post_order_sync, token_id, price, shares, False
             )
-
-            result = self._clob_client.create_and_post_order(order_args)
             order_id = result.get("orderID", "unknown") if result else "error"
 
             revenue = price * shares
@@ -819,8 +837,8 @@ class SpreadCaptureEngine:
     # MARKET DATA
     # ═══════════════════════════════════════════════════════════
 
-    def _fetch_market(self, slug: str) -> Optional[dict]:
-        """Fetch market data (token IDs, crowd price) from Gamma API."""
+    def _fetch_market_sync(self, slug: str) -> Optional[dict]:
+        """Fetch market data (token IDs, crowd price) from Gamma API. (Blocking)"""
         try:
             resp = requests.get(
                 f"{GAMMA_BASE}/markets",
@@ -858,8 +876,12 @@ class SpreadCaptureEngine:
             logger.warning(f"[SC] Market fetch error for {slug}: {e}")
             return None
 
-    def _get_clob_prices(self, pos: WindowPosition) -> Tuple[Optional[float], Optional[float]]:
-        """Get current YES and NO prices from the CLOB orderbook."""
+    async def _fetch_market(self, slug: str) -> Optional[dict]:
+        """Fetch market data without blocking the event loop."""
+        return await asyncio.to_thread(self._fetch_market_sync, slug)
+
+    def _get_clob_prices_sync(self, pos: WindowPosition) -> Tuple[Optional[float], Optional[float]]:
+        """Get current YES and NO prices from the CLOB orderbook. (Blocking)"""
         try:
             if not self._clob_client:
                 return None, None
@@ -884,6 +906,10 @@ class SpreadCaptureEngine:
         except Exception:
             return None, None
 
+    async def _get_clob_prices(self, pos: WindowPosition) -> Tuple[Optional[float], Optional[float]]:
+        """Get CLOB prices without blocking the event loop."""
+        return await asyncio.to_thread(self._get_clob_prices_sync, pos)
+
     # ═══════════════════════════════════════════════════════════
     # RESOLUTION
     # ═══════════════════════════════════════════════════════════
@@ -897,7 +923,7 @@ class SpreadCaptureEngine:
             went_up = cl_price >= pos.chainlink_start_price
         else:
             # Fallback: check Gamma API for resolution
-            went_up = self._check_gamma_resolution(pos.slug)
+            went_up = await asyncio.to_thread(self._check_gamma_resolution_sync, pos.slug)
 
         if went_up is None:
             return  # Can't resolve yet
@@ -945,8 +971,8 @@ class SpreadCaptureEngine:
             if now > window_end + 60:
                 await self._resolve_window(pos)
 
-    def _check_gamma_resolution(self, slug: str) -> Optional[bool]:
-        """Fallback: check Gamma API for market resolution."""
+    def _check_gamma_resolution_sync(self, slug: str) -> Optional[bool]:
+        """Fallback: check Gamma API for market resolution. (Blocking)"""
         try:
             resp = requests.get(f"{GAMMA_BASE}/markets", params={"slug": slug}, timeout=5)
             if resp.status_code != 200:

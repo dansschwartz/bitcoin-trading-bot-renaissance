@@ -13,6 +13,7 @@ No authentication required.
 import asyncio
 import json
 import logging
+import threading
 import time
 from typing import Dict, Optional, Callable
 
@@ -69,10 +70,39 @@ class PolymarketRTDS:
         self._connected = False
         self._last_binance_update = 0.0
         self._last_chainlink_update = 0.0
+        self._thread: Optional[threading.Thread] = None
+        self._thread_loop: Optional[asyncio.AbstractEventLoop] = None
 
     def on_price_update(self, callback: Callable):
         """Register callback for price updates. Called with (source, asset, price, ts)."""
         self._callbacks.append(callback)
+
+    def start_in_thread(self):
+        """Run the RTDS WebSocket in a dedicated daemon thread.
+
+        This isolates the WebSocket from the main bot's busy event loop,
+        preventing ping/pong starvation that causes disconnections.
+        Dict updates in Python are atomic for simple assignments, so
+        price data is safely shared between threads.
+        """
+        def _thread_target():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._thread_loop = loop
+            try:
+                loop.run_until_complete(self.connect())
+            except Exception as e:
+                logger.error(f"RTDS thread crashed: {e}")
+            finally:
+                loop.close()
+
+        self._thread = threading.Thread(
+            target=_thread_target,
+            name="rtds-websocket",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("RTDS WebSocket thread started (isolated from main event loop)")
 
     async def connect(self):
         """Connect to RTDS WebSocket and subscribe to both feeds."""
@@ -286,4 +316,14 @@ class PolymarketRTDS:
         self._running = False
         self._connected = False
         if self._ws:
-            await self._ws.close()
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+
+    def stop_sync(self):
+        """Stop from non-async context (e.g. during shutdown)."""
+        self._running = False
+        self._connected = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)

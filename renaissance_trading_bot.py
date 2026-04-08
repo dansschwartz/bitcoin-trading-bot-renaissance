@@ -7295,8 +7295,8 @@ class RenaissanceTradingBot:
 
         # ── 0x8dxd Spread Capture Engine ──
         if self.rtds and self.spread_capture:
-            self.logger.info("Launching RTDS WebSocket (Binance + Chainlink prices)...")
-            self._track_task(self.rtds.connect())
+            self.logger.info("Launching RTDS WebSocket in dedicated thread (Binance + Chainlink prices)...")
+            self.rtds.start_in_thread()
             self.logger.info(f"Launching Spread Capture Engine (0x8dxd strategy, {len(SC_ASSETS)} assets, 5m+15m)...")
             sc_task = self._track_task(self.spread_capture.run())
             def _sc_done(t, log=self.logger):
