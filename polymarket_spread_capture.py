@@ -372,6 +372,7 @@ class SpreadCaptureEngine:
 
                 # Check for new windows to enter
                 global_exposure = self._get_global_exposure()
+                new_entries = 0
 
                 for asset, config in ASSETS.items():
                     for tf_name, tf_config in TIMEFRAMES.items():
@@ -386,9 +387,21 @@ class SpreadCaptureEngine:
                             if elapsed >= PHASE1_ENTRY_DELAY:
                                 # Global exposure cap
                                 if global_exposure >= MAX_GLOBAL_EXPOSURE:
+                                    logger.info(f"[SC] Global exposure cap (${global_exposure:.0f}/{MAX_GLOBAL_EXPOSURE:.0f}), skipping {asset} {tf_name}")
                                     continue
                                 await self._enter_window(asset, tf_name, window_start, slug, config)
                                 global_exposure = self._get_global_exposure()
+                                new_entries += 1
+
+                # Log heartbeat every 60s
+                if int(now) % 60 < 2:
+                    active_count = len([p for p in self._positions.values() if p.status == "active"])
+                    logger.info(
+                        f"[SC] Heartbeat: {active_count} active windows | "
+                        f"${global_exposure:.2f} deployed | "
+                        f"RTDS: {'Y' if self._rtds.is_connected else 'N'} | "
+                        f"CLOB: {'Y' if self._clob_client else 'N'}"
+                    )
 
                 # Process active positions
                 for slug, pos in list(self._positions.items()):
