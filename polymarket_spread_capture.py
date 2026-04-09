@@ -388,9 +388,12 @@ class SpreadCaptureV2:
                         slug = f"{config[f'slug_{tf_name}']}-{window_start}"
                         elapsed = now - window_start
 
+                        # Entry window: 3s to 180s after window open
+                        # (wide enough for all 14 asset/timeframe combos sequentially)
+                        window_seconds = tf_config["seconds"]
                         if (slug not in self._windows
                                 and elapsed >= ORDER_PLACEMENT_DELAY
-                                and elapsed < ORDER_PLACEMENT_DELAY + 5):
+                                and elapsed < window_seconds - ORDER_CANCEL_BEFORE_END):
 
                             if total_exposure >= MAX_TOTAL_EXPOSURE:
                                 continue
