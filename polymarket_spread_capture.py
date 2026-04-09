@@ -143,6 +143,10 @@ class WindowPosition:
     # Pre-resolution exit tracking (Bug 1 fix)
     exit_attempted: bool = False
 
+    # Phase 3: Individual underdog fill tracking for scalping
+    # Each entry: {"side": str, "shares": float, "cost_per_share": float, "total_cost": float}
+    underdog_fills: list = field(default_factory=list)
+
     @property
     def avg_yes_price(self) -> float:
         return self.yes_cost / self.yes_shares if self.yes_shares > 0 else 0
@@ -509,6 +513,14 @@ class SpreadCaptureEngine:
                         pos.no_shares += actual_shares
                         pos.no_cost += amount
                         pos.no_orders += 1
+                    # Track individual Phase 2 fills for scalping
+                    if order["phase"] == 2:
+                        pos.underdog_fills.append({
+                            "side": order["side"],
+                            "shares": actual_shares,
+                            "cost_per_share": actual_price,
+                            "total_cost": amount,
+                        })
                     self._record_fill(
                         slug, order["side"], actual_price, actual_shares,
                         amount, order_id, order["phase"]
@@ -666,9 +678,9 @@ class SpreadCaptureEngine:
                                 pos, "NO", no_price, actual_elapsed, cl_direction
                             )
 
-                    # -- PHASE 3: Sell/rotation --
-                    if SELL_ENABLED and actual_elapsed > 60 and actual_elapsed < window_seconds - 60:
-                        await self._check_rotation(pos, yes_price, no_price, cl_direction)
+                    # -- PHASE 3: Mid-window underdog scalp --
+                    if actual_elapsed > 10 and actual_elapsed < window_seconds - 30:
+                        await self._check_underdog_scalps(pos, yes_price, no_price)
 
                     # Log status periodically
                     if int(now) % 30 < 2:
@@ -949,46 +961,51 @@ class SpreadCaptureEngine:
         )
 
     # ═══════════════════════════════════════════════════════════
-    # PHASE 3: SELL / ROTATION
+    # PHASE 3: MID-WINDOW UNDERDOG SCALP
     # ═══════════════════════════════════════════════════════════
 
-    async def _check_rotation(self, pos: WindowPosition, yes_price: float,
-                                no_price: float, cl_direction: Optional[str]):
+    async def _check_underdog_scalps(self, pos: WindowPosition,
+                                     yes_price: float, no_price: float):
         """
-        Phase 3: Sell the losing side and rotate into the new underdog.
+        Phase 3: Check each individual underdog fill for scalp opportunity.
 
-        0x8dxd sells in 15% of trades, recovering $384/window average.
-        Triggers when momentum clearly reverses.
-
-        This is optional and can be disabled (SELL_ENABLED=False).
+        For each tracked fill, compute multiplier = current_price / cost_per_share.
+        If multiplier >= 11.0 AND fill_profit >= $10.00, sell that fill's shares.
         """
-        if not cl_direction:
+        if not pos.underdog_fills:
             return
 
-        # If Chainlink says UP, but we have heavy NO position and YES is cheap
-        if cl_direction == "UP" and pos.net_no_shares > pos.net_yes_shares * 1.5:
-            if no_price < pos.avg_no_price * SELL_LOSS_THRESHOLD:
-                # NO is losing badly — sell some to recover capital
-                sell_shares = pos.net_no_shares * 0.3  # Sell 30%
-                if sell_shares > 0 and no_price > 0.01:
-                    await self._sell_order(pos, "NO", no_price, sell_shares, phase=3)
-                    pos.phase = 3
-                    logger.info(
-                        f"[SC] ROTATION: Selling {sell_shares:.1f} NO @ ${no_price:.3f} "
-                        f"(CL says UP, cutting losses)"
-                    )
+        remaining = []
+        for fill in pos.underdog_fills:
+            current_price = yes_price if fill["side"] == "YES" else no_price
+            if current_price <= 0 or fill["cost_per_share"] <= 0:
+                remaining.append(fill)
+                continue
 
-        # Mirror for DOWN
-        elif cl_direction == "DOWN" and pos.net_yes_shares > pos.net_no_shares * 1.5:
-            if yes_price < pos.avg_yes_price * SELL_LOSS_THRESHOLD:
-                sell_shares = pos.net_yes_shares * 0.3
-                if sell_shares > 0 and yes_price > 0.01:
-                    await self._sell_order(pos, "YES", yes_price, sell_shares, phase=3)
-                    pos.phase = 3
+            multiplier = current_price / fill["cost_per_share"]
+            fill_profit = (current_price - fill["cost_per_share"]) * fill["shares"]
+
+            if multiplier >= 11.0 and fill_profit >= 10.00:
+                # Sell this fill's shares
+                order_id = await self._sell_order(
+                    pos, fill["side"], current_price, fill["shares"], phase=3
+                )
+                if order_id:
                     logger.info(
-                        f"[SC] ROTATION: Selling {sell_shares:.1f} YES @ ${yes_price:.3f} "
-                        f"(CL says DOWN, cutting losses)"
+                        f"[SC] SCALP: {pos.asset} {pos.timeframe} | "
+                        f"Sold {fill['shares']:.1f} {fill['side']} @ ${current_price:.2f} "
+                        f"(bought @ ${fill['cost_per_share']:.3f}) | "
+                        f"{multiplier:.1f}x | Profit: ${fill_profit:.2f} | "
+                        f"Remaining underdog fills: {len(remaining)}"
                     )
+                    # Don't keep this fill — it's been sold
+                else:
+                    # Sell failed, keep the fill for next check
+                    remaining.append(fill)
+            else:
+                remaining.append(fill)
+
+        pos.underdog_fills = remaining
 
     # ═══════════════════════════════════════════════════════════
     # BUG 1 FIX: PRE-RESOLUTION EXIT (AUTO-REDEMPTION)
