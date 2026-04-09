@@ -55,7 +55,8 @@ TIMEFRAMES = {
 }
 
 # Position sizing — per spec
-INITIAL_BET_SIZE = 5.00          # $ per initial Phase 1 order (favorite side only)
+INITIAL_BET_SIZE = 1.00          # $ per initial Phase 1 order (favorite side only)
+MAX_UNDERDOG_SPEND = 5.00        # Max $ to spend on underdog (Phase 2) per window
 MAX_BET_SIZE = 20.00             # Maximum after proving it works
 
 # Phase 1: Entry timing
@@ -910,6 +911,11 @@ class SpreadCaptureEngine:
         if pos.total_cost >= MAX_EXPOSURE_PER_WINDOW:
             return
 
+        # Per-window underdog spending cap
+        underdog_spent = pos.yes_cost if underdog_side == "YES" else pos.no_cost
+        if underdog_spent >= MAX_UNDERDOG_SPEND:
+            return
+
         # Global exposure cap
         if self._get_global_exposure() >= MAX_GLOBAL_EXPOSURE:
             return
@@ -969,8 +975,10 @@ class SpreadCaptureEngine:
 
         # Cap by exposure limits
         buy_amount = shares_needed * current_price
+        underdog_remaining = MAX_UNDERDOG_SPEND - underdog_spent
         max_buy = min(MAX_EXPOSURE_PER_WINDOW - pos.total_cost,
-                      MAX_GLOBAL_EXPOSURE - self._get_global_exposure())
+                      MAX_GLOBAL_EXPOSURE - self._get_global_exposure(),
+                      underdog_remaining)
         buy_amount = min(buy_amount, max_buy)
 
         if buy_amount < 1.00:
