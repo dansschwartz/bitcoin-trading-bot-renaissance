@@ -31,15 +31,13 @@ logger = logging.getLogger("spread_capture")
 # Based on 0x8dxd: $636M volume, $5.75M profit, 0.9% margin
 # ═══════════════════════════════════════════════════════════════
 
-# Assets: all 7 crypto direction markets
+# Assets with confirmed Polymarket CLOB orderbooks
+# Removed: BNB (no markets), HYPE (no markets), DOGE (no 5m/15m markets)
 ASSETS = {
     "BTC": {"slug_5m": "btc-updown-5m", "slug_15m": "btc-updown-15m"},
     "ETH": {"slug_5m": "eth-updown-5m", "slug_15m": "eth-updown-15m"},
     "SOL": {"slug_5m": "sol-updown-5m", "slug_15m": "sol-updown-15m"},
-    "XRP": {"slug_5m": "xrp-updown-5m", "slug_15m": "xrp-updown-15m"},
-    "DOGE": {"slug_5m": "doge-updown-5m", "slug_15m": "doge-updown-15m"},
-    "BNB": {"slug_5m": "bnb-updown-5m", "slug_15m": "bnb-updown-15m"},
-    "HYPE": {"slug_5m": "hype-updown-5m", "slug_15m": "hype-updown-15m"},
+    "XRP": {"slug_15m": "xrp-updown-15m"},  # 5m orderbook doesn't exist
 }
 
 TIMEFRAMES = {
@@ -173,6 +171,9 @@ class SpreadCaptureV2:
         self._daily_date = ""
         self._daily_windows = 0
         self._total_open_orders = 0
+        self._entering: set = set()          # slugs currently being entered (prevent dupes)
+        self._entry_sem = asyncio.Semaphore(1)  # serialize entry to avoid CLOB rate-limits
+        self._last_fill_check = 0.0          # track last fill-check time
 
         self._init_db()
         self._init_clob()
@@ -353,7 +354,8 @@ class SpreadCaptureV2:
                     continue
 
                 # ── CHECK FILLS on active windows ──
-                if int(now) % FILL_CHECK_INTERVAL < 2:
+                if now - self._last_fill_check >= FILL_CHECK_INTERVAL:
+                    self._last_fill_check = now
                     for slug, ws in list(self._windows.items()):
                         if ws.status == "active" and ws.orders_placed and not ws.orders_cancelled:
                             await self._check_fills(ws)
@@ -382,15 +384,19 @@ class SpreadCaptureV2:
 
                 for asset, config in ASSETS.items():
                     for tf_name, tf_config in TIMEFRAMES.items():
+                        slug_prefix = config.get(f"slug_{tf_name}")
+                        if not slug_prefix:
+                            continue  # asset doesn't have this timeframe
+
                         alignment = tf_config["alignment"]
                         window_start = int(math.floor(now / alignment) * alignment)
-                        slug = f"{config[f'slug_{tf_name}']}-{window_start}"
+                        slug = f"{slug_prefix}-{window_start}"
                         elapsed = now - window_start
 
-                        # Entry window: 3s to 180s after window open
-                        # (wide enough for all 14 asset/timeframe combos sequentially)
+                        # Entry window: 3s to (close - 30s)
                         window_seconds = tf_config["seconds"]
                         if (slug not in self._windows
+                                and slug not in self._entering
                                 and elapsed >= ORDER_PLACEMENT_DELAY
                                 and elapsed < window_seconds - ORDER_CANCEL_BEFORE_END):
 
@@ -399,8 +405,13 @@ class SpreadCaptureV2:
                             if self._total_open_orders >= MAX_OPEN_ORDERS:
                                 continue
 
-                            await self._enter_window(
-                                asset, tf_name, window_start, slug, config
+                            # Non-blocking: launch entry in background so fill
+                            # checks and lifecycle management keep running
+                            self._entering.add(slug)
+                            asyncio.create_task(
+                                self._safe_enter_window(
+                                    asset, tf_name, window_start, slug, config
+                                )
                             )
                             total_exposure += MAX_EXPOSURE_PER_WINDOW  # pre-reserve
 
@@ -432,6 +443,17 @@ class SpreadCaptureV2:
     # ═══════════════════════════════════════════════════════════
     # ENTER WINDOW — Place limit orders on BOTH sides
     # ═══════════════════════════════════════════════════════════
+
+    async def _safe_enter_window(self, asset: str, timeframe: str,
+                                  window_start: int, slug: str, config: dict):
+        """Wrapper for non-blocking entry. Serialized via semaphore."""
+        async with self._entry_sem:
+            try:
+                await self._enter_window(asset, timeframe, window_start, slug, config)
+            except Exception as e:
+                logger.error(f"[SC] Entry error for {asset} {timeframe}: {e}", exc_info=True)
+            finally:
+                self._entering.discard(slug)
 
     async def _enter_window(self, asset: str, timeframe: str,
                              window_start: int, slug: str, config: dict):
@@ -498,10 +520,15 @@ class SpreadCaptureV2:
                 ws.all_order_ids.append(order_id)
                 no_orders += 1
 
+        total_placed = yes_orders + no_orders
+        if total_placed == 0:
+            logger.warning(f"[SC] {asset} {timeframe}: all orders failed, skipping window")
+            return
+
         ws.orders_placed = True
         self._windows[slug] = ws
         self._daily_windows += 1
-        self._total_open_orders += yes_orders + no_orders
+        self._total_open_orders += total_placed
 
         # Save to DB
         self._save_window(ws)
@@ -538,6 +565,10 @@ class SpreadCaptureV2:
         if not self._clob_client:
             return
 
+        pending_count = sum(1 for o in ws.pending_orders if not o.filled and not o.cancelled)
+        if pending_count == 0:
+            return
+
         for order in ws.pending_orders:
             if order.filled or order.cancelled:
                 continue
@@ -550,12 +581,25 @@ class SpreadCaptureV2:
                 )
 
                 if not result:
+                    if order.checks <= 3:
+                        logger.info(
+                            f"[SC] Fill check #{order.checks}: {ws.asset} {ws.timeframe} "
+                            f"{order.side} @ ${order.price:.2f} — no result from CLOB"
+                        )
                     continue
 
                 status = str(result.get("status", "")).upper()
                 size_matched = float(
                     result.get("sizeMatched", 0) or result.get("size_matched", 0) or 0
                 )
+
+                # Log first few checks and any status changes
+                if order.checks <= 3 or order.checks % 20 == 0:
+                    logger.info(
+                        f"[SC] Fill check #{order.checks}: {ws.asset} {ws.timeframe} "
+                        f"{order.side} @ ${order.price:.2f} — status={status} "
+                        f"sizeMatched={size_matched}"
+                    )
 
                 if status in ("MATCHED", "FILLED", "CLOSED") or size_matched > 0:
                     order.filled = True
@@ -687,6 +731,16 @@ class SpreadCaptureV2:
         if not ws.orders_cancelled:
             await self._cancel_unfilled(ws)
 
+        # Fast-close empty windows (no fills, nothing to resolve)
+        if ws.yes_shares == 0 and ws.no_shares == 0 and len(ws.pending_orders) == 0:
+            ws.status = "resolved"
+            ws.pnl = 0.0
+            self._save_window(ws)
+            if ws.slug in self._windows:
+                del self._windows[ws.slug]
+            logger.info(f"[SC] Closed empty window: {ws.asset} {ws.timeframe} (no fills)")
+            return
+
         # Check resolution via Gamma API
         resolved = await asyncio.to_thread(
             self._check_gamma_resolution_sync, ws.slug
@@ -800,8 +854,10 @@ class SpreadCaptureV2:
     def _get_order_sync(self, order_id: str) -> Optional[dict]:
         """Check order status on the CLOB. (Blocking)"""
         try:
-            return self._clob_client.get_order(order_id)
-        except Exception:
+            result = self._clob_client.get_order(order_id)
+            return result
+        except Exception as e:
+            logger.debug(f"[SC] get_order error for {order_id[:16]}: {e}")
             return None
 
     def _cancel_order_sync(self, order_id: str) -> bool:
