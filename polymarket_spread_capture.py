@@ -204,6 +204,7 @@ class SpreadCaptureEngine:
         self._running = False
         self._positions: Dict[str, WindowPosition] = {}  # slug -> position
         self._pending_orders: List[dict] = []  # Orders awaiting fill verification
+        self._entry_sem = asyncio.Semaphore(5)  # Max 5 concurrent entries (API rate limit)
         self._daily_pnl = 0.0
         self._daily_date = ""
         self._daily_windows = 0
@@ -689,9 +690,12 @@ class SpreadCaptureEngine:
                 if int(now) % 30 == 0:
                     await self._check_resolutions()
 
-                # ── STEP 2: Enter NEW windows ──
+                # ── STEP 2: Enter NEW windows (PARALLEL) ──
                 # Runs AFTER existing positions to avoid delaying Phase 4.
+                # Entries run concurrently (up to 5 at a time via semaphore)
+                # to keep the loop fast (~10s total instead of ~140s sequential).
                 global_exposure = self._get_global_exposure()
+                entry_tasks = []
 
                 for asset, config in ASSETS.items():
                     for tf_name, tf_config in TIMEFRAMES.items():
@@ -704,11 +708,16 @@ class SpreadCaptureEngine:
                         window_seconds = tf_config["seconds"]
                         if slug not in self._positions and elapsed < window_seconds - 30:
                             if elapsed >= PHASE1_ENTRY_DELAY:
-                                # Global exposure cap
                                 if global_exposure >= MAX_GLOBAL_EXPOSURE:
                                     continue
-                                await self._enter_window(asset, tf_name, window_start, slug, config)
-                                global_exposure = self._get_global_exposure()
+                                entry_tasks.append(
+                                    self._enter_window(asset, tf_name, window_start, slug, config)
+                                )
+                                # Pre-reserve exposure for parallel entries
+                                global_exposure += INITIAL_BET_SIZE
+
+                if entry_tasks:
+                    await asyncio.gather(*entry_tasks, return_exceptions=True)
 
                 # Log heartbeat every 30s
                 if int(now) % 30 < 2:
@@ -745,7 +754,14 @@ class SpreadCaptureEngine:
 
         0x8dxd enters within 7-11 seconds of window open.
         Only one side bought initially — the other side comes cheap in Phase 2.
+        Runs under a semaphore (max 5 concurrent) to avoid API rate limits.
         """
+        async with self._entry_sem:
+            await self._enter_window_inner(asset, timeframe, window_start, slug, config)
+
+    async def _enter_window_inner(self, asset: str, timeframe: str,
+                                    window_start: int, slug: str, config: dict):
+        """Inner entry logic (called under semaphore)."""
         # Record Chainlink start price for resolution tracking
         self._rtds.record_window_start(asset, window_start)
 
