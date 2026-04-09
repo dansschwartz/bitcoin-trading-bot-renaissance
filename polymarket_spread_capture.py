@@ -474,6 +474,12 @@ class SpreadCaptureV2:
         market_data = await asyncio.to_thread(self._fetch_market_sync, slug)
         if not market_data:
             logger.warning(f"[SC] {asset} {timeframe}: market {slug} not found on Gamma API")
+            # Register empty window to prevent retries
+            empty_ws = WindowState(asset=asset, timeframe=timeframe,
+                                   window_start=window_start, slug=slug)
+            empty_ws.orders_placed = True
+            empty_ws.orders_cancelled = True
+            self._windows[slug] = empty_ws
             return
 
         yes_token = market_data.get("token_id_yes")
@@ -481,6 +487,11 @@ class SpreadCaptureV2:
 
         if not yes_token or not no_token:
             logger.warning(f"[SC] {asset} {timeframe}: missing token IDs")
+            empty_ws = WindowState(asset=asset, timeframe=timeframe,
+                                   window_start=window_start, slug=slug)
+            empty_ws.orders_placed = True
+            empty_ws.orders_cancelled = True
+            self._windows[slug] = empty_ws
             return
 
         ws = WindowState(
@@ -535,6 +546,10 @@ class SpreadCaptureV2:
                 f"YES={yes_ask_str} NO={no_ask_str} "
                 f"(need both >= ${MIN_TRUE_ASK_BALANCE:.2f})"
             )
+            # Register window so main loop won't retry this slug
+            ws.orders_placed = True
+            ws.orders_cancelled = True
+            self._windows[slug] = ws
             return
 
         logger.info(
