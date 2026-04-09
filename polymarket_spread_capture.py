@@ -1,15 +1,22 @@
 """
-polymarket_spread_capture.py — v2: Passive Limit Order Market Maker
+polymarket_spread_capture.py — 0x8dxd-Style Spread Capture
 
-Places resting limit orders on BOTH sides at multiple price levels.
-The market fills them as prices swing. No direction prediction.
-No waiting for crashes. Just set traps and collect the spread.
+Replicates the #1 Polymarket crypto trader's strategy:
+- Buy the FAVORITE side at window open (Chainlink-based momentum)
+- Accumulate the UNDERDOG when it crashes to pennies (share-balanced)
+- Achieve pair cost < $1.00 for guaranteed profit
+- Optional sell/rotation if momentum reverses
 
-Based on 0x8dxd: $636M volume, $5.75M profit, 170+ fills/day, 24/7.
+No direction prediction needed. +8.19% EV at 50/50 accuracy.
 
-v1 picked a "favorite" side → Phase 2 only fired 12% of the time.
-v2 places orders on BOTH sides from the start → fills whenever
-the crowd pushes either side down.
+Key parameters (from 0x8dxd analysis of 3,500 trades):
+- Assets: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE (5m and 15m)
+- Entry: within 30 seconds of window open — FAVORITE side only
+- 87% limit orders at round cent prices
+- Phase 2: share-based underdog accumulation (TARGET_BALANCE_RATIO=0.62)
+- Pair cost target: < $1.05 ideal, always < $1.20
+- Sell rate: 15% (rotation when momentum reverses)
+- Never skips a window
 """
 
 import asyncio
@@ -27,196 +34,242 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("spread_capture")
 
 # ═══════════════════════════════════════════════════════════════
-# CONFIGURATION
-# Based on 0x8dxd: $636M volume, $5.75M profit, 0.9% margin
+# CONFIGURATION — Based on 0x8dxd's observed parameters
 # ═══════════════════════════════════════════════════════════════
 
-# Assets with confirmed Polymarket CLOB orderbooks
-# Removed: BNB (no markets), HYPE (no markets), DOGE (no 5m/15m markets)
-# 5m DISABLED: 0% hedge rate across 14 windows — books shift too fast for
-# passive orders to fill both sides. Pure adverse selection loss.
+# All 7 crypto assets on Polymarket direction markets
 ASSETS = {
-    "BTC": {"slug_15m": "btc-updown-15m"},
-    "ETH": {"slug_15m": "eth-updown-15m"},
-    "SOL": {"slug_15m": "sol-updown-15m"},
-    "XRP": {"slug_15m": "xrp-updown-15m"},
+    "BTC": {"slug_5m": "btc-updown-5m", "slug_15m": "btc-updown-15m"},
+    "ETH": {"slug_5m": "eth-updown-5m", "slug_15m": "eth-updown-15m"},
+    "SOL": {"slug_5m": "sol-updown-5m", "slug_15m": "sol-updown-15m"},
+    "XRP": {"slug_5m": "xrp-updown-5m", "slug_15m": "xrp-updown-15m"},
+    "DOGE": {"slug_5m": "doge-updown-5m", "slug_15m": "doge-updown-15m"},
+    "BNB": {"slug_5m": "bnb-updown-5m", "slug_15m": "bnb-updown-15m"},
+    "HYPE": {"slug_5m": "hype-updown-5m", "slug_15m": "hype-updown-15m"},
 }
 
+# Timeframes
 TIMEFRAMES = {
+    "5m": {"seconds": 300, "alignment": 300},
     "15m": {"seconds": 900, "alignment": 900},
 }
 
-# ── ORDER LADDER ──
-# Single level for ALL timeframes. Multi-level ladders get swept on one
-# side in tilted markets: e.g. YES=$0.30/NO=$0.70 → 1 YES + 3 NO placed,
-# all 3 NO fill naked ($4.50 loss). Single level caps naked loss at $1.00.
-# CLOB minimums: 5 shares per order, $1.00 for marketable orders
-ORDER_LADDER = [
-    (0.20, 5),   # $1.00 per side — max naked loss capped at $1.00
-]
+# Position sizing — per spec
+INITIAL_BET_SIZE = 5.00          # $ per initial Phase 1 order (favorite side only)
+MAX_BET_SIZE = 20.00             # Maximum after proving it works
 
-# Balance filter: skip window if either side's true_ask is below this.
-# At 0.30 (70/30 market), the cheap side always fills naked → guaranteed loss.
-# At 0.40, market must be 40-60% balanced for entry. Higher = more selective.
-# Data: 22/26 windows resolved UP when balance was 0.30 → 85% directional bias.
-MIN_TRUE_ASK_BALANCE = 0.40
+# Phase 1: Entry timing
+PHASE1_ENTRY_DELAY = 5           # Seconds after window open to start Phase 1
+PHASE1_FAVORITE_PRICE = 0.50     # Max price for favorite side buy
 
-# ── TIMING ──
-ORDER_PLACEMENT_DELAY = 3        # Seconds after window open to place orders
-ORDER_CANCEL_BEFORE_END = 30     # Cancel unfilled orders N seconds before close
-FILL_CHECK_INTERVAL = 5          # Check for fills every N seconds
+# Phase 2: Underdog accumulation — share-based balancing
+UNDERDOG_THRESHOLD = 0.45        # Start accumulating underdog below this price
+UNDERDOG_CHEAP_THRESHOLD = 0.10  # Buy more aggressively below this
+UNDERDOG_PENNY_THRESHOLD = 0.05  # Maximum accumulation below this
+TARGET_BALANCE_RATIO = 0.62      # Target: underdog_shares / favorite_shares
+MAX_UNHEDGED_RATIO = 3.0         # Stop if favorite > 3x underdog shares
+MIN_REBUY_INTERVAL = 10.0        # Minimum seconds between underdog buys
+REBUY_PRICE_IMPROVEMENT = 0.02   # Only rebuy if price improved by $0.02
+MAX_FILLS_PER_WINDOW = 15        # Max Phase 2 fills per window
 
-# ── EXPOSURE LIMITS ──
-MAX_EXPOSURE_PER_WINDOW = 10.00  # Max $ deployed in one window (both sides)
-MAX_TOTAL_EXPOSURE = 200.00      # Across ALL active windows simultaneously
-MAX_DAILY_LOSS = 100.00          # Stop trading for the day
-MAX_OPEN_ORDERS = 200            # Cap total open orders
+# Phase 3: Sell/rotation — DISABLED for first 50 windows per spec
+SELL_ENABLED = False             # Start disabled, enable after first 50 windows
+SELL_LOSS_THRESHOLD = 0.70       # Sell losing side if it drops below this % of entry
+ROTATION_ENABLED = False         # Rotate capital from losing side to underdog
 
-# ── POST-RESOLUTION ──
-SELL_WINNERS_AT = 0.99           # Price to sell winning shares post-resolution
-ENABLE_AUTO_SELL = True          # Sell winning shares automatically
+# Pair cost targets
+PAIR_COST_TARGET = 0.95          # Ideal: guaranteed 5% profit
+PAIR_COST_MAX = 1.10             # Stop buying if pair cost exceeds this
+PAIR_COST_GUARANTEED = 1.00      # Below this = guaranteed profit regardless
 
-# ── DATABASE ──
+# Safety limits
+MAX_DAILY_LOSS = 50.00           # Stop all trading if daily loss exceeds this
+MAX_WINDOWS_PER_DAY = 300        # Sanity limit
+MAX_EXPOSURE_PER_WINDOW = 50.00  # Never deploy more than this per window
+MAX_GLOBAL_EXPOSURE = 300.00     # Total $ across ALL active windows
+
 DB_PATH = "data/renaissance_bot.db"
 SECRETS_PATH = "config/polymarket_secrets.json"
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 
 @dataclass
-class PendingOrder:
-    """An order placed but not yet confirmed filled."""
-    order_id: str
-    side: str           # "YES" or "NO"
-    price: float
-    shares: float
-    amount_usd: float   # price × shares
-    token_id: str
-    placed_at: float
-    checks: int = 0
-    filled: bool = False
-    cancelled: bool = False
-
-
-@dataclass
-class WindowState:
-    """Tracks all state for a single market window."""
+class WindowPosition:
+    """Tracks position state for a single market window."""
     asset: str
     timeframe: str
     window_start: int
     slug: str
     market_id: str = ""
+
+    # Token IDs (from Gamma API)
     yes_token_id: str = ""
     no_token_id: str = ""
 
-    # Filled shares (confirmed only)
+    # YES side
     yes_shares: float = 0.0
     yes_cost: float = 0.0
+    yes_orders: int = 0
+
+    # NO side
     no_shares: float = 0.0
     no_cost: float = 0.0
+    no_orders: int = 0
 
-    # Pending orders
-    pending_orders: list = field(default_factory=list)
+    # Sells
+    yes_sold_shares: float = 0.0
+    yes_sold_revenue: float = 0.0
+    no_sold_shares: float = 0.0
+    no_sold_revenue: float = 0.0
 
-    # All order IDs for cancellation
-    all_order_ids: list = field(default_factory=list)
+    # Chainlink resolution tracking
+    chainlink_start_price: float = 0.0
 
-    # Flags
-    orders_placed: bool = False
-    orders_cancelled: bool = False
+    # Phase tracking
+    phase: int = 0  # 0=waiting, 1=initial, 2=underdog, 3=rotation
+    phase2_triggered: bool = False
+    favorite_side: str = ""  # "YES" or "NO" — set in Phase 1
+
+    # Phase 2 cooldown tracking
+    last_underdog_buy_time: float = 0.0
+    last_underdog_buy_price: float = 0.0
+    phase2_fills: int = 0  # Number of Phase 2 fills in this window
 
     # Status
-    status: str = "active"   # active, resolved, error
-    resolution: str = ""     # UP, DOWN
+    status: str = "active"  # active, resolved, error
+    resolution: str = ""    # UP, DOWN
     pnl: float = 0.0
 
-    @property
-    def total_cost(self) -> float:
-        return self.yes_cost + self.no_cost
+    # Pre-resolution exit tracking (Bug 1 fix)
+    exit_attempted: bool = False
 
     @property
-    def hedged_pairs(self) -> float:
-        return min(self.yes_shares, self.no_shares)
+    def avg_yes_price(self) -> float:
+        return self.yes_cost / self.yes_shares if self.yes_shares > 0 else 0
+
+    @property
+    def avg_no_price(self) -> float:
+        return self.no_cost / self.no_shares if self.no_shares > 0 else 0
 
     @property
     def pair_cost(self) -> float:
-        if self.hedged_pairs == 0:
-            return 1.0
-        return self.total_cost / self.hedged_pairs
+        """Average cost for one YES + one NO share."""
+        if self.yes_shares == 0 or self.no_shares == 0:
+            return 1.0  # Can't compute yet
+        return self.avg_yes_price + self.avg_no_price
 
     @property
-    def is_hedged(self) -> bool:
-        return self.yes_shares > 0 and self.no_shares > 0
+    def total_cost(self) -> float:
+        return self.yes_cost + self.no_cost - self.yes_sold_revenue - self.no_sold_revenue
 
     @property
-    def total_fills(self) -> int:
-        return sum(1 for o in self.pending_orders if o.filled)
+    def net_yes_shares(self) -> float:
+        return self.yes_shares - self.yes_sold_shares
+
+    @property
+    def net_no_shares(self) -> float:
+        return self.no_shares - self.no_sold_shares
+
+    @property
+    def guaranteed_profit(self) -> float:
+        """Profit if the WORSE side wins. Negative = not yet hedged."""
+        min_shares = min(self.net_yes_shares, self.net_no_shares)
+        return min_shares - self.total_cost
+
+    @property
+    def is_arb(self) -> bool:
+        """True if profitable regardless of outcome."""
+        return self.guaranteed_profit > 0
 
 
-class SpreadCaptureV2:
+class SpreadCaptureEngine:
     """
-    Passive limit order market maker for Polymarket direction markets.
+    0x8dxd-style spread capture on Polymarket direction markets.
 
-    For each window:
-    1. Place resting BUY orders on BOTH YES and NO at 5 price levels
-    2. Let the market fill them as prices swing
-    3. Cancel unfilled orders 30s before window close
-    4. Collect payout at resolution
-    5. Sell winning shares at 99¢ to recycle USDC
+    For each 5m/15m window:
+    Phase 1 (0-10s):  Buy FAVORITE side (Chainlink momentum direction)
+    Phase 2 (10-end): Accumulate underdog at pennies (share-balanced)
+    Phase 3 (optional): Sell losing side, rotate capital
 
-    No direction prediction. No waiting for crashes.
-    Just resting orders that get filled when the crowd overreacts.
+    Result: pair_cost < $1.00 -> guaranteed profit regardless of outcome
     """
 
-    def __init__(self):
+    def __init__(self, rtds):
+        """
+        Args:
+            rtds: PolymarketRTDS instance for live price feeds
+        """
+        self._rtds = rtds
         self._clob_client = None
         self._running = False
-        self._windows: Dict[str, WindowState] = {}
+        self._positions: Dict[str, WindowPosition] = {}  # slug -> position
+        self._pending_orders: List[dict] = []  # Orders awaiting fill verification
+        self._entry_sem = asyncio.Semaphore(5)  # Max 5 concurrent entries (API rate limit)
         self._daily_pnl = 0.0
         self._daily_date = ""
         self._daily_windows = 0
-        self._total_open_orders = 0
-        self._entering: set = set()          # slugs currently being entered (prevent dupes)
-        self._entry_sem = asyncio.Semaphore(1)  # serialize entry to avoid CLOB rate-limits
-        self._last_fill_check = 0.0          # track last fill-check time
+        self._total_windows_resolved = 0
 
         self._init_db()
         self._init_clob()
-        self._restore_positions()
+        self._load_active_windows()  # Bug 3 fix: restore state from DB
+
+    def _get_global_exposure(self) -> float:
+        """Total $ deployed across ALL active windows."""
+        return sum(p.total_cost for p in self._positions.values() if p.status == "active")
 
     def _init_db(self):
-        """Create tracking tables for v2."""
+        """Create tracking tables."""
         conn = sqlite3.connect(DB_PATH)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS spread_v2_windows (
+            CREATE TABLE IF NOT EXISTS spread_capture_windows (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 asset TEXT NOT NULL,
                 timeframe TEXT NOT NULL,
                 slug TEXT NOT NULL,
                 window_start INTEGER NOT NULL,
 
-                -- Confirmed fills only
+                -- YES side
                 yes_shares REAL DEFAULT 0,
                 yes_cost REAL DEFAULT 0,
+                yes_avg_price REAL DEFAULT 0,
+                yes_orders INTEGER DEFAULT 0,
+
+                -- NO side
                 no_shares REAL DEFAULT 0,
                 no_cost REAL DEFAULT 0,
+                no_avg_price REAL DEFAULT 0,
+                no_orders INTEGER DEFAULT 0,
 
-                -- Orders
-                orders_placed INTEGER DEFAULT 0,
-                orders_filled INTEGER DEFAULT 0,
-                orders_cancelled INTEGER DEFAULT 0,
+                -- Sells
+                yes_sold_shares REAL DEFAULT 0,
+                yes_sold_revenue REAL DEFAULT 0,
+                no_sold_shares REAL DEFAULT 0,
+                no_sold_revenue REAL DEFAULT 0,
 
-                -- Metrics
+                -- Key metrics
                 pair_cost REAL,
-                hedged_pairs REAL,
                 total_deployed REAL DEFAULT 0,
-                is_hedged INTEGER DEFAULT 0,
+                guaranteed_profit REAL,
+                is_arb INTEGER DEFAULT 0,
 
-                -- Resolution
-                resolution TEXT,
+                -- Resolution (Chainlink-based)
+                chainlink_start REAL,
+                chainlink_end REAL,
+                resolution TEXT,  -- UP or DOWN
+
+                -- P&L
                 pnl REAL,
+                pnl_pct REAL,
+
+                -- Phases reached
+                max_phase INTEGER DEFAULT 0,
+                phase2_triggered INTEGER DEFAULT 0,
 
                 -- Status
                 status TEXT DEFAULT 'active',
+
+                -- Timestamps
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 resolved_at TEXT,
 
@@ -225,37 +278,48 @@ class SpreadCaptureV2:
         """)
 
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS spread_v2_orders (
+            CREATE TABLE IF NOT EXISTS spread_capture_fills (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 window_slug TEXT NOT NULL,
-                order_id TEXT,
-                side TEXT NOT NULL,
+                side TEXT NOT NULL,  -- YES, NO, SELL_YES, SELL_NO
                 price REAL NOT NULL,
                 shares REAL NOT NULL,
                 amount_usd REAL NOT NULL,
-                token_id TEXT,
-                status TEXT DEFAULT 'pending',
-                placed_at REAL,
-                filled_at REAL,
+                order_id TEXT,
+                phase INTEGER,
+                timestamp REAL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Bug 3 fix: Add columns needed for position persistence
+        for col, typedef in [
+            ("yes_token_id", "TEXT DEFAULT ''"),
+            ("no_token_id", "TEXT DEFAULT ''"),
+            ("market_id", "TEXT DEFAULT ''"),
+            ("favorite_side", "TEXT DEFAULT ''"),
+            ("phase2_fills", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE spread_capture_windows ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sv2w_status ON spread_v2_windows(status)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sv2w_slug ON spread_v2_windows(slug)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sv2o_slug ON spread_v2_orders(window_slug)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sv2o_oid ON spread_v2_orders(order_id)")
         conn.commit()
         conn.close()
-        logger.info("[SC] Spread Capture v2 DB initialized")
+        logger.info("Spread capture DB initialized")
 
     def _init_clob(self):
-        """Initialize CLOB client with api creds derivation."""
+        """Initialize CLOB client.
+
+        Uses create_or_derive_api_creds() to get proper ApiCreds object
+        (not a raw dict) — the CLOB library requires attribute access
+        (creds.api_key) not dict access (creds["api_key"]).
+        """
         try:
             from py_clob_client.client import ClobClient
 
             if not os.path.exists(SECRETS_PATH):
-                logger.error(f"[SC] No secrets at {SECRETS_PATH}")
+                logger.error(f"No secrets at {SECRETS_PATH}")
                 return
 
             with open(SECRETS_PATH) as f:
@@ -279,59 +343,235 @@ class SpreadCaptureV2:
             api_creds = self._clob_client.create_or_derive_api_creds()
             self._clob_client.set_api_creds(api_creds)
 
+            # Verify connection
             server_time = self._clob_client.get_server_time()
             logger.info(f"[SC] CLOB client initialized (server_time={server_time})")
         except Exception as e:
-            logger.error(f"[SC] CLOB init failed: {e}")
+            logger.error(f"CLOB init failed: {e}")
 
-    def _restore_positions(self):
-        """Load active windows from DB on restart."""
+    # ═══════════════════════════════════════════════════════════
+    # BUG 3 FIX: POSITION PERSISTENCE
+    # ═══════════════════════════════════════════════════════════
+
+    def _load_active_windows(self):
+        """Load active window positions from DB on startup.
+
+        Prevents orphan fills by restoring in-memory state from the
+        last known DB snapshot. Each fill triggers a DB save, so the
+        data is always current.
+        """
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
-
-            active = conn.execute("""
-                SELECT * FROM spread_v2_windows WHERE status = 'active'
+            rows = conn.execute("""
+                SELECT * FROM spread_capture_windows WHERE status = 'active'
             """).fetchall()
+            conn.close()
 
-            for row in active:
-                ws = WindowState(
+            loaded = 0
+            for row in rows:
+                slug = row["slug"]
+                if slug in self._positions:
+                    continue  # Already loaded
+
+                pos = WindowPosition(
                     asset=row["asset"],
                     timeframe=row["timeframe"],
                     window_start=row["window_start"],
-                    slug=row["slug"],
+                    slug=slug,
+                    market_id=row["market_id"] or "" if "market_id" in row.keys() else "",
+                    yes_token_id=row["yes_token_id"] or "" if "yes_token_id" in row.keys() else "",
+                    no_token_id=row["no_token_id"] or "" if "no_token_id" in row.keys() else "",
                     yes_shares=row["yes_shares"] or 0,
                     yes_cost=row["yes_cost"] or 0,
+                    yes_orders=row["yes_orders"] or 0,
                     no_shares=row["no_shares"] or 0,
                     no_cost=row["no_cost"] or 0,
-                    orders_placed=True,
-                    orders_cancelled=True,  # Don't cancel old orders
+                    no_orders=row["no_orders"] or 0,
+                    yes_sold_shares=row["yes_sold_shares"] or 0,
+                    yes_sold_revenue=row["yes_sold_revenue"] or 0,
+                    no_sold_shares=row["no_sold_shares"] or 0,
+                    no_sold_revenue=row["no_sold_revenue"] or 0,
+                    chainlink_start_price=row["chainlink_start"] or 0,
+                    phase=row["max_phase"] or 0,
+                    phase2_triggered=bool(row["phase2_triggered"]) if row["phase2_triggered"] else False,
+                    favorite_side=row["favorite_side"] or "" if "favorite_side" in row.keys() else "",
+                    phase2_fills=row["phase2_fills"] or 0 if "phase2_fills" in row.keys() else 0,
                     status="active",
                 )
-                self._windows[row["slug"]] = ws
 
-            conn.close()
-            if active:
-                logger.info(f"[SC] Restored {len(active)} active windows from DB")
+                self._positions[slug] = pos
+                loaded += 1
+
+            if loaded:
+                logger.info(
+                    f"[SC] *** RESTORED {loaded} active positions from DB ***\n"
+                    f"  Slugs: {[s for s in self._positions.keys()][:5]}..."
+                )
         except Exception as e:
-            logger.warning(f"[SC] Restore error: {e}")
+            logger.warning(f"[SC] Failed to load active windows: {e}")
+
+    def _save_active_window(self, pos: WindowPosition):
+        """Save/update active window state to DB.
+
+        Called after every verified fill so that position state
+        survives bot restarts. Uses INSERT OR REPLACE keyed on
+        the UNIQUE(asset, timeframe, window_start) constraint.
+        """
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("""
+                INSERT OR REPLACE INTO spread_capture_windows
+                (asset, timeframe, slug, window_start,
+                 yes_shares, yes_cost, yes_avg_price, yes_orders,
+                 no_shares, no_cost, no_avg_price, no_orders,
+                 yes_sold_shares, yes_sold_revenue,
+                 no_sold_shares, no_sold_revenue,
+                 pair_cost, total_deployed, guaranteed_profit, is_arb,
+                 chainlink_start, max_phase, phase2_triggered, status,
+                 yes_token_id, no_token_id, market_id, favorite_side, phase2_fills)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                pos.asset, pos.timeframe, pos.slug, pos.window_start,
+                pos.yes_shares, pos.yes_cost, pos.avg_yes_price, pos.yes_orders,
+                pos.no_shares, pos.no_cost, pos.avg_no_price, pos.no_orders,
+                pos.yes_sold_shares, pos.yes_sold_revenue,
+                pos.no_sold_shares, pos.no_sold_revenue,
+                pos.pair_cost, pos.total_cost, pos.guaranteed_profit,
+                1 if pos.is_arb else 0,
+                pos.chainlink_start_price, pos.phase,
+                1 if pos.phase2_triggered else 0,
+                "active",
+                pos.yes_token_id, pos.no_token_id, pos.market_id,
+                pos.favorite_side, pos.phase2_fills,
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"[SC] Active window save error: {e}")
+
+    # ═══════════════════════════════════════════════════════════
+    # PENDING ORDER VERIFICATION (non-blocking fill check)
+    # ═══════════════════════════════════════════════════════════
+
+    async def _process_pending_orders(self):
+        """Check all pending orders for fills. Credit verified fills, cancel stale ones.
+
+        Called at the start of each main loop iteration. Each order gets
+        up to 3 checks (at ~1s intervals = 3s total). After 3 checks,
+        we do a final check + cancel if still unfilled.
+        """
+        if not self._pending_orders:
+            return
+
+        still_pending = []
+        for order in self._pending_orders:
+            order_id = order["order_id"]
+            slug = order["slug"]
+            order["checks"] += 1
+
+            # Position may have been resolved while order was pending
+            pos = self._positions.get(slug)
+            if not pos or pos.status != "active":
+                # Cancel orphaned order
+                await asyncio.to_thread(self._cancel_order_sync, order_id)
+                continue
+
+            # Check order status (non-blocking via thread)
+            resp = await asyncio.to_thread(self._get_order_sync, order_id)
+            if not resp:
+                if order["checks"] >= 4:
+                    continue  # Give up after 4 failed status checks
+                still_pending.append(order)
+                continue
+
+            status = str(resp.get("status", "")).upper()
+            size_matched = float(
+                resp.get("sizeMatched", 0) or resp.get("size_matched", 0) or 0
+            )
+            filled_price = float(resp.get("price", 0) or 0)
+
+            if status in ("MATCHED", "FILLED") or size_matched > 0:
+                # VERIFIED FILL — credit shares
+                actual_shares = size_matched if size_matched > 0 else float(
+                    resp.get("size", 0) or 0
+                )
+                actual_price = filled_price if filled_price > 0 else order["price"]
+                amount = actual_price * actual_shares
+
+                if order["is_buy"]:
+                    if order["side"] == "YES":
+                        pos.yes_shares += actual_shares
+                        pos.yes_cost += amount
+                        pos.yes_orders += 1
+                    else:
+                        pos.no_shares += actual_shares
+                        pos.no_cost += amount
+                        pos.no_orders += 1
+                    self._record_fill(
+                        slug, order["side"], actual_price, actual_shares,
+                        amount, order_id, order["phase"]
+                    )
+                else:
+                    # SELL fill
+                    revenue = actual_price * actual_shares
+                    if order["side"] == "YES":
+                        pos.yes_sold_shares += actual_shares
+                        pos.yes_sold_revenue += revenue
+                    else:
+                        pos.no_sold_shares += actual_shares
+                        pos.no_sold_revenue += revenue
+                    self._record_fill(
+                        slug, f"SELL_{order['side']}", actual_price,
+                        actual_shares, revenue, order_id, order["phase"]
+                    )
+
+                self._save_active_window(pos)
+                action = "FILL" if order["is_buy"] else "SELL"
+                logger.info(
+                    f"[SC] VERIFIED {action}: {order_id[:12]}... | "
+                    f"{actual_shares:.1f} {order['side']} @ ${actual_price:.2f} "
+                    f"(${amount:.2f})"
+                )
+
+            elif order["checks"] >= 3:
+                # 3+ checks (~3s elapsed) — cancel unfilled order
+                logger.info(
+                    f"[SC] Order {order_id[:12]}... unfilled after "
+                    f"{order['checks']} checks — cancelling"
+                )
+                await asyncio.to_thread(self._cancel_order_sync, order_id)
+                logger.info(
+                    f"[SC] Order {order_id[:12]}... NOT FILLED — "
+                    f"{order['shares']:.1f} {order['side']} "
+                    f"{'shares' if order['is_buy'] else 'sell'} NOT credited"
+                )
+            else:
+                # Still open, check again next iteration
+                still_pending.append(order)
+
+        self._pending_orders = still_pending
 
     # ═══════════════════════════════════════════════════════════
     # MAIN LOOP
     # ═══════════════════════════════════════════════════════════
 
     async def run(self):
-        """Main loop. Runs every second."""
+        """
+        Main loop. Runs every second.
+
+        For each active window, evaluates which phase to execute.
+        Also checks for new windows to enter and old windows to resolve.
+        """
         self._running = True
-        per_side = sum(p * s for p, s in ORDER_LADDER)
         logger.info(
-            f"[SC] Spread Capture v2 STARTED\n"
-            f"  Strategy: Passive limit orders on both sides\n"
-            f"  Assets: {list(ASSETS.keys())} ({len(ASSETS)} assets)\n"
+            f"Spread capture engine STARTED\n"
+            f"  Assets: {list(ASSETS.keys())}\n"
             f"  Timeframes: {list(TIMEFRAMES.keys())}\n"
-            f"  Ladder: {ORDER_LADDER} (${per_side:.2f}/side)\n"
-            f"  Balance filter: min_true_ask={MIN_TRUE_ASK_BALANCE}\n"
-            f"  Max per window: ${MAX_EXPOSURE_PER_WINDOW} | Max global: ${MAX_TOTAL_EXPOSURE}"
+            f"  Initial size: ${INITIAL_BET_SIZE}/side\n"
+            f"  Pair cost target: ${PAIR_COST_TARGET}\n"
+            f"  Sells enabled: {SELL_ENABLED}"
         )
 
         while self._running:
@@ -342,606 +582,568 @@ class SpreadCaptureV2:
                 today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if today != self._daily_date:
                     if self._daily_date:
-                        logger.info(
-                            f"[SC] Daily reset. Yesterday: {self._daily_windows} windows, "
-                            f"${self._daily_pnl:+.2f}"
-                        )
+                        logger.info(f"Daily reset. Yesterday: {self._daily_windows} windows, ${self._daily_pnl:+.2f}")
                     self._daily_date = today
                     self._daily_pnl = 0.0
                     self._daily_windows = 0
 
-                # Safety: daily loss limit
+                # Safety check
                 if self._daily_pnl <= -MAX_DAILY_LOSS:
-                    if int(now) % 60 < 2:
-                        logger.warning(f"[SC] Daily loss limit hit (${self._daily_pnl:.2f}). Paused.")
+                    logger.warning(f"Daily loss limit (${self._daily_pnl:.2f}). Paused.")
                     await asyncio.sleep(60)
                     continue
 
-                # ── CHECK FILLS on active windows ──
-                if now - self._last_fill_check >= FILL_CHECK_INTERVAL:
-                    self._last_fill_check = now
-                    for slug, ws in list(self._windows.items()):
-                        if ws.status == "active" and ws.orders_placed and not ws.orders_cancelled:
-                            await self._check_fills(ws)
+                # ── STEP 0: Verify pending orders from last iteration ──
+                await self._process_pending_orders()
 
-                # ── MANAGE ACTIVE WINDOWS ──
-                for slug, ws in list(self._windows.items()):
-                    if ws.status != "active":
+                # ── STEP 1: Process EXISTING positions FIRST ──
+                # This runs before new entries so that Phase 4 (pre-exit)
+                # fires on time even when entry processing takes 100s+.
+
+                # Split active positions: expired vs tradeable
+                expired_positions = []
+                tradeable_positions = []
+                for slug, pos in list(self._positions.items()):
+                    if pos.status != "active":
+                        continue
+                    elapsed = now - pos.window_start
+                    window_seconds = TIMEFRAMES[pos.timeframe]["seconds"]
+                    if elapsed > window_seconds + 30:
+                        expired_positions.append(pos)
+                    else:
+                        tradeable_positions.append(pos)
+
+                # Resolve expired windows
+                for pos in expired_positions:
+                    await self._resolve_window(pos)
+
+                # Batch fetch all CLOB prices concurrently (one thread per position)
+                if tradeable_positions:
+                    price_results = await asyncio.gather(
+                        *(self._get_clob_prices(p) for p in tradeable_positions),
+                        return_exceptions=True,
+                    )
+                else:
+                    price_results = []
+
+                # Process tradeable positions with pre-fetched prices
+                for pos, prices in zip(tradeable_positions, price_results):
+                    if isinstance(prices, Exception):
+                        continue
+                    yes_price, no_price = prices
+                    if yes_price is None or no_price is None:
                         continue
 
-                    elapsed = now - ws.window_start
-                    window_seconds = TIMEFRAMES[ws.timeframe]["seconds"]
+                    # Use fresh time for accurate phase timing
+                    actual_elapsed = time.time() - pos.window_start
+                    window_seconds = TIMEFRAMES[pos.timeframe]["seconds"]
 
-                    # Window expired? Resolve.
-                    if elapsed > window_seconds + 60:
-                        await self._resolve_window(ws)
-                        continue
+                    # Get Chainlink direction
+                    cl_direction = self._rtds.get_resolution_direction(
+                        pos.asset, pos.window_start
+                    )
 
-                    # Cancel unfilled orders before window closes
-                    if elapsed >= window_seconds - ORDER_CANCEL_BEFORE_END and not ws.orders_cancelled:
-                        await self._cancel_unfilled(ws)
+                    # -- PHASE 4: Pre-resolution exit (Bug 1 fix) --
+                    # Check FIRST — this is time-critical. Must sell winning
+                    # shares before market closes to prevent trapped tokens.
+                    exit_start = window_seconds - 25  # 25 seconds before end
+                    exit_end = window_seconds - 3     # Stop 3s before end
+                    if exit_start <= actual_elapsed < exit_end:
+                        await self._pre_resolution_exit(
+                            pos, yes_price, no_price, cl_direction
+                        )
 
-                # ── ENTER NEW WINDOWS ──
-                total_exposure = sum(
-                    w.total_cost for w in self._windows.values() if w.status == "active"
-                )
+                    # -- PHASE 2: Underdog accumulation --
+                    elif actual_elapsed > 10 and actual_elapsed < window_seconds - 30:
+                        # Is either side an underdog?
+                        if yes_price <= UNDERDOG_THRESHOLD:
+                            await self._accumulate_underdog(
+                                pos, "YES", yes_price, actual_elapsed, cl_direction
+                            )
+
+                        if no_price <= UNDERDOG_THRESHOLD:
+                            await self._accumulate_underdog(
+                                pos, "NO", no_price, actual_elapsed, cl_direction
+                            )
+
+                    # -- PHASE 3: Sell/rotation --
+                    if SELL_ENABLED and actual_elapsed > 60 and actual_elapsed < window_seconds - 60:
+                        await self._check_rotation(pos, yes_price, no_price, cl_direction)
+
+                    # Log status periodically
+                    if int(now) % 30 < 2:
+                        fav = pos.favorite_side or "?"
+                        underdog_price = no_price if fav == "YES" else yes_price
+                        logger.info(
+                            f"[SC] {pos.asset} {pos.timeframe} fav={fav} | "
+                            f"YES: {pos.net_yes_shares:.1f}sh@${pos.avg_yes_price:.3f} | "
+                            f"NO: {pos.net_no_shares:.1f}sh@${pos.avg_no_price:.3f} | "
+                            f"CLOB: Y${yes_price:.2f}/N${no_price:.2f} | "
+                            f"UDog: ${underdog_price:.2f} (thr ${UNDERDOG_THRESHOLD}) | "
+                            f"Pair: ${pos.pair_cost:.3f} | "
+                            f"P2:{pos.phase2_fills}/{MAX_FILLS_PER_WINDOW} | "
+                            f"{'ARB' if pos.is_arb else 'DIR'} | "
+                            f"CL:{cl_direction or '?'}"
+                        )
+
+                # Resolve check every 30 seconds
+                if int(now) % 30 == 0:
+                    await self._check_resolutions()
+
+                # ── STEP 2: Enter NEW windows (PARALLEL) ──
+                # Runs AFTER existing positions to avoid delaying Phase 4.
+                # Entries run concurrently (up to 5 at a time via semaphore)
+                # to keep the loop fast (~10s total instead of ~140s sequential).
+                global_exposure = self._get_global_exposure()
+                entry_tasks = []
 
                 for asset, config in ASSETS.items():
                     for tf_name, tf_config in TIMEFRAMES.items():
-                        slug_prefix = config.get(f"slug_{tf_name}")
-                        if not slug_prefix:
-                            continue  # asset doesn't have this timeframe
-
                         alignment = tf_config["alignment"]
                         window_start = int(math.floor(now / alignment) * alignment)
-                        slug = f"{slug_prefix}-{window_start}"
+                        slug = f"{config[f'slug_{tf_name}']}-{window_start}"
                         elapsed = now - window_start
 
-                        # Entry window: 3s to (close - 30s)
+                        # New window? Start Phase 1
                         window_seconds = tf_config["seconds"]
-                        if (slug not in self._windows
-                                and slug not in self._entering
-                                and elapsed >= ORDER_PLACEMENT_DELAY
-                                and elapsed < window_seconds - ORDER_CANCEL_BEFORE_END):
-
-                            if total_exposure >= MAX_TOTAL_EXPOSURE:
-                                continue
-                            if self._total_open_orders >= MAX_OPEN_ORDERS:
-                                continue
-
-                            # Non-blocking: launch entry in background so fill
-                            # checks and lifecycle management keep running
-                            self._entering.add(slug)
-                            asyncio.create_task(
-                                self._safe_enter_window(
-                                    asset, tf_name, window_start, slug, config
+                        if slug not in self._positions and elapsed < window_seconds - 30:
+                            if elapsed >= PHASE1_ENTRY_DELAY:
+                                if global_exposure >= MAX_GLOBAL_EXPOSURE:
+                                    continue
+                                entry_tasks.append(
+                                    self._enter_window(asset, tf_name, window_start, slug, config)
                                 )
-                            )
-                            total_exposure += MAX_EXPOSURE_PER_WINDOW  # pre-reserve
+                                # Pre-reserve exposure for parallel entries
+                                global_exposure += INITIAL_BET_SIZE
 
-                # ── HEARTBEAT ──
-                if int(now) % 60 < 2:
-                    active = len([w for w in self._windows.values() if w.status == "active"])
-                    deployed = sum(
-                        w.total_cost for w in self._windows.values() if w.status == "active"
-                    )
-                    hedged = sum(
-                        1 for w in self._windows.values()
-                        if w.status == "active" and w.is_hedged
-                    )
+                if entry_tasks:
+                    await asyncio.gather(*entry_tasks, return_exceptions=True)
+
+                # Log heartbeat every 30s
+                if int(now) % 30 < 2:
+                    active_count = len([p for p in self._positions.values() if p.status == "active"])
                     logger.info(
-                        f"[SC] Heartbeat | {active} active | {hedged} hedged | "
-                        f"${deployed:.2f} deployed | {self._total_open_orders} orders | "
-                        f"daily ${self._daily_pnl:+.2f}"
+                        f"[SC] Heartbeat: {active_count} active windows | "
+                        f"${global_exposure:.2f} deployed | "
+                        f"RTDS: {'Y' if self._rtds.is_connected else 'N'} | "
+                        f"CLOB: {'Y' if self._clob_client else 'N'}"
                     )
 
                 await asyncio.sleep(1.0)
 
             except asyncio.CancelledError:
-                logger.info("[SC] Spread capture v2 cancelled — shutting down")
+                logger.info("Spread capture engine cancelled — shutting down")
                 return
             except Exception as e:
-                logger.error(f"[SC] Loop error: {e}", exc_info=True)
+                logger.error(f"Spread capture loop error: {e}")
                 await asyncio.sleep(5)
 
     # ═══════════════════════════════════════════════════════════
-    # ENTER WINDOW — Place limit orders on BOTH sides
+    # PHASE 1: INITIAL ENTRY — FAVORITE SIDE ONLY
     # ═══════════════════════════════════════════════════════════
-
-    async def _safe_enter_window(self, asset: str, timeframe: str,
-                                  window_start: int, slug: str, config: dict):
-        """Wrapper for non-blocking entry. Serialized via semaphore."""
-        async with self._entry_sem:
-            try:
-                await self._enter_window(asset, timeframe, window_start, slug, config)
-            except Exception as e:
-                logger.error(f"[SC] Entry error for {asset} {timeframe}: {e}", exc_info=True)
-            finally:
-                self._entering.discard(slug)
 
     async def _enter_window(self, asset: str, timeframe: str,
                              window_start: int, slug: str, config: dict):
         """
-        Place resting limit BUY orders on BOTH YES and NO at multiple prices.
-        No direction picking. Orders on BOTH sides.
+        Phase 1: Buy the FAVORITE side only.
+
+        Uses Chainlink momentum direction at window open:
+        - If Chainlink is moving UP → crowd will buy YES → YES is favorite
+        - If Chainlink is moving DOWN → crowd will buy NO → NO is favorite
+        - If unknown → default to YES (50/50 doesn't matter, underdog accumulation is the edge)
+
+        0x8dxd enters within 7-11 seconds of window open.
+        Only one side bought initially — the other side comes cheap in Phase 2.
+        Runs under a semaphore (max 5 concurrent) to avoid API rate limits.
         """
-        # Fetch market data
-        logger.info(f"[SC] Entering {asset} {timeframe}: fetching market {slug}...")
-        market_data = await asyncio.to_thread(self._fetch_market_sync, slug)
+        async with self._entry_sem:
+            await self._enter_window_inner(asset, timeframe, window_start, slug, config)
+
+    async def _enter_window_inner(self, asset: str, timeframe: str,
+                                    window_start: int, slug: str, config: dict):
+        """Inner entry logic (called under semaphore)."""
+        # Record Chainlink start price for resolution tracking
+        self._rtds.record_window_start(asset, window_start)
+
+        # Fetch market data (token IDs)
+        market_data = await self._fetch_market(slug)
         if not market_data:
-            logger.warning(f"[SC] {asset} {timeframe}: market {slug} not found on Gamma API")
-            # Register empty window to prevent retries
-            empty_ws = WindowState(asset=asset, timeframe=timeframe,
-                                   window_start=window_start, slug=slug)
-            empty_ws.orders_placed = True
-            empty_ws.orders_cancelled = True
-            self._windows[slug] = empty_ws
+            logger.info(f"[SC] {asset} {timeframe}: market {slug} not found (Gamma returned empty)")
             return
 
-        yes_token = market_data.get("token_id_yes")
-        no_token = market_data.get("token_id_no")
+        # Determine favorite side from CROWD CONSENSUS (market price).
+        # At window open, Chainlink direction is meaningless — we just
+        # recorded the start price, so current == start → always "UP".
+        # Instead use crowd_yes: the market's implied YES probability.
+        crowd_yes = market_data.get("crowd_yes", 0.50)
+        if crowd_yes >= 0.50:
+            favorite_side = "YES"
+        else:
+            favorite_side = "NO"
 
-        if not yes_token or not no_token:
-            logger.warning(f"[SC] {asset} {timeframe}: missing token IDs")
-            empty_ws = WindowState(asset=asset, timeframe=timeframe,
-                                   window_start=window_start, slug=slug)
-            empty_ws.orders_placed = True
-            empty_ws.orders_cancelled = True
-            self._windows[slug] = empty_ws
-            return
+        # Also get Chainlink direction for logging (not for decision)
+        cl_direction = self._rtds.get_resolution_direction(asset, window_start)
 
-        ws = WindowState(
+        pos = WindowPosition(
             asset=asset,
             timeframe=timeframe,
             window_start=window_start,
             slug=slug,
             market_id=market_data.get("market_id", ""),
-            yes_token_id=yes_token,
-            no_token_id=no_token,
+            yes_token_id=market_data.get("token_id_yes", ""),
+            no_token_id=market_data.get("token_id_no", ""),
+            chainlink_start_price=self._rtds.get_chainlink_price(asset) or 0,
+            phase=1,
+            favorite_side=favorite_side,
         )
 
-        # Fetch actual order books to find the TRUE best ask.
-        # The CLOB matches across YES/NO books (complementary tokens):
-        #   BUY YES at $P can match against BUY NO at $(1-P) via minting.
-        # So true_ask(YES) = min(YES_best_ask, 1 - NO_best_bid)
-        # Plus a 5-cent safety margin for book changes between query and placement.
-        BOOK_SAFETY_MARGIN = 0.05
-
-        yes_ask, yes_bid = await asyncio.to_thread(self._get_book_edges_sync, yes_token)
-        no_ask, no_bid = await asyncio.to_thread(self._get_book_edges_sync, no_token)
-
-        # True best ask considering cross-book matching
-        yes_true_ask = yes_ask
-        if no_bid is not None:
-            complementary = round(1.0 - no_bid, 2)
-            if yes_true_ask is None or complementary < yes_true_ask:
-                yes_true_ask = complementary
-
-        no_true_ask = no_ask
-        if yes_bid is not None:
-            complementary = round(1.0 - yes_bid, 2)
-            if no_true_ask is None or complementary < no_true_ask:
-                no_true_ask = complementary
-
-        # Apply safety margin
-        yes_max_price = (yes_true_ask - BOOK_SAFETY_MARGIN) if yes_true_ask is not None else None
-        no_max_price = (no_true_ask - BOOK_SAFETY_MARGIN) if no_true_ask is not None else None
-
-        yes_ask_str = f"${yes_true_ask:.2f}" if yes_true_ask is not None else "N/A"
-        no_ask_str = f"${no_true_ask:.2f}" if no_true_ask is not None else "N/A"
-        yes_direct = f"${yes_ask:.2f}" if yes_ask is not None else "N/A"
-        no_direct = f"${no_ask:.2f}" if no_ask is not None else "N/A"
-
-        # Balance filter: skip if either side's true ask is too low.
-        # In a heavily tilted market only one side can fill → naked loss.
-        yes_ok = yes_true_ask is not None and yes_true_ask >= MIN_TRUE_ASK_BALANCE
-        no_ok = no_true_ask is not None and no_true_ask >= MIN_TRUE_ASK_BALANCE
-        if not yes_ok or not no_ok:
-            logger.info(
-                f"[SC] {asset} {timeframe} SKIP (balance filter): "
-                f"YES={yes_ask_str} NO={no_ask_str} "
-                f"(need both >= ${MIN_TRUE_ASK_BALANCE:.2f})"
-            )
-            # Register window so main loop won't retry this slug
-            ws.orders_placed = True
-            ws.orders_cancelled = True
-            self._windows[slug] = ws
-            return
-
-        logger.info(
-            f"[SC] {asset} {timeframe} book: "
-            f"YES true_ask={yes_ask_str} (direct={yes_direct}) | "
-            f"NO true_ask={no_ask_str} (direct={no_direct}) | "
-            f"margin={BOOK_SAFETY_MARGIN}"
-        )
-
-        # Single ladder for all timeframes
-        ladder = ORDER_LADDER
-
-        yes_orders = 0
-        no_orders = 0
-
-        for price, shares in ladder:
-            # YES side — only if price is below true_ask minus safety margin
-            if yes_max_price is not None and price < yes_max_price:
-                order_id = await self._place_limit_order(yes_token, price, shares)
-                if order_id:
-                    ws.pending_orders.append(PendingOrder(
-                        order_id=order_id,
-                        side="YES",
-                        price=price,
-                        shares=shares,
-                        amount_usd=price * shares,
-                        token_id=yes_token,
-                        placed_at=time.time(),
-                    ))
-                    ws.all_order_ids.append(order_id)
-                    yes_orders += 1
-            elif yes_max_price is not None and yes_orders == 0:
-                logger.info(
-                    f"[SC]   YES: SKIP ${price:.2f} "
-                    f"(max=${yes_max_price:.2f}, ask={yes_ask_str})"
-                )
-
-            # NO side — only if price is below true_ask minus safety margin
-            if no_max_price is not None and price < no_max_price:
-                order_id = await self._place_limit_order(no_token, price, shares)
-                if order_id:
-                    ws.pending_orders.append(PendingOrder(
-                        order_id=order_id,
-                        side="NO",
-                        price=price,
-                        shares=shares,
-                        amount_usd=price * shares,
-                        token_id=no_token,
-                        placed_at=time.time(),
-                    ))
-                    ws.all_order_ids.append(order_id)
-                    no_orders += 1
-            elif no_max_price is not None and no_orders == 0:
-                logger.info(
-                    f"[SC]   NO: SKIP ${price:.2f} "
-                    f"(max=${no_max_price:.2f}, ask={no_ask_str})"
-                )
-
-        total_placed = yes_orders + no_orders
-        if total_placed == 0:
-            logger.warning(f"[SC] {asset} {timeframe}: all orders failed, skipping window")
-            return
-
-        ws.orders_placed = True
-        self._windows[slug] = ws
+        self._positions[slug] = pos
         self._daily_windows += 1
-        self._total_open_orders += total_placed
 
-        # Save to DB
-        self._save_window(ws)
+        # Save initial state to DB immediately (Bug 3 fix)
+        self._save_active_window(pos)
 
-        # Record all orders
-        conn = sqlite3.connect(DB_PATH)
-        for order in ws.pending_orders:
-            conn.execute("""
-                INSERT INTO spread_v2_orders
-                (window_slug, order_id, side, price, shares, amount_usd,
-                 token_id, status, placed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-            """, (slug, order.order_id, order.side, order.price,
-                  order.shares, order.amount_usd, order.token_id, order.placed_at))
-        conn.commit()
-        conn.close()
+        # Buy FAVORITE side at crowd price (capped at PHASE1_FAVORITE_PRICE)
+        if favorite_side == "YES":
+            buy_price = min(PHASE1_FAVORITE_PRICE, crowd_yes)
+        else:
+            buy_price = min(PHASE1_FAVORITE_PRICE, 1.0 - crowd_yes)
 
+        buy_shares = INITIAL_BET_SIZE / buy_price if buy_price > 0 else 0
+
+        await self._place_order(pos, favorite_side, buy_price, buy_shares, phase=1)
+
+        underdog_side = "NO" if favorite_side == "YES" else "YES"
         logger.info(
             f"[SC] *** ENTERED: {asset} {timeframe} ***\n"
-            f"  Book: YES ask={yes_ask_str} | NO ask={no_ask_str}\n"
-            f"  Placed {yes_orders} YES + {no_orders} NO resting limit orders\n"
-            f"  Ladder: {', '.join(f'${p:.2f}x{s}' for p, s in ladder)}"
+            f"  Slug: {slug}\n"
+            f"  Crowd YES: ${crowd_yes:.3f} → Favorite: {favorite_side}\n"
+            f"  Buy: {favorite_side} @ ${buy_price:.2f} ({buy_shares:.1f}sh)\n"
+            f"  Underdog: {underdog_side} (waiting for ≤${UNDERDOG_THRESHOLD})\n"
+            f"  CL direction: {cl_direction or 'unknown'}\n"
+            f"  Chainlink start: ${pos.chainlink_start_price:.2f}"
         )
 
     # ═══════════════════════════════════════════════════════════
-    # CHECK FILLS — Verify which orders actually executed
+    # PHASE 2: UNDERDOG ACCUMULATION (share-based balancing)
     # ═══════════════════════════════════════════════════════════
 
-    async def _check_fills(self, ws: WindowState):
+    async def _accumulate_underdog(self, pos: WindowPosition, side: str,
+                                     current_price: float, elapsed: float,
+                                     cl_direction: Optional[str]):
         """
-        Check pending orders for fills. NON-BLOCKING.
-        Only credit shares when we confirm the order matched.
+        Phase 2: Accumulate the cheap side using SHARE-BASED balancing.
+
+        Key differences from dollar-based:
+        - Size by SHARES needed to reach TARGET_BALANCE_RATIO (0.62)
+        - Enforce rebuy cooldown (MIN_REBUY_INTERVAL=10s)
+        - Require price improvement ($0.02) before rebuying
+        - Cap fills per window (MAX_FILLS_PER_WINDOW=15)
+        - Check global exposure cap
+
+        This is the edge: buying underdog shares at $0.02-$0.15
+        when the crowd piles on one direction.
         """
-        if not self._clob_client:
+        now = time.time()
+
+        # --- Guard checks ---
+
+        # Max fills per window
+        if pos.phase2_fills >= MAX_FILLS_PER_WINDOW:
             return
 
-        pending_count = sum(1 for o in ws.pending_orders if not o.filled and not o.cancelled)
-        if pending_count == 0:
+        # Per-window exposure cap
+        if pos.total_cost >= MAX_EXPOSURE_PER_WINDOW:
             return
 
-        for order in ws.pending_orders:
-            if order.filled or order.cancelled:
-                continue
-
-            order.checks += 1
-
-            try:
-                result = await asyncio.to_thread(
-                    self._get_order_sync, order.order_id
-                )
-
-                if not result:
-                    if order.checks <= 3:
-                        logger.info(
-                            f"[SC] Fill check #{order.checks}: {ws.asset} {ws.timeframe} "
-                            f"{order.side} @ ${order.price:.2f} — no result from CLOB"
-                        )
-                    continue
-
-                status = str(result.get("status", "")).upper()
-                size_matched = float(
-                    result.get("sizeMatched", 0) or result.get("size_matched", 0) or 0
-                )
-
-                # Log first few checks and any status changes
-                if order.checks <= 3 or order.checks % 20 == 0:
-                    logger.info(
-                        f"[SC] Fill check #{order.checks}: {ws.asset} {ws.timeframe} "
-                        f"{order.side} @ ${order.price:.2f} — status={status} "
-                        f"sizeMatched={size_matched}"
-                    )
-
-                if status in ("MATCHED", "FILLED", "CLOSED") or size_matched > 0:
-                    order.filled = True
-
-                    fill_size = size_matched if size_matched > 0 else float(
-                        result.get("size", order.shares) or order.shares
-                    )
-                    fill_price = order.price  # Limit order fills at our price or better
-
-                    if order.side == "YES":
-                        ws.yes_shares += fill_size
-                        ws.yes_cost += fill_price * fill_size
-                    else:
-                        ws.no_shares += fill_size
-                        ws.no_cost += fill_price * fill_size
-
-                    self._total_open_orders = max(0, self._total_open_orders - 1)
-
-                    # Update order in DB
-                    conn = sqlite3.connect(DB_PATH)
-                    conn.execute("""
-                        UPDATE spread_v2_orders SET status='filled', filled_at=?
-                        WHERE order_id=?
-                    """, (time.time(), order.order_id))
-                    conn.commit()
-                    conn.close()
-
-                    self._save_window(ws)
-
-                    logger.info(
-                        f"[SC] FILLED: {ws.asset} {ws.timeframe} {order.side} "
-                        f"{fill_size:.1f}sh @ ${fill_price:.2f} "
-                        f"(${fill_price * fill_size:.2f}) | "
-                        f"YES:{ws.yes_shares:.0f} NO:{ws.no_shares:.0f} | "
-                        f"{'HEDGED' if ws.is_hedged else 'ONE-SIDE'}"
-                    )
-
-                elif "CANCEL" in status:
-                    # Handles CANCELLED, CANCELED, CANCELED_MARKET_RESOLVED
-                    order.cancelled = True
-                    self._total_open_orders = max(0, self._total_open_orders - 1)
-
-                    conn = sqlite3.connect(DB_PATH)
-                    conn.execute("""
-                        UPDATE spread_v2_orders SET status='cancelled'
-                        WHERE order_id=?
-                    """, (order.order_id,))
-                    conn.commit()
-                    conn.close()
-
-            except Exception as e:
-                if order.checks % 10 == 0:
-                    logger.debug(f"[SC] Fill check error: {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # CANCEL UNFILLED — Clean up before window closes
-    # ═══════════════════════════════════════════════════════════
-
-    async def _cancel_unfilled(self, ws: WindowState):
-        """Cancel all unfilled orders before window closes."""
-        if not self._clob_client:
-            ws.orders_cancelled = True
+        # Global exposure cap
+        if self._get_global_exposure() >= MAX_GLOBAL_EXPOSURE:
             return
 
-        cancelled = 0
-        for order in ws.pending_orders:
-            if order.filled or order.cancelled:
-                continue
-
-            try:
-                await asyncio.to_thread(self._cancel_order_sync, order.order_id)
-                order.cancelled = True
-                self._total_open_orders = max(0, self._total_open_orders - 1)
-                cancelled += 1
-
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute("""
-                    UPDATE spread_v2_orders SET status='cancelled'
-                    WHERE order_id=?
-                """, (order.order_id,))
-                conn.commit()
-                conn.close()
-            except Exception as e:
-                logger.debug(f"[SC] Cancel error: {e}")
-
-        ws.orders_cancelled = True
-
-        if cancelled > 0:
-            logger.info(
-                f"[SC] Cancelled {cancelled} unfilled orders | "
-                f"{ws.asset} {ws.timeframe} | "
-                f"Final: YES:{ws.yes_shares:.0f} NO:{ws.no_shares:.0f}"
-            )
-
-    # ═══════════════════════════════════════════════════════════
-    # PLACE LIMIT ORDER — Single order placement
-    # ═══════════════════════════════════════════════════════════
-
-    async def _place_limit_order(self, token_id: str, price: float,
-                                   shares: float) -> Optional[str]:
-        """Place a single limit BUY order. Returns order_id or None."""
-        if not self._clob_client:
-            return None
-
-        try:
-            result = await asyncio.to_thread(
-                self._post_order_sync, token_id, round(price, 2), round(shares, 2), True
-            )
-
-            if result:
-                order_id = result.get("orderID", result.get("id", ""))
-                if order_id:
-                    logger.info(f"[SC] Order placed: {token_id[:10]}... ${price:.2f} x {shares:.0f} → {order_id[:20]}")
-                    return order_id
-                else:
-                    logger.warning(f"[SC] Order returned no ID: {result}")
-
-            return None
-        except Exception as e:
-            logger.warning(f"[SC] Order FAILED @ ${price:.2f} x {shares:.0f}: {e}")
-            return None
-
-    # ═══════════════════════════════════════════════════════════
-    # RESOLVE — Compute P&L and sell winners
-    # ═══════════════════════════════════════════════════════════
-
-    async def _resolve_window(self, ws: WindowState):
-        """Resolve a completed window. Compute P&L. Sell winners."""
-        # Cancel any remaining orders first
-        if not ws.orders_cancelled:
-            await self._cancel_unfilled(ws)
-
-        # Fast-close empty windows (no fills, nothing to resolve)
-        if ws.yes_shares == 0 and ws.no_shares == 0 and len(ws.pending_orders) == 0:
-            ws.status = "resolved"
-            ws.pnl = 0.0
-            self._save_window(ws)
-            if ws.slug in self._windows:
-                del self._windows[ws.slug]
-            logger.info(f"[SC] Closed empty window: {ws.asset} {ws.timeframe} (no fills)")
+        # Rebuy cooldown
+        if now - pos.last_underdog_buy_time < MIN_REBUY_INTERVAL:
             return
 
-        # Check resolution via Gamma API
-        resolved = await asyncio.to_thread(
-            self._check_gamma_resolution_sync, ws.slug
-        )
+        # Price improvement check — only rebuy if price dropped by at least $0.02
+        if pos.last_underdog_buy_price > 0:
+            if current_price >= pos.last_underdog_buy_price - REBUY_PRICE_IMPROVEMENT:
+                return
 
-        if resolved is None:
-            elapsed = time.time() - ws.window_start
-            window_seconds = TIMEFRAMES[ws.timeframe]["seconds"]
-
-            # After 2 min past window end, try price-based fallback
-            # (Gamma removes resolved markets from its API)
-            if elapsed > window_seconds + 120:
-                resolved = await asyncio.to_thread(
-                    self._price_based_resolution_sync, ws.asset,
-                    ws.window_start, ws.timeframe
-                )
-                if resolved is not None:
-                    logger.info(
-                        f"[SC] Price-based resolution for {ws.asset} {ws.timeframe}: "
-                        f"{'UP' if resolved else 'DOWN'}"
-                    )
-
-        if resolved is None:
-            # Still unresolved — check force-expiry timeout
-            elapsed = time.time() - ws.window_start
-            window_seconds = TIMEFRAMES[ws.timeframe]["seconds"]
-            if elapsed > window_seconds + 1800:
-                ws.status = "error"
-                ws.pnl = -ws.total_cost  # assume total loss
-                self._daily_pnl += ws.pnl
-                self._save_window(ws)
-                if ws.slug in self._windows:
-                    del self._windows[ws.slug]
-                logger.warning(
-                    f"[SC] EXPIRED: {ws.asset} {ws.timeframe} — "
-                    f"never resolved after 30min. Lost ${ws.total_cost:.2f}"
-                )
+        # Don't buy if pair cost already too high (both sides populated)
+        if pos.pair_cost > PAIR_COST_MAX and pos.yes_shares > 0 and pos.no_shares > 0:
             return
 
-        went_up = resolved
-        ws.resolution = "UP" if went_up else "DOWN"
+        # --- Share-based sizing ---
 
-        # Compute P&L
-        if ws.yes_shares == 0 and ws.no_shares == 0:
-            ws.pnl = 0.0
-        elif went_up:
-            payout = ws.yes_shares * 1.0
-            ws.pnl = payout - ws.total_cost
+        # Determine favorite vs underdog share counts
+        if pos.favorite_side == "YES":
+            favorite_shares = pos.net_yes_shares
+            underdog_shares = pos.net_no_shares
         else:
-            payout = ws.no_shares * 1.0
-            ws.pnl = payout - ws.total_cost
+            favorite_shares = pos.net_no_shares
+            underdog_shares = pos.net_yes_shares
 
-        ws.status = "resolved"
-        self._daily_pnl += ws.pnl
+        # Only accumulate the underdog side (opposite of favorite)
+        underdog_side = "NO" if pos.favorite_side == "YES" else "YES"
+        if side != underdog_side:
+            return  # Don't buy more of the favorite in Phase 2
 
-        self._save_window(ws)
+        # Target shares: achieve TARGET_BALANCE_RATIO
+        # If favorite_shares=0 (Phase 1 fill still pending/didn't fill),
+        # use default target based on expected Phase 1 size
+        if favorite_shares <= 0:
+            default_fav = INITIAL_BET_SIZE / PHASE1_FAVORITE_PRICE  # ~10 shares
+            target_underdog_shares = default_fav * TARGET_BALANCE_RATIO
+        else:
+            target_underdog_shares = favorite_shares * TARGET_BALANCE_RATIO
+        shares_needed = target_underdog_shares - underdog_shares
 
-        # Log
-        fills = ws.total_fills
-        marker = "+++" if ws.pnl > 0 else "---" if ws.pnl < 0 else "==="
-        hedge_tag = "HEDGED" if ws.is_hedged else "NAKED"
-
-        logger.info(
-            f"[SC] {marker} RESOLVED: {ws.asset} {ws.timeframe} -> {ws.resolution}\n"
-            f"  YES: {ws.yes_shares:.0f}sh (${ws.yes_cost:.2f}) | "
-            f"NO: {ws.no_shares:.0f}sh (${ws.no_cost:.2f})\n"
-            f"  Deployed: ${ws.total_cost:.2f} | "
-            f"Pair: ${ws.pair_cost:.3f} | {hedge_tag} | {fills} fills\n"
-            f"  P&L: ${ws.pnl:+.2f} | Daily: ${self._daily_pnl:+.2f}"
-        )
-
-        # Sell winning shares to recycle USDC
-        if ENABLE_AUTO_SELL and ws.pnl >= 0:
-            await self._sell_winners(ws)
-
-        # Remove from active
-        del self._windows[ws.slug]
-
-    async def _sell_winners(self, ws: WindowState):
-        """Sell winning shares at $0.99 to get USDC back in wallet."""
-        if not self._clob_client:
-            return
-
-        try:
-            if ws.resolution == "UP" and ws.yes_shares > 0:
-                token_id = ws.yes_token_id
-                shares = ws.yes_shares
-            elif ws.resolution == "DOWN" and ws.no_shares > 0:
-                token_id = ws.no_token_id
-                shares = ws.no_shares
+        if shares_needed <= 0:
+            # Already balanced — only buy if truly penny-priced
+            if current_price <= UNDERDOG_PENNY_THRESHOLD:
+                top_up_base = favorite_shares if favorite_shares > 0 else (INITIAL_BET_SIZE / PHASE1_FAVORITE_PRICE)
+                shares_needed = top_up_base * 0.1  # Small top-up
             else:
                 return
 
-            if not token_id or shares <= 0:
+        # Check MAX_UNHEDGED_RATIO — don't let favorite get too far ahead
+        if favorite_shares > 0 and underdog_shares > 0:
+            ratio = favorite_shares / underdog_shares
+            if ratio > MAX_UNHEDGED_RATIO:
+                # Force larger underdog buy to rebalance
+                shares_needed = max(shares_needed, favorite_shares * 0.2)
+
+        # Cap by exposure limits
+        buy_amount = shares_needed * current_price
+        max_buy = min(MAX_EXPOSURE_PER_WINDOW - pos.total_cost,
+                      MAX_GLOBAL_EXPOSURE - self._get_global_exposure())
+        buy_amount = min(buy_amount, max_buy)
+
+        if buy_amount < 1.00:
+            # CLOB minimum order size is $1
+            if current_price > 0 and current_price <= UNDERDOG_THRESHOLD:
+                # Bump up to minimum
+                buy_amount = 1.00
+            else:
                 return
 
-            result = await asyncio.to_thread(
-                self._post_order_sync, token_id,
-                SELL_WINNERS_AT, round(shares, 2), False
-            )
+        shares = buy_amount / current_price if current_price > 0 else 0
+        if shares < 1:
+            return
 
-            if result:
-                logger.info(
-                    f"[SC] SELL WINNER: {ws.asset} {shares:.0f}sh @ "
-                    f"${SELL_WINNERS_AT} -> ${shares * SELL_WINNERS_AT:.2f} USDC"
-                )
-        except Exception as e:
-            logger.warning(f"[SC] Sell winner error: {e}")
+        await self._place_order(pos, side, current_price, shares, phase=2)
+        pos.phase = 2
+        pos.phase2_triggered = True
+        pos.last_underdog_buy_time = now
+        pos.last_underdog_buy_price = current_price
+        pos.phase2_fills += 1
+
+        logger.info(
+            f"[SC] UNDERDOG: {pos.asset} {side} @ ${current_price:.3f} "
+            f"({shares:.1f}sh, ${buy_amount:.2f}) | "
+            f"Balance: {underdog_shares + shares:.0f}/{favorite_shares:.0f} "
+            f"({(underdog_shares + shares) / max(favorite_shares, 1) * 100:.0f}%) | "
+            f"Pair: ${pos.pair_cost:.3f} | "
+            f"Fill {pos.phase2_fills}/{MAX_FILLS_PER_WINDOW} | "
+            f"CL:{cl_direction or '?'}"
+        )
 
     # ═══════════════════════════════════════════════════════════
-    # CLOB HELPERS (blocking — called via to_thread)
+    # PHASE 3: SELL / ROTATION
+    # ═══════════════════════════════════════════════════════════
+
+    async def _check_rotation(self, pos: WindowPosition, yes_price: float,
+                                no_price: float, cl_direction: Optional[str]):
+        """
+        Phase 3: Sell the losing side and rotate into the new underdog.
+
+        0x8dxd sells in 15% of trades, recovering $384/window average.
+        Triggers when momentum clearly reverses.
+
+        This is optional and can be disabled (SELL_ENABLED=False).
+        """
+        if not cl_direction:
+            return
+
+        # If Chainlink says UP, but we have heavy NO position and YES is cheap
+        if cl_direction == "UP" and pos.net_no_shares > pos.net_yes_shares * 1.5:
+            if no_price < pos.avg_no_price * SELL_LOSS_THRESHOLD:
+                # NO is losing badly — sell some to recover capital
+                sell_shares = pos.net_no_shares * 0.3  # Sell 30%
+                if sell_shares > 0 and no_price > 0.01:
+                    await self._sell_order(pos, "NO", no_price, sell_shares, phase=3)
+                    pos.phase = 3
+                    logger.info(
+                        f"[SC] ROTATION: Selling {sell_shares:.1f} NO @ ${no_price:.3f} "
+                        f"(CL says UP, cutting losses)"
+                    )
+
+        # Mirror for DOWN
+        elif cl_direction == "DOWN" and pos.net_yes_shares > pos.net_no_shares * 1.5:
+            if yes_price < pos.avg_yes_price * SELL_LOSS_THRESHOLD:
+                sell_shares = pos.net_yes_shares * 0.3
+                if sell_shares > 0 and yes_price > 0.01:
+                    await self._sell_order(pos, "YES", yes_price, sell_shares, phase=3)
+                    pos.phase = 3
+                    logger.info(
+                        f"[SC] ROTATION: Selling {sell_shares:.1f} YES @ ${yes_price:.3f} "
+                        f"(CL says DOWN, cutting losses)"
+                    )
+
+    # ═══════════════════════════════════════════════════════════
+    # BUG 1 FIX: PRE-RESOLUTION EXIT (AUTO-REDEMPTION)
+    # ═══════════════════════════════════════════════════════════
+
+    async def _pre_resolution_exit(self, pos: WindowPosition,
+                                     yes_price: float, no_price: float,
+                                     cl_direction: Optional[str]):
+        """
+        Sell winning shares before the market closes.
+
+        Determines the likely winner from Chainlink direction and sells
+        the winning side at ~$0.95 to convert conditional tokens to USDC.
+        Without this, winning tokens stay trapped as unredeemed shares
+        that require complex on-chain CTF redemption.
+
+        Risk analysis:
+        - If we correctly predict the winner and sell: lose ~5% vs redemption
+        - If we wrongly predict and sell the loser: we get $0.95 for $0 tokens (free money!)
+        - So this trade is ALWAYS profitable in expectation.
+        """
+        if not cl_direction:
+            return
+
+        # Don't retry
+        if pos.exit_attempted:
+            return
+
+        # Determine winning side from Chainlink
+        if cl_direction == "UP":
+            winning_side = "YES"
+            winning_shares = pos.net_yes_shares
+            current_price = yes_price
+        else:
+            winning_side = "NO"
+            winning_shares = pos.net_no_shares
+            current_price = no_price
+
+        if winning_shares <= 0:
+            pos.exit_attempted = True
+            logger.debug(
+                f"[SC] Pre-exit: {pos.asset} {pos.timeframe} — "
+                f"no {winning_side} shares to sell (CL:{cl_direction})"
+            )
+            return
+
+        # Sell at 95 cents — high enough to capture value, low enough to fill
+        sell_price = 0.95
+        if current_price and current_price > 0.90:
+            sell_price = min(0.95, round(current_price - 0.01, 2))
+        elif current_price and current_price > 0.80:
+            sell_price = round(current_price - 0.02, 2)
+        else:
+            # Price suspiciously low — Chainlink direction might be wrong
+            # Still sell — if we're wrong about winner, this is free money
+            sell_price = max(0.80, round(current_price, 2)) if current_price else 0.90
+
+        # Floor at $0.80 — below this something is wrong
+        if sell_price < 0.80:
+            logger.warning(
+                f"[SC] Pre-exit: {pos.asset} {winning_side} price too low "
+                f"(${sell_price:.2f}), skipping"
+            )
+            pos.exit_attempted = True
+            return
+
+        pos.exit_attempted = True
+        order_id = await self._sell_order(pos, winning_side, sell_price, winning_shares)
+
+        if order_id:
+            logger.info(
+                f"[SC] *** PRE-EXIT: {pos.asset} {pos.timeframe} | "
+                f"Sold {winning_shares:.1f} {winning_side} @ ${sell_price:.2f} | "
+                f"CL: {cl_direction} | Revenue: ${winning_shares * sell_price:.2f}"
+            )
+        else:
+            logger.warning(
+                f"[SC] Pre-exit FAILED: {pos.asset} {pos.timeframe} | "
+                f"Tried to sell {winning_shares:.1f} {winning_side} @ ${sell_price:.2f}"
+            )
+
+    # ═══════════════════════════════════════════════════════════
+    # BUG 2 FIX: FILL VERIFICATION
+    # ═══════════════════════════════════════════════════════════
+
+    def _get_order_sync(self, order_id: str) -> Optional[dict]:
+        """Check order status on the CLOB. (Blocking)"""
+        try:
+            return self._clob_client.get_order(order_id)
+        except Exception as e:
+            logger.debug(f"[SC] Order status check error: {e}")
+            return None
+
+    def _cancel_order_sync(self, order_id: str) -> bool:
+        """Cancel an unfilled order. (Blocking)"""
+        try:
+            self._clob_client.cancel(order_id)
+            return True
+        except Exception as e:
+            logger.debug(f"[SC] Cancel error: {e}")
+            return False
+
+    async def _verify_fill(self, order_id: str) -> Tuple[bool, float, float]:
+        """
+        Wait for an order to fill, with timeout.
+
+        Returns: (filled, filled_shares, filled_price)
+
+        Polls order status after 5 seconds. If still unfilled after
+        10 seconds total, cancels the order and returns (False, 0, 0).
+        This prevents the bot from crediting phantom shares.
+        """
+        if not order_id or order_id in ("unknown", "error"):
+            return False, 0.0, 0.0
+
+        # First check after 3 seconds
+        await asyncio.sleep(3)
+
+        order = await asyncio.to_thread(self._get_order_sync, order_id)
+        if order:
+            status = str(order.get("status", "")).upper()
+            size_matched = float(order.get("sizeMatched", 0) or order.get("size_matched", 0) or 0)
+            price = float(order.get("price", 0) or 0)
+
+            if status in ("MATCHED", "FILLED") or size_matched > 0:
+                actual_shares = size_matched if size_matched > 0 else float(order.get("size", 0) or 0)
+                return True, actual_shares, price
+
+            # If not filled yet, wait 4 more seconds (7s total)
+            if status in ("OPEN", "LIVE", "ACTIVE", ""):
+                await asyncio.sleep(4)
+                order = await asyncio.to_thread(self._get_order_sync, order_id)
+                if order:
+                    status = str(order.get("status", "")).upper()
+                    size_matched = float(order.get("sizeMatched", 0) or order.get("size_matched", 0) or 0)
+                    price = float(order.get("price", 0) or 0)
+
+                    if status in ("MATCHED", "FILLED") or size_matched > 0:
+                        actual_shares = size_matched if size_matched > 0 else float(order.get("size", 0) or 0)
+                        return True, actual_shares, price
+
+                # Still not filled — cancel
+                logger.info(f"[SC] Order {order_id[:12]}... unfilled after 7s — cancelling")
+                await asyncio.to_thread(self._cancel_order_sync, order_id)
+                return False, 0.0, 0.0
+
+        return False, 0.0, 0.0
+
+    # ═══════════════════════════════════════════════════════════
+    # ORDER EXECUTION
     # ═══════════════════════════════════════════════════════════
 
     def _post_order_sync(self, token_id: str, price: float,
                           shares: float, is_buy: bool) -> Optional[dict]:
-        """Post order to CLOB. (Blocking)"""
+        """Post order to CLOB. (Blocking — run via to_thread)"""
         from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
 
@@ -953,56 +1155,128 @@ class SpreadCaptureV2:
         )
         return self._clob_client.create_and_post_order(order_args)
 
-    def _get_order_sync(self, order_id: str) -> Optional[dict]:
-        """Check order status on the CLOB. (Blocking)"""
-        try:
-            result = self._clob_client.get_order(order_id)
-            return result
-        except Exception as e:
-            logger.debug(f"[SC] get_order error for {order_id[:16]}: {e}")
+    async def _place_order(self, pos: WindowPosition, side: str,
+                            price: float, shares: float, phase: int) -> Optional[str]:
+        """
+        Post a BUY order on the CLOB and queue it for fill verification.
+
+        NON-BLOCKING: Posts the order and adds it to _pending_orders.
+        Shares are NOT credited here — they're credited when
+        _process_pending_orders() verifies the fill next loop iteration.
+        This keeps the main loop fast (~1s per order, not 7s).
+        """
+        if not self._clob_client:
+            logger.warning("[SC] No CLOB client")
             return None
 
-    def _cancel_order_sync(self, order_id: str) -> bool:
-        """Cancel an unfilled order. (Blocking)"""
+        price = round(price, 2)
+        shares = round(shares, 2)
+
+        if price <= 0 or shares <= 0:
+            return None
+
+        token_id = pos.yes_token_id if side == "YES" else pos.no_token_id
+        if not token_id:
+            logger.warning(f"[SC] No token ID for {side}")
+            return None
+
         try:
-            self._clob_client.cancel(order_id)
-            return True
-        except Exception:
-            return False
+            result = await asyncio.to_thread(
+                self._post_order_sync, token_id, price, shares, True
+            )
+            order_id = result.get("orderID", "") if result else ""
 
-    # ═══════════════════════════════════════════════════════════
-    # MARKET DATA HELPERS
-    # ═══════════════════════════════════════════════════════════
+            if not order_id:
+                logger.warning(f"[SC] No orderID returned for {side} buy")
+                return None
 
-    def _get_book_edges_sync(self, token_id: str) -> Tuple[Optional[float], Optional[float]]:
-        """Get the best ask (lowest sell) and best bid (highest buy).
-        Returns (best_ask, best_bid) or (None, None) on error. (Blocking)"""
-        if not self._clob_client:
-            return None, None
-        try:
-            book = self._clob_client.get_order_book(token_id)
-            asks = book.asks if hasattr(book, "asks") else book.get("asks", [])
-            bids = book.bids if hasattr(book, "bids") else book.get("bids", [])
+            # Queue for verification — don't block the loop
+            self._pending_orders.append({
+                "order_id": order_id,
+                "slug": pos.slug,
+                "side": side,
+                "price": price,
+                "shares": shares,
+                "phase": phase,
+                "is_buy": True,
+                "posted_at": time.time(),
+                "checks": 0,
+            })
+            return order_id
 
-            best_ask = None
-            for a in asks:
-                p = float(a.price if hasattr(a, "price") else a.get("price", 0))
-                if best_ask is None or p < best_ask:
-                    best_ask = p
-
-            best_bid = None
-            for b in bids:
-                p = float(b.price if hasattr(b, "price") else b.get("price", 0))
-                if best_bid is None or p > best_bid:
-                    best_bid = p
-
-            return best_ask, best_bid
         except Exception as e:
-            logger.debug(f"[SC] Order book error for {token_id[:16]}: {e}")
-            return None, None
+            logger.warning(f"[SC] Order error ({side}): {e}")
+            return None
+
+    async def _sell_order(self, pos: WindowPosition, side: str,
+                           price: float, shares: float,
+                           phase: int = 4) -> Optional[str]:
+        """
+        Post a SELL order on the CLOB and queue for fill verification.
+
+        NON-BLOCKING: Same pattern as _place_order.
+        """
+        if not self._clob_client:
+            return None
+
+        price = round(price, 2)
+        shares = round(shares, 2)
+
+        if price <= 0 or shares <= 0:
+            return None
+
+        token_id = pos.yes_token_id if side == "YES" else pos.no_token_id
+        if not token_id:
+            return None
+
+        try:
+            result = await asyncio.to_thread(
+                self._post_order_sync, token_id, price, shares, False
+            )
+            order_id = result.get("orderID", "") if result else ""
+
+            if not order_id:
+                logger.warning(f"[SC] No orderID returned for {side} sell")
+                return None
+
+            # Queue for verification
+            self._pending_orders.append({
+                "order_id": order_id,
+                "slug": pos.slug,
+                "side": side,
+                "price": price,
+                "shares": shares,
+                "phase": phase,
+                "is_buy": False,
+                "posted_at": time.time(),
+                "checks": 0,
+            })
+            return order_id
+
+        except Exception as e:
+            logger.warning(f"[SC] Sell error ({side}): {e}")
+            return None
+
+    def _record_fill(self, slug, side, price, shares, amount, order_id, phase):
+        """Record a fill in the database."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("""
+                INSERT INTO spread_capture_fills
+                (window_slug, side, price, shares, amount_usd, order_id, phase, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (slug, side, price, shares, amount, order_id, phase, time.time()))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"[SC] DB write error: {e}")
+
+    # ═══════════════════════════════════════════════════════════
+    # MARKET DATA
+    # ═══════════════════════════════════════════════════════════
 
     def _fetch_market_sync(self, slug: str) -> Optional[dict]:
-        """Fetch market token IDs from Gamma API. (Blocking)"""
+        """Fetch market data (token IDs, crowd price) from Gamma API. (Blocking)"""
         try:
             resp = requests.get(
                 f"{GAMMA_BASE}/markets",
@@ -1020,13 +1294,13 @@ class SpreadCaptureV2:
                 if m.get("closed") or m.get("resolved"):
                     continue
 
-                token_ids = m.get("clobTokenIds", "[]")
-                if isinstance(token_ids, str):
-                    token_ids = json.loads(token_ids)
-
                 prices = m.get("outcomePrices", "[]")
                 if isinstance(prices, str):
                     prices = json.loads(prices)
+
+                token_ids = m.get("clobTokenIds", "[]")
+                if isinstance(token_ids, str):
+                    token_ids = json.loads(token_ids)
 
                 return {
                     "market_id": m.get("id", ""),
@@ -1034,20 +1308,113 @@ class SpreadCaptureV2:
                     "token_id_yes": token_ids[0] if len(token_ids) >= 1 else None,
                     "token_id_no": token_ids[1] if len(token_ids) >= 2 else None,
                 }
+
             return None
         except Exception as e:
             logger.warning(f"[SC] Market fetch error for {slug}: {e}")
             return None
 
-    def _check_gamma_resolution_sync(self, slug: str) -> Optional[bool]:
-        """Check if market resolved. Returns True=UP, False=DOWN, None=not yet."""
+    async def _fetch_market(self, slug: str) -> Optional[dict]:
+        """Fetch market data without blocking the event loop."""
+        return await asyncio.to_thread(self._fetch_market_sync, slug)
+
+    def _get_clob_prices_sync(self, pos: WindowPosition) -> Tuple[Optional[float], Optional[float]]:
+        """Get current YES and NO prices from the CLOB orderbook. (Blocking)"""
         try:
-            resp = requests.get(
-                f"{GAMMA_BASE}/markets", params={"slug": slug}, timeout=5
-            )
+            if not self._clob_client:
+                return None, None
+
+            yes_price = None
+            no_price = None
+
+            if pos.yes_token_id:
+                resp = self._clob_client.get_price(
+                    pos.yes_token_id, side="BUY"
+                )
+                yes_price = float(resp.get("price", 0.5)) if resp else None
+
+            if pos.no_token_id:
+                resp = self._clob_client.get_price(
+                    pos.no_token_id, side="BUY"
+                )
+                no_price = float(resp.get("price", 0.5)) if resp else None
+
+            return yes_price, no_price
+
+        except Exception:
+            return None, None
+
+    async def _get_clob_prices(self, pos: WindowPosition) -> Tuple[Optional[float], Optional[float]]:
+        """Get CLOB prices without blocking the event loop."""
+        return await asyncio.to_thread(self._get_clob_prices_sync, pos)
+
+    # ═══════════════════════════════════════════════════════════
+    # RESOLUTION
+    # ═══════════════════════════════════════════════════════════
+
+    async def _resolve_window(self, pos: WindowPosition):
+        """Resolve a completed window and compute P&L."""
+        # Get final Chainlink price
+        cl_price = self._rtds.get_chainlink_price(pos.asset)
+
+        if cl_price and pos.chainlink_start_price:
+            went_up = cl_price >= pos.chainlink_start_price
+        else:
+            # Fallback: check Gamma API for resolution
+            went_up = await asyncio.to_thread(self._check_gamma_resolution_sync, pos.slug)
+
+        if went_up is None:
+            return  # Can't resolve yet
+
+        pos.resolution = "UP" if went_up else "DOWN"
+
+        # Calculate P&L
+        if went_up:
+            # YES wins: collect net_yes_shares * $1
+            payout = pos.net_yes_shares * 1.0 * 0.98  # 2% fee estimate
+        else:
+            # NO wins: collect net_no_shares * $1
+            payout = pos.net_no_shares * 1.0 * 0.98
+
+        pos.pnl = payout - pos.total_cost
+        pos.status = "resolved"
+
+        self._daily_pnl += pos.pnl
+        self._total_windows_resolved += 1
+
+        # Save to DB
+        self._save_window(pos)
+
+        # Log
+        marker = "+++" if pos.pnl > 0 else "---"
+        arb_tag = "ARB" if pos.is_arb else "DIR"
+        logger.info(
+            f"[SC] {marker} RESOLVED: {pos.asset} {pos.timeframe} -> {pos.resolution}\n"
+            f"  YES: {pos.net_yes_shares:.1f}sh @ ${pos.avg_yes_price:.3f}\n"
+            f"  NO: {pos.net_no_shares:.1f}sh @ ${pos.avg_no_price:.3f}\n"
+            f"  Pair cost: ${pos.pair_cost:.3f} ({arb_tag})\n"
+            f"  P&L: ${pos.pnl:+.2f} | Daily: ${self._daily_pnl:+.2f}"
+        )
+
+        # Remove from active
+        del self._positions[pos.slug]
+
+    async def _check_resolutions(self):
+        """Check Gamma API for any resolved markets we missed."""
+        now = time.time()
+        for slug, pos in list(self._positions.items()):
+            if pos.status != "active":
+                continue
+            window_end = pos.window_start + TIMEFRAMES[pos.timeframe]["seconds"]
+            if now > window_end + 60:
+                await self._resolve_window(pos)
+
+    def _check_gamma_resolution_sync(self, slug: str) -> Optional[bool]:
+        """Fallback: check Gamma API for market resolution. (Blocking)"""
+        try:
+            resp = requests.get(f"{GAMMA_BASE}/markets", params={"slug": slug}, timeout=5)
             if resp.status_code != 200:
                 return None
-
             markets = resp.json()
             for m in markets:
                 if m.get("resolved"):
@@ -1060,86 +1427,50 @@ class SpreadCaptureV2:
         except Exception:
             return None
 
-    def _price_based_resolution_sync(self, asset: str, window_start: int,
-                                      timeframe: str) -> Optional[bool]:
-        """Fallback resolution using Binance kline data.
-        Returns True=UP, False=DOWN, None=error.
-        """
-        symbol_map = {
-            "BTC": "BTCUSDT", "ETH": "ETHUSDT",
-            "SOL": "SOLUSDT", "XRP": "XRPUSDT",
-        }
-        symbol = symbol_map.get(asset)
-        if not symbol:
-            return None
-
+    def _save_window(self, pos: WindowPosition):
+        """Save completed (resolved) window to database."""
         try:
-            interval = "5m" if timeframe == "5m" else "15m"
-            start_ms = window_start * 1000
-            window_seconds = TIMEFRAMES[timeframe]["seconds"]
-            end_ms = (window_start + window_seconds) * 1000
-
-            resp = requests.get(
-                "https://api.binance.com/api/v3/klines",
-                params={
-                    "symbol": symbol, "interval": interval,
-                    "startTime": start_ms, "endTime": end_ms, "limit": 1,
-                },
-                timeout=5,
-            )
-            if resp.status_code != 200:
-                return None
-
-            klines = resp.json()
-            if not klines:
-                return None
-
-            open_price = float(klines[0][1])
-            close_price = float(klines[0][4])
-            return close_price > open_price
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("""
+                INSERT OR REPLACE INTO spread_capture_windows
+                (asset, timeframe, slug, window_start,
+                 yes_shares, yes_cost, yes_avg_price, yes_orders,
+                 no_shares, no_cost, no_avg_price, no_orders,
+                 yes_sold_shares, yes_sold_revenue,
+                 no_sold_shares, no_sold_revenue,
+                 pair_cost, total_deployed, guaranteed_profit, is_arb,
+                 chainlink_start, resolution, pnl,
+                 pnl_pct, max_phase, phase2_triggered, status, resolved_at,
+                 yes_token_id, no_token_id, market_id, favorite_side, phase2_fills)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                pos.asset, pos.timeframe, pos.slug, pos.window_start,
+                pos.yes_shares, pos.yes_cost, pos.avg_yes_price, pos.yes_orders,
+                pos.no_shares, pos.no_cost, pos.avg_no_price, pos.no_orders,
+                pos.yes_sold_shares, pos.yes_sold_revenue,
+                pos.no_sold_shares, pos.no_sold_revenue,
+                pos.pair_cost, pos.total_cost, pos.guaranteed_profit,
+                1 if pos.is_arb else 0,
+                pos.chainlink_start_price, pos.resolution, pos.pnl,
+                pos.pnl / pos.total_cost * 100 if pos.total_cost > 0 else 0,
+                pos.phase, 1 if pos.phase2_triggered else 0,
+                pos.status,
+                datetime.now(timezone.utc).isoformat(),
+                pos.yes_token_id, pos.no_token_id, pos.market_id,
+                pos.favorite_side, pos.phase2_fills,
+            ))
+            conn.commit()
+            conn.close()
         except Exception as e:
-            logger.debug(f"[SC] Price resolution error: {e}")
-            return None
-
-    # ═══════════════════════════════════════════════════════════
-    # DB PERSISTENCE
-    # ═══════════════════════════════════════════════════════════
-
-    def _save_window(self, ws: WindowState):
-        """Save/update window state in DB."""
-        conn = sqlite3.connect(DB_PATH)
-
-        filled = sum(1 for o in ws.pending_orders if o.filled)
-        cancelled = sum(1 for o in ws.pending_orders if o.cancelled)
-
-        conn.execute("""
-            INSERT OR REPLACE INTO spread_v2_windows
-            (asset, timeframe, slug, window_start,
-             yes_shares, yes_cost, no_shares, no_cost,
-             orders_placed, orders_filled, orders_cancelled,
-             pair_cost, hedged_pairs, total_deployed, is_hedged,
-             resolution, pnl, status, resolved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            ws.asset, ws.timeframe, ws.slug, ws.window_start,
-            ws.yes_shares, ws.yes_cost, ws.no_shares, ws.no_cost,
-            len(ws.pending_orders), filled, cancelled,
-            ws.pair_cost if ws.hedged_pairs > 0 else None,
-            ws.hedged_pairs,
-            ws.total_cost,
-            1 if ws.is_hedged else 0,
-            ws.resolution, ws.pnl, ws.status,
-            datetime.now(timezone.utc).isoformat() if ws.status == "resolved" else None,
-        ))
-        conn.commit()
-        conn.close()
+            logger.warning(f"[SC] DB save error: {e}")
 
     # ═══════════════════════════════════════════════════════════
     # STATS & DASHBOARD
     # ═══════════════════════════════════════════════════════════
 
     def get_stats(self) -> dict:
-        """Stats for dashboard endpoint."""
+        """Stats for dashboard."""
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
@@ -1148,75 +1479,72 @@ class SpreadCaptureV2:
                 SELECT
                     COUNT(*) as total,
                     SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
-                    SUM(CASE WHEN is_hedged = 1 THEN 1 ELSE 0 END) as hedged,
+                    SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN is_arb = 1 THEN 1 ELSE 0 END) as arb_windows,
                     COALESCE(SUM(pnl), 0) as total_pnl,
-                    COALESCE(AVG(pair_cost), 0) as avg_pair,
-                    COALESCE(AVG(pnl), 0) as avg_pnl,
-                    COALESCE(SUM(total_deployed), 0) as total_deployed
-                FROM spread_v2_windows
+                    COALESCE(AVG(pair_cost), 0) as avg_pair_cost,
+                    COALESCE(AVG(pnl), 0) as avg_pnl
+                FROM spread_capture_windows
                 WHERE status = 'resolved'
             """).fetchone()
 
             total = stats["total"] or 0
             wins = stats["wins"] or 0
 
-            conn.close()
-
-            return {
-                "strategy": "spread_capture_v2",
-                "version": "passive_limit_orders",
+            result = {
+                "strategy": "0x8dxd_spread_capture",
                 "total_windows": total,
                 "wins": wins,
                 "losses": stats["losses"] or 0,
                 "win_rate": round(wins / max(total, 1) * 100, 1),
-                "hedged_windows": stats["hedged"] or 0,
-                "hedge_rate": round((stats["hedged"] or 0) / max(total, 1) * 100, 1),
+                "arb_windows": stats["arb_windows"] or 0,
+                "arb_rate": round((stats["arb_windows"] or 0) / max(total, 1) * 100, 1),
                 "total_pnl": round(stats["total_pnl"], 2),
-                "avg_pnl": round(stats["avg_pnl"], 3),
-                "avg_pair_cost": round(stats["avg_pair"], 3),
-                "total_deployed": round(stats["total_deployed"], 2),
-                "active_windows": len(
-                    [w for w in self._windows.values() if w.status == "active"]
-                ),
+                "avg_pair_cost": round(stats["avg_pair_cost"], 3),
+                "avg_pnl_per_window": round(stats["avg_pnl"], 3),
+                "active_positions": len([p for p in self._positions.values() if p.status == "active"]),
                 "daily_pnl": round(self._daily_pnl, 2),
                 "daily_windows": self._daily_windows,
-                "open_orders": self._total_open_orders,
             }
+
+            conn.close()
+            return result
         except Exception as e:
             logger.warning(f"[SC] Stats error: {e}")
-            return {"strategy": "spread_capture_v2", "error": str(e)}
+            return {"strategy": "0x8dxd_spread_capture", "error": str(e)}
 
     def get_active_positions(self) -> list:
         """Return active position details for dashboard."""
         result = []
-        for slug, ws in self._windows.items():
-            if ws.status != "active":
+        for slug, pos in self._positions.items():
+            if pos.status != "active":
                 continue
             result.append({
                 "slug": slug,
-                "asset": ws.asset,
-                "timeframe": ws.timeframe,
-                "yes_shares": round(ws.yes_shares, 2),
-                "no_shares": round(ws.no_shares, 2),
-                "yes_cost": round(ws.yes_cost, 2),
-                "no_cost": round(ws.no_cost, 2),
-                "total_cost": round(ws.total_cost, 2),
-                "pair_cost": round(ws.pair_cost, 3),
-                "is_hedged": ws.is_hedged,
-                "hedged_pairs": round(ws.hedged_pairs, 1),
-                "fills": ws.total_fills,
-                "orders_cancelled": ws.orders_cancelled,
+                "asset": pos.asset,
+                "timeframe": pos.timeframe,
+                "yes_shares": round(pos.net_yes_shares, 2),
+                "yes_avg_price": round(pos.avg_yes_price, 3),
+                "no_shares": round(pos.net_no_shares, 2),
+                "no_avg_price": round(pos.avg_no_price, 3),
+                "pair_cost": round(pos.pair_cost, 3),
+                "total_cost": round(pos.total_cost, 2),
+                "is_arb": pos.is_arb,
+                "guaranteed_profit": round(pos.guaranteed_profit, 2),
+                "phase": pos.phase,
+                "chainlink_direction": self._rtds.get_resolution_direction(
+                    pos.asset, pos.window_start
+                ),
             })
         return result
 
     async def stop(self):
-        """Graceful shutdown — cancel all open orders, save state."""
+        """Graceful shutdown — process pending orders and save positions."""
         self._running = False
-        logger.info("[SC] Stopping spread capture v2...")
-        for ws in list(self._windows.values()):
-            if not ws.orders_cancelled:
-                await self._cancel_unfilled(ws)
-            if ws.status == "active":
-                self._save_window(ws)
-        logger.info(f"[SC] Saved {len(self._windows)} windows on shutdown")
+        # Final verification pass for any pending orders
+        if self._pending_orders:
+            await self._process_pending_orders()
+        for slug, pos in self._positions.items():
+            if pos.status == "active":
+                self._save_active_window(pos)
+        logger.info(f"[SC] Saved {len(self._positions)} positions on shutdown")

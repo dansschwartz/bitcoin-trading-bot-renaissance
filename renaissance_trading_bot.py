@@ -79,7 +79,8 @@ SIMPLE_UP_AVAILABLE = False
 
 # NEW: 0x8dxd-style spread capture v2 — passive limit orders on both sides
 try:
-    from polymarket_spread_capture import SpreadCaptureV2, ASSETS as SC_ASSETS
+    from polymarket_rtds import PolymarketRTDS
+    from polymarket_spread_capture import SpreadCaptureEngine, ASSETS as SC_ASSETS
     SPREAD_CAPTURE_AVAILABLE = True
 except ImportError as _sc_err:
     SPREAD_CAPTURE_AVAILABLE = False
@@ -987,17 +988,20 @@ class RenaissanceTradingBot:
         self.simple_better = None
         self.cascade_collector = None
 
-        # Initialize 0x8dxd-style Spread Capture v2 — passive limit orders both sides
+        # Initialize 0x8dxd-style Spread Capture (v1 — favorite + underdog)
+        self.rtds = None
         self.spread_capture = None
         if SPREAD_CAPTURE_AVAILABLE:
             try:
-                self.spread_capture = SpreadCaptureV2()
+                self.rtds = PolymarketRTDS()
+                self.spread_capture = SpreadCaptureEngine(rtds=self.rtds)
                 self.logger.info(
-                    f"Spread Capture v2: initialized "
-                    f"({len(SC_ASSETS)} assets, 15m only, passive limit orders both sides)"
+                    f"Spread Capture: initialized "
+                    f"(0x8dxd strategy — {len(SC_ASSETS)} assets, 5m+15m, CLOB limit orders)"
                 )
             except Exception as _sc_err:
-                self.logger.warning(f"Spread Capture v2 init failed: {_sc_err}")
+                self.logger.warning(f"Spread Capture init failed: {_sc_err}")
+                self.rtds = None
                 self.spread_capture = None
 
         # Initialize Sub-Bar Scanner (10-second early exit monitor)
@@ -7289,9 +7293,11 @@ class RenaissanceTradingBot:
         # DISABLED: Old Polymarket strategies — all replaced by spread capture
         # Strategy A, Live Executor, Reversal, Simple UP — all disabled
 
-        # ── 0x8dxd Spread Capture v2 — passive limit orders both sides ──
-        if self.spread_capture:
-            self.logger.info(f"Launching Spread Capture v2 ({len(SC_ASSETS)} assets, 15m only, passive limit orders)...")
+        # ── 0x8dxd Spread Capture — favorite + underdog strategy ──
+        if self.rtds and self.spread_capture:
+            self.logger.info("Launching RTDS WebSocket in dedicated thread (Binance + Chainlink prices)...")
+            self.rtds.start_in_thread()
+            self.logger.info(f"Launching Spread Capture Engine (0x8dxd strategy, {len(SC_ASSETS)} assets, 5m+15m)...")
             sc_task = self._track_task(self.spread_capture.run())
             def _sc_done(t, log=self.logger):
                 if t.cancelled():
