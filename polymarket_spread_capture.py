@@ -696,7 +696,8 @@ class SpreadCaptureV2:
             # Check if window is way past expiry — force resolve as error
             elapsed = time.time() - ws.window_start
             window_seconds = TIMEFRAMES[ws.timeframe]["seconds"]
-            if elapsed > window_seconds + 300:
+            # Give Gamma 30 minutes to resolve (markets can lag)
+            if elapsed > window_seconds + 1800:
                 ws.status = "error"
                 ws.pnl = -ws.total_cost  # assume total loss
                 self._daily_pnl += ws.pnl
@@ -704,7 +705,7 @@ class SpreadCaptureV2:
                 del self._windows[ws.slug]
                 logger.warning(
                     f"[SC] EXPIRED: {ws.asset} {ws.timeframe} — "
-                    f"never resolved. Lost ${ws.total_cost:.2f}"
+                    f"never resolved after 30min. Lost ${ws.total_cost:.2f}"
                 )
             return
 
