@@ -623,7 +623,7 @@ class SpreadCaptureV2:
             f"[SC] *** ENTERED: {asset} {timeframe} ***\n"
             f"  Book: YES ask={yes_ask_str} | NO ask={no_ask_str}\n"
             f"  Placed {yes_orders} YES + {no_orders} NO resting limit orders\n"
-            f"  Ladder: {', '.join(f'${p:.2f}x{s}' for p, s in ORDER_LADDER)}"
+            f"  Ladder: {', '.join(f'${p:.2f}x{s}' for p, s in ladder)}"
         )
 
     # ═══════════════════════════════════════════════════════════
