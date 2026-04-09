@@ -33,15 +33,16 @@ logger = logging.getLogger("spread_capture")
 
 # Assets with confirmed Polymarket CLOB orderbooks
 # Removed: BNB (no markets), HYPE (no markets), DOGE (no 5m/15m markets)
+# 5m DISABLED: 0% hedge rate across 14 windows — books shift too fast for
+# passive orders to fill both sides. Pure adverse selection loss.
 ASSETS = {
-    "BTC": {"slug_5m": "btc-updown-5m", "slug_15m": "btc-updown-15m"},
-    "ETH": {"slug_5m": "eth-updown-5m", "slug_15m": "eth-updown-15m"},
-    "SOL": {"slug_5m": "sol-updown-5m", "slug_15m": "sol-updown-15m"},
-    "XRP": {"slug_15m": "xrp-updown-15m"},  # 5m orderbook doesn't exist
+    "BTC": {"slug_15m": "btc-updown-15m"},
+    "ETH": {"slug_15m": "eth-updown-15m"},
+    "SOL": {"slug_15m": "sol-updown-15m"},
+    "XRP": {"slug_15m": "xrp-updown-15m"},
 }
 
 TIMEFRAMES = {
-    "5m":  {"seconds": 300, "alignment": 300},
     "15m": {"seconds": 900, "alignment": 900},
 }
 
@@ -54,9 +55,11 @@ ORDER_LADDER = [
     (0.20, 5),   # $1.00 per side — max naked loss capped at $1.00
 ]
 
-# Balance filter: skip window if either side's true_ask is below this
-# Prevents entering tilted markets where only one side can fill
-MIN_TRUE_ASK_BALANCE = 0.30
+# Balance filter: skip window if either side's true_ask is below this.
+# At 0.30 (70/30 market), the cheap side always fills naked → guaranteed loss.
+# At 0.40, market must be 40-60% balanced for entry. Higher = more selective.
+# Data: 22/26 windows resolved UP when balance was 0.30 → 85% directional bias.
+MIN_TRUE_ASK_BALANCE = 0.40
 
 # ── TIMING ──
 ORDER_PLACEMENT_DELAY = 3        # Seconds after window open to place orders
