@@ -748,16 +748,33 @@ class SpreadCaptureV2:
         )
 
         if resolved is None:
-            # Check if window is way past expiry — force resolve as error
             elapsed = time.time() - ws.window_start
             window_seconds = TIMEFRAMES[ws.timeframe]["seconds"]
-            # Give Gamma 30 minutes to resolve (markets can lag)
+
+            # After 2 min past window end, try price-based fallback
+            # (Gamma removes resolved markets from its API)
+            if elapsed > window_seconds + 120:
+                resolved = await asyncio.to_thread(
+                    self._price_based_resolution_sync, ws.asset,
+                    ws.window_start, ws.timeframe
+                )
+                if resolved is not None:
+                    logger.info(
+                        f"[SC] Price-based resolution for {ws.asset} {ws.timeframe}: "
+                        f"{'UP' if resolved else 'DOWN'}"
+                    )
+
+        if resolved is None:
+            # Still unresolved — check force-expiry timeout
+            elapsed = time.time() - ws.window_start
+            window_seconds = TIMEFRAMES[ws.timeframe]["seconds"]
             if elapsed > window_seconds + 1800:
                 ws.status = "error"
                 ws.pnl = -ws.total_cost  # assume total loss
                 self._daily_pnl += ws.pnl
                 self._save_window(ws)
-                del self._windows[ws.slug]
+                if ws.slug in self._windows:
+                    del self._windows[ws.slug]
                 logger.warning(
                     f"[SC] EXPIRED: {ws.asset} {ws.timeframe} — "
                     f"never resolved after 30min. Lost ${ws.total_cost:.2f}"
@@ -930,6 +947,47 @@ class SpreadCaptureV2:
                         return float(prices[0]) >= 0.95
             return None
         except Exception:
+            return None
+
+    def _price_based_resolution_sync(self, asset: str, window_start: int,
+                                      timeframe: str) -> Optional[bool]:
+        """Fallback resolution using Binance kline data.
+        Returns True=UP, False=DOWN, None=error.
+        """
+        symbol_map = {
+            "BTC": "BTCUSDT", "ETH": "ETHUSDT",
+            "SOL": "SOLUSDT", "XRP": "XRPUSDT",
+        }
+        symbol = symbol_map.get(asset)
+        if not symbol:
+            return None
+
+        try:
+            interval = "5m" if timeframe == "5m" else "15m"
+            start_ms = window_start * 1000
+            window_seconds = TIMEFRAMES[timeframe]["seconds"]
+            end_ms = (window_start + window_seconds) * 1000
+
+            resp = requests.get(
+                "https://api.binance.com/api/v3/klines",
+                params={
+                    "symbol": symbol, "interval": interval,
+                    "startTime": start_ms, "endTime": end_ms, "limit": 1,
+                },
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                return None
+
+            klines = resp.json()
+            if not klines:
+                return None
+
+            open_price = float(klines[0][1])
+            close_price = float(klines[0][4])
+            return close_price > open_price
+        except Exception as e:
+            logger.debug(f"[SC] Price resolution error: {e}")
             return None
 
     # ═══════════════════════════════════════════════════════════
