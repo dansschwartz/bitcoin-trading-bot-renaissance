@@ -485,26 +485,50 @@ class SpreadCaptureV2:
             no_token_id=no_token,
         )
 
-        # Fetch actual order book to find best ask (lowest sell price).
-        # Only place BUY orders BELOW the best ask so they REST on the book.
-        # Orders at/above the best ask cross the spread and fill instantly
-        # as market orders, creating naked directional bets.
-        yes_best_ask = await asyncio.to_thread(self._get_best_ask_sync, yes_token)
-        no_best_ask = await asyncio.to_thread(self._get_best_ask_sync, no_token)
+        # Fetch actual order books to find the TRUE best ask.
+        # The CLOB matches across YES/NO books (complementary tokens):
+        #   BUY YES at $P can match against BUY NO at $(1-P) via minting.
+        # So true_ask(YES) = min(YES_best_ask, 1 - NO_best_bid)
+        # Plus a 5-cent safety margin for book changes between query and placement.
+        BOOK_SAFETY_MARGIN = 0.05
 
-        yes_ask_str = f"${yes_best_ask:.2f}" if yes_best_ask is not None else "N/A"
-        no_ask_str = f"${no_best_ask:.2f}" if no_best_ask is not None else "N/A"
+        yes_ask, yes_bid = await asyncio.to_thread(self._get_book_edges_sync, yes_token)
+        no_ask, no_bid = await asyncio.to_thread(self._get_book_edges_sync, no_token)
+
+        # True best ask considering cross-book matching
+        yes_true_ask = yes_ask
+        if no_bid is not None:
+            complementary = round(1.0 - no_bid, 2)
+            if yes_true_ask is None or complementary < yes_true_ask:
+                yes_true_ask = complementary
+
+        no_true_ask = no_ask
+        if yes_bid is not None:
+            complementary = round(1.0 - yes_bid, 2)
+            if no_true_ask is None or complementary < no_true_ask:
+                no_true_ask = complementary
+
+        # Apply safety margin
+        yes_max_price = (yes_true_ask - BOOK_SAFETY_MARGIN) if yes_true_ask is not None else None
+        no_max_price = (no_true_ask - BOOK_SAFETY_MARGIN) if no_true_ask is not None else None
+
+        yes_ask_str = f"${yes_true_ask:.2f}" if yes_true_ask is not None else "N/A"
+        no_ask_str = f"${no_true_ask:.2f}" if no_true_ask is not None else "N/A"
+        yes_direct = f"${yes_ask:.2f}" if yes_ask is not None else "N/A"
+        no_direct = f"${no_ask:.2f}" if no_ask is not None else "N/A"
         logger.info(
             f"[SC] {asset} {timeframe} book: "
-            f"YES best_ask={yes_ask_str} | NO best_ask={no_ask_str}"
+            f"YES true_ask={yes_ask_str} (direct={yes_direct}) | "
+            f"NO true_ask={no_ask_str} (direct={no_direct}) | "
+            f"margin={BOOK_SAFETY_MARGIN}"
         )
 
         yes_orders = 0
         no_orders = 0
 
         for price, shares in ORDER_LADDER:
-            # YES side — only if price is below the actual best ask
-            if yes_best_ask is not None and price < yes_best_ask:
+            # YES side — only if price is below true_ask minus safety margin
+            if yes_max_price is not None and price < yes_max_price:
                 order_id = await self._place_limit_order(yes_token, price, shares)
                 if order_id:
                     ws.pending_orders.append(PendingOrder(
@@ -518,15 +542,14 @@ class SpreadCaptureV2:
                     ))
                     ws.all_order_ids.append(order_id)
                     yes_orders += 1
-                    if yes_orders == 1:
-                        logger.info(f"[SC]   YES: placing below best_ask=${yes_best_ask:.2f}")
-            elif yes_best_ask is not None and yes_orders == 0 and price >= yes_best_ask:
+            elif yes_max_price is not None and yes_orders == 0:
                 logger.info(
-                    f"[SC]   YES: SKIP ${price:.2f} (would cross ask=${yes_best_ask:.2f})"
+                    f"[SC]   YES: SKIP ${price:.2f} "
+                    f"(max=${yes_max_price:.2f}, ask={yes_ask_str})"
                 )
 
-            # NO side — only if price is below the actual best ask
-            if no_best_ask is not None and price < no_best_ask:
+            # NO side — only if price is below true_ask minus safety margin
+            if no_max_price is not None and price < no_max_price:
                 order_id = await self._place_limit_order(no_token, price, shares)
                 if order_id:
                     ws.pending_orders.append(PendingOrder(
@@ -540,11 +563,10 @@ class SpreadCaptureV2:
                     ))
                     ws.all_order_ids.append(order_id)
                     no_orders += 1
-                    if no_orders == 1:
-                        logger.info(f"[SC]   NO: placing below best_ask=${no_best_ask:.2f}")
-            elif no_best_ask is not None and no_orders == 0 and price >= no_best_ask:
+            elif no_max_price is not None and no_orders == 0:
                 logger.info(
-                    f"[SC]   NO: SKIP ${price:.2f} (would cross ask=${no_best_ask:.2f})"
+                    f"[SC]   NO: SKIP ${price:.2f} "
+                    f"(max=${no_max_price:.2f}, ask={no_ask_str})"
                 )
 
         total_placed = yes_orders + no_orders
@@ -917,27 +939,32 @@ class SpreadCaptureV2:
     # MARKET DATA HELPERS
     # ═══════════════════════════════════════════════════════════
 
-    def _get_best_ask_sync(self, token_id: str) -> Optional[float]:
-        """Get the lowest ask (best ask) from the CLOB order book. (Blocking)
-        Returns None if no asks or error."""
+    def _get_book_edges_sync(self, token_id: str) -> Tuple[Optional[float], Optional[float]]:
+        """Get the best ask (lowest sell) and best bid (highest buy).
+        Returns (best_ask, best_bid) or (None, None) on error. (Blocking)"""
         if not self._clob_client:
-            return None
+            return None, None
         try:
             book = self._clob_client.get_order_book(token_id)
             asks = book.asks if hasattr(book, "asks") else book.get("asks", [])
-            if not asks:
-                return None
+            bids = book.bids if hasattr(book, "bids") else book.get("bids", [])
 
-            # Find the lowest ask price
-            best = None
+            best_ask = None
             for a in asks:
                 p = float(a.price if hasattr(a, "price") else a.get("price", 0))
-                if best is None or p < best:
-                    best = p
-            return best
+                if best_ask is None or p < best_ask:
+                    best_ask = p
+
+            best_bid = None
+            for b in bids:
+                p = float(b.price if hasattr(b, "price") else b.get("price", 0))
+                if best_bid is None or p > best_bid:
+                    best_bid = p
+
+            return best_ask, best_bid
         except Exception as e:
             logger.debug(f"[SC] Order book error for {token_id[:16]}: {e}")
-            return None
+            return None, None
 
     def _fetch_market_sync(self, slug: str) -> Optional[dict]:
         """Fetch market token IDs from Gamma API. (Blocking)"""
