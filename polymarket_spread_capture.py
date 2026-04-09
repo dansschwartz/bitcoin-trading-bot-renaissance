@@ -637,7 +637,8 @@ class SpreadCaptureV2:
                         f"{'HEDGED' if ws.is_hedged else 'ONE-SIDE'}"
                     )
 
-                elif status == "CANCELLED":
+                elif "CANCEL" in status:
+                    # Handles CANCELLED, CANCELED, CANCELED_MARKET_RESOLVED
                     order.cancelled = True
                     self._total_open_orders = max(0, self._total_open_orders - 1)
 
