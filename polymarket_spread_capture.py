@@ -45,17 +45,23 @@ TIMEFRAMES = {
     "15m": {"seconds": 900, "alignment": 900},
 }
 
-# ── ORDER LADDER ──
-# Resting limit orders placed at these prices on BOTH sides.
-# Each tuple: (price, shares)
+# ── ORDER LADDERS (per-timeframe) ──
+# 15m markets: 3 levels, book is stable enough for multi-level ladders
+# 5m markets: single level — book shifts 40+ cents in seconds, multi-level
+#   ladders create naked fills when all levels get swept on one side
 # CLOB minimums: 5 shares per order, $1.00 for marketable orders
-# Total budget per side if ALL levels fill: $4.50
-# Total budget BOTH sides if ALL fill: $9.00
-ORDER_LADDER = [
+ORDER_LADDER_15M = [
     (0.40, 5),   # $2.00 — fills when underdog dips to 40¢
     (0.30, 5),   # $1.50 — fills on moderate moves
     (0.20, 5),   # $1.00 — fills on strong moves (meets $1 min)
 ]
+ORDER_LADDER_5M = [
+    (0.20, 5),   # $1.00 — single level, max naked loss capped at $1.00
+]
+
+# Balance filter: skip window if either side's true_ask is below this
+# Prevents entering extremely tilted markets where only one side can fill
+MIN_TRUE_ASK_BALANCE = 0.25
 
 # ── TIMING ──
 ORDER_PLACEMENT_DELAY = 3        # Seconds after window open to place orders
@@ -319,15 +325,17 @@ class SpreadCaptureV2:
     async def run(self):
         """Main loop. Runs every second."""
         self._running = True
-        per_side = sum(p * s for p, s in ORDER_LADDER)
+        per_side_15m = sum(p * s for p, s in ORDER_LADDER_15M)
+        per_side_5m = sum(p * s for p, s in ORDER_LADDER_5M)
         logger.info(
             f"[SC] Spread Capture v2 STARTED\n"
             f"  Strategy: Passive limit orders on both sides\n"
             f"  Assets: {list(ASSETS.keys())} ({len(ASSETS)} assets)\n"
             f"  Timeframes: {list(TIMEFRAMES.keys())}\n"
-            f"  Order ladder: {ORDER_LADDER}\n"
-            f"  Max per side: ${per_side:.2f} | Max per window: ${MAX_EXPOSURE_PER_WINDOW}\n"
-            f"  Max global: ${MAX_TOTAL_EXPOSURE}"
+            f"  15m ladder: {ORDER_LADDER_15M} (${per_side_15m:.2f}/side)\n"
+            f"  5m ladder: {ORDER_LADDER_5M} (${per_side_5m:.2f}/side)\n"
+            f"  Balance filter: min_true_ask={MIN_TRUE_ASK_BALANCE}\n"
+            f"  Max per window: ${MAX_EXPOSURE_PER_WINDOW} | Max global: ${MAX_TOTAL_EXPOSURE}"
         )
 
         while self._running:
@@ -516,6 +524,19 @@ class SpreadCaptureV2:
         no_ask_str = f"${no_true_ask:.2f}" if no_true_ask is not None else "N/A"
         yes_direct = f"${yes_ask:.2f}" if yes_ask is not None else "N/A"
         no_direct = f"${no_ask:.2f}" if no_ask is not None else "N/A"
+
+        # Balance filter: skip if either side's true ask is too low.
+        # In a heavily tilted market only one side can fill → naked loss.
+        yes_ok = yes_true_ask is not None and yes_true_ask >= MIN_TRUE_ASK_BALANCE
+        no_ok = no_true_ask is not None and no_true_ask >= MIN_TRUE_ASK_BALANCE
+        if not yes_ok or not no_ok:
+            logger.info(
+                f"[SC] {asset} {timeframe} SKIP (balance filter): "
+                f"YES={yes_ask_str} NO={no_ask_str} "
+                f"(need both >= ${MIN_TRUE_ASK_BALANCE:.2f})"
+            )
+            return
+
         logger.info(
             f"[SC] {asset} {timeframe} book: "
             f"YES true_ask={yes_ask_str} (direct={yes_direct}) | "
@@ -523,10 +544,13 @@ class SpreadCaptureV2:
             f"margin={BOOK_SAFETY_MARGIN}"
         )
 
+        # Select ladder based on timeframe
+        ladder = ORDER_LADDER_5M if timeframe == "5m" else ORDER_LADDER_15M
+
         yes_orders = 0
         no_orders = 0
 
-        for price, shares in ORDER_LADDER:
+        for price, shares in ladder:
             # YES side — only if price is below true_ask minus safety margin
             if yes_max_price is not None and price < yes_max_price:
                 order_id = await self._place_limit_order(yes_token, price, shares)
