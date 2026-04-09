@@ -475,10 +475,6 @@ class SpreadCaptureV2:
             logger.warning(f"[SC] {asset} {timeframe}: missing token IDs")
             return
 
-        # Get crowd price to filter marketable orders
-        crowd_yes = market_data.get("crowd_yes", 0.5)
-        crowd_no = 1.0 - crowd_yes  # YES + NO ≈ $1.00
-
         ws = WindowState(
             asset=asset,
             timeframe=timeframe,
@@ -489,17 +485,25 @@ class SpreadCaptureV2:
             no_token_id=no_token,
         )
 
-        # Place RESTING limit orders on BOTH sides.
-        # Key: only place orders BELOW the crowd price so they REST
-        # (not cross the spread and fill immediately as market orders).
-        # Orders at/above crowd price are effectively market orders and
-        # result in one-sided directional bets instead of hedged positions.
+        # Fetch actual order book to find best ask (lowest sell price).
+        # Only place BUY orders BELOW the best ask so they REST on the book.
+        # Orders at/above the best ask cross the spread and fill instantly
+        # as market orders, creating naked directional bets.
+        yes_best_ask = await asyncio.to_thread(self._get_best_ask_sync, yes_token)
+        no_best_ask = await asyncio.to_thread(self._get_best_ask_sync, no_token)
+
+        logger.info(
+            f"[SC] {asset} {timeframe} book: "
+            f"YES best_ask=${yes_best_ask:.2f if yes_best_ask else 'N/A'} | "
+            f"NO best_ask=${no_best_ask:.2f if no_best_ask else 'N/A'}"
+        )
+
         yes_orders = 0
         no_orders = 0
 
         for price, shares in ORDER_LADDER:
-            # YES side — only if price is below YES crowd price
-            if price < crowd_yes - 0.01:
+            # YES side — only if price is below the actual best ask
+            if yes_best_ask is not None and price < yes_best_ask:
                 order_id = await self._place_limit_order(yes_token, price, shares)
                 if order_id:
                     ws.pending_orders.append(PendingOrder(
@@ -513,9 +517,15 @@ class SpreadCaptureV2:
                     ))
                     ws.all_order_ids.append(order_id)
                     yes_orders += 1
+                    if yes_orders == 1:
+                        logger.info(f"[SC]   YES: placing below best_ask=${yes_best_ask:.2f}")
+            elif yes_best_ask is not None and yes_orders == 0 and price >= yes_best_ask:
+                logger.info(
+                    f"[SC]   YES: SKIP ${price:.2f} (would cross ask=${yes_best_ask:.2f})"
+                )
 
-            # NO side — only if price is below NO crowd price
-            if price < crowd_no - 0.01:
+            # NO side — only if price is below the actual best ask
+            if no_best_ask is not None and price < no_best_ask:
                 order_id = await self._place_limit_order(no_token, price, shares)
                 if order_id:
                     ws.pending_orders.append(PendingOrder(
@@ -529,6 +539,12 @@ class SpreadCaptureV2:
                     ))
                     ws.all_order_ids.append(order_id)
                     no_orders += 1
+                    if no_orders == 1:
+                        logger.info(f"[SC]   NO: placing below best_ask=${no_best_ask:.2f}")
+            elif no_best_ask is not None and no_orders == 0 and price >= no_best_ask:
+                logger.info(
+                    f"[SC]   NO: SKIP ${price:.2f} (would cross ask=${no_best_ask:.2f})"
+                )
 
         total_placed = yes_orders + no_orders
         if total_placed == 0:
@@ -558,7 +574,8 @@ class SpreadCaptureV2:
 
         logger.info(
             f"[SC] *** ENTERED: {asset} {timeframe} ***\n"
-            f"  Crowd: YES=${crowd_yes:.3f} NO=${crowd_no:.3f}\n"
+            f"  Book: YES ask=${yes_best_ask:.2f if yes_best_ask else 'N/A'} | "
+            f"NO ask=${no_best_ask:.2f if no_best_ask else 'N/A'}\n"
             f"  Placed {yes_orders} YES + {no_orders} NO resting limit orders\n"
             f"  Ladder: {', '.join(f'${p:.2f}x{s}' for p, s in ORDER_LADDER)}"
         )
@@ -899,6 +916,28 @@ class SpreadCaptureV2:
     # ═══════════════════════════════════════════════════════════
     # MARKET DATA HELPERS
     # ═══════════════════════════════════════════════════════════
+
+    def _get_best_ask_sync(self, token_id: str) -> Optional[float]:
+        """Get the lowest ask (best ask) from the CLOB order book. (Blocking)
+        Returns None if no asks or error."""
+        if not self._clob_client:
+            return None
+        try:
+            book = self._clob_client.get_order_book(token_id)
+            asks = book.asks if hasattr(book, "asks") else book.get("asks", [])
+            if not asks:
+                return None
+
+            # Find the lowest ask price
+            best = None
+            for a in asks:
+                p = float(a.price if hasattr(a, "price") else a.get("price", 0))
+                if best is None or p < best:
+                    best = p
+            return best
+        except Exception as e:
+            logger.debug(f"[SC] Order book error for {token_id[:16]}: {e}")
+            return None
 
     def _fetch_market_sync(self, slug: str) -> Optional[dict]:
         """Fetch market token IDs from Gamma API. (Blocking)"""
