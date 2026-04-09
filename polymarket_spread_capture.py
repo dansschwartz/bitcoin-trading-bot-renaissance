@@ -55,7 +55,7 @@ TIMEFRAMES = {
 }
 
 # Position sizing — per spec
-INITIAL_BET_SIZE = 1.00          # $ per initial Phase 1 order (favorite side only)
+INITIAL_BET_SIZE = 2.50          # $ per initial Phase 1 order (5 shares @ $0.50 = CLOB minimum)
 MAX_UNDERDOG_SPEND = 5.00        # Max $ to spend on underdog (Phase 2) per window
 MAX_BET_SIZE = 20.00             # Maximum after proving it works
 
