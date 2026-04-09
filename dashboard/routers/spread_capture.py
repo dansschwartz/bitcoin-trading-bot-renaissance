@@ -164,13 +164,28 @@ def _get_engine(bot):
     return None
 
 
-def _get_rtds(bot):
-    if bot and hasattr(bot, "rtds"):
-        return bot.rtds
-    sc = _get_engine(bot)
-    if sc and hasattr(sc, "_rtds"):
-        return sc._rtds
-    return None
+def _format_v2_summary(rows: list[dict]) -> dict:
+    """Format v2 resolved windows into summary dict."""
+    r = rows[0] if rows else {}
+    total = r.get("total", 0) or 0
+    wins = r.get("wins", 0) or 0
+    return {
+        "strategy": "spread_capture_v2",
+        "version": "passive_limit_orders",
+        "total_windows": total,
+        "wins": wins,
+        "losses": r.get("losses", 0) or 0,
+        "win_rate": round(wins / max(total, 1) * 100, 1),
+        "hedged_windows": r.get("hedged", 0) or 0,
+        "hedge_rate": round((r.get("hedged", 0) or 0) / max(total, 1) * 100, 1),
+        "total_pnl": round(r.get("total_pnl", 0) or 0, 2),
+        "avg_pair_cost": round(r.get("avg_pair_cost", 0) or 0, 3),
+        "avg_pnl_per_window": round(r.get("avg_pnl", 0) or 0, 3),
+        "total_deployed": round(r.get("total_deployed", 0) or 0, 2),
+        "active_positions": 0,
+        "daily_pnl": 0,
+        "daily_windows": 0,
+    }
 
 
 # ─── Endpoints ────────────────────────────────────────────────
@@ -206,10 +221,10 @@ async def spread_wallet(request: Request) -> dict[str, Any]:
     """)
     first_balance = first_ever[0]["usdc_balance"] if first_ever else balance
 
-    # Bot estimated P&L for comparison
+    # Bot estimated P&L for comparison (v2 table + v1 legacy)
     bot_pnl_rows = _safe_query(db, """
         SELECT COALESCE(SUM(pnl), 0) as total_pnl
-        FROM spread_capture_windows WHERE status = 'resolved'
+        FROM spread_v2_windows WHERE status = 'resolved'
     """)
     bot_pnl = bot_pnl_rows[0]["total_pnl"] if bot_pnl_rows else 0
 
@@ -254,8 +269,6 @@ async def spread_summary(request: Request) -> dict[str, Any]:
     if sc:
         try:
             stats = sc.get_stats()
-            active = sc.get_active_positions()
-            stats["active_positions_detail"] = active
             return stats
         except Exception as e:
             logger.warning(f"Spread summary live error: {e}")
@@ -266,61 +279,36 @@ async def spread_summary(request: Request) -> dict[str, Any]:
             COUNT(*) as total,
             SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
             SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-            SUM(CASE WHEN is_arb = 1 THEN 1 ELSE 0 END) as arb_windows,
+            SUM(CASE WHEN is_hedged = 1 THEN 1 ELSE 0 END) as hedged,
             COALESCE(SUM(pnl), 0) as total_pnl,
             COALESCE(AVG(pair_cost), 0) as avg_pair_cost,
             COALESCE(AVG(pnl), 0) as avg_pnl,
             COALESCE(SUM(total_deployed), 0) as total_deployed
-        FROM spread_capture_windows
+        FROM spread_v2_windows
         WHERE status = 'resolved'
     """)
-    r = resolved[0] if resolved else {}
-    total = r.get("total", 0) or 0
-    wins = r.get("wins", 0) or 0
+
+    result = _format_v2_summary(resolved)
 
     active_rows = _safe_query(db, """
-        SELECT COUNT(*) as cnt FROM spread_capture_windows WHERE status = 'active'
+        SELECT COUNT(*) as cnt FROM spread_v2_windows WHERE status = 'active'
     """)
-    active_cnt = active_rows[0]["cnt"] if active_rows else 0
+    result["active_positions"] = active_rows[0]["cnt"] if active_rows else 0
 
-    return {
-        "strategy": "0x8dxd_spread_capture",
-        "total_windows": total,
-        "wins": wins,
-        "losses": r.get("losses", 0) or 0,
-        "win_rate": round(wins / max(total, 1) * 100, 1),
-        "arb_windows": r.get("arb_windows", 0) or 0,
-        "arb_rate": round((r.get("arb_windows", 0) or 0) / max(total, 1) * 100, 1),
-        "total_pnl": round(r.get("total_pnl", 0) or 0, 2),
-        "avg_pair_cost": round(r.get("avg_pair_cost", 0) or 0, 3),
-        "avg_pnl_per_window": round(r.get("avg_pnl", 0) or 0, 3),
-        "total_deployed": round(r.get("total_deployed", 0) or 0, 2),
-        "active_positions": active_cnt,
-        "daily_pnl": 0,
-        "daily_windows": 0,
-    }
+    return result
 
 
 @router.get("/active")
 async def spread_active(request: Request) -> list[dict]:
     """Currently active window positions with live data."""
-    bot = getattr(request.app.state, "bot", None)
-    sc = _get_engine(bot)
-
-    if sc:
-        try:
-            return sc.get_active_positions()
-        except Exception:
-            pass
-
     db = _get_db(request)
     return _safe_query(db, """
         SELECT asset, timeframe, slug, window_start,
-               yes_shares, yes_cost, yes_avg_price, yes_orders,
-               no_shares, no_cost, no_avg_price, no_orders,
-               pair_cost, total_deployed, guaranteed_profit, is_arb,
-               max_phase as phase, status
-        FROM spread_capture_windows
+               yes_shares, yes_cost, no_shares, no_cost,
+               orders_placed, orders_filled, orders_cancelled,
+               pair_cost, hedged_pairs, total_deployed, is_hedged,
+               status
+        FROM spread_v2_windows
         WHERE status = 'active'
         ORDER BY window_start DESC
     """)
@@ -333,13 +321,12 @@ async def spread_history(request: Request, limit: int = 200, asset: str = "") ->
     params = (asset.upper(), limit) if asset else (limit,)
     return _safe_query(db, f"""
         SELECT id, asset, timeframe, slug, window_start,
-               yes_shares, yes_cost, yes_avg_price, yes_orders,
-               no_shares, no_cost, no_avg_price, no_orders,
-               pair_cost, total_deployed, guaranteed_profit, is_arb,
-               resolution, pnl, pnl_pct,
-               max_phase, phase2_triggered, status,
-               created_at, resolved_at
-        FROM spread_capture_windows
+               yes_shares, yes_cost, no_shares, no_cost,
+               orders_placed, orders_filled, orders_cancelled,
+               pair_cost, hedged_pairs, total_deployed, is_hedged,
+               resolution, pnl, status,
+               resolved_at
+        FROM spread_v2_windows
         WHERE status = 'resolved' {asset_filter}
         ORDER BY resolved_at DESC
         LIMIT ?
@@ -353,10 +340,10 @@ async def spread_fills(request: Request, limit: int = 200, slug: str = "") -> li
     params = (slug, limit) if slug else (limit,)
     return _safe_query(db, f"""
         SELECT id, window_slug, side, price, shares, amount_usd,
-               order_id, phase, timestamp, created_at
-        FROM spread_capture_fills
+               order_id, status, placed_at, filled_at, created_at
+        FROM spread_v2_orders
         {slug_filter}
-        ORDER BY timestamp DESC
+        ORDER BY placed_at DESC
         LIMIT ?
     """, params)
 
@@ -369,7 +356,7 @@ async def spread_pnl_chart(request: Request) -> dict[str, Any]:
     # Bot estimated cumulative P&L
     rows = _safe_query(db, """
         SELECT resolved_at as ts, pnl, pair_cost, asset, timeframe
-        FROM spread_capture_windows
+        FROM spread_v2_windows
         WHERE status = 'resolved' AND resolved_at IS NOT NULL
         ORDER BY resolved_at ASC
     """)
@@ -417,9 +404,9 @@ async def spread_by_asset(request: Request) -> list[dict]:
                ROUND(SUM(pnl), 3) as total_pnl,
                ROUND(AVG(pnl), 4) as avg_pnl,
                ROUND(AVG(pair_cost), 3) as avg_pair_cost,
-               SUM(CASE WHEN is_arb = 1 THEN 1 ELSE 0 END) as arb_count,
-               SUM(CASE WHEN phase2_triggered = 1 THEN 1 ELSE 0 END) as phase2_count
-        FROM spread_capture_windows
+               SUM(CASE WHEN is_hedged = 1 THEN 1 ELSE 0 END) as hedged_count,
+               SUM(orders_filled) as total_fills
+        FROM spread_v2_windows
         WHERE status = 'resolved'
         GROUP BY asset
         ORDER BY total_pnl DESC
@@ -436,23 +423,27 @@ async def spread_by_timeframe(request: Request) -> list[dict]:
                ROUND(SUM(pnl), 3) as total_pnl,
                ROUND(AVG(pnl), 4) as avg_pnl,
                ROUND(AVG(pair_cost), 3) as avg_pair_cost,
-               SUM(CASE WHEN is_arb = 1 THEN 1 ELSE 0 END) as arb_count
-        FROM spread_capture_windows
+               SUM(CASE WHEN is_hedged = 1 THEN 1 ELSE 0 END) as hedged_count
+        FROM spread_v2_windows
         WHERE status = 'resolved'
         GROUP BY timeframe
     """)
 
 
-@router.get("/rtds")
-async def spread_rtds(request: Request) -> dict[str, Any]:
-    bot = getattr(request.app.state, "bot", None)
-    rtds = _get_rtds(bot)
-    if rtds:
-        try:
-            return rtds.get_status()
-        except Exception:
-            pass
-    return {"connected": False, "assets": {}}
+@router.get("/orders")
+async def spread_orders(request: Request, limit: int = 200, status: str = "") -> list[dict]:
+    """All orders with optional status filter (pending/filled/cancelled)."""
+    db = _get_db(request)
+    status_filter = "WHERE status = ?" if status else ""
+    params = (status, limit) if status else (limit,)
+    return _safe_query(db, f"""
+        SELECT id, window_slug, order_id, side, price, shares, amount_usd,
+               status, placed_at, filled_at, created_at
+        FROM spread_v2_orders
+        {status_filter}
+        ORDER BY placed_at DESC
+        LIMIT ?
+    """, params)
 
 
 @router.get("/hourly")
@@ -464,7 +455,7 @@ async def spread_hourly(request: Request, hours: int = 48) -> list[dict]:
                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                ROUND(SUM(pnl), 3) as pnl,
                ROUND(AVG(pair_cost), 3) as avg_pair_cost
-        FROM spread_capture_windows
+        FROM spread_v2_windows
         WHERE status = 'resolved' AND resolved_at IS NOT NULL
         GROUP BY hour
         ORDER BY hour DESC
@@ -489,7 +480,7 @@ async def spread_pair_cost_dist(request: Request) -> list[dict]:
             END as bucket,
             COUNT(*) as count,
             ROUND(AVG(pnl), 3) as avg_pnl
-        FROM spread_capture_windows
+        FROM spread_v2_windows
         WHERE status = 'resolved' AND pair_cost > 0
         GROUP BY bucket
         ORDER BY MIN(pair_cost) ASC
@@ -500,21 +491,27 @@ async def spread_pair_cost_dist(request: Request) -> list[dict]:
 async def spread_fill_rate(request: Request) -> dict[str, Any]:
     db = _get_db(request)
 
-    phase_dist = _safe_query(db, """
-        SELECT phase, COUNT(*) as count,
+    status_dist = _safe_query(db, """
+        SELECT status, COUNT(*) as count,
                ROUND(SUM(amount_usd), 2) as total_usd
-        FROM spread_capture_fills GROUP BY phase ORDER BY phase
+        FROM spread_v2_orders GROUP BY status ORDER BY status
     """)
     side_dist = _safe_query(db, """
         SELECT side, COUNT(*) as count,
                ROUND(AVG(price), 3) as avg_price,
                ROUND(SUM(amount_usd), 2) as total_usd
-        FROM spread_capture_fills GROUP BY side
+        FROM spread_v2_orders WHERE status = 'filled' GROUP BY side
     """)
-    total_fills = _safe_query(db, "SELECT COUNT(*) as cnt FROM spread_capture_fills")
+    total_placed = _safe_query(db, "SELECT COUNT(*) as cnt FROM spread_v2_orders")
+    total_filled = _safe_query(db, "SELECT COUNT(*) as cnt FROM spread_v2_orders WHERE status='filled'")
     return {
-        "total_fills": total_fills[0]["cnt"] if total_fills else 0,
-        "by_phase": phase_dist,
+        "total_placed": total_placed[0]["cnt"] if total_placed else 0,
+        "total_filled": total_filled[0]["cnt"] if total_filled else 0,
+        "fill_rate": round(
+            (total_filled[0]["cnt"] if total_filled else 0) /
+            max(total_placed[0]["cnt"] if total_placed else 1, 1) * 100, 1
+        ),
+        "by_status": status_dist,
         "by_side": side_dist,
     }
 
@@ -524,8 +521,8 @@ async def spread_errors(request: Request, limit: int = 50) -> list[dict]:
     db = _get_db(request)
     return _safe_query(db, """
         SELECT id, asset, timeframe, slug, window_start,
-               pair_cost, total_deployed, status, created_at
-        FROM spread_capture_windows
+               pair_cost, total_deployed, status
+        FROM spread_v2_windows
         WHERE status = 'error'
-        ORDER BY created_at DESC LIMIT ?
+        ORDER BY id DESC LIMIT ?
     """, (limit,))
