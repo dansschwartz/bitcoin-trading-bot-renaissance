@@ -415,6 +415,45 @@ class SpreadCaptureEngine:
         except Exception as e:
             logger.warning(f"[SC] Failed to load active windows: {e}")
 
+    async def _resubmit_lost_phase1(self):
+        """Re-place Phase 1 orders for positions restored with 0 shares.
+
+        When the bot restarts mid-window, pending Phase 1 orders are lost
+        (in-memory _pending_orders list is wiped). This re-submits them
+        so restored windows don't sit dead with 0 shares.
+        """
+        now = time.time()
+        resubmitted = 0
+        for slug, pos in list(self._positions.items()):
+            if pos.status != "active":
+                continue
+            if pos.yes_shares > 0 or pos.no_shares > 0:
+                continue  # Already has shares — Phase 1 filled before restart
+            if not pos.favorite_side:
+                continue
+            if not pos.yes_token_id or not pos.no_token_id:
+                continue
+
+            window_seconds = TIMEFRAMES.get(pos.timeframe, {}).get("seconds", 300)
+            elapsed = now - pos.window_start
+            if elapsed > window_seconds - 30:
+                continue  # Window about to close, not worth re-entering
+
+            buy_price = PHASE1_FAVORITE_PRICE
+            buy_shares = INITIAL_BET_SIZE / buy_price
+            order_id = await self._place_order(
+                pos, pos.favorite_side, buy_price, buy_shares, phase=1
+            )
+            if order_id:
+                resubmitted += 1
+                logger.info(
+                    f"[SC] RESUBMIT Phase 1: {pos.asset} {pos.timeframe} | "
+                    f"{pos.favorite_side} @ ${buy_price:.2f} ({buy_shares:.1f}sh)"
+                )
+
+        if resubmitted:
+            logger.info(f"[SC] Resubmitted {resubmitted} lost Phase 1 orders")
+
     def _save_active_window(self, pos: WindowPosition):
         """Save/update active window state to DB.
 
@@ -585,6 +624,9 @@ class SpreadCaptureEngine:
             f"  Pair cost target: ${PAIR_COST_TARGET}\n"
             f"  Sells enabled: {SELL_ENABLED}"
         )
+
+        # Re-place Phase 1 orders lost during restart
+        await self._resubmit_lost_phase1()
 
         while self._running:
             try:
@@ -940,10 +982,24 @@ class SpreadCaptureEngine:
                 return
 
         shares = buy_amount / current_price if current_price > 0 else 0
-        if shares < 1:
-            return
 
-        await self._place_order(pos, side, current_price, shares, phase=2)
+        # Enforce CLOB 5-share minimum
+        if shares < 5:
+            min_cost = 5 * current_price
+            if min_cost <= max_buy:
+                shares = 5
+                buy_amount = min_cost
+            else:
+                logger.info(
+                    f"[SC] UNDERDOG SKIP: {pos.asset} {side} @ ${current_price:.3f} — "
+                    f"{shares:.1f} shares below CLOB minimum 5"
+                )
+                return
+
+        order_id = await self._place_order(pos, side, current_price, shares, phase=2)
+        if not order_id:
+            return  # Order rejected by CLOB — don't update state or log success
+
         pos.phase = 2
         pos.phase2_triggered = True
         pos.last_underdog_buy_time = now
@@ -1073,18 +1129,29 @@ class SpreadCaptureEngine:
             return
 
         pos.exit_attempted = True
-        order_id = await self._sell_order(pos, winning_side, sell_price, winning_shares)
+
+        # CLOB internally credits ~3-4% fewer shares than size_matched reports.
+        # Reduce sell amount to avoid "not enough balance" rejections.
+        sell_shares = round(winning_shares * 0.95, 2)
+        if sell_shares < 5:
+            logger.debug(
+                f"[SC] Pre-exit: {pos.asset} {pos.timeframe} — "
+                f"only {sell_shares:.1f} shares after safety margin, skipping"
+            )
+            return
+
+        order_id = await self._sell_order(pos, winning_side, sell_price, sell_shares)
 
         if order_id:
             logger.info(
                 f"[SC] *** PRE-EXIT: {pos.asset} {pos.timeframe} | "
-                f"Sold {winning_shares:.1f} {winning_side} @ ${sell_price:.2f} | "
-                f"CL: {cl_direction} | Revenue: ${winning_shares * sell_price:.2f}"
+                f"Sold {sell_shares:.1f} {winning_side} @ ${sell_price:.2f} | "
+                f"CL: {cl_direction} | Revenue: ${sell_shares * sell_price:.2f}"
             )
         else:
             logger.warning(
                 f"[SC] Pre-exit FAILED: {pos.asset} {pos.timeframe} | "
-                f"Tried to sell {winning_shares:.1f} {winning_side} @ ${sell_price:.2f}"
+                f"Tried to sell {sell_shares:.1f} {winning_side} @ ${sell_price:.2f}"
             )
 
     # ═══════════════════════════════════════════════════════════
