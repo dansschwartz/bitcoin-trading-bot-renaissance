@@ -438,16 +438,17 @@ class SpreadCaptureV2:
         No direction picking. Orders on BOTH sides.
         """
         # Fetch market data
+        logger.info(f"[SC] Entering {asset} {timeframe}: fetching market {slug}...")
         market_data = await asyncio.to_thread(self._fetch_market_sync, slug)
         if not market_data:
-            logger.debug(f"[SC] {asset} {timeframe}: market {slug} not found")
+            logger.warning(f"[SC] {asset} {timeframe}: market {slug} not found on Gamma API")
             return
 
         yes_token = market_data.get("token_id_yes")
         no_token = market_data.get("token_id_no")
 
         if not yes_token or not no_token:
-            logger.debug(f"[SC] {asset} {timeframe}: missing token IDs")
+            logger.warning(f"[SC] {asset} {timeframe}: missing token IDs")
             return
 
         ws = WindowState(
@@ -843,7 +844,7 @@ class SpreadCaptureV2:
                 }
             return None
         except Exception as e:
-            logger.debug(f"[SC] Market fetch error for {slug}: {e}")
+            logger.warning(f"[SC] Market fetch error for {slug}: {e}")
             return None
 
     def _check_gamma_resolution_sync(self, slug: str) -> Optional[bool]:
