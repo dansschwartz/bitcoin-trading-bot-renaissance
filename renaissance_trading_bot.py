@@ -994,7 +994,7 @@ class RenaissanceTradingBot:
                 self.spread_capture = SpreadCaptureV2()
                 self.logger.info(
                     f"Spread Capture v2: initialized "
-                    f"({len(SC_ASSETS)} assets, 5m+15m, passive limit orders both sides)"
+                    f"({len(SC_ASSETS)} assets, 15m only, passive limit orders both sides)"
                 )
             except Exception as _sc_err:
                 self.logger.warning(f"Spread Capture v2 init failed: {_sc_err}")
@@ -7291,7 +7291,7 @@ class RenaissanceTradingBot:
 
         # ── 0x8dxd Spread Capture v2 — passive limit orders both sides ──
         if self.spread_capture:
-            self.logger.info(f"Launching Spread Capture v2 ({len(SC_ASSETS)} assets, 5m+15m, passive limit orders)...")
+            self.logger.info(f"Launching Spread Capture v2 ({len(SC_ASSETS)} assets, 15m only, passive limit orders)...")
             sc_task = self._track_task(self.spread_capture.run())
             def _sc_done(t, log=self.logger):
                 if t.cancelled():
