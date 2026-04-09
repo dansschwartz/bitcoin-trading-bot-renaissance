@@ -63,7 +63,7 @@ PHASE1_ENTRY_DELAY = 5           # Seconds after window open to start Phase 1
 PHASE1_FAVORITE_PRICE = 0.50     # Max price for favorite side buy
 
 # Phase 2: Underdog accumulation — share-based balancing
-UNDERDOG_THRESHOLD = 0.45        # Start accumulating underdog below this price
+UNDERDOG_THRESHOLD = 0.35        # Start accumulating underdog below this price
 UNDERDOG_CHEAP_THRESHOLD = 0.10  # Buy more aggressively below this
 UNDERDOG_PENNY_THRESHOLD = 0.05  # Maximum accumulation below this
 TARGET_BALANCE_RATIO = 0.62      # Target: underdog_shares / favorite_shares
