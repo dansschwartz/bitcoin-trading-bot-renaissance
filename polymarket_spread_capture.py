@@ -475,6 +475,10 @@ class SpreadCaptureV2:
             logger.warning(f"[SC] {asset} {timeframe}: missing token IDs")
             return
 
+        # Get crowd price to filter marketable orders
+        crowd_yes = market_data.get("crowd_yes", 0.5)
+        crowd_no = 1.0 - crowd_yes  # YES + NO ≈ $1.00
+
         ws = WindowState(
             asset=asset,
             timeframe=timeframe,
@@ -485,40 +489,46 @@ class SpreadCaptureV2:
             no_token_id=no_token,
         )
 
-        # Place orders on BOTH sides
+        # Place RESTING limit orders on BOTH sides.
+        # Key: only place orders BELOW the crowd price so they REST
+        # (not cross the spread and fill immediately as market orders).
+        # Orders at/above crowd price are effectively market orders and
+        # result in one-sided directional bets instead of hedged positions.
         yes_orders = 0
         no_orders = 0
 
         for price, shares in ORDER_LADDER:
-            # YES side
-            order_id = await self._place_limit_order(yes_token, price, shares)
-            if order_id:
-                ws.pending_orders.append(PendingOrder(
-                    order_id=order_id,
-                    side="YES",
-                    price=price,
-                    shares=shares,
-                    amount_usd=price * shares,
-                    token_id=yes_token,
-                    placed_at=time.time(),
-                ))
-                ws.all_order_ids.append(order_id)
-                yes_orders += 1
+            # YES side — only if price is below YES crowd price
+            if price < crowd_yes - 0.01:
+                order_id = await self._place_limit_order(yes_token, price, shares)
+                if order_id:
+                    ws.pending_orders.append(PendingOrder(
+                        order_id=order_id,
+                        side="YES",
+                        price=price,
+                        shares=shares,
+                        amount_usd=price * shares,
+                        token_id=yes_token,
+                        placed_at=time.time(),
+                    ))
+                    ws.all_order_ids.append(order_id)
+                    yes_orders += 1
 
-            # NO side
-            order_id = await self._place_limit_order(no_token, price, shares)
-            if order_id:
-                ws.pending_orders.append(PendingOrder(
-                    order_id=order_id,
-                    side="NO",
-                    price=price,
-                    shares=shares,
-                    amount_usd=price * shares,
-                    token_id=no_token,
-                    placed_at=time.time(),
-                ))
-                ws.all_order_ids.append(order_id)
-                no_orders += 1
+            # NO side — only if price is below NO crowd price
+            if price < crowd_no - 0.01:
+                order_id = await self._place_limit_order(no_token, price, shares)
+                if order_id:
+                    ws.pending_orders.append(PendingOrder(
+                        order_id=order_id,
+                        side="NO",
+                        price=price,
+                        shares=shares,
+                        amount_usd=price * shares,
+                        token_id=no_token,
+                        placed_at=time.time(),
+                    ))
+                    ws.all_order_ids.append(order_id)
+                    no_orders += 1
 
         total_placed = yes_orders + no_orders
         if total_placed == 0:
@@ -548,9 +558,9 @@ class SpreadCaptureV2:
 
         logger.info(
             f"[SC] *** ENTERED: {asset} {timeframe} ***\n"
-            f"  Placed {yes_orders} YES + {no_orders} NO limit orders\n"
-            f"  Ladder: {', '.join(f'${p:.2f}x{s}' for p, s in ORDER_LADDER)}\n"
-            f"  Max exposure: ${sum(p * s for p, s in ORDER_LADDER) * 2:.2f}"
+            f"  Crowd: YES=${crowd_yes:.3f} NO=${crowd_no:.3f}\n"
+            f"  Placed {yes_orders} YES + {no_orders} NO resting limit orders\n"
+            f"  Ladder: {', '.join(f'${p:.2f}x{s}' for p, s in ORDER_LADDER)}"
         )
 
     # ═══════════════════════════════════════════════════════════
