@@ -50,14 +50,13 @@ TIMEFRAMES = {
 # ── ORDER LADDER ──
 # Resting limit orders placed at these prices on BOTH sides.
 # Each tuple: (price, shares)
-# Total budget per side if ALL levels fill: $3.30
-# Total budget BOTH sides if ALL fill: $6.60
+# CLOB minimums: 5 shares per order, $1.00 for marketable orders
+# Total budget per side if ALL levels fill: $4.50
+# Total budget BOTH sides if ALL fill: $9.00
 ORDER_LADDER = [
-    (0.40, 3),   # $1.20 — fills when underdog dips to 40¢
-    (0.30, 3),   # $0.90 — fills on moderate moves
-    (0.20, 3),   # $0.60 — fills on strong moves
-    (0.10, 4),   # $0.40 — fills on major panic
-    (0.05, 4),   # $0.20 — fills on extreme crash
+    (0.40, 5),   # $2.00 — fills when underdog dips to 40¢
+    (0.30, 5),   # $1.50 — fills on moderate moves
+    (0.20, 5),   # $1.00 — fills on strong moves (meets $1 min)
 ]
 
 # ── TIMING ──
