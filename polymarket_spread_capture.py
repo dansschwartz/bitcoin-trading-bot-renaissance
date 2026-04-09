@@ -45,23 +45,18 @@ TIMEFRAMES = {
     "15m": {"seconds": 900, "alignment": 900},
 }
 
-# ── ORDER LADDERS (per-timeframe) ──
-# 15m markets: 3 levels, book is stable enough for multi-level ladders
-# 5m markets: single level — book shifts 40+ cents in seconds, multi-level
-#   ladders create naked fills when all levels get swept on one side
+# ── ORDER LADDER ──
+# Single level for ALL timeframes. Multi-level ladders get swept on one
+# side in tilted markets: e.g. YES=$0.30/NO=$0.70 → 1 YES + 3 NO placed,
+# all 3 NO fill naked ($4.50 loss). Single level caps naked loss at $1.00.
 # CLOB minimums: 5 shares per order, $1.00 for marketable orders
-ORDER_LADDER_15M = [
-    (0.40, 5),   # $2.00 — fills when underdog dips to 40¢
-    (0.30, 5),   # $1.50 — fills on moderate moves
-    (0.20, 5),   # $1.00 — fills on strong moves (meets $1 min)
-]
-ORDER_LADDER_5M = [
-    (0.20, 5),   # $1.00 — single level, max naked loss capped at $1.00
+ORDER_LADDER = [
+    (0.20, 5),   # $1.00 per side — max naked loss capped at $1.00
 ]
 
 # Balance filter: skip window if either side's true_ask is below this
-# Prevents entering extremely tilted markets where only one side can fill
-MIN_TRUE_ASK_BALANCE = 0.25
+# Prevents entering tilted markets where only one side can fill
+MIN_TRUE_ASK_BALANCE = 0.30
 
 # ── TIMING ──
 ORDER_PLACEMENT_DELAY = 3        # Seconds after window open to place orders
@@ -325,15 +320,13 @@ class SpreadCaptureV2:
     async def run(self):
         """Main loop. Runs every second."""
         self._running = True
-        per_side_15m = sum(p * s for p, s in ORDER_LADDER_15M)
-        per_side_5m = sum(p * s for p, s in ORDER_LADDER_5M)
+        per_side = sum(p * s for p, s in ORDER_LADDER)
         logger.info(
             f"[SC] Spread Capture v2 STARTED\n"
             f"  Strategy: Passive limit orders on both sides\n"
             f"  Assets: {list(ASSETS.keys())} ({len(ASSETS)} assets)\n"
             f"  Timeframes: {list(TIMEFRAMES.keys())}\n"
-            f"  15m ladder: {ORDER_LADDER_15M} (${per_side_15m:.2f}/side)\n"
-            f"  5m ladder: {ORDER_LADDER_5M} (${per_side_5m:.2f}/side)\n"
+            f"  Ladder: {ORDER_LADDER} (${per_side:.2f}/side)\n"
             f"  Balance filter: min_true_ask={MIN_TRUE_ASK_BALANCE}\n"
             f"  Max per window: ${MAX_EXPOSURE_PER_WINDOW} | Max global: ${MAX_TOTAL_EXPOSURE}"
         )
@@ -559,8 +552,8 @@ class SpreadCaptureV2:
             f"margin={BOOK_SAFETY_MARGIN}"
         )
 
-        # Select ladder based on timeframe
-        ladder = ORDER_LADDER_5M if timeframe == "5m" else ORDER_LADDER_15M
+        # Single ladder for all timeframes
+        ladder = ORDER_LADDER
 
         yes_orders = 0
         no_orders = 0
