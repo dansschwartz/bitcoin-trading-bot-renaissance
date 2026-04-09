@@ -667,11 +667,15 @@ class SpreadCaptureV2:
 
             if result:
                 order_id = result.get("orderID", result.get("id", ""))
-                return order_id if order_id else None
+                if order_id:
+                    logger.info(f"[SC] Order placed: {token_id[:10]}... ${price:.2f} x {shares:.0f} → {order_id[:20]}")
+                    return order_id
+                else:
+                    logger.warning(f"[SC] Order returned no ID: {result}")
 
             return None
         except Exception as e:
-            logger.debug(f"[SC] Order error @ ${price}: {e}")
+            logger.warning(f"[SC] Order FAILED @ ${price:.2f} x {shares:.0f}: {e}")
             return None
 
     # ═══════════════════════════════════════════════════════════
