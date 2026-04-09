@@ -492,10 +492,11 @@ class SpreadCaptureV2:
         yes_best_ask = await asyncio.to_thread(self._get_best_ask_sync, yes_token)
         no_best_ask = await asyncio.to_thread(self._get_best_ask_sync, no_token)
 
+        yes_ask_str = f"${yes_best_ask:.2f}" if yes_best_ask is not None else "N/A"
+        no_ask_str = f"${no_best_ask:.2f}" if no_best_ask is not None else "N/A"
         logger.info(
             f"[SC] {asset} {timeframe} book: "
-            f"YES best_ask=${yes_best_ask:.2f if yes_best_ask else 'N/A'} | "
-            f"NO best_ask=${no_best_ask:.2f if no_best_ask else 'N/A'}"
+            f"YES best_ask={yes_ask_str} | NO best_ask={no_ask_str}"
         )
 
         yes_orders = 0
@@ -574,8 +575,7 @@ class SpreadCaptureV2:
 
         logger.info(
             f"[SC] *** ENTERED: {asset} {timeframe} ***\n"
-            f"  Book: YES ask=${yes_best_ask:.2f if yes_best_ask else 'N/A'} | "
-            f"NO ask=${no_best_ask:.2f if no_best_ask else 'N/A'}\n"
+            f"  Book: YES ask={yes_ask_str} | NO ask={no_ask_str}\n"
             f"  Placed {yes_orders} YES + {no_orders} NO resting limit orders\n"
             f"  Ladder: {', '.join(f'${p:.2f}x{s}' for p, s in ORDER_LADDER)}"
         )
