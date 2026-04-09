@@ -69,7 +69,7 @@ UNDERDOG_PENNY_THRESHOLD = 0.05  # Maximum accumulation below this
 TARGET_BALANCE_RATIO = 0.62      # Target: underdog_shares / favorite_shares
 MAX_UNHEDGED_RATIO = 3.0         # Stop if favorite > 3x underdog shares
 MIN_REBUY_INTERVAL = 3.0         # Minimum seconds between underdog buys
-REBUY_PRICE_IMPROVEMENT = 0.005  # Only rebuy if price improved by $0.005
+REBUY_PRICE_IMPROVEMENT = 0.02   # Only rebuy if price improved by $0.02
 MAX_FILLS_PER_WINDOW = 15        # Max Phase 2 fills per window
 
 # Phase 3: Sell/rotation — DISABLED for first 50 windows per spec
