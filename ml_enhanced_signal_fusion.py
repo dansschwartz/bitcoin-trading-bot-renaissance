@@ -15,7 +15,7 @@ from enum import Enum
 import json
 
 # Import base components
-from renaissance_trading_bot import TradingSignal, SignalType
+from renaissance_types import TradingSignal, SignalType
 from ml_integration_bridge import MLSignalPackage
 
 class FusionStrategy(Enum):

@@ -47,6 +47,15 @@ class MLSignalPackage:
     timestamp: datetime = datetime.now()
 
 @dataclass
+class TradingSignal:
+    """Individual trading signal from a signal source"""
+    strength: float  # -1.0 to 1.0 (negative = sell, positive = buy)
+    confidence: float  # 0.0 to 1.0
+    signal_type: SignalType
+    timestamp: datetime
+    metadata: Optional[Dict[str, Any]] = None
+
+@dataclass
 class TradingDecision:
     """Final trading decision with Renaissance methodology"""
     action: str  # 'BUY', 'SELL', 'HOLD'
