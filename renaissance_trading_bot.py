@@ -1606,8 +1606,8 @@ class RenaissanceTradingBot:
                             )
                             if conn.total_changes > inserted:
                                 inserted += 1
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self.logger.warning(f"Gap-fill bar insert failed for {pid}: {e}")
                     conn.commit()
                     conn.close()
 
@@ -1708,8 +1708,8 @@ class RenaissanceTradingBot:
                                          0, c['close'], 0.0, 0.0, 0.5, 0.0),
                                     )
                                     pair_inserted += 1
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    self.logger.warning(f"Interior gap-fill bar insert failed for {pid}: {e}")
                             conn.commit()
                             conn.close()
                         except Exception as e:
@@ -1817,8 +1817,8 @@ class RenaissanceTradingBot:
                         last_price=ticker['price'],
                         last_size=0.0,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Order book snapshot construction failed: {e}")
 
             # Compute bid_ask_spread
             bid = ticker.get('bid', 0)
@@ -2035,6 +2035,48 @@ class RenaissanceTradingBot:
             return (entry_price - close_price) * size
         return 0.0
 
+    async def _resolve_close_price(self, pos) -> float:
+        """Resolve the best available market price for closing a position.
+
+        Fallback chain:
+          1. pos.current_price (if recently updated and > 0)
+          2. self._last_prices cache
+          3. Live Binance ticker fetch
+          4. pos.entry_price (last resort — better than 0)
+        """
+        _cpx = getattr(pos, 'current_price', 0.0) or 0.0
+
+        if _cpx <= 0:
+            _pair_id = getattr(pos, 'product_id', '') or (
+                pos.position_id.rsplit('_', 2)[0] if '_' in pos.position_id else pos.position_id
+            )
+            if hasattr(self, '_last_prices'):
+                _cpx = self._last_prices.get(_pair_id, 0.0)
+
+        if _cpx <= 0:
+            try:
+                _pair_id = getattr(pos, 'product_id', '') or (
+                    pos.position_id.rsplit('_', 2)[0] if '_' in pos.position_id else pos.position_id
+                )
+                bsym = to_binance_symbol(_pair_id)
+                ticker = await self.binance_spot.fetch_ticker(bsym)
+                if ticker and ticker.get('price', 0) > 0:
+                    _cpx = float(ticker['price'])
+                    self.logger.info(
+                        f"CLOSE PRICE RESOLVED via Binance: {_pair_id} = ${_cpx:,.4f}"
+                    )
+            except Exception as e:
+                self.logger.debug(f"Binance ticker fetch for close price failed: {e}")
+
+        if _cpx <= 0:
+            _cpx = getattr(pos, 'entry_price', 0.0) or 0.0
+            if _cpx > 0:
+                self.logger.warning(
+                    f"CLOSE PRICE FALLBACK: {pos.position_id} using entry price ${_cpx:,.4f}"
+                )
+
+        return float(_cpx)
+
     async def _shutdown(self):
         """Cancel background tasks and cleanup resources."""
         self.logger.info("Shutting down - cancelling background tasks...")
@@ -2042,14 +2084,14 @@ class RenaissanceTradingBot:
         if self.cascade_collector:
             try:
                 self.cascade_collector.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Cascade collector stop failed during shutdown: {e}")
         # Stop sub-bar scanner
         if self.sub_bar_scanner:
             try:
                 await self.sub_bar_scanner.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Sub-bar scanner stop failed during shutdown: {e}")
         for task in self._background_tasks:
             if not task.done():
                 task.cancel()
@@ -2073,8 +2115,8 @@ class RenaissanceTradingBot:
             }
             with open(self.HEARTBEAT_FILE, 'w') as f:
                 json.dump(heartbeat, f)
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning(f"Heartbeat file write failed: {e}")
 
     async def _log_ml_accuracy_summary(self) -> None:
         """Council S2 P3: Log per-model accuracy summary from ml_predictions table.
@@ -2275,8 +2317,8 @@ class RenaissanceTradingBot:
             for msg in requeue:
                 try:
                     self._ws_queue.put_nowait(msg)
-                except queue.Full:
-                    pass
+                except queue.Full as e:
+                    self.logger.warning(f"WebSocket queue full, dropping requeued message: {e}")
 
             # Check WebSocket data freshness
             MAX_DATA_AGE_SECONDS = 30
@@ -2458,8 +2500,8 @@ class RenaissanceTradingBot:
             if self.sub_bar_scanner and cur_price > 0:
                 try:
                     self.sub_bar_scanner.update_price(p_id, cur_price)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Sub-bar scanner price update failed for {p_id}: {e}")
 
             # Cross-Asset Lead-Lag Alpha (Step 16)
             try:
@@ -2762,8 +2804,8 @@ class RenaissanceTradingBot:
         try:
             if self.regime_overlay.enabled:
                 _regime_label = self.regime_overlay.get_hmm_regime_label()
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning(f"Regime overlay label fetch failed: {e}")
 
         _BEARISH = {'bear_trending', 'bear_mean_reverting', 'high_volatility'}
         _BULLISH = {'bull_trending', 'bull_mean_reverting'}
@@ -3066,8 +3108,8 @@ class RenaissanceTradingBot:
         if feature_vector is not None and self.risk_gateway.vae_trained and self.risk_gateway.vae is not None:
             try:
                 _, vae_loss = self.risk_gateway._check_anomaly(feature_vector)
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"VAE anomaly check failed: {e}")
 
         if action != 'HOLD':
             portfolio_data = {
@@ -3147,8 +3189,8 @@ class RenaissanceTradingBot:
                         bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10]) if bids else 0
                         ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10]) if asks else 0
                     order_book_depth = bid_depth + ask_depth
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Order book depth calculation failed: {e}")
 
             # Extract daily volume from market data if available
             daily_volume_usd = None
@@ -3157,8 +3199,8 @@ class RenaissanceTradingBot:
                 vol_24h = ticker.get('volume_24h') or ticker.get('volume')
                 if vol_24h and current_price > 0:
                     daily_volume_usd = float(vol_24h) * current_price
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Daily volume extraction failed: {e}")
 
             # Use measured edge from signal scorecard when available
             _measured_edge = self._get_measured_edge(product_id)
@@ -3179,8 +3221,8 @@ class RenaissanceTradingBot:
                         _chain["regime"] = transition["size_multiplier"]
                         _tier_multiplier *= transition["size_multiplier"]
                         self.logger.info(f"REGIME TRANSITION: {transition['message']}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Regime transition warning check failed: {e}")
 
             # ── Portfolio Engine: correlation-aware sizing ──
             if self.portfolio_engine and action != 'HOLD':
@@ -3209,8 +3251,8 @@ class RenaissanceTradingBot:
                     if port_mult < 1.0:
                         _tier_multiplier *= port_mult
                         self.logger.info(f"PORTFOLIO ENGINE: {product_id} sized to {port_mult:.0%} — {port_adj.get('reason', '')}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Portfolio engine correlation-aware sizing failed for {product_id}: {e}")
 
             # ── Health Monitor: apply rolling Sharpe-based size scaling ──
             if self.health_monitor:
@@ -3403,8 +3445,8 @@ class RenaissanceTradingBot:
                         f"overlay={overlay_regime} vs medallion={med_regime.get('regime_name', 'unknown')} "
                         f"(conf={med_regime.get('confidence', 0):.2f})"
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Medallion regime comparison failed for {product_id}: {e}")
 
             # ── FINAL SIZE NORMALIZATION — predictable sizing from signal quality ──
             if action != 'HOLD' and position_size > 0 and current_price > 0:
@@ -3659,8 +3701,8 @@ class RenaissanceTradingBot:
                         side=decision.action.lower(),
                         timestamp=_time.time(),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"BarAggregator trade feed failed for {product_id}: {e}")
 
             # 4.5 Send monitoring alert for executed trade (Module C)
             if success and self.monitoring_alert_manager:
@@ -3673,8 +3715,8 @@ class RenaissanceTradingBot:
                         'confidence': decision.confidence,
                         'slippage': slippage_risk.get('predicted_slippage', 0.0),
                     }))
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Monitoring trade alert failed for {product_id}: {e}")
 
             # 5. Check daily loss after trade
             if self.position_manager.daily_pnl < -self.daily_loss_limit:
@@ -4003,15 +4045,7 @@ class RenaissanceTradingBot:
                     for pos in all_positions:
                         ok, _ = self.position_manager.close_position(pos.position_id, reason="Circuit breaker: 15% drawdown")
                         if ok:
-                            _cpx = getattr(pos, 'current_price', 0.0) or 0.0
-                            # If position lacks current_price, fetch from latest market data
-                            if _cpx <= 0:
-                                _pair_id = pos.position_id.rsplit('_', 2)[0] if '_' in pos.position_id else pos.position_id
-                                _cpx = self._last_prices.get(_pair_id, 0.0) if hasattr(self, '_last_prices') else 0.0
-                            if _cpx <= 0:
-                                # Last resort: use entry price (better than 0)
-                                _cpx = pos.entry_price
-                                self.logger.warning(f"CIRCUIT BREAKER CLOSE: No current price for {pos.position_id}, using entry price")
+                            _cpx = await self._resolve_close_price(pos)
                             _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
                             _rpnl = self._compute_realized_pnl(
                                 pos.entry_price, _cpx, pos.size, _side
@@ -4060,15 +4094,7 @@ class RenaissanceTradingBot:
                                 worst_pos.position_id, reason="Exposure limit exceeded"
                             )
                             if ok:
-                                _cpx = getattr(worst_pos, 'current_price', 0.0) or 0.0
-                                # If position lacks current_price, fetch from latest market data
-                                if _cpx <= 0:
-                                    _pair_id = worst_pos.position_id.rsplit('_', 2)[0] if '_' in worst_pos.position_id else worst_pos.position_id
-                                    _cpx = self._last_prices.get(_pair_id, 0.0) if hasattr(self, '_last_prices') else 0.0
-                                if _cpx <= 0:
-                                    # Last resort: use entry price (better than 0)
-                                    _cpx = worst_pos.entry_price
-                                    self.logger.warning(f"EXPOSURE CLOSE: No current price for {worst_pos.position_id}, using entry price")
+                                _cpx = await self._resolve_close_price(worst_pos)
                                 _side = worst_pos.side.value if hasattr(worst_pos.side, 'value') else str(worst_pos.side)
                                 _rpnl = self._compute_realized_pnl(
                                     worst_pos.entry_price, _cpx, worst_pos.size, _side
@@ -4309,8 +4335,8 @@ class RenaissanceTradingBot:
                         _cdf = self._load_price_df_from_db(_pid, limit=300)
                     if _cdf is not None and len(_cdf) > 0:
                         cross_data[_pid] = _cdf
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Cross-asset data loading failed for {_pid}: {e}")
             # Save for Strategy A timing features (BTC lead-lag)
             self._latest_cross_data = cross_data
 
@@ -4490,8 +4516,8 @@ class RenaissanceTradingBot:
                             market_data['_skip_stale'] = True
                         market_data['_staleness_minutes'] = _staleness_min
                         market_data['_staleness_decay'] = _staleness_decay
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Data staleness check failed for {product_id}: {e}")
 
                 # ── Signal Scorecard: evaluate last cycle's predictions ──
                 if product_id in self._pending_predictions and current_price > 0:
@@ -4570,8 +4596,8 @@ class RenaissanceTradingBot:
                             best_ask=float(ticker.get('ask', 0)),
                             timestamp=_time.time(),
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"BarAggregator orderbook snapshot feed failed for {product_id}: {e}")
 
                 # 1.56 Feed fast signal layers with real-time price data
                 if self.fast_reversion_scanner and current_price > 0:
@@ -4582,8 +4608,8 @@ class RenaissanceTradingBot:
                             volume=float(ticker.get('volume_24h', 0)),
                             timestamp=time.time(),
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Fast reversion scanner price update failed for {product_id}: {e}")
                 if self.liquidation_detector and hasattr(self.liquidation_detector, 'on_price_update'):
                     try:
                         self.liquidation_detector.on_price_update(
@@ -4593,8 +4619,8 @@ class RenaissanceTradingBot:
                             spread_bps=float(ticker.get('spread_bps', 0)),
                             timestamp=time.time(),
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Liquidation detector price update failed for {product_id}: {e}")
 
                 # 1.6 Update Medallion-style engines with current price
                 if current_price > 0:
@@ -4933,8 +4959,8 @@ class RenaissanceTradingBot:
                                     f"DAILY REVIEW (obs): {sig_name} allocation={alloc:.1f}x "
                                     f"(signal={signals[sig_name]:.4f})"
                                 )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Daily signal review allocation check failed: {e}")
 
                 # 3. Calculate Renaissance weighted signal with regime-adjusted weights
                 # Temporarily swap weights for this cycle
@@ -5167,8 +5193,8 @@ class RenaissanceTradingBot:
                                 _entry2 = _rtp2._crash_loader._models.get(_key2)
                                 if _entry2:
                                     _model_acc_2 = _entry2.accuracy
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self.logger.warning(f"Crash model 2bar accuracy lookup failed for {product_id}: {e}")
                         _conf_2 = max(_dir_conf_2, _model_acc_2) * 100.0
                         _entry = {
                             "prediction": float(_crash_2bar),
@@ -5187,8 +5213,8 @@ class RenaissanceTradingBot:
                                     _entry1 = _rtp2._crash_loader._models.get(_key1)
                                     if _entry1:
                                         _model_acc_1 = _entry1.accuracy
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                self.logger.warning(f"Crash model 1bar accuracy lookup failed for {product_id}: {e}")
                             _conf_1 = max(_dir_conf_1, _model_acc_1) * 100.0
                             _entry["prediction_1bar"] = float(_crash_1bar)
                             _entry["confidence_1bar"] = _conf_1
@@ -5269,16 +5295,16 @@ class RenaissanceTradingBot:
                                     pair_data = self.stat_arb_engine.calculate_pair_signal(base, target)
                                     if pair_data.get('status') == 'active' and abs(self._force_float(pair_data.get('signal', 0))) > abs(self._force_float(stat_arb_data.get('signal', 0))):
                                         stat_arb_data = pair_data
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    self.logger.warning(f"Stat arb pair signal failed for {base}/{target}: {e}")
                     else:
                         # For non-BTC assets, compute pair vs BTC
                         try:
                             stat_arb_data = self.stat_arb_engine.calculate_pair_signal(base, product_id)
                             if 'signal' in stat_arb_data:
                                 stat_arb_data['signal'] = -self._force_float(stat_arb_data['signal'])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self.logger.warning(f"Stat arb signal calculation failed for {base}/{product_id}: {e}")
                 
                 if stat_arb_data.get('status') == 'active':
                     signals['stat_arb'] = self._force_float(stat_arb_data['signal'])
@@ -5464,8 +5490,8 @@ class RenaissanceTradingBot:
                             "price": float(current_price),
                             "source": "token_spray",
                         }))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Token spray decision persist failed for {product_id}: {e}")
 
                     # Update price cache so exit loop can fetch current prices
                     if not hasattr(self, '_last_prices'):
@@ -5561,8 +5587,8 @@ class RenaissanceTradingBot:
                         try:
                             with self.position_manager._lock:
                                 _open_count = sum(1 for p in self.position_manager.positions.values() if p.status == PositionStatus.OPEN)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self.logger.warning(f"Open position count for audit failed: {e}")
                         _audit.record_system_state(
                             drawdown_pct=getattr(self, '_current_drawdown_pct', 0.0),
                             daily_pnl=self.daily_pnl,
@@ -6586,11 +6612,16 @@ class RenaissanceTradingBot:
                                     pos.position_id, reason=f"sub_bar_{reason.lower()}"
                                 )
                                 if ok:
+                                    _cpx = await self._resolve_close_price(pos)
+                                    _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
+                                    _rpnl = self._compute_realized_pnl(
+                                        pos.entry_price, _cpx, pos.size, _side
+                                    )
                                     self._track_task(
                                         self.db_manager.close_position_record(
                                             pos.position_id,
-                                            close_price=float(pos.current_price),
-                                            realized_pnl=float(details.get('pnl_bps', 0)),
+                                            close_price=float(_cpx),
+                                            realized_pnl=float(_rpnl),
                                             exit_reason=f"sub_bar_{reason.lower()}",
                                         )
                                     )
@@ -7065,11 +7096,16 @@ class RenaissanceTradingBot:
                         pos.position_id, reason="startup_dedup_opposing"
                     )
                     if ok:
+                        _cpx = await self._resolve_close_price(pos)
+                        _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
+                        _rpnl = self._compute_realized_pnl(
+                            pos.entry_price, _cpx, pos.size, _side
+                        )
                         self._track_task(
                             self.db_manager.close_position_record(
                                 pos.position_id,
-                                close_price=float(pos.current_price),
-                                realized_pnl=0.0,
+                                close_price=float(_cpx),
+                                realized_pnl=float(_rpnl),
                                 exit_reason="startup_dedup_opposing",
                             )
                         )
@@ -7092,11 +7128,16 @@ class RenaissanceTradingBot:
                             pos.position_id, reason="startup_dedup_duplicate"
                         )
                         if ok:
+                            _cpx = await self._resolve_close_price(pos)
+                            _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
+                            _rpnl = self._compute_realized_pnl(
+                                pos.entry_price, _cpx, pos.size, _side
+                            )
                             self._track_task(
                                 self.db_manager.close_position_record(
                                     pos.position_id,
-                                    close_price=float(pos.current_price),
-                                    realized_pnl=0.0,
+                                    close_price=float(_cpx),
+                                    realized_pnl=float(_rpnl),
                                     exit_reason="startup_dedup_duplicate",
                                 )
                             )
