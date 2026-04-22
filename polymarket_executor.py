@@ -17,7 +17,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -682,11 +682,13 @@ class PolymarketExecutor:
             "FROM polymarket_positions WHERE status IN ('won', 'lost')"
         ).fetchone()
 
+        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         pnl_24h = conn.execute(
             "SELECT COALESCE(SUM(pnl), 0) as pnl "
             "FROM polymarket_positions "
             "WHERE status IN ('won', 'lost') "
-            "AND closed_at >= datetime('now', '-24 hours')"
+            "AND closed_at >= ?",
+            (cutoff_24h,)
         ).fetchone()
 
         conn.close()

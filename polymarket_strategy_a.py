@@ -30,7 +30,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -385,7 +385,8 @@ class StrategyAExecutor:
                 self.logger.warning(f"Failed to add timeframe column to polymarket_skip_log (may already exist): {e}")
 
         # Prune skip log entries older than 7 days
-        conn.execute("DELETE FROM polymarket_skip_log WHERE timestamp < datetime('now', '-7 days')")
+        cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        conn.execute("DELETE FROM polymarket_skip_log WHERE timestamp < ?", (cutoff_7d,))
         conn.commit()
 
         conn.close()
@@ -424,10 +425,11 @@ class StrategyAExecutor:
 
     def _log_bankroll(self, event: str, position_id: Optional[str] = None, amount: float = 0) -> None:
         conn = sqlite3.connect(self.db_path)
+        now_utc = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT INTO polymarket_bankroll_log (timestamp, bankroll, event, position_id, amount) "
-            "VALUES (datetime('now'), ?, ?, ?, ?)",
-            (self.bankroll, event, position_id, amount),
+            "VALUES (?, ?, ?, ?, ?)",
+            (now_utc, self.bankroll, event, position_id, amount),
         )
         conn.commit()
         conn.close()
@@ -437,12 +439,13 @@ class StrategyAExecutor:
                   ml_direction: str = "", minutes_left: float = 0,
                   timeframe: int = 15) -> None:
         """Write to polymarket_skip_log table."""
+        now_utc = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             "INSERT INTO polymarket_skip_log "
-            "(asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left, timeframe) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left, timeframe),
+            "(timestamp, asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left, timeframe) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (now_utc, asset, slug, reason, ml_confidence, token_cost, ml_direction, minutes_left, timeframe),
         )
         conn.commit()
         conn.close()
@@ -872,13 +875,14 @@ class StrategyAExecutor:
         pnl = round((exit_price - bet["avg_cost"]) * bet["total_tokens"], 2)
         return_pct = round(pnl / bet["total_invested"] * 100, 2) if bet["total_invested"] > 0 else 0
 
+        now_utc = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
             UPDATE polymarket_bets
             SET status = 'CLOSED', exit_price = ?, exit_reason = ?,
-                exit_at = datetime('now'), pnl = ?, return_pct = ?
+                exit_at = ?, pnl = ?, return_pct = ?
             WHERE id = ?
-        """, (exit_price, reason, pnl, return_pct, bet["id"]))
+        """, (exit_price, reason, now_utc, pnl, return_pct, bet["id"]))
         conn.commit()
         conn.close()
 
@@ -1008,18 +1012,20 @@ class StrategyAExecutor:
         if window_start_price <= 0:
             window_start_price = asset_price  # fallback to current price
 
+        now_utc = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
             INSERT INTO polymarket_bets
             (slug, asset, entry_side, entry_token_cost, entry_amount, entry_tokens,
              entry_confidence, adds, total_invested, total_tokens, avg_cost,
-             status, regime, entry_asset_price, window_start_price, question, timeframe)
-            VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)
+             status, regime, entry_asset_price, window_start_price, question, timeframe,
+             opened_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)
         """, (
             slug, inst.asset, entry_side, token_cost, bet_amount, tokens,
             ml_confidence, bet_amount, tokens, token_cost,
             regime, asset_price, window_start_price, market.get("question", ""),
-            inst.timeframe,
+            inst.timeframe, now_utc,
         ))
         bet_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
@@ -1154,6 +1160,7 @@ class StrategyAExecutor:
         except (ValueError, OSError) as e:
             self.logger.warning(f"Failed to parse market_open_time from slug '{slug}': {e}")
 
+        now_utc = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute("""
@@ -1165,11 +1172,11 @@ class StrategyAExecutor:
                     t0_regime,
                     decision, decision_reason,
                     bet_amount, entry_price, position_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 slug, question, asset, instrument_key,
                 market_open_time, deadline, timeframe,
-                asset_price, crowd_up, round(1.0 - crowd_up, 4),
+                now_utc, asset_price, crowd_up, round(1.0 - crowd_up, 4),
                 ml_prediction, ml_confidence, direction,
                 regime,
                 "BET", f"conf={ml_confidence:.1f}%,token=${token_cost:.2f}",
@@ -1236,9 +1243,10 @@ class StrategyAExecutor:
                 if t0_ml_direction and final_result:
                     ml_accuracy = 1 if t0_ml_direction == final_result else 0
 
+            now_utc = datetime.now(timezone.utc).isoformat()
             rows_updated = conn.execute("""
                 UPDATE polymarket_lifecycle
-                SET t15_timestamp = datetime('now'),
+                SET t15_timestamp = ?,
                     t15_asset_price = ?,
                     t15_final_result = ?,
                     t15_price_change_from_t0 = ?,
@@ -1249,6 +1257,7 @@ class StrategyAExecutor:
                     ml_accuracy = COALESCE(?, ml_accuracy)
                 WHERE slug = ?
             """, (
+                now_utc,
                 asset_price,
                 final_result,
                 t15_price_change_from_t0,
@@ -1278,9 +1287,9 @@ class StrategyAExecutor:
                     INSERT OR IGNORE INTO polymarket_lifecycle (
                         slug, asset, t15_timestamp, t15_asset_price,
                         t15_final_result, t15_won, t15_pnl, decision
-                    ) VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    slug, asset, asset_price,
+                    slug, asset, now_utc, asset_price,
                     final_result, 1 if won else 0, pnl,
                     f"retroactive_{source}",
                 ))
@@ -1353,12 +1362,13 @@ class StrategyAExecutor:
                 # Force-expire after 30 min
                 if seconds_past > 1800:
                     self.logger.info(f"FORCE-EXPIRE [{bet['asset']}]: {slug}")
+                    now_utc = datetime.now(timezone.utc).isoformat()
                     conn.execute("""
                         UPDATE polymarket_bets
                         SET status = 'CLOSED', exit_reason = 'force_expired',
-                            exit_at = datetime('now'), pnl = 0, return_pct = 0
+                            exit_at = ?, pnl = 0, return_pct = 0
                         WHERE id = ?
-                    """, (bet["id"],))
+                    """, (now_utc, bet["id"],))
                     self.bankroll += bet["total_invested"]
                     self._log_bankroll("force_expired", str(bet["id"]), bet["total_invested"])
 
@@ -1405,13 +1415,14 @@ class StrategyAExecutor:
             if inst:
                 exit_asset_price = current_prices.get(inst.price_pair, 0)
 
+        now_utc = datetime.now(timezone.utc).isoformat()
         conn.execute("""
             UPDATE polymarket_bets
             SET status = ?, exit_price = ?, exit_reason = ?,
-                exit_at = datetime('now'), pnl = ?, return_pct = ?,
+                exit_at = ?, pnl = ?, return_pct = ?,
                 exit_asset_price = ?
             WHERE id = ?
-        """, (status, exit_price, source, pnl, return_pct, exit_asset_price, bet["id"]))
+        """, (status, exit_price, source, now_utc, pnl, return_pct, exit_asset_price, bet["id"]))
 
         if won and source == "gamma_api":
             self.bankroll += bet["total_invested"] + pnl
@@ -1504,12 +1515,13 @@ class StrategyAExecutor:
                             pnl = round((exit_price * pos["shares"]) - pos["bet_amount"], 2)
                             status = "won" if won else "lost"
 
+                            now_utc = datetime.now(timezone.utc).isoformat()
                             conn.execute("""
                                 UPDATE polymarket_positions
-                                SET status = ?, exit_price = ?, pnl = ?, closed_at = datetime('now'),
+                                SET status = ?, exit_price = ?, pnl = ?, closed_at = ?,
                                     notes = COALESCE(notes, '') || ' | resolved_via=gamma_api'
                                 WHERE position_id = ?
-                            """, (status, exit_price, pnl, pos["position_id"]))
+                            """, (status, exit_price, pnl, now_utc, pos["position_id"]))
 
                             if won:
                                 self.bankroll += pos["bet_amount"] + pnl
@@ -1531,12 +1543,13 @@ class StrategyAExecutor:
 
                 # Force-expire legacy positions 30 min past deadline
                 if seconds_past > 1800:
+                    now_utc = datetime.now(timezone.utc).isoformat()
                     conn.execute("""
                         UPDATE polymarket_positions
-                        SET status = 'expired', pnl = 0, closed_at = datetime('now'),
+                        SET status = 'expired', pnl = 0, closed_at = ?,
                             notes = 'Force-expired: 30min past deadline'
                         WHERE position_id = ?
-                    """, (pos["position_id"],))
+                    """, (now_utc, pos["position_id"],))
                     self.bankroll += pos["bet_amount"]
                     self._log_bankroll("legacy_force_expired", pos["position_id"], pos["bet_amount"])
 
@@ -1724,6 +1737,7 @@ class StrategyAExecutor:
     def _log_timeframe_stats(self) -> None:
         """Log separate 5m vs 15m performance stats (last 24 hours)."""
         conn = sqlite3.connect(self.db_path)
+        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         try:
             for tf in [5, 15]:
                 row = conn.execute("""
@@ -1732,8 +1746,8 @@ class StrategyAExecutor:
                            COALESCE(SUM(pnl), 0) as total_pnl
                     FROM polymarket_bets
                     WHERE timeframe = ? AND status IN ('WON', 'LOST', 'CLOSED')
-                    AND opened_at > datetime('now', '-24 hours')
-                """, (tf,)).fetchone()
+                    AND opened_at > ?
+                """, (tf, cutoff_24h)).fetchone()
                 n, wins, pnl = row
                 if n > 0:
                     wr = (wins / n) * 100
