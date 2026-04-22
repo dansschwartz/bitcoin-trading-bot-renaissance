@@ -2741,6 +2741,19 @@ class RenaissanceTradingBot:
         #   3/6  agree (50%+) → 0.42 (below 0.45 threshold → HOLD)
         #   <3/6 agree         → 0.30
 
+        # Step 0: ML prediction staleness check
+        # Discard ML predictions older than max_prediction_age_minutes (default 15)
+        _max_pred_age_min = self.config.get('ml_max_prediction_age_minutes', 15)
+        if ml_package and hasattr(ml_package, 'timestamp') and ml_package.timestamp:
+            _pred_age_sec = (datetime.now() - ml_package.timestamp).total_seconds()
+            _pred_age_min = _pred_age_sec / 60.0
+            if _pred_age_min > _max_pred_age_min:
+                self.logger.warning(
+                    f"ML STALE: {product_id} prediction is {_pred_age_min:.1f}min old "
+                    f"(max={_max_pred_age_min}min) — discarding"
+                )
+                ml_package = None
+
         # Step 1: Get ML model agreement if available
         ml_agreement = 0.5  # default
         if ml_package and ml_package.ml_predictions:
@@ -6159,8 +6172,8 @@ class RenaissanceTradingBot:
                 # Fallback: use _sa_prices or _last_prices from this cycle
                 try:
                     _rev_prices = dict(_sa_prices)  # noqa: F821 — may not exist if Strategy A block skipped
-                except NameError:
-                    pass
+                except NameError as e:
+                    self.logger.warning(f"Strategy A prices fallback unavailable: {e}")
                 if not _rev_prices and hasattr(self, '_last_prices'):
                     _rev_prices = dict(self._last_prices)
 
@@ -6217,8 +6230,8 @@ class RenaissanceTradingBot:
                         "regime": first_dec.reasoning.get("hmm_regime", "unknown") if first_dec else "unknown",
                         "cycle_time": cycle_time,
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Agent coordinator cycle complete notification failed: {e}")
 
             # Return the first decision or a HOLD if none
             return decisions[0] if decisions else TradingDecision('HOLD', 0.0, 0.0, {}, datetime.now())
@@ -6357,8 +6370,8 @@ class RenaissanceTradingBot:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     asyncio.ensure_future(self.token_spray.stop_exit_loop())
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Token spray exit loop stop failed during kill switch: {e}")
         # Stop straddle exit loops (all assets)
         for _s_asset, _s_engine in self.straddle_engines.items():
             try:

@@ -589,6 +589,7 @@
         "__default_small_cap__": 0.8
     },
     "ml_signal_scale": 10.0,
+    "ml_max_prediction_age_minutes": 15,
     "volatility_prediction": {
         "enabled": true,
         "dead_zone_action": "hold",
