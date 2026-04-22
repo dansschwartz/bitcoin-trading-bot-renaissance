@@ -1,0 +1,72 @@
+[project]
+name = "renaissance-trading-bot"
+version = "0.1.0"
+description = "Renaissance Technologies-inspired cryptocurrency trading bot"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "ccxt>=4.0.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "scipy",
+    "scikit-learn",
+    "hmmlearn>=0.3.0",
+    "statsmodels>=0.14.0",
+    "arch>=6.0",
+    "torch",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "flask",
+    "websockets>=12.0",
+    "websocket-client>=1.6.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "PyYAML>=6.0",
+    "python-binance>=1.0.19",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "pyarrow>=12.0.0",
+    "networkx",
+    "cvxpy",
+    "nltk>=3.8.0",
+    "vaderSentiment>=3.3.2",
+    "textblob>=0.17.0",
+    "beautifulsoup4>=4.12.0",
+    "APScheduler>=3.10.0",
+    "tqdm>=4.65.0",
+    "joblib>=1.3.0",
+    "openpyxl>=3.1.0",
+    "xlsxwriter>=3.1.0",
+    "yfinance>=0.2.0",
+    "pycryptodome>=3.19.0",
+    "python-dateutil>=2.8.0",
+    "pytz>=2023.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.2.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+timeout = 60
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

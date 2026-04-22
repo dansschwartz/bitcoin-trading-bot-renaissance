@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+__pycache__
+*.pyc
+*.pyo
+data/
+logs/
+models/trained/
+.venv/
+.idea/
+.DS_Store
+*.md
+!requirements.txt
+node_modules
+output/
