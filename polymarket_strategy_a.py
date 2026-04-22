@@ -903,11 +903,7 @@ class StrategyAExecutor:
         )
 
         # Update lifecycle table for active close
-        exit_asset_price = 0
-        if current_prices:
-            inst = self._find_instrument(bet["asset"])
-            if inst:
-                exit_asset_price = current_prices.get(inst.price_pair, 0)
+        exit_asset_price = self._get_exit_asset_price(bet["asset"], current_prices)
         ml_direction = "UP" if bet["entry_side"] == "YES" else "DOWN"
         # For active sells, determine result using window_start_price (asset price
         # at t=0 when the prediction window opened), NOT entry_asset_price (price
@@ -915,12 +911,12 @@ class StrategyAExecutor:
         # of phantom P&L — price_fallback showed 76.5% win rate vs gamma_api 8.3%.
         final_result = "CLOSED"
         ref_price = bet["window_start_price"] if bet["window_start_price"] else bet["entry_asset_price"]
-        if exit_asset_price > 0 and ref_price and ref_price > 0:
+        if exit_asset_price and exit_asset_price > 0 and ref_price and ref_price > 0:
             final_result = "UP" if exit_asset_price > ref_price else "DOWN"
         self._update_lifecycle_resolution(
             slug=bet["slug"],
             asset=bet["asset"],
-            asset_price=exit_asset_price,
+            asset_price=exit_asset_price or 0,
             final_result=final_result,
             won=pnl > 0,
             pnl=pnl,
@@ -1373,16 +1369,12 @@ class StrategyAExecutor:
                     self._log_bankroll("force_expired", str(bet["id"]), bet["total_invested"])
 
                     # Update lifecycle for force-expired bets
-                    exit_asset_price = 0
-                    if current_prices:
-                        inst = self._find_instrument(bet["asset"])
-                        if inst:
-                            exit_asset_price = current_prices.get(inst.price_pair, 0)
+                    exit_asset_price = self._get_exit_asset_price(bet["asset"], current_prices)
                     ml_direction = "UP" if bet["entry_side"] == "YES" else "DOWN"
                     self._update_lifecycle_resolution(
                         slug=slug,
                         asset=bet["asset"],
-                        asset_price=exit_asset_price,
+                        asset_price=exit_asset_price or 0,
                         final_result="EXPIRED",
                         won=False,
                         pnl=0,
@@ -1409,11 +1401,7 @@ class StrategyAExecutor:
         return_pct = round(pnl / bet["total_invested"] * 100, 2) if bet["total_invested"] > 0 else 0
         status = "WON" if won else "LOST"
 
-        exit_asset_price = 0
-        if current_prices:
-            inst = self._find_instrument(bet["asset"])
-            if inst:
-                exit_asset_price = current_prices.get(inst.price_pair, 0)
+        exit_asset_price = self._get_exit_asset_price(bet["asset"], current_prices)
 
         now_utc = datetime.now(timezone.utc).isoformat()
         conn.execute("""
@@ -1456,7 +1444,7 @@ class StrategyAExecutor:
         self._update_lifecycle_resolution(
             slug=bet["slug"],
             asset=bet["asset"],
-            asset_price=exit_asset_price,
+            asset_price=exit_asset_price or 0,
             final_result=final_result,
             won=won,
             pnl=pnl,
@@ -1771,6 +1759,39 @@ class StrategyAExecutor:
         for key, inst in self.instruments.items():
             if inst.asset == asset and inst.enabled:
                 return key
+        return None
+
+    def _get_exit_asset_price(self, asset: str, current_prices: Optional[dict]) -> Optional[float]:
+        """Get the current asset price for recording at bet exit.
+
+        Tries current_prices dict first, then falls back to Binance spot API.
+        Returns None (not 0) if price cannot be determined — zero is a valid
+        price conceptually but not for BTC/ETH, so storing 0 corrupts analysis.
+        """
+        inst = self._find_instrument(asset)
+        # Try 1: current_prices dict (already fetched this cycle)
+        if current_prices and inst:
+            price = current_prices.get(inst.price_pair, 0)
+            if price and price > 0:
+                return float(price)
+        # Try 2: Binance spot API as fallback
+        try:
+            symbol = asset.upper() + "USDT"
+            resp = requests.get(
+                f"https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": symbol}, timeout=5,
+            )
+            if resp.status_code == 200:
+                price = float(resp.json().get("price", 0))
+                if price > 0:
+                    return price
+        except Exception as e:
+            self.logger.debug(f"Binance price fallback failed for {asset}: {e}")
+        # Price truly unavailable — return None, not 0
+        self.logger.warning(
+            f"EXIT_PRICE_UNAVAILABLE [{asset}]: could not fetch price from "
+            f"current_prices or Binance. Storing NULL instead of $0."
+        )
         return None
 
     def get_stats(self) -> dict:
