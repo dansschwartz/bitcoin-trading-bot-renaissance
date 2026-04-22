@@ -174,8 +174,8 @@ class StrategyAExecutor:
         cols = []
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(polymarket_bets)").fetchall()]
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning(f"Failed to read polymarket_bets schema: {e}")
 
         if cols and "action" in cols and "entry_side" not in cols:
             self.logger.info("Migrating old polymarket_bets -> polymarket_bets_legacy")
@@ -363,8 +363,8 @@ class StrategyAExecutor:
                 conn.execute("ALTER TABLE polymarket_bets ADD COLUMN window_start_price REAL")
                 conn.commit()
                 self.logger.info("Added window_start_price column to polymarket_bets")
-            except Exception:
-                pass  # Column already exists
+            except Exception as e:
+                self.logger.warning(f"Failed to add window_start_price column (may already exist): {e}")
 
         # Add timeframe column if not exists (migration for 5m markets)
         if "timeframe" not in bet_cols:
@@ -372,8 +372,8 @@ class StrategyAExecutor:
                 conn.execute("ALTER TABLE polymarket_bets ADD COLUMN timeframe INTEGER DEFAULT 15")
                 conn.commit()
                 self.logger.info("Added timeframe column to polymarket_bets")
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Failed to add timeframe column to polymarket_bets (may already exist): {e}")
 
         skip_cols = [r[1] for r in conn.execute("PRAGMA table_info(polymarket_skip_log)").fetchall()]
         if "timeframe" not in skip_cols:
@@ -381,8 +381,8 @@ class StrategyAExecutor:
                 conn.execute("ALTER TABLE polymarket_skip_log ADD COLUMN timeframe INTEGER DEFAULT 15")
                 conn.commit()
                 self.logger.info("Added timeframe column to polymarket_skip_log")
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Failed to add timeframe column to polymarket_skip_log (may already exist): {e}")
 
         # Prune skip log entries older than 7 days
         conn.execute("DELETE FROM polymarket_skip_log WHERE timestamp < datetime('now', '-7 days')")
@@ -905,10 +905,14 @@ class StrategyAExecutor:
             if inst:
                 exit_asset_price = current_prices.get(inst.price_pair, 0)
         ml_direction = "UP" if bet["entry_side"] == "YES" else "DOWN"
-        # For active sells, the "result" is based on price movement
+        # For active sells, determine result using window_start_price (asset price
+        # at t=0 when the prediction window opened), NOT entry_asset_price (price
+        # when bet was placed mid-window). Using entry_asset_price was the root cause
+        # of phantom P&L — price_fallback showed 76.5% win rate vs gamma_api 8.3%.
         final_result = "CLOSED"
-        if exit_asset_price > 0 and bet["entry_asset_price"] and bet["entry_asset_price"] > 0:
-            final_result = "UP" if exit_asset_price > bet["entry_asset_price"] else "DOWN"
+        ref_price = bet["window_start_price"] if bet["window_start_price"] else bet["entry_asset_price"]
+        if exit_asset_price > 0 and ref_price and ref_price > 0:
+            final_result = "UP" if exit_asset_price > ref_price else "DOWN"
         self._update_lifecycle_resolution(
             slug=bet["slug"],
             asset=bet["asset"],
@@ -1066,8 +1070,8 @@ class StrategyAExecutor:
                 ws = 0
                 try:
                     ws = int(slug.rsplit("-", 1)[-1])
-                except (ValueError, IndexError):
-                    pass
+                except (ValueError, IndexError) as e:
+                    self.logger.warning(f"Failed to parse window_start from slug '{slug}': {e}")
                 self._pending_live_bet = {
                     "asset": inst.asset,
                     "direction": direction,
@@ -1147,8 +1151,8 @@ class StrategyAExecutor:
             if len(slug_parts) == 2 and slug_parts[1].isdigit():
                 ts = int(slug_parts[1])
                 market_open_time = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as e:
+            self.logger.warning(f"Failed to parse market_open_time from slug '{slug}': {e}")
 
         conn = sqlite3.connect(self.db_path)
         try:
@@ -1337,8 +1341,8 @@ class StrategyAExecutor:
                     try:
                         deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
                         seconds_past = (datetime.now(timezone.utc) - deadline).total_seconds()
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e:
+                        self.logger.warning(f"Failed to parse deadline '{deadline_str}' for bet {bet['id']}: {e}")
 
                 # Price-based fallback: PERMANENTLY DISABLED
                 # Resolving via crypto price comparison is unreliable and was the
@@ -1457,7 +1461,8 @@ class StrategyAExecutor:
             open_positions = conn.execute(
                 "SELECT * FROM polymarket_positions WHERE status = 'open' AND strategy = 'strategy_a'"
             ).fetchall()
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"Failed to query legacy polymarket_positions: {e}")
             conn.close()
             return
 
@@ -1472,8 +1477,8 @@ class StrategyAExecutor:
                 try:
                     deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
                     seconds_past = (datetime.now(timezone.utc) - deadline).total_seconds()
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e:
+                    self.logger.warning(f"Failed to parse legacy deadline '{deadline_str}' for position {pos['position_id']}: {e}")
 
             try:
                 market = self._fetch_market_by_slug(slug)
@@ -1680,14 +1685,14 @@ class StrategyAExecutor:
         if isinstance(prices, list) and len(prices) >= 1:
             try:
                 return float(prices[0])
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse outcomePrices[0] as float: {prices[0]!r}: {e}")
         best_ask = raw.get("bestAsk")
         if best_ask:
             try:
                 return float(best_ask)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse bestAsk as float: {best_ask!r}: {e}")
         return 0.5
 
     @staticmethod
@@ -1777,7 +1782,8 @@ class StrategyAExecutor:
                 "losses": total["losses"] or 0,
                 "total_pnl": round(total["pnl"] or 0, 2),
             }
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"Failed to query polymarket stats: {e}")
             return {"bankroll": self.bankroll, "open_positions": 0}
         finally:
             conn.close()
