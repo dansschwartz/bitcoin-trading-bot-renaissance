@@ -38,7 +38,7 @@ import logging
 import math
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
 
@@ -80,7 +80,7 @@ class RenaissancePositionSizer:
       a single instrument without moving the market against yourself
     """
 
-    def __init__(self, config: Dict[str, Any] = None, logger: Optional[logging.Logger] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None) -> None:
         config = config or {}
         self.logger = logger or logging.getLogger(__name__)
 
@@ -434,7 +434,7 @@ class RenaissancePositionSizer:
 
     def _estimate_edge(
         self, signal_strength: float, confidence: float, ml_package: Optional[Any]
-    ) -> tuple:
+    ) -> Tuple[float, float]:
         """
         Estimate trading edge and win probability.
 
@@ -524,7 +524,7 @@ class RenaissancePositionSizer:
             capacity_used_pct=0.0, sizing_method="blocked", reasons=[reason],
         )
 
-    def _blocked_result(self, edge, win_prob, reasons) -> SizingResult:
+    def _blocked_result(self, edge: float, win_prob: float, reasons: List[str]) -> SizingResult:
         return SizingResult(
             asset_units=0.0, usd_value=0.0, kelly_fraction=0.0,
             applied_fraction=0.0, risk_budget_usd=0.0, edge=edge,
@@ -534,7 +534,7 @@ class RenaissancePositionSizer:
             capacity_used_pct=0.0, sizing_method="blocked", reasons=reasons,
         )
 
-    def _gated_result(self, edge, win_prob, kelly_f, cost_ratio, reasons) -> SizingResult:
+    def _gated_result(self, edge: float, win_prob: float, kelly_f: float, cost_ratio: float, reasons: List[str]) -> SizingResult:
         return SizingResult(
             asset_units=0.0, usd_value=0.0, kelly_fraction=kelly_f,
             applied_fraction=0.0, risk_budget_usd=0.0, edge=edge,

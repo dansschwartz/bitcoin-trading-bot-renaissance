@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class SignalFusion:
     """Signal fusion results"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.combined_signal = 0.0
         self.confidence = 0.0
         self.contributing_signals = {}
@@ -119,7 +119,7 @@ class SignalFusion:
 
 class RiskManager:
     """Risk management component with ML-informed decisions"""
-    def __init__(self, daily_loss_limit=500.0, position_limit=1000.0, **kwargs):
+    def __init__(self, daily_loss_limit: float = 500.0, position_limit: float = 1000.0, **kwargs: Any) -> None:
         self.max_position_size = float(position_limit)
         self.current_risk = 0.0
         self.daily_pnl = 0.0
