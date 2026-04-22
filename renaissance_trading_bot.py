@@ -3500,9 +3500,12 @@ class RenaissanceTradingBot:
                 'reasons': sizing_result.reasons,
             }
 
-        # Final safety: never trade with zero or negative confidence
-        if action != 'HOLD' and confidence <= 0:
-            self.logger.warning(f"ZERO-CONF GUARD: {product_id} {action} blocked (confidence={confidence})")
+        # Final safety: never trade with zero/negative confidence or below min_confidence
+        if action != 'HOLD' and (confidence <= 0 or confidence < self.min_confidence):
+            self.logger.warning(
+                f"CONF GUARD: {product_id} {action} blocked "
+                f"(confidence={confidence:.4f}, min={self.min_confidence})"
+            )
             action = 'HOLD'
 
         decision = TradingDecision(
@@ -5652,8 +5655,8 @@ class RenaissanceTradingBot:
                             "signal_type": "combined",
                             "notional_usd": decision.position_size * current_price if current_price > 0 else 0,
                         })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Medallion portfolio engine signal ingest failed for {product_id}: {e}")
 
                 # Retrieve lead_lag_alpha from market_data if it was calculated in generate_signals
                 if 'lead_lag_alpha' in market_data:
@@ -5919,9 +5922,12 @@ class RenaissanceTradingBot:
 
                 # 6. Smart Execution (Step 10)
                 # Final pre-execution confidence guard (defense-in-depth)
-                if decision.action != 'HOLD' and decision.confidence <= 0:
+                if decision.action != 'HOLD' and (
+                    decision.confidence <= 0 or decision.confidence < self.min_confidence
+                ):
                     self.logger.warning(
-                        f"PRE-EXEC GUARD: {product_id} {decision.action} blocked — confidence={decision.confidence:.4f} <= 0"
+                        f"PRE-EXEC GUARD: {product_id} {decision.action} blocked — "
+                        f"confidence={decision.confidence:.4f} < min={self.min_confidence}"
                     )
                     decision = TradingDecision(
                         action='HOLD', confidence=decision.confidence,
@@ -5994,8 +6000,8 @@ class RenaissanceTradingBot:
                                 )
                             else:
                                 self.logger.info(f"SHARPE MONITOR: Sharpe={sharpe_val:.2f}")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Sharpe monitor check failed: {e}")
                     try:
                         if self.beta_monitor:
                             beta_report = self.beta_monitor.get_report()
@@ -6005,8 +6011,8 @@ class RenaissanceTradingBot:
                                     f"BETA MONITOR: beta={beta_report.get('beta', 0):.2f} — "
                                     f"hedge: {rec.get('action', 'none')}"
                                 )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Beta monitor check failed: {e}")
                     try:
                         if self.capacity_monitor:
                             caps = self.capacity_monitor.get_all_capacities()
@@ -6015,8 +6021,8 @@ class RenaissanceTradingBot:
                                     self.logger.warning(
                                         f"CAPACITY MONITOR: {_cpair} at capacity wall"
                                     )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Capacity monitor check failed: {e}")
 
                 # DEPRECATED: Old breakout scan (replaced by Phase 0 breakout_scanner)
                 # if self.scan_cycle_count % 10 == 0:
