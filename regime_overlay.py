@@ -1,8 +1,51 @@
 """
-Regime Overlay Adapter
-Bridges the Advanced 5-state HMM Regime Detector with the Renaissance Trading Bot.
-Uses Bootstrap ATR/SMA rules when <200 bars available, then switches to HMM.
-Reads OHLCV bars from five_minute_bars DB table for proper HMM input.
+Regime Overlay Adapter — CANONICAL REGIME SYSTEM
+=================================================
+
+This module is the **single source of truth** for regime classification in the
+trading decision path.  Every signal-weight adjustment, confidence boost,
+entry-threshold bias, position-sizing scalar, and signal-validation gate in
+``renaissance_trading_bot.py`` reads its regime label from *this* class.
+
+Architecture
+------------
+The codebase contains several other regime detectors.  Their roles are:
+
+* ``regime_overlay.py``  (THIS FILE)
+    PRIMARY — drives all trading decisions.
+    Uses Bootstrap ATR/SMA rules (<200 bars) then 5-state HMM (≥200 bars).
+    Reads OHLCV bars from the ``five_minute_bars`` DB table.
+
+* ``advanced_regime_detector.py``
+    INTERNAL — the 5-state HMM engine consumed *by* RegimeOverlay.
+    Never called directly from the trading bot.
+
+* ``medallion_regime_predictor.py``
+    INTERNAL — legacy 3-state HMM used by RegimeOverlay for the
+    supplementary ``hmm_forecast`` field.  Not on the decision path.
+
+* ``intelligence/regime_detector.py``  (MedallionRegimeDetector)
+    OBSERVATION ONLY — logs predictions alongside RegimeOverlay for
+    comparison; does not influence trading decisions.
+
+* ``macro_regime_detector.py``
+    OBSERVATION ONLY — Dalio-inspired macro classifier (SPX/VIX/DXY).
+    Feeds into ``model_router.py`` which is in observation mode.
+
+* ``crypto_regime_detector.py``
+    OBSERVATION ONLY — crypto-specific classifier (EMA stack, funding, OI).
+    Feeds into ``model_router.py`` which is in observation mode.
+
+* ``model_router.py``
+    OBSERVATION ONLY — routes (macro, crypto, micro) regime tuples to
+    model configs.  Phase 1 = logging only; not enforced.
+
+Only RegimeOverlay writes the ``hmm_regime`` label persisted in the
+``decisions`` table (via the bot's ``decision_persist`` dict).
+
+Do **not** delete any of the other detectors — they provide valuable
+observability.  But never wire them into the decision path without
+updating this header.
 """
 
 import logging

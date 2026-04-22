@@ -28,6 +28,23 @@ from derivatives_data_provider import DerivativesDataProvider
 from renaissance_signal_fusion import RenaissanceSignalFusion
 from alternative_data_engine import AlternativeDataEngine, AlternativeSignal
 
+# ── Regime Detection Hierarchy ──
+# PRIMARY (drives all trading decisions):
+#   regime_overlay.py → RegimeOverlay
+#     Reads OHLCV bars from five_minute_bars table, runs Bootstrap (<200 bars)
+#     or 5-state HMM (≥200 bars).  Every confidence boost, entry-threshold bias,
+#     signal-weight adjustment, and position-sizing scalar reads from this class.
+#     This is the ONLY regime source written to decisions.hmm_regime.
+#
+# OBSERVATION ONLY (logged but never used for decisions):
+#   macro_regime_detector.py  → MacroRegimeDetector  (Dalio SPX/VIX/DXY, 4-state)
+#   crypto_regime_detector.py → CryptoRegimeDetector  (EMA/funding/OI, 4-state)
+#   model_router.py           → ModelRouter            (routes regime tuples → model config)
+#   intelligence/regime_detector.py → MedallionRegimeDetector (3-state HMM, pickle model)
+#
+# INTERNAL (consumed inside RegimeOverlay, not called from this file):
+#   advanced_regime_detector.py    → AdvancedRegimeDetector  (5-state HMM engine)
+#   medallion_regime_predictor.py  → MedallionRegimePredictor (3-state, hmm_forecast field)
 from regime_overlay import RegimeOverlay
 from risk_gateway import RiskGateway
 from real_time_pipeline import RealTimePipeline
@@ -236,6 +253,7 @@ try:
 except ImportError:
     MEDALLION_PORTFOLIO_ENGINE_AVAILABLE = False
 
+# OBSERVATION ONLY — logs alongside RegimeOverlay for comparison; not on decision path
 try:
     from intelligence.regime_detector import RegimeDetector as MedallionRegimeDetector
     MEDALLION_REGIME_AVAILABLE = True
@@ -316,7 +334,9 @@ try:
 except ImportError:
     AGENT_COORDINATOR_AVAILABLE = False
 
-# Hierarchical Regime Detection (Dalio-inspired)
+# Hierarchical Regime Detection (Dalio-inspired) — OBSERVATION ONLY
+# These detectors log alongside RegimeOverlay but do NOT influence trading decisions.
+# ModelRouter is in Phase 1 (observation mode): logs regime-to-model mapping, does not enforce.
 try:
     from macro_regime_detector import MacroRegimeDetector, MacroRegime
     from crypto_regime_detector import CryptoRegimeDetector, CryptoRegime
@@ -2727,8 +2747,8 @@ class RenaissanceTradingBot:
             else:
                 if audit_logger:
                     audit_logger.record_gate('cost_prescreen', True)
-        except Exception:
-            pass  # Don't let cost pre-screen crash the decision pipeline
+        except Exception as e:
+            self.logger.warning(f"Cost pre-screen check failed (non-fatal): {e}")
 
         # Calculate confidence based on MODEL AGREEMENT (calibrated 2026-03-02)
         # Diagnostic audit showed magnitude-based confidence was INVERSELY correlated
@@ -6378,8 +6398,8 @@ class RenaissanceTradingBot:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     asyncio.ensure_future(_s_engine.stop_exit_loop())
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Straddle exit loop stop failed for {_s_asset} during kill switch: {e}")
         try:
             self.position_manager.set_emergency_stop(True, reason)
         except Exception as e:
@@ -6391,8 +6411,8 @@ class RenaissanceTradingBot:
                 asyncio.ensure_future(
                     self.alert_manager.send_alert("CRITICAL", "Kill Switch", reason)
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning(f"Kill switch alert dispatch failed: {e}")
 
     def _check_kill_file(self):
         """Check for file-based kill switch (touch KILL_SWITCH to halt)."""
@@ -6440,8 +6460,8 @@ class RenaissanceTradingBot:
             self.logger.error(f"Arbitrage engine error: {e}")
             try:
                 await self.arbitrage_orchestrator.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Arbitrage orchestrator stop failed after error: {e}")
 
     # ──────────────────────────────────────────────
     #  BTC Price Relay (Binance WS → Reversal Strategy)
@@ -6498,8 +6518,8 @@ class RenaissanceTradingBot:
                             _px = _tickers.get(_sym, 0)
                             if _px > 0:
                                 sa_prices[_pair] = _px
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Strategy A Binance price fetch failed: {e}")
 
                 # Need at least SOL price for any instrument
                 if "SOL-USD" not in sa_prices or sa_prices["SOL-USD"] <= 0:
@@ -6529,8 +6549,8 @@ class RenaissanceTradingBot:
                 if self.polymarket_live_executor:
                     try:
                         self.polymarket_live_executor.check_live_resolutions()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Polymarket live resolution check failed: {e}")
 
                 if cycle_count % 10 == 1:
                     self.logger.info(
@@ -6560,8 +6580,8 @@ class RenaissanceTradingBot:
             self.logger.error(f"Liquidation detector error: {e}")
             try:
                 await self.liquidation_detector.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Liquidation detector stop failed after error: {e}")
 
     # ──────────────────────────────────────────────
     #  Fast Mean Reversion Scanner
@@ -6608,8 +6628,8 @@ class RenaissanceTradingBot:
                         ticker = self.binance_spot_provider.get_cached_ticker(symbol)
                         if ticker and ticker.get('last_price', 0) > 0:
                             return float(ticker['last_price'])
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Binance spot provider price fetch failed for {symbol}: {e}")
                 # Fallback to position current_price
                 with self.position_manager._lock:
                     for pos in self.position_manager.positions.values():
@@ -6688,7 +6708,7 @@ class RenaissanceTradingBot:
                     self.logger.debug(f"Portfolio drift logger error: {e}")
                 await asyncio.sleep(60)
         except asyncio.CancelledError:
-            pass
+            self.logger.warning("Portfolio drift logger loop cancelled")
 
     async def _run_insurance_scanner_loop(self):
         """Scan for insurance premiums every 30 minutes (observation mode)."""
@@ -6707,7 +6727,7 @@ class RenaissanceTradingBot:
                         self.logger.debug(f"Insurance scanner error for {pair}: {e}")
                 await asyncio.sleep(1800)  # 30 minutes
         except asyncio.CancelledError:
-            pass
+            self.logger.warning("Insurance scanner loop cancelled")
 
     async def _run_daily_signal_review_loop(self):
         """Run daily signal P&L review at midnight UTC."""
@@ -6732,7 +6752,7 @@ class RenaissanceTradingBot:
                 except Exception as e:
                     self.logger.error(f"Daily signal review error: {e}")
         except asyncio.CancelledError:
-            pass
+            self.logger.warning("Daily signal review loop cancelled")
 
     # ──────────────────────────────────────────────
     #  Phase 2 Monitor Loops (BUG 6 fix — orphaned monitors)
@@ -6759,7 +6779,7 @@ class RenaissanceTradingBot:
                     self.logger.debug(f"Beta monitor loop error: {e}")
                 await asyncio.sleep(3600)  # 60 minutes
         except asyncio.CancelledError:
-            pass
+            self.logger.warning("Beta monitor loop cancelled")
 
     async def _run_sharpe_monitor_loop(self):
         """Periodic Sharpe health check (every 60 min, observation mode)."""
@@ -6779,7 +6799,7 @@ class RenaissanceTradingBot:
                     self.logger.debug(f"Sharpe monitor loop error: {e}")
                 await asyncio.sleep(3600)  # 60 minutes
         except asyncio.CancelledError:
-            pass
+            self.logger.warning("Sharpe monitor loop cancelled")
 
     async def _run_capacity_monitor_loop(self):
         """Periodic capacity analysis (every 60 min, observation mode)."""
@@ -6801,7 +6821,7 @@ class RenaissanceTradingBot:
                     self.logger.debug(f"Capacity monitor loop error: {e}")
                 await asyncio.sleep(3600)  # 60 minutes
         except asyncio.CancelledError:
-            pass
+            self.logger.warning("Capacity monitor loop cancelled")
 
     async def _run_regime_detector_loop(self):
         """Periodic regime retraining + prediction (every 5 min, observation mode)."""
@@ -6823,7 +6843,7 @@ class RenaissanceTradingBot:
                     self.logger.debug(f"Regime detector loop error: {e}")
                 await asyncio.sleep(300)  # 5 minutes
         except asyncio.CancelledError:
-            pass
+            self.logger.warning("Regime detector loop cancelled")
 
     # ──────────────────────────────────────────────
     #  Unified Telegram Reporting (Gap 5 fix)
@@ -6858,15 +6878,15 @@ class RenaissanceTradingBot:
                             if row:
                                 stats["trades_1h"] = row[0] or 0
                                 stats["pnl_1h"] = float(row[1] or 0)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self.logger.warning(f"Telegram report trade stats DB query failed: {e}")
 
                     await self.monitoring_alert_manager._telegram.send_hourly_heartbeat(stats)
                 except Exception as e:
                     self.logger.debug(f"Telegram report loop error: {e}")
                 await asyncio.sleep(3600)  # Every hour
         except asyncio.CancelledError:
-            pass
+            self.logger.warning("Telegram report loop cancelled")
 
     # ──────────────────────────────────────────────
     #  State Recovery
@@ -7037,8 +7057,8 @@ class RenaissanceTradingBot:
                     for (pair, _), ticker in zip(fetchable, results):
                         if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
                             prices[pair] = float(ticker['price'])
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Batch price fetch from provider failed: {e}")
 
         # Fill gaps from _last_prices cache
         last = getattr(self, '_last_prices', {})
@@ -7074,8 +7094,8 @@ class RenaissanceTradingBot:
                     if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
                         result[p] = float(ticker['price'])
                         continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Straddle price fetch failed for {p}: {e}")
             # Fallback to cached price
             last = getattr(self, '_last_prices', {})
             if last.get(p, 0) > 0:
@@ -7289,8 +7309,8 @@ class RenaissanceTradingBot:
         if self.state_manager:
             try:
                 await self.state_manager.aset_system_state(SystemState.RUNNING, "trading loop started")
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"State manager set RUNNING state failed: {e}")
 
         # ── Module C: Startup alert ──
         if self.monitoring_alert_manager:
@@ -7300,8 +7320,8 @@ class RenaissanceTradingBot:
                     f"Renaissance bot starting with {len(self.product_ids)} products, "
                     f"{'paper' if paper_mode else 'live'} mode"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Startup monitoring alert failed: {e}")
 
         # ── Build dynamic trading universe from Binance ──
         self.logger.info("Building dynamic trading universe from Binance...")
@@ -7314,8 +7334,8 @@ class RenaissanceTradingBot:
                         "Universe Built",
                         f"Dynamic universe: {len(self.product_ids)} pairs from Binance"
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"Universe built monitoring alert failed: {e}")
 
             # ── Council #1: Gap-fill missing bars from Binance on startup ──
             try:
@@ -7459,8 +7479,8 @@ class RenaissanceTradingBot:
                 if self.state_manager:
                     try:
                         await self.state_manager.asend_heartbeat()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"State manager heartbeat send failed: {e}")
 
                 # Wait for next cycle
                 await asyncio.sleep(cycle_interval)
