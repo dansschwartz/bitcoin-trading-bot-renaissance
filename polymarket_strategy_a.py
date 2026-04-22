@@ -161,6 +161,10 @@ class StrategyAExecutor:
         self.live_executor = None
         self._pending_live_bet: Optional[Dict] = None
 
+        # Periodic bankroll reconciliation (every N cycles)
+        self._reconcile_interval = 10  # Check every 10 cycles
+        self._cycle_count = 0
+
         self._ensure_tables()
         self._load_bankroll()
         self._reset_daily_if_needed()
@@ -423,6 +427,49 @@ class StrategyAExecutor:
             logger.warning(f"Bankroll fallback to log: ${self.bankroll:.2f} ({e})")
         conn.close()
 
+    def _reconcile_bankroll(self) -> None:
+        """Periodic bankroll reconciliation: compare runtime value against first-principles.
+
+        First-principles: bankroll = initial + sum(resolved PnL) - sum(open exposure)
+        If discrepancy > $1, log a warning with full breakdown. If > $5, auto-correct.
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            pnl_row = conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM polymarket_bets "
+                "WHERE status IN ('WON', 'LOST', 'CLOSED')"
+            ).fetchone()
+            open_row = conn.execute(
+                "SELECT COALESCE(SUM(total_invested), 0) FROM polymarket_bets "
+                "WHERE status = 'OPEN'"
+            ).fetchone()
+            total_pnl = pnl_row[0] if pnl_row else 0
+            open_exposure = open_row[0] if open_row else 0
+            expected = self.initial_bankroll + total_pnl - open_exposure
+
+            # Compare raw (uncapped) values for discrepancy detection
+            runtime_raw = self.bankroll  # May be capped, but that's intentional
+            expected_capped = min(expected, self.MAX_SIZING_BANKROLL)
+            discrepancy = abs(runtime_raw - expected_capped)
+
+            if discrepancy > 1.0:
+                self.logger.warning(
+                    f"BANKROLL DISCREPANCY: ${discrepancy:.2f} | "
+                    f"runtime=${runtime_raw:.2f} vs expected=${expected_capped:.2f} "
+                    f"(raw={expected:.2f} = initial=${self.initial_bankroll:.2f} "
+                    f"+ pnl=${total_pnl:.2f} - open=${open_exposure:.2f})"
+                )
+                if discrepancy > 5.0:
+                    self.logger.warning(
+                        f"BANKROLL AUTO-CORRECT: ${runtime_raw:.2f} → ${expected_capped:.2f}"
+                    )
+                    self.bankroll = expected_capped
+                    self._log_bankroll("auto_reconcile", amount=expected_capped - runtime_raw)
+        except Exception as e:
+            self.logger.debug(f"Bankroll reconciliation failed: {e}")
+        finally:
+            conn.close()
+
     def _log_bankroll(self, event: str, position_id: Optional[str] = None, amount: float = 0) -> None:
         conn = sqlite3.connect(self.db_path)
         now_utc = datetime.now(timezone.utc).isoformat()
@@ -557,6 +604,11 @@ class StrategyAExecutor:
 
         # 1. Check resolutions on old and new tables
         self._check_resolutions(current_prices)
+
+        # 1a. Periodic bankroll reconciliation
+        self._cycle_count += 1
+        if self._cycle_count % self._reconcile_interval == 0:
+            self._reconcile_bankroll()
 
         # 1b. Log per-timeframe stats
         self._log_timeframe_stats()
