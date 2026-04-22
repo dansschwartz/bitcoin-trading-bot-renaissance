@@ -1,0 +1,186 @@
+"""FastAPI dashboard server — REST + WebSocket + static file serving."""
+
+import argparse
+import asyncio
+import logging
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+from dashboard.backtest_runner import BacktestJobManager
+from dashboard.config import DashboardConfig
+from dashboard.event_emitter import DashboardEventEmitter
+from dashboard.ws_manager import ConnectionManager
+
+from dashboard.routers import system, decisions, trades, analytics, brain, risk, backtest, medallion, devil, agents, arbitrage, breakout, polymarket, audit, council, breakout_strategy, token_spray, exit_engine, btc_straddle, oracle, oracle_trading, spread_capture
+
+logger = logging.getLogger(__name__)
+
+FRONTEND_BUILD = Path(__file__).resolve().parent / "frontend" / "dist"
+
+
+def create_app(
+    config_path: str | None = None,
+    emitter: DashboardEventEmitter | None = None,
+) -> FastAPI:
+    app = FastAPI(title="Renaissance Dashboard", version="1.0.0")
+
+    # No-cache middleware — prevents stale dashboard data in browser
+    class NoCacheMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            response: Response = await call_next(request)
+            # No-cache on everything — this is a dev/paper-trading dashboard
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            return response
+
+    app.add_middleware(NoCacheMiddleware)
+
+    # CORS (allow Vite dev server during development)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Shared state
+    cfg = DashboardConfig(config_path)
+    app.state.dashboard_config = cfg
+    app.state.ws_manager = ConnectionManager()
+    app.state.emitter = emitter or DashboardEventEmitter()
+    app.state.start_time = datetime.now(timezone.utc)
+    app.state.last_confluence = None
+    app.state.active_alerts: list = []
+    app.state.backtest_manager = BacktestJobManager(emitter=app.state.emitter, db_path=cfg.db_path)
+
+    # Routers
+    app.include_router(system.router)
+    app.include_router(decisions.router)
+    app.include_router(trades.router)
+    app.include_router(analytics.router)
+    app.include_router(brain.router)
+    app.include_router(risk.router)
+    app.include_router(backtest.router)
+    app.include_router(medallion.router)
+    app.include_router(devil.router)
+    app.include_router(agents.router)
+    app.include_router(arbitrage.router)
+    app.include_router(arbitrage.price_feed_router)
+    app.include_router(arbitrage.liquidation_router)
+    app.include_router(breakout.router)
+    app.include_router(polymarket.router)
+    app.include_router(audit.router)
+    app.include_router(council.router)
+    app.include_router(breakout_strategy.router)
+    app.include_router(token_spray.router)
+    app.include_router(exit_engine.router)
+    app.include_router(btc_straddle.router)
+    app.include_router(oracle.router)
+    app.include_router(oracle_trading.router)
+    app.include_router(spread_capture.router)
+
+    # WebSocket endpoint
+    @app.websocket("/ws")
+    async def websocket_endpoint(ws: WebSocket):
+        mgr = app.state.ws_manager
+        await mgr.connect(ws)
+        q = app.state.emitter.subscribe()
+        try:
+            # Relay events from emitter to this client
+            relay = asyncio.create_task(_relay(q, ws))
+            # Keep alive — also receive pings from client
+            while True:
+                try:
+                    await asyncio.wait_for(ws.receive_text(), timeout=30)
+                except asyncio.TimeoutError:
+                    # Send heartbeat
+                    from dashboard import db_queries
+                    db = cfg.db_path
+                    await ws.send_json({
+                        "channel": "heartbeat",
+                        "data": {
+                            "status": "OPERATIONAL",
+                            "uptime": (datetime.now(timezone.utc) - app.state.start_time).total_seconds(),
+                            "cycle_count": db_queries.get_cycle_count(db),
+                            "ws_clients": mgr.active_count,
+                        },
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    })
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.debug(f"WS error: {e}")
+        finally:
+            relay.cancel()
+            app.state.emitter.unsubscribe(q)
+            mgr.disconnect(ws)
+
+    async def _relay(q, ws: WebSocket):
+        import queue as _queue
+        try:
+            while True:
+                try:
+                    msg = await asyncio.to_thread(q.get, timeout=2)
+                except _queue.Empty:
+                    continue
+                await ws.send_json(msg)
+                # Cache certain channels for REST fallback
+                ch = msg.get("channel", "")
+                if ch == "confluence":
+                    app.state.last_confluence = msg.get("data")
+                elif ch == "risk.alert":
+                    alerts = app.state.active_alerts
+                    alerts.append(msg.get("data"))
+                    app.state.active_alerts = alerts[-100:]  # Keep last 100
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    # Health check
+    @app.get("/api/health")
+    async def health():
+        return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+    # Serve frontend static build
+    if FRONTEND_BUILD.is_dir():
+        # Static assets (JS, CSS, images)
+        app.mount("/assets", StaticFiles(directory=str(FRONTEND_BUILD / "assets")), name="assets")
+
+        # SPA catch-all: serve index.html for any non-API route (React Router handles client-side routing)
+        from starlette.responses import FileResponse
+
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            # Serve actual static files if they exist (favicon.ico, etc.)
+            file_path = FRONTEND_BUILD / full_path
+            if full_path and file_path.is_file():
+                return FileResponse(str(file_path))
+            return FileResponse(str(FRONTEND_BUILD / "index.html"))
+
+    return app
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Renaissance Dashboard Server")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--config", type=str, default=None)
+    args = parser.parse_args()
+
+    import uvicorn
+
+    app = create_app(config_path=args.config)
+    logger.info(f"Starting dashboard on {args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

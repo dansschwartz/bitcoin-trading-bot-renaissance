@@ -1,0 +1,105 @@
+import { useDashboard } from '../../context/DashboardContext';
+import { formatCurrency, pnlColor, pnlSign } from '../../utils/formatters';
+
+function formatAge(openedAt: string | null | undefined): string {
+  if (!openedAt) return '--';
+  const opened = new Date(openedAt).getTime();
+  if (isNaN(opened)) return '--';
+  const now = Date.now();
+  const diffMs = now - opened;
+  if (diffMs < 0) return '--';
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ${mins % 60}m`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ${hrs % 24}h`;
+}
+
+function formatOpenTime(openedAt: string | null | undefined): string {
+  if (!openedAt) return '--';
+  try {
+    const d = new Date(openedAt);
+    return `${(d.getUTCMonth()+1).toString().padStart(2,'0')}/${d.getUTCDate().toString().padStart(2,'0')} ${d.getUTCHours().toString().padStart(2,'0')}:${d.getUTCMinutes().toString().padStart(2,'0')}`;
+  } catch {
+    return '--';
+  }
+}
+
+export default function OpenPositionsTable() {
+  const { state } = useDashboard();
+  const positions = state.positions;
+
+  return (
+    <div className="bg-surface-1 border border-surface-3 rounded-xl p-4">
+      <h3 className="text-sm font-medium text-gray-300 mb-3">
+        Open Positions <span className="text-gray-600">({positions.length})</span>
+      </h3>
+      {positions.length === 0 ? (
+        <div className="text-sm text-gray-600 py-4 text-center">No open positions</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs font-mono">
+            <thead>
+              <tr className="text-gray-500 border-b border-surface-3">
+                <th className="text-left py-2 px-2">Asset</th>
+                <th className="text-left py-2 px-2">Src</th>
+                <th className="text-left py-2 px-2">Side</th>
+                <th className="text-right py-2 px-2">Size</th>
+                <th className="text-right py-2 px-2">Entry</th>
+                <th className="text-right py-2 px-2">Current</th>
+                <th className="text-right py-2 px-2">P&L</th>
+                <th className="text-left py-2 px-2">Opened</th>
+                <th className="text-right py-2 px-2">Age</th>
+                <th className="text-right py-2 px-2">SL</th>
+                <th className="text-right py-2 px-2">TP</th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => (
+                <tr key={p.position_id} className="border-b border-surface-3/50 hover:bg-surface-2/50">
+                  <td className="py-2 px-2 text-gray-300">{p.product_id}</td>
+                  <td className="py-2 px-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                      p.source === 'spray' ? 'bg-accent-blue/20 text-accent-blue' :
+                      p.source === 'arb' ? 'bg-purple-500/20 text-purple-400' :
+                      p.source === 'poly' ? 'bg-accent-yellow/20 text-accent-yellow' :
+                      'bg-surface-3 text-gray-500'
+                    }`}>{p.source || 'ml'}</span>
+                  </td>
+                  <td className="py-2 px-2">
+                    <span className={p.side === 'BUY' ? 'text-accent-green' : 'text-accent-red'}>
+                      {p.side}
+                    </span>
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-300">{p.size.toFixed(6)}</td>
+                  <td className="py-2 px-2 text-right text-gray-400">{formatCurrency(p.entry_price)}</td>
+                  <td className="py-2 px-2 text-right text-gray-300">
+                    {p.current_price ? formatCurrency(p.current_price) : '--'}
+                  </td>
+                  <td className={`py-2 px-2 text-right font-semibold ${pnlColor(p.unrealized_pnl || 0)}`}>
+                    {p.unrealized_pnl != null
+                      ? `${pnlSign(p.unrealized_pnl)}${formatCurrency(p.unrealized_pnl)}`
+                      : '--'}
+                  </td>
+                  <td className="py-2 px-2 text-gray-500">
+                    {formatOpenTime(p.opened_at)}
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-400">
+                    {formatAge(p.opened_at)}
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-600">
+                    {p.stop_loss_price ? formatCurrency(p.stop_loss_price) : '--'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-gray-600">
+                    {p.take_profit_price ? formatCurrency(p.take_profit_price) : '--'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}

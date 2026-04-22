@@ -1,0 +1,111 @@
+{
+  "asset": "SOL",
+  "horizon": "2bar",
+  "horizon_label": "2-bar (10min)",
+  "training_config": "RECENT_ONLY",
+  "test_acc": 0.5213,
+  "test_auc": 0.5381,
+  "val_acc": 0.5089,
+  "val_auc": 0.5203,
+  "pred_std": 0.0119,
+  "n_rounds": 8,
+  "train_size": 108289,
+  "feature_cols": [
+    "return_1bar",
+    "return_6bar",
+    "return_12bar",
+    "return_48bar",
+    "return_288bar",
+    "vol_12bar",
+    "vol_48bar",
+    "vol_ratio",
+    "volume_surge",
+    "volume_trend",
+    "consecutive_red",
+    "drawdown_24h",
+    "rsi_14_norm",
+    "bb_pct_b",
+    "vwap_distance",
+    "spx_return_1d",
+    "spx_vs_sma",
+    "vix_norm",
+    "vix_change",
+    "vix_extreme",
+    "dxy_return_1d",
+    "dxy_trend",
+    "yield_level",
+    "yield_change",
+    "fng_norm",
+    "funding_z",
+    "funding_extreme_long",
+    "funding_extreme_short",
+    "oi_change_1h",
+    "oi_change_4h",
+    "oi_spike",
+    "ls_ratio_norm",
+    "ls_extreme_long",
+    "taker_imbalance",
+    "spx_return_5m",
+    "spx_return_15m",
+    "spx_return_1h",
+    "spx_momentum_5m",
+    "spx_direction_5m",
+    "vix_return_5m",
+    "vix_return_1h",
+    "vix_spike_5m",
+    "ndx_return_5m",
+    "ndx_return_1h",
+    "has_intraday_macro",
+    "btc_return_1bar",
+    "btc_return_6bar",
+    "btc_asset_ratio_change",
+    "btc_lead_1",
+    "btc_lead_2",
+    "btc_lead_3"
+  ],
+  "n_features": 51,
+  "deploy": true,
+  "trained_at": "2026-03-01 16:05:59",
+  "top_features": [
+    {
+      "name": "bb_pct_b",
+      "gain": 1334.1
+    },
+    {
+      "name": "spx_return_1d",
+      "gain": 313.1
+    },
+    {
+      "name": "btc_return_1bar",
+      "gain": 242.5
+    },
+    {
+      "name": "yield_level",
+      "gain": 213.6
+    },
+    {
+      "name": "btc_lead_1",
+      "gain": 195.0
+    },
+    {
+      "name": "spx_vs_sma",
+      "gain": 173.1
+    },
+    {
+      "name": "return_6bar",
+      "gain": 165.2
+    },
+    {
+      "name": "btc_lead_2",
+      "gain": 165.2
+    },
+    {
+      "name": "btc_asset_ratio_change",
+      "gain": 156.7
+    },
+    {
+      "name": "vol_ratio",
+      "gain": 141.4
+    }
+  ]
+}

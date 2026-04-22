@@ -1,0 +1,1375 @@
+"""QuantResearcherAgent — the Outer Loop.
+
+Weekly:
+1. ObservationCollector compiles a structured report (pure Python, no LLM).
+2. Report + research prompt written to ``data/research_sessions/``.
+3. Claude Code launched via ``subprocess.run(['claude', ...])`` with timeout.
+4. Session output parsed for ``proposals.json``.
+5. Each proposal evaluated through SafetyGate.
+6. Approved proposals stored in ``proposals`` table.
+
+Can be run manually:
+    python -m agents.quant_researcher --manual
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+from agents.base import BaseAgent
+from agents.observation_collector import ObservationCollector
+from agents.safety_gate import SafetyGate, PAPER_TRADING_ONLY
+from agents.proposal import Proposal, ProposalStatus, DeploymentMode
+from agents.db_schema import insert_proposal, log_agent_event
+
+if TYPE_CHECKING:
+    from agents.coordinator import AgentCoordinator
+
+logger = logging.getLogger(__name__)
+
+# ── Defense-in-depth: restrictive settings for researcher subprocesses ──
+# Written to session_dir/.claude/settings.json so Claude Code picks it up
+# when cwd=session_dir. Blocks production file edits, process kills,
+# direct DB writes, and destructive filesystem operations.
+RESEARCHER_SETTINGS_JSON = {
+    "permissions": {
+        "allow": [
+            "Read",
+            "Glob",
+            "Grep",
+            "Write",
+            "Bash(python*)",
+            "Bash(.venv/bin/python*)",
+            "Bash(cat *)",
+            "Bash(head *)",
+            "Bash(tail *)",
+            "Bash(wc *)",
+            "Bash(ls *)",
+            "Bash(find *)",
+            "Bash(grep *)",
+            "Bash(rg *)",
+            "Bash(echo *)",
+            "Bash(date*)",
+            "Bash(sort *)",
+            "Bash(uniq *)",
+            "Bash(awk *)",
+            "Bash(diff *)",
+        ],
+        "deny": [
+            # Block editing ANY production file
+            "Edit(renaissance_trading_bot.py)",
+            "Edit(risk_gateway.py)",
+            "Edit(position_sizer.py)",
+            "Edit(kelly_position_sizer.py)",
+            "Edit(portfolio_engine.py)",
+            "Edit(regime_overlay.py)",
+            "Edit(real_time_pipeline.py)",
+            "Edit(ml_model_loader.py)",
+            "Edit(database_manager.py)",
+            "Edit(dashboard_api.py)",
+            "Edit(config/*)",
+            "Edit(agents/*)",
+            "Edit(core/*)",
+            "Edit(intelligence/*)",
+            "Edit(monitors/*)",
+            "Edit(arbitrage/*)",
+            "Edit(models/*)",
+            # Block writing to production files (Write = create/overwrite)
+            "Write(renaissance_trading_bot.py)",
+            "Write(risk_gateway.py)",
+            "Write(position_sizer.py)",
+            "Write(kelly_position_sizer.py)",
+            "Write(portfolio_engine.py)",
+            "Write(regime_overlay.py)",
+            "Write(real_time_pipeline.py)",
+            "Write(ml_model_loader.py)",
+            "Write(database_manager.py)",
+            "Write(config/*)",
+            "Write(agents/*)",
+            "Write(core/*)",
+            # Block dangerous shell commands
+            "Bash(sqlite3 data/*)",
+            "Bash(sqlite3 */renaissance_bot*)",
+            "Bash(sqlite3 */trading*)",
+            "Bash(kill *)",
+            "Bash(pkill *)",
+            "Bash(killall *)",
+            "Bash(rm *)",
+            "Bash(rm -rf *)",
+            "Bash(mv */renaissance*)",
+            "Bash(mv */data/*)",
+            "Bash(mv */config/*)",
+            "Bash(mv */agents/*)",
+            "Bash(mv */models/*)",
+            "Bash(cp * */data/renaissance*)",
+            "Bash(sudo *)",
+            "Bash(git push*)",
+            "Bash(git remote*)",
+            "Bash(git checkout*)",
+            "Bash(git reset*)",
+            "Bash(ssh *)",
+            "Bash(scp *)",
+            "Bash(curl -X POST*)",
+            "Bash(curl -X PUT*)",
+            "Bash(curl -X DELETE*)",
+            "Bash(wget *)",
+            "Bash(apt *)",
+            "Bash(brew *)",
+            "Bash(pip install*)",
+            "Bash(npm install*)",
+            "Bash(chmod 777*)",
+            "Bash(export *KEY*)",
+            "Bash(export *SECRET*)",
+            "Bash(export *PASSWORD*)",
+        ]
+    }
+}
+
+
+class QuantResearcherAgent(BaseAgent):
+    """Outer Loop agent — launches weekly Claude Code research sessions."""
+
+    def __init__(
+        self,
+        event_bus: Any,
+        db_path: str,
+        config: Dict[str, Any],
+        coordinator: Optional[AgentCoordinator] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__("quant_researcher", event_bus, db_path, config, **kwargs)
+        self.coordinator = coordinator
+        self.researcher_cfg = config.get("quant_researcher", {})
+        self.max_proposals = self.researcher_cfg.get("max_proposals_per_week", 5)
+        self.max_session_minutes = self.researcher_cfg.get("max_session_minutes", 120)
+        self.model = self.researcher_cfg.get("model", "sonnet")
+        self._state = "idle"
+        self._project_root = Path(self.db_path).resolve().parent.parent
+        self._claude_available = self._check_claude_available()
+
+    @staticmethod
+    def _clean_env() -> dict:
+        """Return env dict with CLAUDECODE unset so nested sessions work."""
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        return env
+
+    def _check_claude_available(self) -> bool:
+        """Check if the claude CLI is available on PATH."""
+        try:
+            result = subprocess.run(
+                ["claude", "--version"],
+                capture_output=True, text=True, timeout=10,
+                env=self._clean_env(),
+            )
+            version = (result.stdout or "").strip()
+            self.logger.info("Claude CLI available: %s", version or "unknown version")
+            return True
+        except FileNotFoundError:
+            self.logger.info("Claude CLI not found on PATH — research sessions will skip Claude launch")
+            return False
+        except Exception as exc:
+            self.logger.debug("Claude CLI check failed: %s", exc)
+            return False
+
+    def get_status(self) -> Dict[str, Any]:
+        status = self._base_status()
+        try:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro", uri=True, timeout=5.0,
+            )
+            row = conn.execute(
+                "SELECT COUNT(*) FROM weekly_reports"
+            ).fetchone()
+            status["total_reports"] = row[0] if row else 0
+            row = conn.execute(
+                "SELECT COUNT(*) FROM proposals"
+            ).fetchone()
+            status["total_proposals"] = row[0] if row else 0
+            # Latest report date
+            row = conn.execute(
+                "SELECT generated_at FROM weekly_reports ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            status["last_report"] = row[0] if row else None
+            conn.close()
+        except Exception as exc:
+            status["db_error"] = str(exc)
+        return status
+
+    def get_observations(self, window_hours: int = 168) -> Dict[str, Any]:
+        self._record_run()
+        obs: Dict[str, Any] = {"agent": self.name}
+        try:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro", uri=True, timeout=5.0,
+            )
+            # Recent proposals
+            rows = conn.execute(
+                """SELECT id, title, category, status, deployment_mode,
+                          backtest_sharpe, created_at
+                   FROM proposals ORDER BY id DESC LIMIT 10"""
+            ).fetchall()
+            obs["recent_proposals"] = [
+                {
+                    "id": r[0], "title": r[1], "category": r[2],
+                    "status": r[3], "mode": r[4], "sharpe": r[5],
+                    "created": r[6],
+                }
+                for r in rows
+            ]
+            # Improvement log
+            rows = conn.execute(
+                """SELECT change_type, description, reverted
+                   FROM improvement_log
+                   ORDER BY id DESC LIMIT 10"""
+            ).fetchall()
+            obs["recent_improvements"] = [
+                {"type": r[0], "desc": r[1], "reverted": bool(r[2])}
+                for r in rows
+            ]
+            conn.close()
+        except Exception as exc:
+            self._record_error(exc)
+            obs["error"] = str(exc)
+        return obs
+
+    async def run_weekly_research(self) -> None:
+        """Execute one weekly research cycle."""
+        self._state = "researching"
+        self.logger.info("QuantResearcher: starting weekly research cycle")
+        self._record_run()
+
+        try:
+            # Step 1: Compile observation report
+            collector = ObservationCollector(
+                db_path=self.db_path,
+                config=self.config,
+                coordinator=self.coordinator,
+            )
+            report = collector.compile_weekly_report()
+            filepath = collector.save_report(report)
+            self.logger.info("Weekly report compiled: %s", filepath)
+
+            # Step 2: Prepare research session directory
+            session_dir = self._prepare_session(report)
+
+            # Step 3: Launch research session (single or council mode)
+            research_mode = self.researcher_cfg.get("research_mode", "single")
+
+            if research_mode == "council":
+                proposals = self._run_council_cycle(session_dir, report)
+            else:
+                # Existing single-researcher mode (PRESERVED)
+                if self.researcher_cfg.get("enabled", False):
+                    proposals = self._launch_claude_session(session_dir)
+                else:
+                    self.logger.info("QuantResearcher: Claude Code disabled, skipping launch")
+                    proposals = []
+
+            # Step 4: Evaluate proposals through safety gate
+            if proposals:
+                self._evaluate_proposals(proposals, report)
+
+            self.event_bus.emit("researcher.cycle_complete", {
+                "report_path": filepath,
+                "proposals_found": len(proposals),
+            })
+
+        except Exception as exc:
+            self._record_error(exc)
+            self.logger.error("Weekly research failed: %s", exc)
+            log_agent_event(
+                self.db_path,
+                agent_name=self.name,
+                event_type="research_error",
+                channel="researcher.error",
+                payload={"error": str(exc)},
+                severity="error",
+            )
+        finally:
+            self._state = "idle"
+
+    def _prepare_session(self, report: Dict[str, Any]) -> Path:
+        """Write report + prompt to a session directory with frozen DB snapshot."""
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        session_dir = self._project_root / "data" / "research_sessions" / ts
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write report
+        (session_dir / "weekly_report.json").write_text(
+            json.dumps(report, indent=2, default=str)
+        )
+
+        # ── DEFENSE IN DEPTH: Frozen read-only DB snapshot ──
+        db_source = Path(self.db_path)
+        db_snapshot = session_dir / "research_db.sqlite"
+        try:
+            # Use sqlite3 .backup for WAL-safe snapshot
+            src_conn = sqlite3.connect(str(db_source), timeout=10.0)
+            dst_conn = sqlite3.connect(str(db_snapshot))
+            src_conn.backup(dst_conn)
+            dst_conn.close()
+            src_conn.close()
+            # Make read-only at filesystem level
+            os.chmod(str(db_snapshot), 0o444)
+            self.logger.info("DB snapshot created: %s (read-only)", db_snapshot)
+        except Exception as exc:
+            self.logger.warning("Failed to create DB snapshot: %s", exc)
+            db_snapshot = None
+
+        # Write db_access.py helper for researchers
+        db_path_str = str(db_snapshot) if db_snapshot else str(db_source)
+        (session_dir / "db_access.py").write_text(
+            f'"""Read-only database access for research sessions.\n'
+            f'The snapshot is frozen at session start — writes are impossible.\n'
+            f'"""\n'
+            f'import sqlite3\n'
+            f'from typing import Any, Dict, List\n'
+            f'\n'
+            f'DB_PATH = "{db_path_str}"\n'
+            f'_RO_URI = f"file:{{DB_PATH}}?mode=ro"\n'
+            f'\n'
+            f'def get_connection() -> sqlite3.Connection:\n'
+            f'    """Get a READ-ONLY connection."""\n'
+            f'    conn = sqlite3.connect(_RO_URI, uri=True, timeout=10.0)\n'
+            f'    conn.row_factory = sqlite3.Row\n'
+            f'    return conn\n'
+            f'\n'
+            f'def query(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:\n'
+            f'    """Execute a read-only query and return results as dicts."""\n'
+            f'    conn = get_connection()\n'
+            f'    try:\n'
+            f'        rows = conn.execute(sql, params).fetchall()\n'
+            f'        return [dict(r) for r in rows]\n'
+            f'    finally:\n'
+            f'        conn.close()\n'
+            f'\n'
+            f'def query_one(sql: str, params: tuple = ()) -> Dict[str, Any]:\n'
+            f'    """Execute a read-only query and return first result."""\n'
+            f'    results = query(sql, params)\n'
+            f'    return results[0] if results else {{}}\n'
+        )
+
+        # ── DEFENSE IN DEPTH: Write restrictive settings.json ──
+        researcher_settings_dir = session_dir / ".claude"
+        researcher_settings_dir.mkdir(parents=True, exist_ok=True)
+        (researcher_settings_dir / "settings.json").write_text(
+            json.dumps(RESEARCHER_SETTINGS_JSON, indent=2)
+        )
+
+        # Build and write research prompt
+        prompt = self._build_research_prompt(
+            report,
+            session_dir=session_dir,
+            project_root=self._project_root,
+        )
+        (session_dir / "research_prompt.md").write_text(prompt)
+
+        self.logger.info("Research session prepared at %s", session_dir)
+        return session_dir
+
+    def _build_research_prompt(
+        self,
+        report: Dict[str, Any],
+        session_dir: Optional[Path] = None,
+        project_root: Optional[Path] = None,
+    ) -> str:
+        """Build the research prompt for Claude Code."""
+        summary = report.get("summary", {})
+        signals = report.get("signals", {})
+        regimes = report.get("regimes", {})
+        config_snap = report.get("config_snapshot", {})
+
+        if project_root is None:
+            project_root = self._project_root
+        db_path_abs = Path(self.db_path).resolve()
+        config_path_abs = (project_root / "config" / "config.json").resolve()
+
+        # Identify focus areas
+        focus_areas: List[str] = []
+        worst_signals = signals.get("per_signal_pnl", [])
+        if worst_signals:
+            losers = [s for s in worst_signals if s.get("pnl", 0) < 0]
+            if losers:
+                focus_areas.append(
+                    f"Worst signals: {', '.join(s['signal'] for s in losers[:3])}"
+                )
+
+        sharpe = summary.get("sharpe_7d")
+        if sharpe is not None and sharpe < 0.5:
+            focus_areas.append(f"Low Sharpe ratio: {sharpe:.3f}")
+
+        win_rate = summary.get("win_rate", 0)
+        if win_rate < 0.5:
+            focus_areas.append(f"Win rate below 50%: {win_rate:.1%}")
+
+        output_dir_str = str(session_dir) if session_dir else "data/research_sessions/<timestamp>"
+
+        prompt = f"""# Weekly Quant Research Session
+
+## System Paths
+- **Project root:** `{project_root}`
+- **Database:** `{db_path_abs}` (read-only for analysis)
+- **Config:** `{config_path_abs}`
+- **Output dir:** `{output_dir_str}`
+- **Models dir:** `{project_root / 'models' / 'trained'}`
+
+## Performance Summary (last 7 days)
+- Total P&L: ${summary.get('total_pnl', 0):.2f}
+- Total Trades: {summary.get('total_trades', 0)}
+- Win Rate: {summary.get('win_rate', 0):.1%}
+- Sharpe (7d): {summary.get('sharpe_7d', 'N/A')}
+- Open Positions: {summary.get('open_positions', 0)}
+
+## Focus Areas
+{chr(10).join(f'- {f}' for f in focus_areas) if focus_areas else '- No critical issues identified'}
+
+## Current Signal Weights
+```json
+{json.dumps(config_snap.get('signal_weights', {}), indent=2)}
+```
+
+## Regime Distribution
+```json
+{json.dumps(regimes.get('regime_distribution', []), indent=2, default=str)}
+```
+
+## Your Task
+Analyze the weekly report at `{output_dir_str}/weekly_report.json`.
+Query the database for deeper analysis:
+```bash
+sqlite3 "{db_path_abs}" "SELECT ..."
+```
+Read source code at `{project_root}` to understand the system.
+
+Produce a file `proposals.json` in `{output_dir_str}` with up to {self.max_proposals} improvement proposals.
+
+## Model Retraining
+If model accuracy is below target (< 52%), you may propose a `model_retrain` deployment.
+Set `"deployment_mode": "model_retrain"` and include retrain arguments in `config_changes`:
+```json
+{{"retrain_args": {{"epochs": 50, "rolling_days": 180, "full_history": false}}}}
+```
+The system will run `retrain_weekly()` automatically. Retraining has its own safety gate
+(new model must beat old by >= -1% accuracy).
+
+## Hard Safety Limits (CANNOT be changed)
+- PAPER_TRADING_ONLY = True
+- ABSOLUTE_MAX_POSITION_USD = 10,000
+- ABSOLUTE_MAX_DRAWDOWN_PCT = 10%
+- ABSOLUTE_MAX_LEVERAGE = 3.0
+- ABSOLUTE_MAX_DAILY_TRADES = 200
+
+## Allowed Proposal Categories
+- `parameter_tune` — adjust signal weights, thresholds, intervals (no sandbox, no approval)
+- `modify_existing` — change existing module behavior (24h sandbox, no approval)
+- `new_feature` — add new capability (72h sandbox, human approval required)
+- `new_strategy` — add new trading strategy (168h sandbox, human approval required)
+- `model_retrain` — retrain ML models (no sandbox, has own safety gate)
+
+## Output Format (proposals.json)
+```json
+[
+  {{
+    "title": "Short descriptive title",
+    "description": "What to change and why",
+    "category": "parameter_tune",
+    "deployment_mode": "parameter_tune",
+    "config_changes": {{"signal_weights": {{"rsi": 0.08}}}},
+    "backtest_sharpe": 1.2,
+    "backtest_drawdown": 0.03,
+    "backtest_accuracy": 0.54,
+    "backtest_sample_size": 150,
+    "backtest_p_value": 0.02,
+    "notes": "Additional context"
+  }}
+]
+```
+
+Focus on high-impact, low-risk improvements first. Parameter tunes are preferred
+because they deploy immediately without sandbox overhead.
+"""
+        return prompt
+
+    def _launch_claude_session(self, session_dir: Path) -> List[Dict[str, Any]]:
+        """Launch Claude Code subprocess and parse proposals."""
+        prompt_file = session_dir / "research_prompt.md"
+        timeout_seconds = self.max_session_minutes * 60
+
+        self.logger.info(
+            "Launching Claude Code session (timeout=%dm)", self.max_session_minutes,
+        )
+
+        try:
+            result = subprocess.run(
+                [
+                    "claude",
+                    "--print",
+                    "--model", self.model,
+                    "--max-turns", "50",
+                    "-p", prompt_file.read_text(),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(self._project_root),
+                env=self._clean_env(),
+            )
+
+            # Save raw output
+            (session_dir / "claude_output.txt").write_text(result.stdout or "")
+            if result.stderr:
+                (session_dir / "claude_stderr.txt").write_text(result.stderr)
+
+            # Try to find proposals.json
+            proposals_file = session_dir / "proposals.json"
+            if proposals_file.exists():
+                proposals = json.loads(proposals_file.read_text())
+                self.logger.info("Claude session produced %d proposals", len(proposals))
+                return proposals
+            else:
+                # Try to extract JSON from stdout
+                return self._extract_proposals_from_output(result.stdout or "")
+
+        except subprocess.TimeoutExpired:
+            self.logger.warning("Claude Code session timed out after %dm", self.max_session_minutes)
+            return []
+        except FileNotFoundError:
+            self.logger.warning("'claude' CLI not found — skipping Claude Code session")
+            return []
+        except Exception as exc:
+            self.logger.error("Claude Code session failed: %s", exc)
+            return []
+
+    def _extract_proposals_from_output(self, output: str) -> List[Dict[str, Any]]:
+        """Try to extract proposals JSON from Claude's raw output."""
+        import re
+        # Look for JSON array in output
+        matches = re.findall(r'\[[\s\S]*?\]', output)
+        for match in reversed(matches):  # Try last match first
+            try:
+                data = json.loads(match)
+                if isinstance(data, list) and data and isinstance(data[0], dict):
+                    if "title" in data[0]:
+                        return data
+            except (json.JSONDecodeError, IndexError):
+                continue
+        return []
+
+    # ── Council mode methods ──
+
+    def _run_council_cycle(
+        self, session_dir: Path, report: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Run the full Executive Research Council cycle.
+
+        Phase 1: Hypothesis generation — 5 specialist sessions
+        Phase 2: Peer review — 5 review sessions
+        Phase 3: Consensus scoring — pure Python
+
+        Returns proposals that pass consensus threshold (for SafetyGate).
+        """
+        researchers = self.researcher_cfg.get("researchers", [
+            "mathematician", "cryptographer", "physicist",
+            "linguist", "systems_engineer",
+        ])
+        max_turns = self.researcher_cfg.get("council_max_turns", 30)
+        max_minutes = self.researcher_cfg.get("council_max_minutes", 25)
+        project_root = self._project_root
+
+        # Prepare snapshot
+        snapshot_script = project_root / "scripts" / "prepare_research_snapshot.sh"
+        if snapshot_script.exists():
+            try:
+                subprocess.run(
+                    ["bash", str(snapshot_script)], timeout=120,
+                    capture_output=True, cwd=str(project_root),
+                )
+                self.logger.info("Research snapshot created")
+            except Exception as exc:
+                self.logger.warning("Snapshot creation failed (continuing): %s", exc)
+
+        snapshot_dir = project_root / "data" / "research_snapshots" / "latest"
+
+        # Phase 1: Hypothesis generation
+        self.logger.info(
+            "Council Phase 1: Hypothesis generation (%d researchers)", len(researchers),
+        )
+        for name in researchers:
+            self.logger.info("  Launching researcher: %s", name)
+            try:
+                self._launch_researcher_session(
+                    researcher_name=name,
+                    phase="hypothesize",
+                    session_dir=session_dir,
+                    snapshot_dir=snapshot_dir,
+                    project_root=project_root,
+                    max_turns=max_turns,
+                    timeout_minutes=max_minutes,
+                )
+            except Exception as exc:
+                self.logger.warning("Researcher %s hypothesis session failed: %s", name, exc)
+
+        # Phase 2: Peer review
+        self.logger.info(
+            "Council Phase 2: Peer review (%d researchers)", len(researchers),
+        )
+        for name in researchers:
+            self.logger.info("  Launching reviewer: %s", name)
+            try:
+                self._launch_researcher_session(
+                    researcher_name=name,
+                    phase="review",
+                    session_dir=session_dir,
+                    snapshot_dir=snapshot_dir,
+                    project_root=project_root,
+                    max_turns=max(10, max_turns // 2),
+                    timeout_minutes=max(10, max_minutes // 2),
+                )
+            except Exception as exc:
+                self.logger.warning("Researcher %s review session failed: %s", name, exc)
+
+        # Phase 3: Consensus scoring
+        self.logger.info("Council Phase 3: Consensus scoring")
+        try:
+            scripts_dir = str(project_root / "scripts")
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            from score_proposals import score
+            passing_proposals = score(session_dir)
+        except Exception as exc:
+            self.logger.error("Consensus scoring failed: %s", exc)
+            passing_proposals = self._collect_all_proposals(session_dir, researchers)
+
+        # Update outcome ledger
+        try:
+            updater = project_root / "scripts" / "update_council_memory.py"
+            if updater.exists():
+                subprocess.run(
+                    [str(project_root / ".venv" / "bin" / "python3"), str(updater)],
+                    timeout=30, capture_output=True, cwd=str(project_root),
+                )
+        except Exception:
+            pass
+
+        self.logger.info(
+            "Council cycle complete: %d proposals pass consensus", len(passing_proposals),
+        )
+        return passing_proposals
+
+    def _launch_researcher_session(
+        self,
+        researcher_name: str,
+        phase: str,
+        session_dir: Path,
+        snapshot_dir: Path,
+        project_root: Path,
+        max_turns: int = 30,
+        timeout_minutes: int = 25,
+    ) -> None:
+        """Launch a single Claude Code session for one researcher in one phase."""
+        # Load researcher profile
+        profile_path = project_root / "researchers" / f"{researcher_name}.md"
+        if not profile_path.exists():
+            self.logger.warning("Researcher profile not found: %s", profile_path)
+            return
+        researcher_profile = profile_path.read_text()
+
+        # Load journal (institutional memory)
+        journal_path = (
+            project_root / "data" / "council_memory" / "journals"
+            / f"{researcher_name}_journal.md"
+        )
+        journal_content = journal_path.read_text() if journal_path.exists() else "(No previous sessions)"
+
+        # Load outcome ledger
+        ledger_path = project_root / "data" / "council_memory" / "outcome_ledger.json"
+        ledger_content = ledger_path.read_text() if ledger_path.exists() else "{}"
+
+        # Create per-researcher output directory
+        if phase == "hypothesize":
+            output_dir = session_dir / "proposals" / researcher_name
+        else:
+            output_dir = session_dir / "reviews" / researcher_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build prompt
+        if phase == "hypothesize":
+            prompt = self._build_hypothesis_prompt(
+                researcher_name, researcher_profile, journal_content,
+                ledger_content, session_dir, snapshot_dir, output_dir,
+            )
+        elif phase == "review":
+            prompt = self._build_review_prompt(
+                researcher_name, researcher_profile, journal_content,
+                session_dir, output_dir,
+            )
+        else:
+            self.logger.error("Unknown phase: %s", phase)
+            return
+
+        # Save prompt for debugging
+        (output_dir / f"{phase}_prompt.md").write_text(prompt)
+
+        # ── DEFENSE IN DEPTH: Per-researcher DB snapshot + restrictive settings ──
+        db_snapshot = output_dir / "research_db.sqlite"
+        try:
+            db_source = Path(self.db_path)
+            src_conn = sqlite3.connect(str(db_source), timeout=10.0)
+            dst_conn = sqlite3.connect(str(db_snapshot))
+            src_conn.backup(dst_conn)
+            dst_conn.close()
+            src_conn.close()
+            os.chmod(str(db_snapshot), 0o444)
+        except Exception as exc:
+            self.logger.warning("Per-researcher DB snapshot failed: %s", exc)
+
+        # Write restrictive settings.json into output_dir so cwd picks it up
+        settings_dir = output_dir / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        (settings_dir / "settings.json").write_text(
+            json.dumps(RESEARCHER_SETTINGS_JSON, indent=2)
+        )
+
+        # Write db_access.py helper
+        db_path_str = str(db_snapshot) if db_snapshot.exists() else str(Path(self.db_path))
+        (output_dir / "db_access.py").write_text(
+            f'"""Read-only database access for research sessions."""\n'
+            f'import sqlite3\n'
+            f'from typing import Any, Dict, List\n'
+            f'DB_PATH = "{db_path_str}"\n'
+            f'_RO_URI = f"file:{{DB_PATH}}?mode=ro"\n'
+            f'def get_connection() -> sqlite3.Connection:\n'
+            f'    conn = sqlite3.connect(_RO_URI, uri=True, timeout=10.0)\n'
+            f'    conn.row_factory = sqlite3.Row\n'
+            f'    return conn\n'
+            f'def query(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:\n'
+            f'    conn = get_connection()\n'
+            f'    try:\n'
+            f'        return [dict(r) for r in conn.execute(sql, params).fetchall()]\n'
+            f'    finally:\n'
+            f'        conn.close()\n'
+            f'def query_one(sql: str, params: tuple = ()) -> Dict[str, Any]:\n'
+            f'    results = query(sql, params)\n'
+            f'    return results[0] if results else {{}}\n'
+        )
+
+        # Snapshot untracked files BEFORE session (for integrity comparison)
+        pre_session_untracked: set[str] = set()
+        try:
+            pre_result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(self._project_root),
+            )
+            pre_session_untracked = {
+                f.strip() for f in (pre_result.stdout or "").strip().split("\n") if f.strip()
+            }
+        except Exception:
+            pass
+
+        # Launch Claude Code — cwd=output_dir so it reads restrictive settings.json
+        try:
+            result = subprocess.run(
+                ["claude", "--print", "--max-turns", str(max_turns), "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=timeout_minutes * 60,
+                cwd=str(output_dir),
+                env=self._clean_env(),
+            )
+            (output_dir / "claude_output.txt").write_text(result.stdout or "")
+            if result.stderr:
+                (output_dir / "claude_stderr.txt").write_text(result.stderr)
+
+            # Check for proposals.json or reviews.json
+            expected_file = "proposals.json" if phase == "hypothesize" else "reviews.json"
+            if not (output_dir / expected_file).exists():
+                extracted = self._extract_proposals_from_output(result.stdout or "")
+                if extracted:
+                    (output_dir / expected_file).write_text(
+                        json.dumps(extracted, indent=2, default=str)
+                    )
+
+            # Harvest updated journal
+            self._harvest_journal_update(researcher_name, result.stdout or "", project_root)
+
+            # ── DEFENSE IN DEPTH: Post-session integrity check ──
+            integrity = self._verify_session_integrity(output_dir, pre_session_untracked)
+            if not integrity["passed"]:
+                self.logger.error(
+                    "SESSION INTEGRITY FAILED for %s — discarding proposals: %s",
+                    researcher_name, integrity["violations"],
+                )
+                log_agent_event(
+                    self.db_path,
+                    agent_name=self.name,
+                    event_type="integrity_violation",
+                    channel="researcher.security",
+                    payload=integrity,
+                    severity="critical",
+                )
+                # Remove proposals/reviews from compromised session
+                compromised = output_dir / expected_file
+                if compromised.exists():
+                    compromised.unlink()
+
+        except subprocess.TimeoutExpired:
+            self.logger.warning(
+                "Researcher %s %s timed out after %dm",
+                researcher_name, phase, timeout_minutes,
+            )
+        except FileNotFoundError:
+            self.logger.warning("'claude' CLI not found — skipping session")
+        except Exception as exc:
+            self.logger.error("Researcher %s %s failed: %s", researcher_name, phase, exc)
+
+    def _verify_session_integrity(
+        self,
+        output_dir: Path,
+        pre_session_untracked: set[str] | None = None,
+    ) -> Dict[str, Any]:
+        """Post-session integrity check: verify researcher didn't escape sandbox.
+
+        Checks:
+        1. DB snapshot still has read-only permissions (chmod 444)
+        2. No critical project files were modified (git diff)
+        3. No NEW unauthorized files created during session
+        """
+        result: Dict[str, Any] = {"passed": True, "violations": []}
+
+        # Check 1: DB snapshot permissions
+        db_snapshot = output_dir / "research_db.sqlite"
+        if db_snapshot.exists():
+            import stat
+            mode = db_snapshot.stat().st_mode
+            # Should be 444 (read-only for all)
+            if mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+                result["violations"].append(
+                    f"DB snapshot permissions changed: {oct(mode & 0o777)}"
+                )
+                result["passed"] = False
+
+        # Check 2: Critical files not modified (git diff)
+        critical_files = [
+            "renaissance_trading_bot.py",
+            "risk_gateway.py",
+            "position_sizer.py",
+            "kelly_position_sizer.py",
+            "core/portfolio_engine.py",
+            "regime_overlay.py",
+            "real_time_pipeline.py",
+            "ml_model_loader.py",
+            "database_manager.py",
+            "config/config.json",
+            "agents/safety_gate.py",
+            "agents/quant_researcher.py",
+        ]
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(self._project_root),
+            )
+            modified = set((diff_result.stdout or "").strip().split("\n"))
+            modified.discard("")
+            for f in critical_files:
+                if f in modified:
+                    result["violations"].append(f"Critical file modified: {f}")
+                    result["passed"] = False
+        except Exception as exc:
+            self.logger.warning("Git diff check failed: %s", exc)
+
+        # Check 3: No NEW files created in project root during session
+        try:
+            untracked_result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(self._project_root),
+            )
+            post_untracked = {
+                f.strip() for f in (untracked_result.stdout or "").strip().split("\n")
+                if f.strip()
+            }
+            # Only flag files that are genuinely NEW (not pre-existing)
+            new_files = post_untracked - (pre_session_untracked or set())
+            try:
+                session_rel = str(output_dir.relative_to(self._project_root))
+            except ValueError:
+                session_rel = ""
+            for f in sorted(new_files):
+                if f.startswith("data/research_sessions/"):
+                    continue  # Expected
+                if session_rel and f.startswith(session_rel):
+                    continue  # Expected
+                # Suspicious: new code/config file created during session
+                if f.endswith((".py", ".json", ".yaml", ".yml", ".sh")):
+                    result["violations"].append(f"New file created during session: {f}")
+                    result["passed"] = False
+        except Exception as exc:
+            self.logger.warning("Untracked files check failed: %s", exc)
+
+        if result["passed"]:
+            self.logger.info("Session integrity check PASSED for %s", output_dir.name)
+        else:
+            self.logger.critical(
+                "Session integrity check FAILED: %d violations", len(result["violations"])
+            )
+
+        return result
+
+    def _build_hypothesis_prompt(
+        self,
+        name: str,
+        profile: str,
+        journal: str,
+        ledger: str,
+        session_dir: Path,
+        snapshot_dir: Path,
+        output_dir: Path,
+    ) -> str:
+        """Build the hypothesis-phase prompt for a researcher."""
+        report_path = session_dir / "weekly_report.json"
+        project_root = self._project_root
+
+        # Load dynamic brief if available
+        brief_path = project_root / "data" / "council_memory" / "briefs" / f"{name}_brief.md"
+        brief = brief_path.read_text() if brief_path.exists() else "(No brief available)"
+
+        return f"""You are the {name.replace('_', ' ').title()} on the Executive Research Council.
+
+{profile}
+
+KNOWLEDGE LIBRARY — import and use:
+    import sys; sys.path.insert(0, 'researchers')
+    from knowledge.registry import KB
+    from knowledge.atoms import *
+    print(KB.manifest("{name}"))
+    result = KB.execute("math.kelly_optimal", p=0.54, b=1.2)
+    from knowledge.shared.data_loader import load_pair_csv, get_aligned_returns
+    from knowledge.shared.queries import weekly_performance, correlation_matrix
+    from knowledge.shared.queries import (
+        audit_model_accuracy, audit_signal_effectiveness, audit_regime_performance,
+        audit_sizing_chain_analysis, audit_cost_vs_edge, audit_confluence_effectiveness,
+        audit_feature_health, audit_raw_decisions,
+    )
+    from knowledge.regime_registry import REGIME_CONFIG, Regime, ParamType
+    from knowledge.shared.dead_ends import is_dead_end
+
+DATABASE ACCESS (read-only snapshot — NEVER use the live DB):
+    # ALWAYS use the provided helper — never construct your own connection
+    from db_access import query, query_one, get_connection
+
+    rows = query("SELECT * FROM decision_audit_log ORDER BY timestamp DESC LIMIT 10")
+    stats = query_one("SELECT COUNT(*) as n, AVG(final_confidence) as avg_conf FROM decision_audit_log")
+
+DECISION AUDIT LOG — 97-column per-decision dataset:
+    import sys; sys.path.insert(0, '{project_root}/researchers')
+    from knowledge.shared.queries import (
+        audit_model_accuracy, audit_signal_effectiveness, audit_regime_performance,
+        audit_sizing_chain_analysis, audit_cost_vs_edge, audit_confluence_effectiveness,
+        audit_feature_health, audit_raw_decisions,
+    )
+    # ALWAYS use the local snapshot — NEVER the live DB
+    DB = 'research_db.sqlite'
+
+    # Which models are actually working on live data?
+    acc = audit_model_accuracy(DB, days=7)
+    print(f"Ensemble: {{acc['ensemble_accuracy']:.1%}} on {{acc['ensemble_n']}} decisions")
+
+    # Which signals have predictive power?
+    sigs = audit_signal_effectiveness(DB, days=7)
+    for s in sigs['signals'][:5]:
+        print(f"  {{s['signal_name']}}: separation={{s['separation']:.4f}}")
+
+    # Performance by regime
+    rp = audit_regime_performance(DB, days=14)
+    for r in rp['by_regime']:
+        print(f"  {{r['regime']}}: trades={{r['trades']}}, return={{r['avg_return_bps']}}bps")
+
+    # Is the Devil eating the edge?
+    costs = audit_cost_vs_edge(DB, days=7)
+
+    # Sizing chain bottlenecks
+    chain = audit_sizing_chain_analysis(DB, days=7)
+
+    # Does confluence boost help or hurt?
+    conf = audit_confluence_effectiveness(DB, days=14)
+
+    # Feature vector quality
+    fh = audit_feature_health(DB, days=3)
+
+    # Raw decision inspection
+    rows = audit_raw_decisions(DB, pair='BTC-USD', limit=10)
+
+    # Or query via db_access.py for custom SQL:
+    from db_access import query
+    worst = query(\"\"\"
+        SELECT product_id, final_action, final_confidence, effective_edge,
+               outcome_6bar, regime_label, timestamp
+        FROM decision_audit_log
+        WHERE outcome_6bar IS NOT NULL AND final_action != 'HOLD'
+        ORDER BY outcome_6bar ASC LIMIT 10
+    \"\"\")
+
+REGIME CONFIG REGISTRY — structured parameter proposals:
+    from knowledge.regime_registry import REGIME_CONFIG, Regime, ParamType
+
+    # See all current values:
+    print(REGIME_CONFIG.manifest())
+
+    # See what applies in a specific regime:
+    entries = REGIME_CONFIG.get_all(regime=Regime.HIGH_VOL)
+    for e in entries:
+        print(f"  {{e.key}} = {{e.value}} ({{e.description}})")
+
+    # Propose a change (safe — does NOT modify runtime):
+    REGIME_CONFIG.propose_change(
+        key="sizing.regime_scalar", regime="trending",
+        current_value=1.20, proposed_value=1.05,
+        rationale="audit_regime_performance shows trending returns don't justify 1.2x"
+    )
+
+    # Include registry proposals in your proposals.json:
+    import json
+    proposals = [{{
+        "title": "Reduce trending regime sizing scalar",
+        "config_changes": {{"regime_config": REGIME_CONFIG.get_proposals()}},
+        ...
+    }}]
+
+DYNAMIC BRIEF:
+{brief}
+
+JOURNAL (institutional memory):
+{journal}
+
+OUTCOME LEDGER:
+{ledger}
+
+WEEKLY REPORT: Read the file at {report_path}
+DATABASE SNAPSHOT: {snapshot_dir}/trading_snapshot.db (read-only SQLite — query freely)
+HISTORICAL DATA: {snapshot_dir}/training_data/ (5-year CSVs per pair)
+
+===============================================================
+BEFORE PROPOSING — CHECK RECENT DEPLOYMENTS
+===============================================================
+
+Read the `recent_deployments` section of the weekly report FIRST.
+These changes were deployed since your last session. DO NOT repropose them.
+
+Instead, for each recent deployment, consider:
+1. Is it working as intended? Check the data.
+2. Are there second-order effects or interactions with other changes?
+3. Does it create new opportunities for complementary improvements?
+
+Also read the `in_progress_fixes` section — these issues are already
+being addressed. Only propose alternatives if you have a fundamentally
+DIFFERENT approach.
+
+If you have a fundamentally different approach to a problem that was
+already addressed, you may propose it — but explicitly acknowledge the
+existing fix and explain why your approach is better.
+
+===============================================================
+CRITICAL: OUTPUT-FIRST WORKFLOW — Follow this EXACT sequence
+===============================================================
+
+You have a LIMITED number of turns. You MUST produce proposals.json
+before doing deep analysis. Follow this sequence:
+
+TURNS 1-5: QUICK ASSESSMENT
+  - Read the weekly report at {report_path}
+  - Check your journal for standing hypotheses
+  - Check dead ends: from knowledge.shared.dead_ends import is_dead_end
+  - Identify 1-3 improvement opportunities from your domain lens
+
+TURNS 6-12: WRITE PROPOSALS.JSON FIRST
+  - Write {output_dir}/proposals.json with your 1-3 proposals
+  - Use the EXACT format below — every field must be present
+  - For infrastructure proposals (no traditional backtest), use:
+    category: "infrastructure", deployment_mode: "infrastructure"
+    Set backtest fields to null and explain in notes why no backtest applies
+  - For parameter tunes with backtests, fill all fields with real numbers
+
+TURNS 13+: DEEPER ANALYSIS (only if time permits)
+  - Run backtests to fill in missing metrics
+  - Update proposals.json with backtest results
+  - Run KB.diagnostic("{name}") for domain-specific analysis
+  - Update your journal at data/council_memory/journals/{name}_journal.md
+
+THIS ORDER IS MANDATORY. A session that produces brilliant analysis
+but no proposals.json is a FAILED session. A session that produces
+proposals.json with incomplete metrics but clear reasoning is a
+SUCCESSFUL session that can be improved next week.
+
+===============================================================
+PROPOSAL FORMAT — proposals.json
+===============================================================
+
+Save to: {output_dir}/proposals.json
+
+[
+  {{
+    "title": "Short descriptive title (max 80 chars)",
+    "description": "What to change, why, and expected impact (2-4 sentences)",
+    "category": "parameter_tune|modify_existing|new_feature|infrastructure",
+    "deployment_mode": "parameter_tune|modify_existing|new_feature|infrastructure",
+    "config_changes": {{"key": "value"}},
+    "backtest_sharpe": 1.2,
+    "backtest_drawdown": 0.03,
+    "backtest_accuracy": 0.54,
+    "backtest_sample_size": 200,
+    "backtest_p_value": 0.02,
+    "expected_improvement_bps": 5.0,
+    "notes": "Additional context, caveats, or why backtest metrics are N/A"
+  }}
+]
+
+Category guide:
+  parameter_tune   — change a number in config (signal weight, threshold)
+                     Deploys immediately. No sandbox. Prefer this.
+  modify_existing  — change module behavior. 24h sandbox.
+  new_feature      — add capability. 72h sandbox. Human approval.
+  infrastructure   — measurement/monitoring/data quality improvement.
+                     No backtest required. Human approval required.
+                     Use when the proposal improves OBSERVABILITY or COST
+                     MEASUREMENT rather than directly changing trading signals.
+                     Set backtest_* fields to null and explain in notes.
+
+===============================================================
+
+CONSTRAINTS:
+- NEVER modify risk_gateway.py, safety limits, or circuit breakers
+- NEVER propose increasing leverage
+- Save ALL work to {output_dir}/ — never modify production code directly
+- Check dead ends before proposing — don't waste time on known failures
+"""
+
+    def _build_review_prompt(
+        self,
+        name: str,
+        profile: str,
+        journal: str,
+        session_dir: Path,
+        output_dir: Path,
+    ) -> str:
+        """Build the peer-review prompt for a researcher."""
+        researchers = [
+            'mathematician', 'cryptographer', 'physicist',
+            'linguist', 'systems_engineer',
+        ]
+        other_proposals: Dict[str, Any] = {}
+        for other in researchers:
+            if other == name:
+                continue
+            prop_file = session_dir / "proposals" / other / "proposals.json"
+            if prop_file.exists():
+                try:
+                    other_proposals[other] = json.loads(prop_file.read_text())
+                except Exception:
+                    pass
+
+        if not other_proposals:
+            (output_dir / "reviews.json").write_text("[]")
+            return "No proposals from other researchers to review. Session complete."
+
+        return f"""You are the {name.replace('_', ' ').title()} in PEER REVIEW mode.
+
+{profile}
+
+JOURNAL: {journal}
+
+Review these proposals. For each: ENDORSE, CHALLENGE, or REJECT.
+
+REVIEW GUIDELINES:
+- For parameter_tune proposals: Does the math support the change? Is the effect size realistic?
+- For infrastructure proposals: Does this improve our ability to MEASURE or MONITOR?
+  Infrastructure proposals don't need backtests — they improve observability.
+  Evaluate whether the measurement methodology is sound.
+- For all proposals: Check the dead ends list mentally. Don't endorse known failures.
+- Cross-domain endorsements carry extra weight in consensus scoring.
+
+PROPOSALS:
+{json.dumps(other_proposals, indent=2, default=str)}
+
+Save to {output_dir}/reviews.json:
+[
+  {{
+    "researcher": "name_of_proposer",
+    "proposal_title": "title from their proposal",
+    "verdict": "endorse|challenge|reject",
+    "reasoning": "Your domain-specific analysis (2-4 sentences)",
+    "suggested_improvements": "If challenging, what would fix it",
+    "confidence": 0.8
+  }}
+]
+
+Be rigorous. Challenge weak reasoning. Endorse only what you'd stake your reputation on.
+"""
+
+    def _collect_all_proposals(
+        self, session_dir: Path, researchers: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Fallback: collect all proposals without consensus filtering."""
+        all_props: List[Dict[str, Any]] = []
+        for name in researchers:
+            prop_file = session_dir / "proposals" / name / "proposals.json"
+            if prop_file.exists():
+                try:
+                    props = json.loads(prop_file.read_text())
+                    for p in props:
+                        p["_source_researcher"] = name
+                    all_props.extend(props)
+                except Exception:
+                    pass
+        return all_props
+
+    def _harvest_journal_update(
+        self, researcher_name: str, stdout: str, project_root: Path,
+    ) -> None:
+        """Check if the researcher updated their journal during the session."""
+        journal_path = (
+            project_root / "data" / "council_memory" / "journals"
+            / f"{researcher_name}_journal.md"
+        )
+        if journal_path.exists():
+            lines = len(journal_path.read_text().splitlines())
+            self.logger.info("Journal for %s: %d lines", researcher_name, lines)
+
+    def _evaluate_proposals(
+        self, proposals: List[Dict[str, Any]], report: Dict[str, Any],
+    ) -> None:
+        """Run each proposal through SafetyGate and store results."""
+        summary = report.get("summary", {})
+        current_sharpe = summary.get("sharpe_7d", 0.0) or 0.0
+
+        # Estimate current max drawdown from daily P&L
+        daily_pnl = report.get("portfolio", {}).get("daily_pnl", [])
+        current_dd = 0.05  # default
+        if daily_pnl:
+            pnls = [d.get("pnl", 0) for d in daily_pnl]
+            peak = 0.0
+            max_dd = 0.0
+            running = 0.0
+            for p in pnls:
+                running += p
+                if running > peak:
+                    peak = running
+                dd = (peak - running) / max(peak, 1.0)
+                if dd > max_dd:
+                    max_dd = dd
+            if max_dd > 0:
+                current_dd = max_dd
+
+        gate = SafetyGate(current_sharpe=current_sharpe, current_max_dd=current_dd)
+
+        accepted = 0
+        for p_data in proposals[:self.max_proposals]:
+            try:
+                proposal = Proposal.from_dict(p_data)
+                results = gate.evaluate(proposal)
+
+                # Store in DB regardless of pass/fail
+                proposal_dict = proposal.to_dict()
+                proposal_dict["safety_gate_results"] = results
+                pid = insert_proposal(self.db_path, proposal_dict)
+                proposal.proposal_id = pid
+
+                if results["overall"]:
+                    accepted += 1
+                    self.event_bus.emit("researcher.proposal_accepted", {
+                        "id": pid,
+                        "title": proposal.title,
+                        "category": proposal.category,
+                    })
+                else:
+                    self.event_bus.emit("researcher.proposal_rejected", {
+                        "id": pid,
+                        "title": proposal.title,
+                        "reasons": [
+                            g.get("reason") for g in results["gates"].values()
+                            if not g["passed"]
+                        ],
+                    })
+
+            except Exception as exc:
+                self.logger.warning("Failed to evaluate proposal: %s", exc)
+
+        self.logger.info(
+            "QuantResearcher: %d/%d proposals accepted by SafetyGate",
+            accepted, min(len(proposals), self.max_proposals),
+        )
+
+
+# ── Standalone / manual entry point ──
+
+def _main() -> None:
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser(description="Quant Researcher Agent")
+    parser.add_argument("--manual", action="store_true", help="Run one research cycle manually")
+    parser.add_argument("--no-claude", action="store_true", help="Skip Claude Code launch (report only)")
+    parser.add_argument("--report-only", action="store_true", help="Only compile report, no Claude Code")
+    parser.add_argument("--council", action="store_true", help="Run full council cycle instead of single researcher")
+    parser.add_argument("--db", default="data/renaissance_bot.db", help="DB path")
+    parser.add_argument("--config", default="config/config.json", help="Config path")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    config: Dict[str, Any] = {}
+    if os.path.exists(args.config):
+        with open(args.config) as f:
+            config = json.load(f)
+
+    if args.report_only:
+        from agents.db_schema import ensure_agent_tables
+        ensure_agent_tables(args.db)
+        collector = ObservationCollector(db_path=args.db, config=config)
+        report = collector.compile_weekly_report()
+        filepath = collector.save_report(report)
+        print(json.dumps(report.get("summary", {}), indent=2))
+        print(f"\nFull report: {filepath}")
+        return
+
+    if args.manual or args.council:
+        from agents.event_bus import EventBus
+        from agents.db_schema import ensure_agent_tables
+        ensure_agent_tables(args.db)
+
+        bus = EventBus()
+        config_copy = dict(config)
+        config_copy.setdefault("quant_researcher", {})
+        # --no-claude disables Claude launch; --manual alone respects config
+        if args.no_claude:
+            config_copy["quant_researcher"]["enabled"] = False
+        # --council overrides mode
+        if args.council:
+            config_copy["quant_researcher"]["research_mode"] = "council"
+            config_copy["quant_researcher"]["enabled"] = True
+
+        researcher = QuantResearcherAgent(
+            event_bus=bus,
+            db_path=args.db,
+            config=config_copy,
+        )
+        asyncio.run(researcher.run_weekly_research())
+        mode = config_copy["quant_researcher"].get("research_mode", "single")
+        claude_status = "disabled (--no-claude)" if args.no_claude else (
+            f"enabled ({mode} mode)" if config_copy["quant_researcher"].get("enabled") else "disabled (config)"
+        )
+        print(f"\nManual research cycle complete (Claude Code: {claude_status}).")
+
+
+if __name__ == "__main__":
+    _main()

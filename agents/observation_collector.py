@@ -1,0 +1,620 @@
+"""ObservationCollector — compiles weekly observation reports from DB + agent data.
+
+``compile_weekly_report()`` queries existing tables and returns a JSON-serializable
+dict covering portfolio, signals, regimes, ML models, execution, risk events,
+data quality, and config snapshot.
+
+Can be run standalone:
+    python -m agents.observation_collector
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agents.coordinator import AgentCoordinator
+
+logger = logging.getLogger(__name__)
+
+
+class ObservationCollector:
+    """Compiles a comprehensive weekly observation report."""
+
+    def __init__(
+        self,
+        db_path: str,
+        config: Dict[str, Any],
+        coordinator: Optional[AgentCoordinator] = None,
+    ) -> None:
+        self.db_path = db_path
+        self.config = config
+        self.coordinator = coordinator
+
+    def compile_weekly_report(self, window_hours: int = 168) -> Dict[str, Any]:
+        """Build the full weekly observation report.
+
+        Returns a JSON-serializable dict with sections for every dimension
+        the quant researcher needs.
+        """
+        now = datetime.now(timezone.utc)
+        week_start = (now - timedelta(hours=window_hours)).isoformat()
+        week_end = now.isoformat()
+
+        report: Dict[str, Any] = {
+            "meta": {
+                "generated_at": now.isoformat(),
+                "week_start": week_start,
+                "week_end": week_end,
+                "window_hours": window_hours,
+            },
+        }
+
+        conn = sqlite3.connect(
+            f"file:{self.db_path}?mode=ro", uri=True, timeout=10.0,
+        )
+        conn.row_factory = sqlite3.Row
+
+        # Context sections — researchers read these FIRST
+        report["recent_deployments"] = self._collect_recent_deployments(conn)
+        report["in_progress_fixes"] = self._collect_in_progress_fixes(conn)
+        report["known_issues_unfixed"] = self._collect_known_issues_unfixed(conn)
+
+        report["portfolio"] = self._portfolio_section(conn, window_hours)
+        report["signals"] = self._signals_section(conn, window_hours)
+        report["regimes"] = self._regimes_section(conn, window_hours)
+        report["ml_models"] = self._ml_section(conn, window_hours)
+        report["execution"] = self._execution_section(conn, window_hours)
+        report["risk_events"] = self._risk_events_section(conn, window_hours)
+        report["data_quality"] = self._data_quality_section(conn, window_hours)
+        report["config_snapshot"] = self._config_snapshot()
+
+        # Collect agent observations if coordinator is available
+        if self.coordinator:
+            report["agent_observations"] = self.coordinator.get_all_observations(window_hours)
+
+        conn.close()
+
+        # Compute summary metrics
+        report["summary"] = self._compute_summary(report)
+
+        return report
+
+    def save_report(self, report: Dict[str, Any]) -> str:
+        """Save report to weekly_reports table and to disk as JSON.
+
+        Returns the file path of the saved JSON.
+        """
+        # Save to DB
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            summary = report.get("summary", {})
+            conn.execute(
+                """INSERT INTO weekly_reports
+                   (week_start, week_end, report_json, sharpe_7d, total_pnl, total_trades, win_rate)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    report["meta"]["week_start"],
+                    report["meta"]["week_end"],
+                    json.dumps(report),
+                    summary.get("sharpe_7d"),
+                    summary.get("total_pnl"),
+                    summary.get("total_trades"),
+                    summary.get("win_rate"),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.warning("Failed to save report to DB: %s", exc)
+
+        # Save to disk
+        reports_dir = Path(self.db_path).parent.parent / "reports"
+        reports_dir.mkdir(exist_ok=True)
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        filepath = reports_dir / f"weekly_report_{date_str}.json"
+        try:
+            filepath.write_text(json.dumps(report, indent=2, default=str))
+            logger.info("Weekly report saved to %s", filepath)
+        except Exception as exc:
+            logger.warning("Failed to write report file: %s", exc)
+
+        return str(filepath)
+
+    # ── Context sections (deployment awareness) ──
+
+    def _get_last_council_timestamp(self, conn: sqlite3.Connection) -> str:
+        """Find the most recent council session timestamp from weekly_reports."""
+        try:
+            row = conn.execute(
+                "SELECT MAX(generated_at) FROM weekly_reports"
+            ).fetchone()
+            if row and row[0]:
+                return row[0]
+        except sqlite3.OperationalError:
+            pass
+        # Fallback: 7 days ago
+        return (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    def _collect_recent_deployments(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        """Gather all changes deployed since last council session."""
+        deployments: Dict[str, Any] = {
+            "section": "recent_deployments",
+            "description": (
+                "Changes deployed since last council session. "
+                "DO NOT repropose these. Instead, evaluate whether "
+                "they are working as intended."
+            ),
+            "council_proposals_deployed": [],
+            "manual_fixes_deployed": [],
+            "active_experiments": [],
+            "last_council_timestamp": None,
+        }
+        try:
+            last_session = self._get_last_council_timestamp(conn)
+            deployments["last_council_timestamp"] = last_session
+
+            # Council proposals deployed since last session
+            try:
+                rows = conn.execute("""
+                    SELECT id, source, title, status, deployed_at, description
+                    FROM proposals
+                    WHERE status IN ('deployed', 'sandbox', 'safety_passed')
+                      AND created_at > ?
+                    ORDER BY created_at DESC
+                """, (last_session,)).fetchall()
+                for r in rows:
+                    deployments["council_proposals_deployed"].append({
+                        "id": r["id"], "source": r["source"],
+                        "title": r["title"], "status": r["status"],
+                        "deployed_at": r["deployed_at"],
+                        "description": r["description"],
+                    })
+            except sqlite3.OperationalError:
+                pass
+
+            # Improvement log entries (manual fixes, mega specs)
+            try:
+                rows = conn.execute("""
+                    SELECT timestamp, description, change_type
+                    FROM improvement_log
+                    WHERE timestamp > ?
+                    ORDER BY timestamp DESC
+                """, (last_session,)).fetchall()
+                for r in rows:
+                    deployments["manual_fixes_deployed"].append({
+                        "timestamp": r["timestamp"],
+                        "description": r["description"],
+                        "change_type": r["change_type"],
+                    })
+            except sqlite3.OperationalError:
+                pass
+
+            # Active experiments from outcome ledger
+            project_root = Path(self.db_path).parent.parent
+            ledger_path = project_root / "data" / "council_memory" / "outcome_ledger.json"
+            if ledger_path.exists():
+                try:
+                    with open(ledger_path) as f:
+                        ledger = json.load(f)
+                    active = [e for e in ledger.get("experiments", [])
+                              if e.get("status") == "active"]
+                    deployments["active_experiments"] = active
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+        except Exception as exc:
+            logger.warning("Failed to collect recent deployments: %s", exc)
+            deployments["error"] = str(exc)
+
+        return deployments
+
+    def _collect_in_progress_fixes(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        """List issues that have specs written or fixes in progress."""
+        in_progress: Dict[str, Any] = {
+            "section": "in_progress_fixes",
+            "description": (
+                "These issues are ALREADY BEING ADDRESSED. "
+                "Do not propose fixes for these unless you have "
+                "a fundamentally different approach."
+            ),
+            "items": [],
+        }
+        try:
+            rows = conn.execute("""
+                SELECT id, source, title, status, created_at
+                FROM proposals
+                WHERE status IN ('consensus_passed', 'safety_passed',
+                                 'sandbox', 'pending_review')
+                ORDER BY created_at DESC
+            """).fetchall()
+            for r in rows:
+                in_progress["items"].append({
+                    "id": r["id"], "source": r["source"],
+                    "title": r["title"], "status": r["status"],
+                    "created_at": r["created_at"],
+                })
+        except sqlite3.OperationalError:
+            pass
+        except Exception as exc:
+            logger.warning("Failed to collect in-progress fixes: %s", exc)
+            in_progress["error"] = str(exc)
+
+        return in_progress
+
+    def _collect_known_issues_unfixed(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        """List acknowledged issues that remain unfixed.
+
+        Includes forensic audit findings at P-MEDIUM/LOW severity and
+        any rejected/stalled proposals that identify real problems.
+        Researchers should investigate these — they may propose fixes
+        or validate that they're no longer relevant.
+        """
+        issues: Dict[str, Any] = {
+            "section": "known_issues_unfixed",
+            "description": (
+                "These issues have been IDENTIFIED but NOT YET FIXED. "
+                "Researchers may propose solutions, validate severity, "
+                "or determine they are no longer relevant."
+            ),
+            "forensic_findings": [
+                {
+                    "id": "F-9", "severity": "P-MEDIUM",
+                    "title": "Duplicate UNI-USD Polymarket position",
+                    "details": "Two open positions for same market creating ambiguous P&L tracking.",
+                },
+                {
+                    "id": "F-10", "severity": "P-MEDIUM",
+                    "title": "Timestamp format inconsistency",
+                    "details": "Mix of ISO 8601 and Unix timestamps across tables complicates joins.",
+                },
+                {
+                    "id": "F-11", "severity": "P-MEDIUM",
+                    "title": "$25 Polymarket bankroll discrepancy",
+                    "details": "Config says $500 but actual deployed bankroll was $475.",
+                },
+                {
+                    "id": "F-12", "severity": "P-MEDIUM",
+                    "title": "No balance snapshots",
+                    "details": "No periodic exchange balance snapshots — can't audit equity curve.",
+                },
+                {
+                    "id": "F-13", "severity": "P-LOW",
+                    "title": "HMM file permissions may recur",
+                    "details": "Fixed in forensic #6 but root cause (root touching .git) may recur on VPS.",
+                },
+                {
+                    "id": "F-14", "severity": "P-MEDIUM",
+                    "title": "BUY signal bias (3.4:1 BUY/SELL ratio)",
+                    "details": (
+                        "Partially addressed by disabling zombie models. "
+                        "Needs re-measurement with clean ensemble."
+                    ),
+                },
+                {
+                    "id": "F-15", "severity": "P-MEDIUM",
+                    "title": "26+ silent except+pass blocks in codebase",
+                    "details": (
+                        "Bare exception handlers silently swallowing errors. "
+                        "Each one could be hiding a bug."
+                    ),
+                },
+            ],
+            "stalled_proposals": [],
+        }
+
+        # Add any rejected/stalled proposals that identified real problems
+        try:
+            rows = conn.execute("""
+                SELECT id, source, title, status, created_at, description
+                FROM proposals
+                WHERE status IN ('rejected', 'stalled', 'reverted')
+                ORDER BY created_at DESC
+                LIMIT 10
+            """).fetchall()
+            for r in rows:
+                issues["stalled_proposals"].append({
+                    "id": r["id"], "source": r["source"],
+                    "title": r["title"], "status": r["status"],
+                    "created_at": r["created_at"],
+                    "description": r["description"],
+                })
+        except sqlite3.OperationalError:
+            pass
+        except Exception as exc:
+            logger.warning("Failed to collect stalled proposals: %s", exc)
+
+        return issues
+
+    # ── Section builders ──
+
+    def _portfolio_section(self, conn: sqlite3.Connection, hours: int) -> Dict[str, Any]:
+        section: Dict[str, Any] = {}
+        try:
+            # Trades summary (trades table is a fill log — no pnl column)
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt
+                   FROM trades
+                   WHERE timestamp >= datetime('now', ? || ' hours')""",
+                (f"-{hours}",),
+            ).fetchone()
+            section["total_trades"] = row["cnt"] if row else 0
+
+            # Use daily_performance for P&L aggregates
+            row = conn.execute(
+                """SELECT SUM(total_trades) as trades,
+                          SUM(winning_trades) as wins,
+                          SUM(net_profit_usd) as total_pnl,
+                          MAX(net_profit_usd) as best_day,
+                          MIN(net_profit_usd) as worst_day
+                   FROM daily_performance
+                   WHERE date >= date('now', ? || ' days')""",
+                (f"-{hours // 24}",),
+            ).fetchone()
+            if row and row["trades"]:
+                section["total_trades"] = row["trades"] or 0
+                section["wins"] = row["wins"] or 0
+                section["total_pnl"] = round(row["total_pnl"] or 0.0, 2)
+                section["best_day_pnl"] = round(row["best_day"] or 0.0, 4)
+                section["worst_day_pnl"] = round(row["worst_day"] or 0.0, 4)
+                trades = section["total_trades"]
+                section["win_rate"] = round(section["wins"] / trades, 4) if trades > 0 else 0.0
+            else:
+                section["wins"] = 0
+                section["total_pnl"] = 0.0
+                section["win_rate"] = 0.0
+
+            # Open positions
+            row = conn.execute(
+                "SELECT COUNT(*) FROM open_positions WHERE status='open'"
+            ).fetchone()
+            section["open_positions"] = row[0] if row else 0
+
+            # Daily performance timeline
+            rows = conn.execute(
+                """SELECT date, net_profit_usd, total_trades, winning_trades
+                   FROM daily_performance
+                   WHERE date >= date('now', ? || ' days')
+                   ORDER BY date""",
+                (f"-{hours // 24}",),
+            ).fetchall()
+            section["daily_pnl"] = [
+                {"date": r["date"], "pnl": r["net_profit_usd"],
+                 "trades": r["total_trades"], "wins": r["winning_trades"]}
+                for r in rows
+            ]
+        except Exception as exc:
+            section["error"] = str(exc)
+        return section
+
+    def _signals_section(self, conn: sqlite3.Connection, hours: int) -> Dict[str, Any]:
+        section: Dict[str, Any] = {}
+        try:
+            rows = conn.execute(
+                """SELECT signal_type, SUM(pnl) as total_pnl, COUNT(*) as days
+                   FROM signal_daily_pnl
+                   WHERE date >= date('now', ? || ' days')
+                   GROUP BY signal_type
+                   ORDER BY total_pnl DESC""",
+                (f"-{hours // 24}",),
+            ).fetchall()
+            section["per_signal_pnl"] = [
+                {"signal": r["signal_type"], "pnl": round(r["total_pnl"], 2), "days": r["days"]}
+                for r in rows
+            ]
+            # Decision confidence distribution
+            rows = conn.execute(
+                """SELECT
+                    CASE
+                        WHEN confidence < 0.3 THEN 'low'
+                        WHEN confidence < 0.6 THEN 'medium'
+                        ELSE 'high'
+                    END as bucket,
+                    COUNT(*) as cnt
+                   FROM decisions
+                   WHERE timestamp >= datetime('now', ? || ' hours')
+                   GROUP BY bucket""",
+                (f"-{hours}",),
+            ).fetchall()
+            section["confidence_distribution"] = {r["bucket"]: r["cnt"] for r in rows}
+        except Exception as exc:
+            section["error"] = str(exc)
+        return section
+
+    def _regimes_section(self, conn: sqlite3.Connection, hours: int) -> Dict[str, Any]:
+        section: Dict[str, Any] = {}
+        try:
+            rows = conn.execute(
+                """SELECT hmm_regime, COUNT(*) as cnt,
+                          AVG(confidence) as avg_conf
+                   FROM decisions
+                   WHERE timestamp >= datetime('now', ? || ' hours')
+                   GROUP BY hmm_regime
+                   ORDER BY cnt DESC""",
+                (f"-{hours}",),
+            ).fetchall()
+            section["regime_distribution"] = [
+                {"regime": r["hmm_regime"], "decisions": r["cnt"],
+                 "avg_confidence": round(r["avg_conf"], 4)}
+                for r in rows
+            ]
+        except Exception as exc:
+            section["error"] = str(exc)
+        return section
+
+    def _ml_section(self, conn: sqlite3.Connection, hours: int) -> Dict[str, Any]:
+        section: Dict[str, Any] = {}
+        try:
+            rows = conn.execute(
+                """SELECT model_name, COUNT(*) as cnt, AVG(confidence) as avg_conf
+                   FROM ml_predictions
+                   WHERE timestamp >= datetime('now', ? || ' hours')
+                   GROUP BY model_name""",
+                (f"-{hours}",),
+            ).fetchall()
+            section["predictions_per_model"] = [
+                {"model": r["model_name"], "count": r["cnt"],
+                 "avg_confidence": round(r["avg_conf"], 4) if r["avg_conf"] else None}
+                for r in rows
+            ]
+        except sqlite3.OperationalError:
+            section["predictions_per_model"] = []
+        except Exception as exc:
+            section["error"] = str(exc)
+        # Model ledger
+        try:
+            rows = conn.execute(
+                "SELECT * FROM model_ledger ORDER BY timestamp DESC LIMIT 10"
+            ).fetchall()
+            section["model_ledger"] = [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            section["model_ledger"] = []
+        return section
+
+    def _execution_section(self, conn: sqlite3.Connection, hours: int) -> Dict[str, Any]:
+        section: Dict[str, Any] = {}
+        try:
+            rows = conn.execute(
+                """SELECT signal_type,
+                          COUNT(*) as fills,
+                          AVG(slippage_bps) as avg_slip,
+                          AVG(latency_signal_to_fill_ms) as avg_latency,
+                          AVG(devil) as avg_devil
+                   FROM devil_tracker
+                   WHERE signal_timestamp >= datetime('now', ? || ' hours')
+                   GROUP BY signal_type""",
+                (f"-{hours}",),
+            ).fetchall()
+            section["per_signal_execution"] = [
+                {
+                    "signal_type": r["signal_type"],
+                    "fills": r["fills"],
+                    "avg_slippage_bps": round(r["avg_slip"], 2) if r["avg_slip"] else 0.0,
+                    "avg_latency_ms": round(r["avg_latency"], 1) if r["avg_latency"] else 0.0,
+                    "avg_devil": round(r["avg_devil"], 4) if r["avg_devil"] else 0.0,
+                }
+                for r in rows
+            ]
+        except Exception as exc:
+            section["error"] = str(exc)
+        return section
+
+    def _risk_events_section(self, conn: sqlite3.Connection, hours: int) -> Dict[str, Any]:
+        section: Dict[str, Any] = {}
+        try:
+            rows = conn.execute(
+                """SELECT event_type, severity, COUNT(*) as cnt
+                   FROM agent_events
+                   WHERE timestamp >= datetime('now', ? || ' hours')
+                   GROUP BY event_type, severity
+                   ORDER BY cnt DESC""",
+                (f"-{hours}",),
+            ).fetchall()
+            section["events_by_type"] = [
+                {"type": r["event_type"], "severity": r["severity"], "count": r["cnt"]}
+                for r in rows
+            ]
+        except sqlite3.OperationalError:
+            section["events_by_type"] = []
+        except Exception as exc:
+            section["error"] = str(exc)
+        return section
+
+    def _data_quality_section(self, conn: sqlite3.Connection, hours: int) -> Dict[str, Any]:
+        section: Dict[str, Any] = {}
+        try:
+            rows = conn.execute(
+                """SELECT pair, COUNT(*) as bars,
+                          MIN(bar_start) as first_bar,
+                          MAX(bar_end) as last_bar
+                   FROM five_minute_bars
+                   GROUP BY pair
+                   ORDER BY bars DESC"""
+            ).fetchall()
+            section["bar_completeness"] = [
+                {"pair": r["pair"], "total_bars": r["bars"],
+                 "first": r["first_bar"], "last": r["last_bar"]}
+                for r in rows
+            ]
+            # Expected bars in window
+            expected = hours * 12  # 12 five-minute bars per hour
+            for entry in section["bar_completeness"]:
+                entry["completeness_pct"] = round(
+                    min(entry["total_bars"] / expected * 100, 100.0), 1,
+                )
+        except Exception as exc:
+            section["error"] = str(exc)
+        return section
+
+    def _config_snapshot(self) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {}
+        snapshot["signal_weights"] = self.config.get("signal_weights", {})
+        snapshot["risk_management"] = self.config.get("risk_management", {})
+        snapshot["regime_overlay"] = self.config.get("regime_overlay", {})
+        snapshot["risk_gateway"] = self.config.get("risk_gateway", {})
+        return snapshot
+
+    def _compute_summary(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        portfolio = report.get("portfolio", {})
+        summary: Dict[str, Any] = {
+            "total_pnl": portfolio.get("total_pnl", 0.0),
+            "total_trades": portfolio.get("total_trades", 0),
+            "win_rate": portfolio.get("win_rate", 0.0),
+            "open_positions": portfolio.get("open_positions", 0),
+        }
+        # Compute 7-day Sharpe from daily P&L
+        daily_pnl = portfolio.get("daily_pnl", [])
+        if len(daily_pnl) >= 2:
+            pnls = [d.get("pnl", 0.0) for d in daily_pnl if d.get("pnl") is not None]
+            if pnls:
+                import statistics
+                mean_pnl = statistics.mean(pnls)
+                std_pnl = statistics.stdev(pnls) if len(pnls) > 1 else 1.0
+                summary["sharpe_7d"] = round(mean_pnl / std_pnl, 4) if std_pnl > 0 else 0.0
+            else:
+                summary["sharpe_7d"] = None
+        else:
+            summary["sharpe_7d"] = None
+
+        # Identify worst and best signals
+        signals = report.get("signals", {}).get("per_signal_pnl", [])
+        if signals:
+            summary["best_signal"] = signals[0].get("signal") if signals else None
+            summary["worst_signal"] = signals[-1].get("signal") if signals else None
+
+        return summary
+
+
+# ── Standalone entry point ──
+
+def _main() -> None:
+    """Run observation collector standalone for testing."""
+    import sys
+
+    db_path = os.environ.get("BOT_DB_PATH", "data/renaissance_bot.db")
+    config_path = os.environ.get("BOT_CONFIG_PATH", "config/config.json")
+
+    if not os.path.exists(db_path):
+        print(f"DB not found at {db_path}")
+        sys.exit(1)
+
+    config: Dict[str, Any] = {}
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            config = json.load(f)
+
+    collector = ObservationCollector(db_path=db_path, config=config)
+    report = collector.compile_weekly_report()
+    filepath = collector.save_report(report)
+    print(json.dumps(report.get("summary", {}), indent=2))
+    print(f"\nFull report saved to: {filepath}")
+
+
+if __name__ == "__main__":
+    _main()

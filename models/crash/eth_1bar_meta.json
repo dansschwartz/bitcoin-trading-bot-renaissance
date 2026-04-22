@@ -1,0 +1,111 @@
+{
+  "asset": "ETH",
+  "horizon": "1bar",
+  "horizon_label": "1-bar (5min)",
+  "training_config": "RECENT_ONLY",
+  "test_acc": 0.5302,
+  "test_auc": 0.5431,
+  "val_acc": 0.5217,
+  "val_auc": 0.5317,
+  "pred_std": 0.0277,
+  "n_rounds": 21,
+  "train_size": 108289,
+  "feature_cols": [
+    "return_1bar",
+    "return_6bar",
+    "return_12bar",
+    "return_48bar",
+    "return_288bar",
+    "vol_12bar",
+    "vol_48bar",
+    "vol_ratio",
+    "volume_surge",
+    "volume_trend",
+    "consecutive_red",
+    "drawdown_24h",
+    "rsi_14_norm",
+    "bb_pct_b",
+    "vwap_distance",
+    "spx_return_1d",
+    "spx_vs_sma",
+    "vix_norm",
+    "vix_change",
+    "vix_extreme",
+    "dxy_return_1d",
+    "dxy_trend",
+    "yield_level",
+    "yield_change",
+    "fng_norm",
+    "funding_z",
+    "funding_extreme_long",
+    "funding_extreme_short",
+    "oi_change_1h",
+    "oi_change_4h",
+    "oi_spike",
+    "ls_ratio_norm",
+    "ls_extreme_long",
+    "taker_imbalance",
+    "spx_return_5m",
+    "spx_return_15m",
+    "spx_return_1h",
+    "spx_momentum_5m",
+    "spx_direction_5m",
+    "vix_return_5m",
+    "vix_return_1h",
+    "vix_spike_5m",
+    "ndx_return_5m",
+    "ndx_return_1h",
+    "has_intraday_macro",
+    "btc_return_1bar",
+    "btc_return_6bar",
+    "btc_asset_ratio_change",
+    "btc_lead_1",
+    "btc_lead_2",
+    "btc_lead_3"
+  ],
+  "n_features": 51,
+  "deploy": true,
+  "trained_at": "2026-03-01 16:05:58",
+  "top_features": [
+    {
+      "name": "bb_pct_b",
+      "gain": 2400.4
+    },
+    {
+      "name": "vwap_distance",
+      "gain": 1026.1
+    },
+    {
+      "name": "btc_lead_1",
+      "gain": 785.2
+    },
+    {
+      "name": "return_1bar",
+      "gain": 565.4
+    },
+    {
+      "name": "spx_return_1d",
+      "gain": 546.4
+    },
+    {
+      "name": "btc_lead_2",
+      "gain": 505.2
+    },
+    {
+      "name": "vix_change",
+      "gain": 360.5
+    },
+    {
+      "name": "volume_trend",
+      "gain": 332.7
+    },
+    {
+      "name": "volume_surge",
+      "gain": 294.4
+    },
+    {
+      "name": "btc_return_1bar",
+      "gain": 288.9
+    }
+  ]
+}

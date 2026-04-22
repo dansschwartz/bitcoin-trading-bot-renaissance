@@ -1,0 +1,124 @@
+#!/bin/bash
+# Prepares a frozen data snapshot for researcher sessions.
+# Creates read-only copies so researchers cannot affect the live system.
+
+set -e
+
+PROJ_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SNAPSHOT_DIR="$PROJ_DIR/data/research_snapshots/$(date +%Y-%m-%d)"
+LATEST_LINK="$PROJ_DIR/data/research_snapshots/latest"
+
+echo "Creating research snapshot at $SNAPSHOT_DIR"
+mkdir -p "$SNAPSHOT_DIR"
+
+# 1. WAL-safe frozen copy of trading database (sqlite3 .backup API)
+#    cp is NOT safe for WAL-mode databases — use Python backup API instead
+"$PROJ_DIR/.venv/bin/python3" -c "
+import sqlite3, sys
+for name in ['renaissance_bot.db', 'trading.db']:
+    src = '$PROJ_DIR/data/' + name
+    try:
+        s = sqlite3.connect(src, timeout=10)
+        d = sqlite3.connect('$SNAPSHOT_DIR/research_db.sqlite')
+        s.backup(d)
+        d.close()
+        s.close()
+        print(f'Snapshot created from {name}')
+        sys.exit(0)
+    except Exception as e:
+        continue
+print('Warning: no database found to snapshot')
+sys.exit(1)
+" || echo "DB snapshot failed — continuing anyway"
+chmod 444 "$SNAPSHOT_DIR/research_db.sqlite" 2>/dev/null || true
+
+# 2. Symlink historical training data (large files, don't copy)
+if [ -d "$PROJ_DIR/data/training" ]; then
+    ln -sfn "$PROJ_DIR/data/training" "$SNAPSHOT_DIR/training_data"
+fi
+
+# 3. Copy model files
+if [ -d "$PROJ_DIR/models/trained" ]; then
+    cp -r "$PROJ_DIR/models/trained" "$SNAPSHOT_DIR/models"
+fi
+
+# 4. Generate quick summary
+"$PROJ_DIR/.venv/bin/python3" -c "
+import sqlite3, json
+from datetime import datetime, timezone, timedelta
+
+conn = sqlite3.connect('$SNAPSHOT_DIR/research_db.sqlite')
+now = datetime.now(timezone.utc)
+week_ago = (now - timedelta(days=7)).isoformat()
+
+summary = {
+    'snapshot_time': now.isoformat(),
+}
+
+# Safe queries — tables may not exist yet
+for table, key in [
+    ('decisions', 'total_decisions'),
+    ('positions', 'total_positions'),
+    ('proposals', 'total_proposals'),
+    ('five_minute_bars', 'total_bars'),
+]:
+    try:
+        cnt = conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+        summary[key] = cnt
+    except Exception:
+        summary[key] = 0
+
+# Pairs
+try:
+    pairs = [r[0] for r in conn.execute(
+        'SELECT DISTINCT product_id FROM decisions ORDER BY product_id'
+    ).fetchall()]
+    summary['pairs'] = pairs
+except Exception:
+    summary['pairs'] = []
+
+# Recent changes since last council report
+try:
+    last_report = conn.execute(
+        'SELECT MAX(generated_at) FROM weekly_reports'
+    ).fetchone()[0]
+    if not last_report:
+        from datetime import timedelta
+        last_report = (now - timedelta(days=7)).isoformat()
+    proposals_deployed = conn.execute(
+        \"SELECT COUNT(*) FROM proposals WHERE status IN ('deployed','sandbox','safety_passed') AND created_at > ?\",
+        (last_report,)
+    ).fetchone()[0]
+    manual_fixes = conn.execute(
+        'SELECT COUNT(*) FROM improvement_log WHERE timestamp > ?',
+        (last_report,)
+    ).fetchone()[0]
+    in_progress = conn.execute(
+        \"SELECT COUNT(*) FROM proposals WHERE status IN ('consensus_passed','safety_passed','sandbox','pending_review')\"
+    ).fetchone()[0]
+    total_changes = proposals_deployed + manual_fixes
+    summary['recent_changes'] = {
+        'council_proposals_deployed_since_last_run': proposals_deployed,
+        'manual_fixes_deployed_since_last_run': manual_fixes,
+        'in_progress': in_progress,
+        'message': f'{total_changes} changes deployed since last council run. See recent_deployments section for details.',
+    }
+except Exception as e:
+    summary['recent_changes'] = {'error': str(e)}
+
+conn.close()
+
+with open('$SNAPSHOT_DIR/snapshot_summary.json', 'w') as f:
+    json.dump(summary, f, indent=2, default=str)
+print(json.dumps(summary, indent=2, default=str))
+"
+
+# 5. Generate dynamic researcher briefs
+echo "Generating researcher knowledge briefs..."
+"$PROJ_DIR/.venv/bin/python3" "$PROJ_DIR/scripts/generate_researcher_briefs.py" 2>/dev/null || \
+  echo "Brief generation skipped (script may not exist yet)"
+
+# 6. Update latest symlink
+ln -sfn "$SNAPSHOT_DIR" "$LATEST_LINK"
+
+echo "Snapshot ready: $SNAPSHOT_DIR ($(du -sh "$SNAPSHOT_DIR" | cut -f1))"

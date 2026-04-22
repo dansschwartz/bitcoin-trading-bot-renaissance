@@ -1,0 +1,324 @@
+# === Renaissance of One — Arbitrage Configuration (Bangalore Droplet) ===
+# Bangalore droplet: Triangular arb (MEXC) + MEXC<->Binance Intl cross-exchange
+# Binance US is geo-blocked from non-US IPs
+# ALL thresholds live here. Change this file, not code.
+
+exchanges:
+  primary: mexc
+  secondary: binance
+  mexc_order_rate_limit_per_second: 5
+  kucoin_enabled: true                 # KuCoin spoke enabled
+  binance_us_enabled: false            # DISABLED — geo-blocked from India
+
+websocket:
+  enabled: true
+  mexc_endpoint: "wss://wbs-api.mexc.com/ws"
+  mexc_ping_interval_seconds: 15
+  mexc_depth_levels: 20
+  binance_endpoint: "wss://stream.binance.com:9443/ws"
+  binance_depth_levels: 20
+  binance_depth_update_speed_ms: 100
+  max_connection_age_hours: 23
+  max_reconnect_attempts: 3
+  rest_fallback_duration_seconds: 60
+
+pairs:
+  phase_1:                              # Large-cap — tight spreads, high liquidity
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - XRP/USDT
+    - BNB/USDT
+    - DOGE/USDT
+    - ADA/USDT
+    - AVAX/USDT
+    - LINK/USDT
+    - DOT/USDT
+  phase_2:                              # Mid-cap — wider spreads, cross-exchange edge
+    - NTRN/USDT
+    - G/USDT
+    - ZKP/USDT
+    - POL/USDT
+    - SONIC/USDT
+    - NEAR/USDT
+    - ATOM/USDT
+    - FIL/USDT
+    - IMX/USDT
+    - ARB/USDT
+    - OP/USDT
+    - APE/USDT
+    - SAND/USDT
+    - MANA/USDT
+    - GALA/USDT
+    - ENJ/USDT
+
+cross_exchange:
+  enabled: false                       # Off — triangular only for first week
+  min_net_spread_bps: 3.0
+  signal_ttl_seconds: 5
+  min_trade_usd: 10
+  max_trade_usd: 2000
+  scan_interval_ms: 100
+  fill_timeout_seconds: 3
+  emergency_close_seconds: 5
+  order_type: LIMIT_MAKER
+
+pair_discovery:
+  enabled: true
+  scan_interval_sec: 60
+  max_active_pairs: 40
+  min_gross_spread_bps: 3.0
+  max_gross_spread_bps: 500.0
+  min_volume_usdt: 10000
+  demotion_grace_scans: 3
+  excluded_bases:
+    - USDC
+    - BUSD
+    - DAI
+    - TUSD
+    - FDUSD
+    - WBTC
+    - WETH
+    - VANRY
+    - COTI
+    - DUSK
+    - ALGO
+
+funding_rate:
+  enabled: true
+  observation_mode: true
+  entry_threshold: 0.0001
+  exit_threshold: 0.00005
+  max_position_usd: 1000
+  max_total_positions: 3
+  check_interval_seconds: 60
+  min_differential_apr: 5.0
+  close_differential_apr: 2.0
+  max_leverage: 3.0
+
+triangular:
+  min_net_profit_bps: 5.0
+  execution_mode: hybrid_ioc_maker
+  leg1_order_type: IOC
+  leg2_order_type: LIMIT_MAKER
+  leg3_order_type: LIMIT_MAKER
+  leg1_fee_bps: 5.0
+  leg2_fee_bps: 0.0
+  leg3_fee_bps: 0.0
+  round_trip_cost_bps: 5.0
+  maker_fill_timeout_ms: 5000
+  exchange: mexc
+  start_currencies:
+    - USDT
+    - USDC
+  scan_interval_ms: 1000
+  scan_interval_ms_ws: 500
+  scan_interval_ms_rest: 1000
+  max_single_trade_usd: 50
+  max_trade_usd: 150
+  min_trade_usd: 15
+  max_trade_pct: 0.40
+  abs_max_trade_usd: 2000
+  max_depth_fraction: 0.20
+  min_depth_fraction: 0.05
+  max_capital_per_cycle: 25000
+  hourly_capital_limit: 500000
+  dynamic_sizing_enabled: true
+  observation_mode: false
+  max_signals_per_cycle: 2
+  adaptive_threshold_enabled: true
+  adaptive_threshold:
+    check_interval_attempts: 500
+    raise_if_fill_rate_below: 0.25
+    lower_if_fill_rate_above: 0.60
+    step_size_bps: 0.5
+    floor_bps: 5.0
+    ceiling_bps: 30.0
+  path_allowlist_enabled: true
+  min_avg_depth_usd: auto
+  edge_scaling:
+    thin_bps: 5
+    moderate_bps: 7
+    full_bps: 10
+
+quadrangular:
+  enabled: true
+  max_signals_per_cycle: 1
+  min_net_profit_bps: 25.0
+
+triangular_bybit:
+  enabled: false
+  min_net_profit_bps: 35.0
+  exchange: bybit
+  start_currencies:
+    - USDT
+  scan_interval_ms: 5000
+  max_trade_usd: 500
+  observation_mode: false
+  max_signals_per_cycle: 2
+
+inventory:
+  target_allocation: 0.50
+  rebalance_threshold: 0.70
+  min_rebalance_usd: 500
+  check_interval_minutes: 15
+  preferred_networks:
+    USDT: TRC20
+    USDC: SOL
+    BTC: BTC
+    ETH: ARB
+    SOL: SOL
+
+risk:
+  max_single_arb_usd: 15000
+  max_total_exposure_usd: 10000
+  max_one_sided_usd: 200
+  max_daily_loss_usd: 100
+  max_funding_position_usd: 2000
+  max_trades_per_hour: 2000
+  max_consecutive_losses: 10
+  max_api_latency_ms: 500
+  max_book_staleness_sec: 10
+  min_exchange_balance_usd: 100
+
+safety:
+  max_price_divergence_pct: 5.0
+  blocked_tokens:
+    - VANRY
+    - COTI
+    - DUSK
+    - ALGO
+  cache_ttl_hours: 24
+
+volume_participation:
+  max_participation_rate: 0.02
+  min_daily_volume_usd: 500000
+  one_sided_block_threshold: 0.20
+  one_sided_min_samples: 50
+
+realistic_fill:
+  rebalance_cost_per_trade: 0.01
+  bnb_discount: true
+
+kucoin_cross_exchange:
+  min_net_spread_bps: 2.0
+  max_trade_usd: 300
+
+kucoin_pairs:
+  phase_1:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - XRP/USDT
+    - DOGE/USDT
+    - ADA/USDT
+    - AVAX/USDT
+    - LINK/USDT
+    - DOT/USDT
+    - MATIC/USDT
+
+kucoin_risk:
+  max_single_arb_usd: 300
+  max_total_exposure_usd: 2000
+  max_daily_loss_usd: 50
+  max_trades_per_hour: 50
+
+paper_trading:
+  enabled: false                       # LIVE MODE
+  simulated_latency_ms: 50
+  simulated_fill_rate: 0.75
+
+logging:
+  level: INFO
+  file: logs/arbitrage.log
+
+basis_trading:
+  enabled: true
+  observation_mode: true
+  min_basis_bps: 5
+  max_position_usd: 1000
+  max_total_positions: 3
+  scan_interval_seconds: 120
+  symbols:
+    - BTC
+    - ETH
+    - SOL
+
+listing_arbitrage:
+  enabled: true
+  observation_mode: true
+  poll_interval_seconds: 60
+  max_position_usd: 200
+  max_concurrent_positions: 2
+  max_hold_minutes: 60
+  take_profit_pct: 0.10
+  stop_loss_pct: 0.08
+  min_volume_usd_5min: 1000
+  quote_filter: USDT
+
+statistical_pairs:
+  enabled: true
+  observation_mode: true
+  entry_z_score: 2.0
+  exit_z_score: 0.5
+  stop_z_score: 3.5
+  max_position_usd: 1500
+  max_concurrent_positions: 3
+  scan_interval_seconds: 300
+  window_size_bars: 240
+  min_history_bars: 60
+  cointegration_pvalue: 0.05
+  retest_interval_cycles: 288
+  max_half_life_bars: 120
+  min_half_life_bars: 5
+
+temporal_analyzer:
+  enabled: true
+  refresh_interval_minutes: 60
+  min_sample_size: 20
+  skip_threshold: 0.4
+
+pair_expansion:
+  enabled: true
+  min_volume_24h_usd: 50000
+  min_trades_24h: 100
+  max_spread_bps: 50
+  tier_1_max: 10
+  tier_2_max: 20
+  tier_3_max: 70
+  rescan_interval_hours: 6
+  allowed_quote_currencies: ["USDT", "BTC", "ETH", "USDC"]
+  locked_pairs: []
+
+relay_server:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8765
+
+hedged_market_maker:
+  enabled: true
+  observation_mode: false
+  min_usdc_spread_bps: 15.0
+  max_usdt_spread_bps: 10.0
+  min_spread_ratio: 3.0
+  min_usdc_volume_24h: 10000
+  min_usdt_volume_24h: 50000
+  min_trade_usd: 20
+  max_trade_usd: 50
+  target_fill_minutes: 5
+  max_volume_pct: 0.02
+  spread_capture_pct: 0.3
+  refresh_threshold_bps: 10
+  max_order_age_seconds: 300
+  max_pairs: 10
+  max_capital_deployed_pct: 0.80
+  max_directional_exposure_usd: 200
+  max_daily_loss_usd: 25
+  hedge_timeout_ms: 3000
+  hedge_slippage_bps: 2
+  rebalance_threshold_usd: 50
+  rescan_interval_minutes: 60
+  adverse_threshold_bps: 20
+  adverse_removal_pct: 0.30
+  check_interval_seconds: 0.5
+

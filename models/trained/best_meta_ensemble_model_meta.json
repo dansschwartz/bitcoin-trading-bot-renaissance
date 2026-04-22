@@ -1,0 +1,20 @@
+{
+  "model": "meta_ensemble",
+  "last_trained": "2026-02-16T16:06:36.983731+00:00",
+  "epochs_trained": 5,
+  "val_loss": 0.9970350089121838,
+  "val_dir_acc": 0.5462681796388046,
+  "test_loss": 1.0120075163040452,
+  "test_dir_acc": 0.5270237809272159,
+  "train_samples": 35775,
+  "val_samples": 6257,
+  "test_samples": 8326,
+  "device": "cpu",
+  "base_models": [
+    "quantum_transformer",
+    "bidirectional_lstm",
+    "dilated_cnn",
+    "cnn",
+    "gru"
+  ]
+}

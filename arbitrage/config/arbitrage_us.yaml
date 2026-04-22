@@ -1,0 +1,275 @@
+# === Renaissance of One — Arbitrage Configuration (US Droplet) ===
+# US droplet: MEXC + Binance US cross-exchange arb
+# Binance International is geo-blocked from US IPs (HTTP 451)
+# Route: MEXC (0% maker) <-> Binance US (0% maker, 0.01% taker) = 0.1 bps total
+
+exchanges:
+  primary: mexc
+  secondary: binance                   # Will fail from US — graceful degradation
+  mexc_order_rate_limit_per_second: 5
+  kucoin_enabled: false                # Not needed on US droplet
+  binance_us_enabled: true             # Primary spoke — Tier 0: 0% maker, 0.01% taker
+
+websocket:
+  enabled: true
+  mexc_endpoint: "wss://wbs-api.mexc.com/ws"
+  mexc_ping_interval_seconds: 15
+  mexc_depth_levels: 20
+  binance_endpoint: "wss://stream.binance.com:9443/ws"   # Will fail from US — expected
+  binance_depth_levels: 20
+  binance_depth_update_speed_ms: 100
+  max_connection_age_hours: 23
+  max_reconnect_attempts: 1            # Reduced — Binance Intl will always fail from US
+  binance_us_endpoint: "wss://stream.binance.us:9443/ws"
+  binance_us_depth_levels: 20
+  binance_us_depth_update_speed_ms: 100
+  rest_fallback_duration_seconds: 60
+
+# Top MEXC <-> Binance US overlapping pairs by 24h volume
+pairs:
+  phase_1:                              # Large-cap — highest volume on Binance US
+    - BTC/USDT
+    - ETH/USDT
+    - XRP/USDT
+    - DOGE/USDT
+    - SOL/USDT
+    - BNB/USDT
+    - HYPE/USDT
+    - PEPE/USDT
+    - HBAR/USDT
+    - ADA/USDT
+  phase_2:                              # Mid-cap — good Binance US volume
+    - ZEC/USDT
+    - FET/USDT
+    - UNI/USDT
+    - ICP/USDT
+    - AVAX/USDT
+    - LINK/USDT
+    - XLM/USDT
+    - POL/USDT
+    - ZEN/USDT
+    - AAVE/USDT
+    - BCH/USDT
+    - TFUEL/USDT
+    - SHIB/USDT
+    - VET/USDT
+    - SUI/USDT
+    - LTC/USDT
+    - IOTA/USDT
+    - NEAR/USDT
+    - ATOM/USDT
+    - DOT/USDT
+
+cross_exchange:
+  enabled: true                        # ON — this is the point of the US droplet
+  min_net_spread_bps: 3.0              # 3bps net — MEXC<->BinanceUS route costs only 0.1bps
+  signal_ttl_seconds: 5
+  min_trade_usd: 2                     # Lowered — capture thin-book wide-spread pairs (TFUEL 40+ bps)
+  max_trade_usd: 5                     # Reduced — BinUS only has ~$5 USDT for buy-side trades
+  scan_interval_ms: 100
+  fill_timeout_seconds: 3
+  emergency_close_seconds: 5
+  order_type: LIMIT_MAKER
+
+pair_discovery:
+  enabled: false                       # DISABLED — Binance Intl geo-blocked from US
+
+funding_rate:
+  enabled: false                       # DISABLED — needs Binance futures (geo-blocked from US)
+
+# Assets pre-positioned for cross-exchange arb — do NOT sell in tri arb cleanup
+inventory_cleanup_skip:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
+  - BNB
+
+triangular:
+  min_net_profit_bps: 5.0
+  execution_mode: hybrid_ioc_maker
+  leg1_order_type: IOC
+  leg2_order_type: LIMIT_MAKER
+  leg3_order_type: LIMIT_MAKER
+  leg1_fee_bps: 5.0
+  leg2_fee_bps: 0.0
+  leg3_fee_bps: 0.0
+  round_trip_cost_bps: 5.0
+  maker_fill_timeout_ms: 5000
+  exchange: mexc
+  start_currencies:
+    - USDT
+    - USDC
+  scan_interval_ms: 1000
+  scan_interval_ms_ws: 500
+  scan_interval_ms_rest: 1000
+  max_single_trade_usd: 50
+  max_trade_usd: 150
+  min_trade_usd: 15
+  max_trade_pct: 0.40
+  abs_max_trade_usd: 2000
+  max_depth_fraction: 0.20
+  min_depth_fraction: 0.05
+  max_capital_per_cycle: 25000
+  hourly_capital_limit: 500000
+  dynamic_sizing_enabled: true
+  observation_mode: false
+  max_signals_per_cycle: 2
+  adaptive_threshold_enabled: true
+  adaptive_threshold:
+    check_interval_attempts: 500
+    raise_if_fill_rate_below: 0.25
+    lower_if_fill_rate_above: 0.60
+    step_size_bps: 0.5
+    floor_bps: 5.0
+    ceiling_bps: 30.0
+  path_allowlist_enabled: true
+  min_avg_depth_usd: auto
+  edge_scaling:
+    thin_bps: 5
+    moderate_bps: 7
+    full_bps: 10
+
+quadrangular:
+  enabled: true
+  max_signals_per_cycle: 1
+  min_net_profit_bps: 25.0
+
+triangular_bybit:
+  enabled: false
+
+inventory:
+  target_allocation: 0.50
+  rebalance_threshold: 0.70
+  min_rebalance_usd: 500
+  check_interval_minutes: 15
+  preferred_networks:
+    USDT: TRC20
+    USDC: SOL
+    BTC: BTC
+    ETH: ARB
+    SOL: SOL
+
+auto_rebalance:
+  enabled: true
+  check_interval_minutes: 30
+  min_usdt_per_exchange: 10        # Rebalance if USDT drops below this
+  target_usdt_per_exchange: 20     # Top up to this level
+  max_single_rebalance_usd: 15    # Cap per rebalance trade
+  cooldown_minutes: 60             # Don't rebalance same asset within 1 hour
+  seed_assets:                     # Assets to pre-position for wide-spread arb
+    - {symbol: ZEC, amount_usd: 5}
+    - {symbol: TFUEL, amount_usd: 3}
+    - {symbol: LTC, amount_usd: 5}
+
+risk:
+  max_single_arb_usd: 5
+  max_total_exposure_usd: 500
+  max_one_sided_usd: 100
+  max_daily_loss_usd: 25                # Stop if losing $25 — protect capital
+  max_funding_position_usd: 2000
+  max_trades_per_hour: 2000
+  max_consecutive_losses: 10
+  max_api_latency_ms: 500
+  max_book_staleness_sec: 10
+  min_exchange_balance_usd: 100
+
+safety:
+  max_price_divergence_pct: 5.0
+  blocked_tokens:
+    - VANRY
+    - COTI
+    - DUSK
+    - ALGO
+  cache_ttl_hours: 24
+
+volume_participation:
+  max_participation_rate: 0.02
+  min_daily_volume_usd: 500000
+  one_sided_block_threshold: 0.20
+  one_sided_min_samples: 50
+
+realistic_fill:
+  rebalance_cost_per_trade: 0.01
+  bnb_discount: false                  # No BNB discount on Binance US
+
+kucoin_cross_exchange:
+  min_net_spread_bps: 2.0
+  max_trade_usd: 300
+
+kucoin_pairs:
+  phase_1: []                          # KuCoin disabled on US droplet
+
+kucoin_risk:
+  max_single_arb_usd: 300
+  max_total_exposure_usd: 2000
+  max_daily_loss_usd: 50
+  max_trades_per_hour: 50
+
+paper_trading:
+  enabled: false                       # LIVE MODE — real orders on MEXC + Binance US
+  simulated_latency_ms: 50
+  simulated_fill_rate: 0.75
+
+logging:
+  level: INFO
+  file: logs/arbitrage.log
+
+basis_trading:
+  enabled: false                       # DISABLED — needs Binance futures (geo-blocked from US)
+
+listing_arbitrage:
+  enabled: true
+  observation_mode: true
+  poll_interval_seconds: 60
+  max_position_usd: 200
+  max_concurrent_positions: 2
+  max_hold_minutes: 60
+  take_profit_pct: 0.10
+  stop_loss_pct: 0.08
+  min_volume_usd_5min: 1000
+  quote_filter: USDT
+
+statistical_pairs:
+  enabled: true
+  observation_mode: true
+  entry_z_score: 2.0
+  exit_z_score: 0.5
+  stop_z_score: 3.5
+  max_position_usd: 1500
+  max_concurrent_positions: 3
+  scan_interval_seconds: 300
+  window_size_bars: 240
+  min_history_bars: 60
+  cointegration_pvalue: 0.05
+  retest_interval_cycles: 288
+  max_half_life_bars: 120
+  min_half_life_bars: 5
+
+temporal_analyzer:
+  enabled: true
+  refresh_interval_minutes: 60
+  min_sample_size: 20
+  skip_threshold: 0.4
+
+pair_expansion:
+  enabled: true
+  min_volume_24h_usd: 50000
+  min_trades_24h: 100
+  max_spread_bps: 50
+  tier_1_max: 10
+  tier_2_max: 20
+  tier_3_max: 70
+  rescan_interval_hours: 6
+  allowed_quote_currencies: ["USDT", "BTC", "ETH", "USDC"]
+  locked_pairs: []
+
+relay_client:
+  enabled: true
+  url: "ws://64.227.135.217:8765"
+  reconnect_max_backoff_seconds: 30
+  stale_threshold_seconds: 30
+
+hedged_market_maker:
+  enabled: false                       # DISABLED on US droplet — focus on cross-exchange arb
+

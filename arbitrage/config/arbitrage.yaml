@@ -1,0 +1,345 @@
+# === Renaissance of One — Arbitrage Configuration ===
+# ALL thresholds live here. Change this file, not code.
+
+exchanges:
+  primary: mexc
+  secondary: binance
+  mexc_order_rate_limit_per_second: 5
+  kucoin_enabled: true                    # KuCoin spoke enabled
+  kucoin_order_rate_limit_per_second: 3
+
+websocket:
+  enabled: true
+  mexc_endpoint: "wss://wbs-api.mexc.com/ws"
+  mexc_ping_interval_seconds: 15
+  mexc_depth_levels: 20
+  binance_endpoint: "wss://stream.binance.com:9443/ws"
+  binance_depth_levels: 20
+  binance_depth_update_speed_ms: 100
+  max_connection_age_hours: 23
+  max_reconnect_attempts: 3
+  rest_fallback_duration_seconds: 60
+
+pairs:
+  phase_1:                              # Large-cap — tight spreads, high liquidity
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - XRP/USDT
+    - BNB/USDT
+    - DOGE/USDT
+    - ADA/USDT
+    - AVAX/USDT
+    - LINK/USDT
+    - DOT/USDT
+  phase_2:                              # Mid-cap — wider spreads, cross-exchange edge
+    - NTRN/USDT
+    - G/USDT
+    - ZKP/USDT
+    - POL/USDT
+    - SONIC/USDT
+    - NEAR/USDT
+    - ATOM/USDT
+    - FIL/USDT
+    - IMX/USDT
+    - ARB/USDT
+    - OP/USDT
+    - APE/USDT
+    - SAND/USDT
+    - MANA/USDT
+    - GALA/USDT
+    - ENJ/USDT
+
+cross_exchange:
+  enabled: false                       # Off — triangular only for first week
+  min_net_spread_bps: 3.0              # Require 3bps net — thin edges can't absorb one-sided close cost
+  signal_ttl_seconds: 5
+  min_trade_usd: 10                    # Low for paper trading — raise to $100+ for live
+  max_trade_usd: 2000              # Must be ≤ risk.max_single_arb_usd
+  scan_interval_ms: 100
+  fill_timeout_seconds: 3
+  emergency_close_seconds: 5
+  order_type: LIMIT_MAKER
+
+pair_discovery:
+  enabled: true
+  scan_interval_sec: 60                # How often to scan all tickers
+  max_active_pairs: 40                 # Top N pairs to monitor with full order books
+  min_gross_spread_bps: 3.0            # Minimum gross spread to consider a pair
+  max_gross_spread_bps: 500.0          # Maximum — above 5% is bogus (different tokens, stale data)
+  min_volume_usdt: 10000               # Minimum 24h USDT volume (from Binance)
+  demotion_grace_scans: 3              # Keep pair for N scans after it drops below threshold
+  excluded_bases:                      # Additional exclusions beyond hardcoded set
+    - USDC
+    - BUSD
+    - DAI
+    - TUSD
+    - FDUSD
+    - WBTC
+    - WETH
+    # Depth-blocked — orderbooks too thin for real execution (APPEND-ONLY)
+    - VANRY
+    - COTI
+    - DUSK
+    - ALGO
+
+funding_rate:
+  enabled: true
+  observation_mode: true             # Triangular only for first week
+  entry_threshold: 0.0001            # 0.01% — minimum rate to enter
+  exit_threshold: 0.00005            # 0.005% — rate considered normalized
+  max_position_usd: 1000             # Max per-symbol position
+  max_total_positions: 3             # Max simultaneous funding positions
+  check_interval_seconds: 60         # How often to check rates
+  min_differential_apr: 5.0          # Legacy — kept for backward compat
+  close_differential_apr: 2.0
+  max_leverage: 3.0
+
+triangular:
+  min_net_profit_bps: 5.0            # 5 bps cost (only leg 1 taker) + 0 bps buffer — breakeven floor
+  execution_mode: hybrid_ioc_maker  # Leg 1 = IOC taker, Legs 2-3 = LIMIT_MAKER
+  leg1_order_type: IOC              # taker, crosses spread
+  leg2_order_type: LIMIT_MAKER      # maker, rests on book, 0 bps
+  leg3_order_type: LIMIT_MAKER      # maker, rests on book, 0 bps
+  leg1_fee_bps: 5.0                 # taker fee
+  leg2_fee_bps: 0.0                 # maker fee
+  leg3_fee_bps: 0.0                 # maker fee
+  round_trip_cost_bps: 5.0           # total: 5 + 0 + 0
+  maker_fill_timeout_ms: 5000        # wait 5s for maker legs
+  exchange: mexc
+  start_currencies:
+    - USDT
+    - USDC
+  scan_interval_ms: 1000            # REST polling interval (was 5000)
+  scan_interval_ms_ws: 500          # WebSocket mode: 500ms (data already in memory)
+  scan_interval_ms_rest: 1000       # REST fallback interval (was 5000)
+  max_single_trade_usd: 50          # Safe fallback if balance fetch fails
+  max_trade_usd: 150                # Fallback only if balance fetch fails
+  min_trade_usd: 15                 # Hard floor — $15 @ 5bps edge = breakeven (covers 5bps fee cost)
+  max_trade_pct: 0.40               # 20% of wallet per trade (dynamic sizing)
+  abs_max_trade_usd: 2000           # Hard ceiling regardless of balance
+  max_depth_fraction: 0.20          # Use at most 20% of thinnest leg's depth (raised from 15% to unblock thin books)
+  min_depth_fraction: 0.05          # Skip if trade < 5% of book depth -- data-backed (0% fill rate below 5%)
+  max_capital_per_cycle: 25000      # Total USD deployed per 60s cycle
+  hourly_capital_limit: 500000      # Hourly capital breaker
+  dynamic_sizing_enabled: true      # Master switch for dynamic sizing
+  observation_mode: false           # 3-leg executor now handles triangular trades directly
+  max_signals_per_cycle: 2          # Max 3-leg signals per 60s window
+  adaptive_threshold_enabled: true  # Enable adaptive min_profit_bps auto-tuning
+  adaptive_threshold:
+    check_interval_attempts: 500    # Re-evaluate every N attempts
+    raise_if_fill_rate_below: 0.25  # Raise threshold if marginal trades fill <25%
+    lower_if_fill_rate_above: 0.60  # Lower threshold if marginal trades fill >60%
+    step_size_bps: 0.5              # Adjust by 0.5 bps at a time
+    floor_bps: 5.0                  # Never below cost floor (5 bps) — adaptive won't drop below breakeven
+    ceiling_bps: 30.0               # Never go above 30.0 bps
+  path_allowlist_enabled: true   # Filter out paths with avg bottleneck depth < min_avg_depth_usd
+  min_avg_depth_usd: auto        # Computed: min_trade_usd / max_depth_fraction (was 5000)
+  edge_scaling:                     # Edge-quality scaling: small edges → smaller positions
+    thin_bps: 5                     # <5 bps → 0.5x size (at breakeven — half size)
+    moderate_bps: 7                 # 5-7 bps → 0.75x size (small profit — 3/4 size)
+    full_bps: 10                    # ≥10 bps → 1.0x size (clear profit — full size)
+
+quadrangular:
+  enabled: true
+  max_signals_per_cycle: 1          # Dedicated slot for 4-leg trades
+  min_net_profit_bps: 25.0           # 20 bps taker cost (4 legs x 5 bps) + 5 bps buffer
+
+# Bybit triangular arb disabled — 30bps fee floor (3×10bps maker) makes it structurally unprofitable
+triangular_bybit:
+  enabled: false                     # Enable after observation period
+  min_net_profit_bps: 35.0           # Bybit maker fee 0.10% × 3 legs = 30bps + 5bps buffer
+  exchange: bybit
+  start_currencies:
+    - USDT
+  scan_interval_ms: 5000
+  max_trade_usd: 500                 # Start conservative
+  observation_mode: false             # MUST start in observation mode
+  max_signals_per_cycle: 2
+
+inventory:
+  target_allocation: 0.50
+  rebalance_threshold: 0.70
+  min_rebalance_usd: 500
+  check_interval_minutes: 15
+  preferred_networks:
+    USDT: TRC20
+    USDC: SOL
+    BTC: BTC
+    ETH: ARB
+    SOL: SOL
+
+risk:
+  max_single_arb_usd: 15000
+  max_total_exposure_usd: 10000
+  max_one_sided_usd: 200
+  max_daily_loss_usd: 100
+  max_funding_position_usd: 2000
+  max_trades_per_hour: 2000
+  max_consecutive_losses: 10
+  max_api_latency_ms: 500
+  max_book_staleness_sec: 10        # Matches unified_book.py is_fresh window
+  min_exchange_balance_usd: 100
+
+safety:
+  max_price_divergence_pct: 5.0     # Block if prices differ >5% between exchanges
+  blocked_tokens:                    # Manual blocklist — APPEND-ONLY, never remove entries
+    - VANRY                          # Insufficient orderbook depth — phantom fills
+    - COTI                           # Insufficient orderbook depth — phantom fills
+    - DUSK                           # Insufficient orderbook depth — phantom fills
+    - ALGO                           # Insufficient orderbook depth — phantom fills
+  cache_ttl_hours: 24               # How often to refresh contract data
+
+volume_participation:
+  max_participation_rate: 0.02       # 2% of hourly market volume — beyond this we move the price
+  min_daily_volume_usd: 500000       # $500K minimum to be tradeable (VANRY excluded at $180K)
+  one_sided_block_threshold: 0.20    # Auto-block pair if >20% of trades are one-sided
+  one_sided_min_samples: 50          # Need 50+ samples before evaluating one-sided rate
+  # Fill rate degrades with participation (models market impact):
+  # 0-0.5%: 85%, 0.5-1%: 75%, 1-2%: 60%, 2-5%: 35%, 5%+: 10%
+
+realistic_fill:
+  rebalance_cost_per_trade: 0.01    # $0.01 amortized rebalancing per trade
+  bnb_discount: true                 # Binance BNB fee discount active (0.075% vs 0.1%)
+
+# === KuCoin Spoke Exchange (cross-exchange arb: MEXC↔KuCoin) ===
+kucoin_cross_exchange:               # Separate thresholds for KuCoin route
+  min_net_spread_bps: 2.0            # Higher than Binance due to 10bps vs 7.5bps fee
+  max_trade_usd: 300                 # Conservative start
+
+kucoin_pairs:
+  phase_1:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - XRP/USDT
+    - DOGE/USDT
+    - ADA/USDT
+    - AVAX/USDT
+    - LINK/USDT
+    - DOT/USDT
+    - MATIC/USDT
+
+kucoin_risk:
+  max_single_arb_usd: 300
+  max_total_exposure_usd: 2000
+  max_daily_loss_usd: 50
+  max_trades_per_hour: 50
+
+paper_trading:
+  enabled: false                     # LIVE MODE
+  simulated_latency_ms: 50
+  simulated_fill_rate: 0.75         # Calibrated to observed fill rate (431/577 = 75%)
+
+logging:
+  level: INFO
+  file: logs/arbitrage.log
+
+basis_trading:
+  enabled: true
+  observation_mode: true             # Triangular only for first week
+  min_basis_bps: 5                   # Minimum basis to flag as opportunity
+  max_position_usd: 1000            # Max per-symbol notional (when live)
+  max_total_positions: 3             # Max simultaneous basis positions
+  scan_interval_seconds: 120         # Scan every 2 minutes
+  symbols:                           # MEXC contract symbols to monitor
+    - BTC
+    - ETH
+    - SOL
+
+listing_arbitrage:
+  enabled: true
+  observation_mode: true             # Triangular only for first week
+  poll_interval_seconds: 60           # How often to check for new listings
+  max_position_usd: 200              # HARD CAP — do not increase without review
+  max_concurrent_positions: 2         # HARD CAP
+  max_hold_minutes: 60                # Force close after this long
+  take_profit_pct: 0.10               # 10% gain -> close
+  stop_loss_pct: 0.08                 # 8% loss -> close
+  min_volume_usd_5min: 1000           # Minimum volume before entering
+  quote_filter: USDT                  # Only track USDT pairs
+
+statistical_pairs:
+  enabled: true
+  observation_mode: true             # Triangular only for first week
+  entry_z_score: 2.0            # Z-score to trigger signal
+  exit_z_score: 0.5             # Z-score to take profit (mean reversion)
+  stop_z_score: 3.5             # Emergency exit (spread not reverting)
+  max_position_usd: 1500        # Per leg, in USD
+  max_concurrent_positions: 3
+  scan_interval_seconds: 300    # Align with 5-min bot cycle
+  window_size_bars: 240         # 20 hours of 5-min bars
+  min_history_bars: 60          # Need 5 hours before testing
+  cointegration_pvalue: 0.05    # Standard significance threshold
+  retest_interval_cycles: 288   # Retest every 24 hours
+  max_half_life_bars: 120       # Maximum acceptable mean reversion speed
+  min_half_life_bars: 5         # Minimum (faster = too noisy)
+
+# --- Temporal Pattern Mining ---
+temporal_analyzer:
+  enabled: true
+  refresh_interval_minutes: 60
+  min_sample_size: 20
+  # Bias skip threshold — skip trades when bias < this (0.4 = 40% of average)
+  skip_threshold: 0.4
+
+# --- MEXC Pair Expansion ---
+pair_expansion:
+  enabled: true                   # LIVE — scanning all MEXC pairs
+  min_volume_24h_usd: 50000
+  min_trades_24h: 100
+  max_spread_bps: 50
+  tier_1_max: 10
+  tier_2_max: 20
+  tier_3_max: 70
+  rescan_interval_hours: 6
+  allowed_quote_currencies: ["USDT", "BTC", "ETH", "USDC"]
+  locked_pairs: []                # Pairs that always stay in Tier 1
+
+# ============================================================
+# Hedged Market Maker — post on wide USDC, hedge on tight USDT
+# ============================================================
+hedged_market_maker:
+  enabled: true
+  observation_mode: false          # START IN OBSERVATION — log but don't trade
+
+  # Pair selection
+  min_usdc_spread_bps: 15.0       # minimum USDC pair spread
+  max_usdt_spread_bps: 10.0       # maximum USDT pair spread (hedge cost)
+  min_spread_ratio: 3.0           # USDC spread must be 3x USDT spread
+  min_usdc_volume_24h: 10000      # minimum $10K daily volume on USDC pair
+  min_usdt_volume_24h: 50000      # minimum $50K daily volume on USDT pair
+
+  # Sizing
+  min_trade_usd: 20
+  max_trade_usd: 50               # was 200 — spread across more pairs
+  target_fill_minutes: 5          # size orders to fill within 5 min avg
+  max_volume_pct: 0.02            # never more than 2% of pair daily volume
+
+  # Quote placement
+  spread_capture_pct: 0.3         # how far inside the spread to post (0.3 = 30%)
+  refresh_threshold_bps: 10       # repost if USDT hedge price moved 10+ bps
+  max_order_age_seconds: 300      # cancel and repost after 5 minutes
+
+  # Risk
+  max_pairs: 10                   # max simultaneous pairs
+  max_capital_deployed_pct: 0.80  # never deploy more than 80% of wallet
+  max_directional_exposure_usd: 200  # max unhedged exposure
+  max_daily_loss_usd: 25          # stop if losing
+
+  # Hedge
+  hedge_timeout_ms: 3000          # if hedge doesn't fill in 3s, emergency
+  hedge_slippage_bps: 2           # add 2 bps to hedge price for safety
+
+  # Rebalancing
+  rebalance_threshold_usd: 50    # rebalance USDT<->USDC when imbalance > $50
+
+  # Candidate refresh
+  rescan_interval_minutes: 60     # re-scan for new candidates every hour
+
+  # Adverse selection
+  adverse_threshold_bps: 20       # warn if hedge is 20+ bps worse than entry
+  adverse_removal_pct: 0.30       # remove pair if >30% fills are adverse
+
+  # Check interval
+  check_interval_seconds: 0.5     # poll for fills every 500ms
