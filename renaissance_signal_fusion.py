@@ -1,26 +1,34 @@
 """
-Renaissance Signal Fusion
-Combines microstructure signals, enhanced technical indicators, and configuration management.
+Renaissance Signal Fusion (LEGACY — not used in golden path)
+
+This module is imported but never instantiated by renaissance_trading_bot.py.
+The golden path uses renaissance_engine_core.SignalFusion instead.
+Kept for reference; imports fixed to use class names instead of non-existent singletons.
 """
 
 import logging
 from typing import Dict, Any, Tuple
 from datetime import datetime
 
-from microstructure_engine import microstructure_engine
-from enhanced_technical_indicators import enhanced_technical_indicators
-from enhanced_config_manager import enhanced_config_manager
+from microstructure_engine import MicrostructureEngine
+from enhanced_technical_indicators import EnhancedTechnicalIndicators
+from enhanced_config_manager import EnhancedConfigManager
 
 logger = logging.getLogger(__name__)
 
 class RenaissanceSignalFusion:
     """
-    Renaissance Technologies Signal Fusion Engine
-    Combines all signal sources with research-optimized weights
+    Renaissance Technologies Signal Fusion Engine (LEGACY)
+    Combines all signal sources with research-optimized weights.
+    Not used in the golden path — see renaissance_engine_core.SignalFusion.
     """
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
+        # Instantiate engines (legacy — golden path creates these per-asset in the main bot)
+        self._microstructure = MicrostructureEngine()
+        self._technical = EnhancedTechnicalIndicators()
+        self._config_manager = EnhancedConfigManager("config")
         
         # Renaissance Technologies research-optimized weights
         self.signal_weights = {
@@ -40,17 +48,17 @@ class RenaissanceSignalFusion:
         """
         try:
             # Get microstructure signals (70% weight)
-            microstructure_data = microstructure_engine.get_signal_summary()
+            microstructure_data = self._microstructure.get_signal_summary()
             microstructure_signal = microstructure_data.get('overall_signal', 0.0) if microstructure_data.get('status') != 'no_data' else 0.0
             microstructure_confidence = microstructure_data.get('confidence', 0.0) if microstructure_data.get('status') != 'no_data' else 0.0
             
             # Get enhanced technical signals (25% weight)
-            technical_data = enhanced_technical_indicators.get_signals_summary()
+            technical_data = self._technical.get_signals_summary()
             technical_signal = technical_data.get('combined_signal', 0.0) if technical_data.get('status') != 'no_data' else 0.0
             technical_confidence = technical_data.get('confidence', 0.0) if technical_data.get('status') != 'no_data' else 0.0
             
             # Get configuration data
-            config_data = enhanced_config_manager.get_config_summary()
+            config_data = self._config_manager.get_config_summary()
             
             # Alternative data signal (placeholder - 5% weight)
             alternative_signal = 0.0  # Will be expanded in Step 5
@@ -118,7 +126,7 @@ class RenaissanceSignalFusion:
         """Generate trading decision based on signal and confidence"""
         try:
             # Get current configuration thresholds
-            config = enhanced_config_manager.get_current_config()
+            config = self._config_manager.get_current_config()
             
             buy_threshold = config.trading_thresholds.buy_threshold
             sell_threshold = config.trading_thresholds.sell_threshold
