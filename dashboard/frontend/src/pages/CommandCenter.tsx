@@ -4,6 +4,7 @@ import MetricCard from '../components/cards/MetricCard';
 import EquityCurve from '../components/charts/EquityCurve';
 import PriceChart from '../components/charts/PriceChart';
 import SystemHealthBar from '../components/panels/SystemHealthBar';
+import AssetSummaryPanel from '../components/panels/AssetSummaryPanel';
 import { api } from '../api';
 
 // ─── Types for strategy data ─────────────────────────────────────────────────
@@ -235,6 +236,9 @@ export default function CommandCenter() {
 
       {/* Oracle Signal Bar */}
       <OracleBar signals={oracleSignals} />
+
+      {/* Asset Exposure Summary */}
+      <AssetSummaryPanel />
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
