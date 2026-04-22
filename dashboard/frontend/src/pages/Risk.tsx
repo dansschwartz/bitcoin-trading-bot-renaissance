@@ -26,7 +26,7 @@ export default function Risk() {
         <MetricCard
           title="Current Equity"
           value={metrics ? formatCurrency(metrics.current_equity) : '--'}
-          subtitle={metrics ? `Initial ${formatCurrency(metrics.initial_capital)} + Realized + Unrealized` : ''}
+          subtitle={metrics ? `${formatCurrency(metrics.initial_capital)} + ${formatCurrency(metrics.realized_pnl)} realized + ${formatCurrency(metrics.unrealized_pnl)} unrealized` : ''}
           valueColor={metrics ? (metrics.current_equity >= metrics.initial_capital ? 'text-accent-green' : 'text-accent-red') : 'text-gray-100'}
         />
         <MetricCard
@@ -49,12 +49,18 @@ export default function Risk() {
       </div>
 
       {/* Secondary metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <MetricCard
-          title="Cumulative P&L"
+          title="Total P&L"
           value={metrics ? formatCurrency(metrics.cumulative_pnl) : '--'}
           subtitle="Realized + Unrealized"
           valueColor={metrics ? (metrics.cumulative_pnl >= 0 ? 'text-accent-green' : 'text-accent-red') : 'text-gray-100'}
+        />
+        <MetricCard
+          title="Realized P&L"
+          value={metrics ? formatCurrency(metrics.realized_pnl) : '--'}
+          subtitle="From closed positions"
+          valueColor={metrics ? (metrics.realized_pnl >= 0 ? 'text-accent-green' : 'text-accent-red') : 'text-gray-100'}
         />
         <MetricCard
           title="Unrealized P&L"

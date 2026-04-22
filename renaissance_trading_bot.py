@@ -3145,7 +3145,7 @@ class RenaissanceTradingBot:
                 audit_logger.record_gate('daily_loss', True)
 
         # Gate through VAE Anomaly Detection
-        vae_loss = 0.0
+        vae_loss: float | None = None  # None = VAE never ran; float = actual loss
         gate_reason = "not_evaluated"
         feature_vector = ml_package.feature_vector if ml_package else None
 

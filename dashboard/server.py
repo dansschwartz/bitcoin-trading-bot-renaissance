@@ -56,8 +56,17 @@ def create_app(
     app.state.ws_manager = ConnectionManager()
     app.state.emitter = emitter or DashboardEventEmitter()
     app.state.start_time = datetime.now(timezone.utc)
-    app.state.last_confluence = None
+    app.state.last_confluence = None  # Cleared on every startup to prevent stale data
     app.state.active_alerts: list = []
+
+    @app.on_event("startup")
+    async def _clear_stale_caches() -> None:
+        """Reset transient caches so the dashboard never shows data from a prior session."""
+        app.state.last_confluence = None
+        app.state.active_alerts = []
+        if hasattr(app.state, "emitter") and app.state.emitter:
+            app.state.emitter.clear_cache()
+        logger.info("Dashboard startup: cleared stale confluence + alert caches")
     app.state.backtest_manager = BacktestJobManager(emitter=app.state.emitter, db_path=cfg.db_path)
 
     # Routers

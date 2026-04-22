@@ -160,13 +160,14 @@ export interface VAEPoint {
 export interface RiskMetrics {
   max_drawdown: number;
   cumulative_pnl: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
   peak_equity: number;
   current_equity: number;
   initial_capital: number;
   sharpe_ratio: number;
   max_consecutive_losses: number;
   total_trading_days: number;
-  unrealized_pnl: number;
 }
 
 export interface AssetExposure {

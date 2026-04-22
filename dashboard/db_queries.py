@@ -750,28 +750,30 @@ def get_risk_metrics(db_path: str) -> Dict[str, Any]:
         except Exception:
             pass  # portfolio_snapshots table may not exist in older DBs
 
+        realized_pnl = cumulative_pnl - unrealized
+
         return {
             "max_drawdown": round(max_dd, 4),
             "cumulative_pnl": round(cumulative_pnl, 2),
+            "realized_pnl": round(realized_pnl, 2),
+            "unrealized_pnl": round(unrealized, 2),
             "peak_equity": round(peak, 2),
             "current_equity": round(current_equity, 2),
             "initial_capital": INITIAL_CAPITAL,
             "sharpe_ratio": sharpe,
             "max_consecutive_losses": max_consec_losses,
             "total_trading_days": len(daily_pnls),
-            "unrealized_pnl": round(unrealized, 2),
         }
 
 
 def get_risk_gateway_log(db_path: str, limit: int = 100) -> List[Dict[str, Any]]:
     """Decisions with risk gateway context — VAE loss + regime + action taken."""
     with _conn(db_path) as c:
-        # Include all decisions that have vae_loss OR are BUY/SELL
+        # Include all decisions — gateway evaluates every cycle, not just BUY/SELL
         rows = c.execute(
             """SELECT id, timestamp, product_id, action, confidence, vae_loss,
                       hmm_regime, reasoning
                FROM decisions
-               WHERE action IN ('BUY', 'SELL') OR vae_loss IS NOT NULL
                ORDER BY id DESC
                LIMIT ?""",
             (limit,),
@@ -965,8 +967,38 @@ def evaluate_risk_alerts(db_path: str, thresholds: Optional[Dict] = None) -> Lis
                     "timestamp": now,
                     "value": net_to_gross,
                 })
+        # Over-exposure alert: gross > 2x initial capital
+        if exposure["gross_exposure"] > metrics["initial_capital"] * 2:
+            alerts.append({
+                "type": "over_exposure",
+                "severity": "WARNING",
+                "message": f"Gross exposure ${exposure['gross_exposure']:.0f} exceeds 2x capital (${metrics['initial_capital']:.0f})",
+                "timestamp": now,
+                "value": exposure["gross_exposure"],
+            })
     except Exception as e:
         logger.warning(f"get_exposure failed: {e}")
+
+    # Unrealized P&L alert — large open losses
+    unrealized = metrics.get("unrealized_pnl", 0.0)
+    if unrealized < thresholds.get("pnl_threshold", -200) / 2:
+        alerts.append({
+            "type": "unrealized_loss",
+            "severity": "WARNING",
+            "message": f"Unrealized P&L ${unrealized:.2f} — open positions are underwater",
+            "timestamp": now,
+            "value": unrealized,
+        })
+
+    # Status: no alerts = system healthy
+    if not alerts:
+        alerts.append({
+            "type": "status",
+            "severity": "INFO",
+            "message": "All risk metrics within thresholds",
+            "timestamp": now,
+            "value": 0,
+        })
 
     return alerts
 

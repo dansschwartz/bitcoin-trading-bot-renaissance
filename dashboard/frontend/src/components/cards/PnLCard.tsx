@@ -17,7 +17,7 @@ export default function PnLCard() {
 
   return (
     <MetricCard
-      title="Total P&L (24h)"
+      title="Total P&L"
       value={`${pnlSign(totalPnl)}${formatCurrency(totalPnl)}`}
       valueColor={color}
       subtitle={`Realized: ${pnlSign(pnl.realized_pnl)}${formatCurrency(pnl.realized_pnl)} | Unrealized: ${pnlSign(pnl.unrealized_pnl || 0)}${formatCurrency(pnl.unrealized_pnl || 0)} | ${trips} | ${wr}`}
