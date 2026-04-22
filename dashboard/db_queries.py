@@ -310,7 +310,7 @@ def get_position_summary_stats(db_path: str, start_date: Optional[str] = None) -
 # ─── Analytics ────────────────────────────────────────────────────────────
 
 def get_equity_curve(db_path: str, hours: int = 24) -> List[Dict[str, Any]]:
-    """Equity curve from closed positions — cumulative realized P&L anchored to starting capital."""
+    """Equity curve from closed positions and portfolio snapshots."""
     with _conn(db_path) as c:
         # Get position closes with recomputed P&L
         rows = c.execute(
@@ -369,6 +369,31 @@ def get_equity_curve(db_path: str, hours: int = 24) -> List[Dict[str, Any]]:
                 "equity": round(INITIAL_CAPITAL + unrealized, 2),
             })
 
+        # If no closed-position data, fall back to portfolio_snapshots
+        if not result:
+            try:
+                snaps = c.execute(
+                    """SELECT timestamp, total_equity, unrealized_pnl, daily_pnl
+                       FROM portfolio_snapshots
+                       WHERE datetime(timestamp) > datetime('now', ? || ' hours')
+                       ORDER BY timestamp ASC""",
+                    (f"-{hours}",),
+                ).fetchall()
+                for s in snaps:
+                    s = dict(s)
+                    eq = s.get("total_equity", INITIAL_CAPITAL) or INITIAL_CAPITAL
+                    result.append({
+                        "timestamp": s.get("timestamp", ""),
+                        "side": "SNAPSHOT",
+                        "size": 0,
+                        "price": 0,
+                        "pnl_delta": s.get("daily_pnl", 0.0) or 0.0,
+                        "cumulative_pnl": round(eq - INITIAL_CAPITAL, 2),
+                        "equity": round(eq, 2),
+                    })
+            except Exception:
+                pass  # portfolio_snapshots may not exist
+
         return result
 
 
@@ -392,11 +417,7 @@ def _compute_total_unrealized_pnl(conn) -> float:
         side = p.get("side", "BUY")
         # Get latest price for this product (cached)
         if pid not in price_cache:
-            lp = conn.execute(
-                "SELECT price FROM market_data WHERE product_id = ? ORDER BY id DESC LIMIT 1",
-                (pid,),
-            ).fetchone()
-            price_cache[pid] = lp["price"] if lp else entry_price
+            price_cache[pid] = _resolve_current_price(conn, pid, entry_price)
         current_price = price_cache[pid]
         if _is_long_side(side):
             total += (current_price - entry_price) * size
@@ -646,7 +667,7 @@ def get_vae_history(db_path: str, limit: int = 200) -> List[Dict[str, Any]]:
 # ─── Risk ─────────────────────────────────────────────────────────────────
 
 def get_risk_metrics(db_path: str) -> Dict[str, Any]:
-    """Compute risk metrics from closed position P&L, anchored to initial capital."""
+    """Compute risk metrics from closed position P&L and portfolio snapshots."""
     with _conn(db_path) as c:
         # Daily PnL from closed positions (recomputed from entry/close prices)
         rows = c.execute(
@@ -705,6 +726,30 @@ def get_risk_metrics(db_path: str) -> Dict[str, Any]:
 
         cumulative_pnl = equity - INITIAL_CAPITAL + unrealized
 
+        # Supplement with portfolio_snapshots if available and more accurate
+        # These are written every cycle by the bot and include real-time equity
+        try:
+            snap = c.execute(
+                """SELECT total_equity, high_watermark, drawdown_pct,
+                          unrealized_pnl, open_position_count
+                   FROM portfolio_snapshots
+                   ORDER BY id DESC LIMIT 1"""
+            ).fetchone()
+            if snap:
+                snap_equity = snap["total_equity"] or 0.0
+                snap_hwm = snap["high_watermark"] or 0.0
+                snap_dd = snap["drawdown_pct"] or 0.0
+                # Use snapshot data if it's more informative than the closed-trade computation
+                if snap_equity > 0:
+                    current_equity = snap_equity
+                    cumulative_pnl = snap_equity - INITIAL_CAPITAL
+                if snap_hwm > peak:
+                    peak = snap_hwm
+                if snap_dd > max_dd:
+                    max_dd = snap_dd
+        except Exception:
+            pass  # portfolio_snapshots table may not exist in older DBs
+
         return {
             "max_drawdown": round(max_dd, 4),
             "cumulative_pnl": round(cumulative_pnl, 2),
@@ -761,6 +806,39 @@ def get_risk_gateway_log(db_path: str, limit: int = 100) -> List[Dict[str, Any]]
         return results
 
 
+def _resolve_current_price(conn, product_id: str, fallback: float = 0.0) -> float:
+    """Resolve best available current price for a product.
+
+    Tries (in order):
+      1. market_data table (live ticker snapshots)
+      2. five_minute_bars table (latest bar close — Binance data)
+      3. Provided fallback (usually entry_price)
+    """
+    # 1. market_data
+    lp = conn.execute(
+        "SELECT price FROM market_data WHERE product_id = ? ORDER BY id DESC LIMIT 1",
+        (product_id,),
+    ).fetchone()
+    if lp and lp["price"]:
+        return lp["price"]
+
+    # 2. five_minute_bars — try exact pair name, then common variants
+    pair_variants = [product_id]
+    # BTC-USD → BTC/USDT, BTCUSDT → BTC/USDT etc.
+    base = product_id.replace("-USD", "").replace("/USDT", "").replace("USDT", "")
+    if base:
+        pair_variants.extend([f"{base}/USDT", f"{base}-USD", f"{base}USDT"])
+    for pair in pair_variants:
+        bar = conn.execute(
+            "SELECT close FROM five_minute_bars WHERE pair = ? ORDER BY bar_start DESC LIMIT 1",
+            (pair,),
+        ).fetchone()
+        if bar and bar["close"]:
+            return bar["close"]
+
+    return fallback
+
+
 def get_exposure(db_path: str) -> Dict[str, Any]:
     """Compute exposure using current market prices (not entry prices)."""
     with _conn(db_path) as c:
@@ -774,11 +852,7 @@ def get_exposure(db_path: str) -> Dict[str, Any]:
         for p in positions:
             pid = p.get("product_id", "BTC-USD")
             if pid not in price_cache:
-                lp = c.execute(
-                    "SELECT price FROM market_data WHERE product_id = ? ORDER BY id DESC LIMIT 1",
-                    (pid,),
-                ).fetchone()
-                price_cache[pid] = lp["price"] if lp else p.get("entry_price", 0.0)
+                price_cache[pid] = _resolve_current_price(c, pid, p.get("entry_price", 0.0))
             p["current_price"] = price_cache[pid]
 
         long_exp = sum(

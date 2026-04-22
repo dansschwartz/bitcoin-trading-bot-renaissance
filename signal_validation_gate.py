@@ -56,6 +56,10 @@ class SignalValidationGate:
             "neutral_sideways": 0.0,
             "bear_mean_reverting": -0.5,
             "bear_trending": -1.0,
+            # Bootstrap classifier labels — neutral direction, no penalty
+            "low_volatility": 0.0,
+            "high_volatility": 0.0,
+            "trending": 0.0,
         }
 
         # Momentum-type signals that should align with regime direction

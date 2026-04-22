@@ -2869,13 +2869,22 @@ class RenaissanceTradingBot:
                 audit_logger.record_gate('confidence', False, f'signal={weighted_signal:.4f} in dead zone')
 
         # Apply regime bias to thresholds based on trade direction
-        if action != 'HOLD' and _regime_label and _regime_label not in ('neutral_sideways', 'unknown', 'low_volatility'):
+        if action != 'HOLD' and _regime_label and _regime_label not in ('neutral_sideways', 'unknown'):
             _is_bearish = _regime_label in _BEARISH
             _is_bullish = _regime_label in _BULLISH
+            _is_low_vol = _regime_label == 'low_volatility'
             _counter_trend = (_is_bearish and action == 'BUY') or (_is_bullish and action == 'SELL')
             _with_trend = (_is_bearish and action == 'SELL') or (_is_bullish and action == 'BUY')
 
-            if _counter_trend:
+            if _is_low_vol:
+                # Low volatility BOOSTS mean reversion — lower thresholds to catch smaller moves
+                _pred_thresh = 0.04
+                _agree_thresh = 0.65
+                self.logger.info(
+                    f"LOW VOL BOOST: {product_id} {action} in {_regime_label} — "
+                    f"lowered thresholds to pred>{_pred_thresh} agree>{_agree_thresh}"
+                )
+            elif _counter_trend:
                 # Swimming upstream — require much higher conviction
                 _pred_thresh = 0.10
                 _agree_thresh = 0.80

@@ -96,6 +96,11 @@ class ConfidenceCalculator:
             'neutral_sideways': 1.00,
             'bull_mean_reverting': 1.05,
             'bear_mean_reverting': 0.90,
+            # Bootstrap classifier labels (ATR/SMA rules, <200 bars)
+            # Low vol BOOSTS confidence — quiet markets favor mean reversion
+            'low_volatility': 1.05,
+            'high_volatility': 0.85,
+            'trending': 1.00,
         }
 
         # Performance tracking
