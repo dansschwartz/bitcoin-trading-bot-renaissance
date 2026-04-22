@@ -225,8 +225,8 @@ class ListingMonitor:
                 try:
                     ticker = await self.mexc.get_ticker(symbol)
                     initial_price = float(ticker.get('last_price', 0))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"self.mexc.get_ticker failed: {e}")
 
                 event = ListingEvent(
                     symbol=symbol,
@@ -304,8 +304,8 @@ class ListingMonitor:
                                 base = s[:-4]
                                 symbols.add(f"{base}/USDT")
                     return symbols if symbols else self._known_mexc_symbols
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: async with aiohttp.ClientSession() as session:: {e}")
 
         # Fallback: use MEXC exchangeInfo
         try:

@@ -38,8 +38,8 @@ class DashboardEventEmitter:
         with self._lock:
             try:
                 self._subscribers.remove(q)
-            except ValueError:
-                pass
+            except ValueError as e:
+                logger.warning(f"self._subscribers.remove failed: {e}")
 
     async def emit(self, channel: str, payload: Dict[str, Any]) -> None:
         self._do_emit(channel, payload)
@@ -69,5 +69,5 @@ class DashboardEventEmitter:
             for q in self._subscribers:
                 try:
                     q.put_nowait(msg)
-                except queue.Full:
-                    pass  # drop if consumer is slow
+                except queue.Full as e:
+                    logger.warning(f"q.put_nowait failed: {e}")

@@ -161,8 +161,8 @@ class DevilTracker:
                 for col, typ in [('fee_bps', 'REAL'), ('devil_bps', 'REAL')]:
                     try:
                         conn.execute(f"ALTER TABLE {self.TABLE} ADD COLUMN {col} {typ}")
-                    except Exception:
-                        pass  # Column already exists
+                    except Exception as e:
+                        logger.warning(f"conn.execute failed: {e}")
                 conn.commit()
         except Exception as exc:
             logger.error("DevilTracker: failed to create table: %s", exc)
@@ -241,8 +241,8 @@ class DevilTracker:
                         if signal_dt.tzinfo is None:
                             signal_dt = signal_dt.replace(tzinfo=timezone.utc)
                         latency_ms = (now - signal_dt).total_seconds() * 1000.0
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"datetime.fromisoformat failed: {e}")
 
                 conn.execute(
                     f"""
@@ -311,8 +311,8 @@ class DevilTracker:
                         if signal_dt.tzinfo is None:
                             signal_dt = signal_dt.replace(tzinfo=timezone.utc)
                         latency_ms = (now - signal_dt).total_seconds() * 1000.0
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"datetime.fromisoformat failed: {e}")
 
                 # --- slippage ---
                 slippage_bps = 0.0

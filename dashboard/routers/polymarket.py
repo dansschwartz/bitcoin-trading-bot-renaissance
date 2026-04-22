@@ -478,8 +478,8 @@ async def polymarket_live_markets(request: Request):
                         try:
                             dl = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
                             mins_left = round((dl - datetime.now(timezone.utc)).total_seconds() / 60.0, 1)
-                        except (ValueError, TypeError):
-                            pass
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"datetime.fromisoformat failed: {e}")
 
                     # Check if we have a bet on this slug
                     our_bet = None

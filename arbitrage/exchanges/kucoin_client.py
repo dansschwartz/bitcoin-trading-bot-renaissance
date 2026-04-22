@@ -413,8 +413,8 @@ class KuCoinClient(ExchangeClient):
                     book = await self.get_order_book(symbol, depth=20)
                     self._last_books[symbol] = book
                     await callback(book)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"self.get_order_book failed: {e}")
 
         while self._ws_running and time.monotonic() < end_time:
             items = list(self._ws_callbacks.items())

@@ -140,8 +140,8 @@ class RegimePredictor:
                 try:
                     steps = max(1, horizon_seconds // 300)
                     return fn(steps=steps)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"max failed: {e}")
 
         # Fallback: high probability of staying in current regime
         current = self._get_current_regime()

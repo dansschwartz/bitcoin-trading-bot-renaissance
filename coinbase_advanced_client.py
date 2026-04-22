@@ -9,6 +9,8 @@ from typing import Dict, Optional, List
 from dataclasses import dataclass, field
 
 
+
+logger = logging.getLogger(__name__)
 @dataclass
 class MarketData:
     """Market data structure"""
@@ -82,8 +84,8 @@ class CoinbaseAdvancedClient:
                             while not data_queue.empty():
                                 data_queue.get_nowait()
                             data_queue.put_nowait(processed_data)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"Failed: while not data_queue.empty():: {e}")
 
         except websockets.exceptions.ConnectionClosed:
             self.logger.warning("Coinbase WebSocket connection closed")

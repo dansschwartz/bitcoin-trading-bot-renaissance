@@ -332,8 +332,8 @@ class GracefulShutdownHandler:
                                     client.cancel_order, trade.symbol, oid,
                                 )
                             cancelled += 1
-                        except Exception:
-                            pass  # Already logged above or order not found
+                        except Exception as e:
+                            logger.warning(f"Conditional check failed: {e}")
 
             logger.info("Cancelled %d order(s) on %s.", cancelled, name)
 

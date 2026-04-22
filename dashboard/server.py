@@ -141,8 +141,8 @@ def create_app(
                     app.state.active_alerts = alerts[-100:]  # Keep last 100
         except asyncio.CancelledError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: while True:: {e}")
 
     # Health check
     @app.get("/api/health")

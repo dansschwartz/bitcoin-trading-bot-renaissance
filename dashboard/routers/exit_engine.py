@@ -37,8 +37,8 @@ async def exit_engine_summary(request: Request) -> dict[str, Any]:
     if bot and hasattr(bot, "sub_bar_scanner"):
         try:
             scanner_status = bot.sub_bar_scanner.get_status()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"bot.sub_bar_scanner.get_status failed: {e}")
 
     # If no live status, build from DB
     if not scanner_status:

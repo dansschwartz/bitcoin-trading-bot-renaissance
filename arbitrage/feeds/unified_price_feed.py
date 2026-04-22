@@ -336,8 +336,8 @@ class BinanceUnifiedPriceFeed:
                         try:
                             msg = json.loads(raw_msg)
                             self._handle_liquidation(msg)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"json.loads failed: {e}")
 
             except asyncio.CancelledError:
                 return
@@ -465,8 +465,8 @@ class BinanceUnifiedPriceFeed:
                     asyncio.create_task(cb(symbol, entry, stats))
                 else:
                     cb(symbol, entry, stats)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Conditional check failed: {e}")
 
     def _handle_mini_ticker_arr(self, tickers: list) -> None:
         """Process !miniTicker@arr batch.

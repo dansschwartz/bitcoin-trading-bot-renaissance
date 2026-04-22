@@ -223,8 +223,8 @@ def run_once(client, dry_run: bool = False) -> int:
             if timeframe:
                 try:
                     tf_sec = int(timeframe.replace("m", "")) * 60
-                except (ValueError, AttributeError):
-                    pass
+                except (ValueError, AttributeError) as e:
+                    logger.warning(f"int failed: {e}")
             market_end = window_start + tf_sec
             now_epoch = time.time()
             # Skip if market already ended (with 30s grace for execution)

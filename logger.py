@@ -16,6 +16,8 @@ from typing import Dict, Any, Optional, List
 import asyncio
 import uuid
 
+
+logger = logging.getLogger(__name__)
 # Renaissance Technologies specific imports
 try:
     import psutil
@@ -126,8 +128,8 @@ class RenaissanceJSONFormatter(logging.Formatter):
                     "memory_mb": process.memory_info().rss / 1024 / 1024,
                     "memory_percent": process.memory_percent()
                 }
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"psutil.Process failed: {e}")
 
         return json.dumps(log_data, default=str)
 

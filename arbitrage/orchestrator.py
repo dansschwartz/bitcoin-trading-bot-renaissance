@@ -964,8 +964,8 @@ class ArbitrageOrchestrator:
                     side=trade.side.value,
                     timestamp=trade.timestamp.timestamp(),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"self.bar_aggregator.on_trade failed: {e}")
 
     # --- Reporting ---
 
@@ -1036,8 +1036,8 @@ class ArbitrageOrchestrator:
                     f"{disc_stats['above_threshold']} above threshold | "
                     f"{disc_stats['active_discovered_pairs']} active"
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"self.pair_discovery.get_stats failed: {e}")
         try:
             vol_stats = self.volume_limiter.get_stats()
             rej = vol_stats.get('rejections', {})
@@ -1051,8 +1051,8 @@ class ArbitrageOrchestrator:
                     f"(vol={rej.get('volume',0)} part={rej.get('participation',0)} "
                     f"block={rej.get('blocked',0)})"
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"self.volume_limiter.get_stats failed: {e}")
         # Dynamic seed status
         try:
             ds_status = self.rebalancer.get_dynamic_seeds_status()
@@ -1063,8 +1063,8 @@ class ArbitrageOrchestrator:
                     f"  Dynamic seeds: {ds_status['dynamic_seed_count']} active [{seed_names}] | "
                     f"pending: {pending}"
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"self.rebalancer.get_dynamic_seeds_status failed: {e}")
         # Relay status
         if self.relay_server:
             try:
@@ -1073,8 +1073,8 @@ class ArbitrageOrchestrator:
                     f"  Relay server: {rs['connected_clients']} clients | "
                     f"{rs['messages_sent']} msgs sent | seq={rs['sequence']}"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"self.relay_server.get_status failed: {e}")
         if self.relay_client:
             try:
                 rc = self.relay_client.get_status()
@@ -1084,8 +1084,8 @@ class ArbitrageOrchestrator:
                     f"{rc['messages_received']} msgs | last={age_str} | "
                     f"gaps={rc['sequence_gaps']} | reconnects={rc['reconnect_count']}"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"self.relay_client.get_status failed: {e}")
         # Capital allocation status
         try:
             cap_summary = self.capital_allocator.get_summary()
@@ -1096,8 +1096,8 @@ class ArbitrageOrchestrator:
                 f"  Capital: tri=40% mm=50% rsv=10% | "
                 f"deployed: tri=${tri_dep:.0f} mm=${mm_dep:.0f}"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"self.capital_allocator.get_summary failed: {e}")
         logger.info("=" * 60)
 
     def get_full_status(self) -> dict:

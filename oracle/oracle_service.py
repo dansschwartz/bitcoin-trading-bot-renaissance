@@ -146,8 +146,8 @@ class OracleService:
         try:
             import keras
             keras.backend.clear_session()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: import keras: {e}")
         import gc
         gc.collect()
 

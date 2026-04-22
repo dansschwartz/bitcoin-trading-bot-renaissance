@@ -231,8 +231,8 @@ class CrossExchangeDetector:
                                         exhaust_books[exch] = book
                                 self.exhaust_capture.capture_at_detection(
                                     signal.signal_id, pair, exhaust_books)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"pairs.get failed: {e}")
 
                     # Temporal bias check — skip if this time window is historically bad
                     if self.temporal_bias and self.temporal_bias.should_skip("cross_exchange", pair):
@@ -257,8 +257,8 @@ class CrossExchangeDetector:
                                 f"profit=${float(expected_profit):.2f} "
                                 f"qty={float(recommended_qty):.6f}"
                             )
-                        except asyncio.QueueFull:
-                            pass  # Drop if consumer is slow
+                        except asyncio.QueueFull as e:
+                            logger.warning(f"self.signal_queue.put_nowait failed: {e}")
 
                     self._last_spreads[pair] = spread_info['gross_spread_bps']
 

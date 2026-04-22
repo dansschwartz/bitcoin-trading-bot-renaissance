@@ -377,8 +377,8 @@ class BasisArbitrage:
                 if funding_rate_raw is not None:
                     try:
                         funding_rate = Decimal(str(funding_rate_raw))
-                    except (InvalidOperation, ValueError):
-                        pass
+                    except (InvalidOperation, ValueError) as e:
+                        logger.warning(f"Decimal failed: {e}")
 
                 result[contract_sym] = {
                     "price": Decimal(str(last_price)),
@@ -602,8 +602,8 @@ class BasisArbitrage:
                 )
                 conn.commit()
                 conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"sqlite3.connect failed: {e}")
 
             fee_est = Decimal(str(pos.get("spot_fee", 0))) * 2
 
@@ -681,8 +681,8 @@ class BasisArbitrage:
                     quantity=float(qty), status="filled",
                     actual_profit_usd=final_pnl,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"self.tracker.record_trade failed: {e}")
 
         logger.info(
             f"BASIS POSITION CLOSED: {pos['position_id']} | {symbol} | "

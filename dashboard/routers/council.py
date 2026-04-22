@@ -46,8 +46,8 @@ def _scan_sessions() -> list[dict[str, Any]]:
                 proposal_count = len(ranked)
                 consensus_count = sum(1 for p in ranked if p.get("passes_consensus"))
                 review_count = sum(p.get("review_count", 0) for p in ranked)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"json.loads failed: {e}")
 
         # Parse timestamp from session_id (format: YYYYMMDD_HHMMSS)
         timestamp = None
@@ -101,8 +101,8 @@ async def session_detail(session_id: str):
     try:
         from datetime import datetime
         timestamp = datetime.strptime(session_id, "%Y%m%d_%H%M%S").isoformat()
-    except ValueError:
-        pass
+    except ValueError as e:
+        logger.warning(f"Failed: from datetime import datetime: {e}")
 
     scores = [p.get("consensus_score", 0) for p in proposals if p.get("consensus_score")]
     return {
@@ -133,15 +133,15 @@ async def researcher_detail(session_id: str, name: str):
     if prop_path.exists():
         try:
             proposals = json.loads(prop_path.read_text())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"json.loads failed: {e}")
 
     rev_path = session_dir / "reviews" / name / "reviews.json"
     if rev_path.exists():
         try:
             reviews = json.loads(rev_path.read_text())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"json.loads failed: {e}")
 
     return {
         "name": name,

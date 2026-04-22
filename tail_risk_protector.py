@@ -912,8 +912,8 @@ class TailRiskProtector:
                 }
                 regime = self.current_regime if isinstance(self.current_regime, str) else 'normal'
                 return regime_map.get(regime, 1.0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Conditional check failed: {e}")
 
         return 1.0  # neutral default
 

@@ -132,8 +132,8 @@ def get_recent_decisions(db_path: str, limit: int = 100) -> List[Dict[str, Any]]
             if r.get("reasoning"):
                 try:
                     r["reasoning"] = _sanitize_floats(json.loads(r["reasoning"]))
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"JSON parsing failed: {e}")
         return results
 
 
@@ -146,8 +146,8 @@ def get_decision_by_id(db_path: str, decision_id: int) -> Optional[Dict[str, Any
         if result.get("reasoning"):
             try:
                 result["reasoning"] = _sanitize_floats(json.loads(result["reasoning"]))
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"JSON parsing failed: {e}")
         return result
 
 
@@ -195,8 +195,8 @@ def get_trade_lifecycle(db_path: str, trade_id: int) -> Dict[str, Any]:
             if d.get("reasoning"):
                 try:
                     d["reasoning"] = json.loads(d["reasoning"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"JSON parsing failed: {e}")
     return {"trade": trade, "context_decisions": decisions}
 
 
@@ -740,8 +740,8 @@ def get_risk_gateway_log(db_path: str, limit: int = 100) -> List[Dict[str, Any]]
                 import json as _json
                 reasoning = _json.loads(r.get("reasoning", "{}"))
                 gateway_reason = reasoning.get("risk_gateway_reason", "not_evaluated")
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed: import json as _json: {e}")
             # Remove reasoning from response (too large)
             r.pop("reasoning", None)
             # Map gateway_reason to PASS/BLOCK verdict
@@ -891,8 +891,8 @@ def evaluate_risk_alerts(db_path: str, thresholds: Optional[Dict] = None) -> Lis
                     "timestamp": now,
                     "value": net_to_gross,
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"get_exposure failed: {e}")
 
     return alerts
 
@@ -1299,8 +1299,8 @@ def get_audit_summary(db_path: str, hours: int = 24) -> Dict[str, Any]:
                 cnt = row["cnt"] if row else 0
                 if cnt > 0:
                     gate_blocks[col.replace('gate_', '')] = cnt
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"c.execute failed: {e}")
 
         # blocked_by distribution
         blocked_rows = c.execute('''
@@ -1383,15 +1383,15 @@ def get_pipeline_health(db_path: str) -> Dict[str, Any]:
                     if lb.tzinfo is None:
                         lb = lb.replace(tzinfo=timezone.utc)
                     age_seconds = round((now_utc - lb).total_seconds())
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"datetime.fromisoformat failed: {e}")
             r["age_seconds"] = age_seconds
             r["stale"] = age_seconds is not None and age_seconds > 900  # >15 min
             if r.get("details"):
                 try:
                     r["details"] = json.loads(r["details"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"JSON parsing failed: {e}")
             components.append(r)
         return _sanitize_floats({"components": components})
 

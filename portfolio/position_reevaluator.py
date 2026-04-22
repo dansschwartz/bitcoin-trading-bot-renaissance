@@ -622,8 +622,8 @@ class PositionReEvaluator:
                     exit_cost_bps = self.cost_model.cost_in_bps(
                         cost, float(pos.current_size_usd)
                     )
-            except Exception:
-                pass  # Use cached value
+            except Exception as e:
+                logger.warning(f"Conditional check failed: {e}")
 
         pos.current_cost_to_exit_bps = exit_cost_bps
         net_remaining = remaining_move_bps - exit_cost_bps
@@ -718,8 +718,8 @@ class PositionReEvaluator:
                 }
                 size = self.kelly_sizer.get_position_size(signal_dict, equity)
                 return Decimal(str(max(0, size)))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"float failed: {e}")
 
         # Fallback: simple proportional sizing
         # If confidence dropped by X%, optimal size drops proportionally
@@ -748,8 +748,8 @@ class PositionReEvaluator:
                 try:
                     regime_mult = multiplier()
                     optimal_size = Decimal(str(float(optimal_size) * regime_mult))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"multiplier failed: {e}")
 
         # Never allow size to exceed the original entry size
         # (re-evaluation can trim but shouldn't grow beyond entry without add logic)

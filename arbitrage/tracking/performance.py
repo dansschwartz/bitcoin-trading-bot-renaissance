@@ -68,26 +68,26 @@ class PerformanceTracker:
         # Add book_depth_json column if missing (existing DBs)
         try:
             conn.execute("ALTER TABLE arb_trades ADD COLUMN book_depth_json TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        except sqlite3.OperationalError as e:
+            logger.warning(f"conn.execute failed: {e}")
         # Add individual leg depth columns (for efficient queries)
         for col in ("leg1_depth_usd", "leg2_depth_usd", "leg3_depth_usd"):
             try:
                 conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} REAL")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
         try:
             conn.execute("ALTER TABLE arb_trades ADD COLUMN exchange TEXT DEFAULT 'mexc'")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        except sqlite3.OperationalError as e:
+            logger.warning(f"conn.execute failed: {e}")
         # Dynamic sizing and leg count columns
         for col, default in [("trade_size_usd", "REAL"), ("leg_count", "INTEGER DEFAULT 3"),
                               ("bottleneck_depth_usd", "REAL DEFAULT 0"),
                               ("sizing_reason", "TEXT DEFAULT ''")]:
             try:
                 conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {default}")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS arb_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,8 +134,8 @@ class PerformanceTracker:
         # Add path column to arb_trades if missing (currency path, e.g. "USDT→BTC→ETH→USDT")
         try:
             conn.execute("ALTER TABLE arb_trades ADD COLUMN path TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        except sqlite3.OperationalError as e:
+            logger.warning(f"conn.execute failed: {e}")
         # IOC tracking columns (Change 7)
         for col, coltype in [
             ("order_type", "TEXT DEFAULT 'LIMIT_MAKER'"),
@@ -147,8 +147,8 @@ class PerformanceTracker:
         ]:
             try:
                 conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {coltype}")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
         # Realistic cross-exchange cost columns (Part B)
         for col, coltype in [
             ("withdrawal_fee_usd", "REAL DEFAULT 0"),
@@ -160,8 +160,8 @@ class PerformanceTracker:
         ]:
             try:
                 conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {coltype}")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
         conn.commit()
         conn.close()
 
@@ -315,8 +315,8 @@ class PerformanceTracker:
         if hasattr(result, 'book_depth') and result.book_depth:
             try:
                 depth_json = json.dumps(result.book_depth)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"json.dumps failed: {e}")
             legs = result.book_depth.get('legs', [])
             if len(legs) >= 1:
                 leg1_depth = legs[0].get('depth_usd_top5', 0.0)

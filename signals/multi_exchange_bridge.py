@@ -135,18 +135,18 @@ class MultiExchangeBridge:
                     try:
                         fr = await self.binance.get_funding_rate(symbol)
                         rates.append(float(fr.current_rate))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"self.binance.get_funding_rate failed: {e}")
                 if self.mexc:
                     try:
                         fr = await self.mexc.get_funding_rate(symbol)
                         rates.append(float(fr.current_rate))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"self.mexc.get_funding_rate failed: {e}")
                 if rates:
                     self._funding_cache[symbol] = sum(rates) / len(rates)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed: rates = []: {e}")
 
         self._funding_fetch_count += 1
         if self._funding_fetch_count <= 1 or self._funding_fetch_count % 10 == 0:

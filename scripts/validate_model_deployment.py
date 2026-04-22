@@ -171,8 +171,8 @@ def _detect_model_input_dim(model: Any) -> int:
     try:
         from ml_model_loader import _detect_input_dim
         return _detect_input_dim(model)
-    except (ImportError, Exception):
-        pass
+    except (ImportError, Exception) as e:
+        logger.warning(f"Failed to detect input dim via ml_model_loader: {e}")
 
     try:
         for name, param in model.named_parameters():
@@ -183,8 +183,8 @@ def _detect_model_input_dim(model: Any) -> int:
                     return param.shape[1]
                 if 'conv' in name.lower() and param.dim() == 3:
                     return param.shape[1]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Iteration failed: {e}")
     return INPUT_DIM
 
 

@@ -215,8 +215,8 @@ class PolymarketRTDS:
                 for cb in self._callbacks:
                     try:
                         cb("chainlink", asset, float(price), ts)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"cb failed: {e}")
         else:
             # Binance price
             asset = self._symbol_to_asset(symbol, SYMBOLS)
@@ -229,8 +229,8 @@ class PolymarketRTDS:
                 for cb in self._callbacks:
                     try:
                         cb("binance", asset, float(price), ts)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"cb failed: {e}")
 
     def _symbol_to_asset(self, symbol: str, mapping: dict) -> Optional[str]:
         """Reverse lookup: symbol -> asset name."""
@@ -318,8 +318,8 @@ class PolymarketRTDS:
         if self._ws:
             try:
                 await self._ws.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"self._ws.close failed: {e}")
 
     def stop_sync(self):
         """Stop from non-async context (e.g. during shutdown)."""

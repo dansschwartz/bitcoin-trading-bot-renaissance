@@ -224,8 +224,8 @@ def oracle_open_trades():
                     if et.tzinfo is None:
                         et = et.replace(tzinfo=timezone.utc)
                     hours_open = (datetime.now(timezone.utc) - et).total_seconds() / 3600
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed: from datetime import datetime, timezone: {e}")
 
             result.append({
                 'pair': pair,

@@ -158,8 +158,8 @@ class CascadeDataCollector:
                 if len(prices) >= 2:
                     yes_price = float(prices[0])
                     no_price = float(prices[1])
-            except (ValueError, TypeError, json.JSONDecodeError):
-                pass
+            except (ValueError, TypeError, json.JSONDecodeError) as e:
+                logger.warning(f"m.get failed: {e}")
 
             # Calculate time remaining
             end_date = m.get('endDate', m.get('end_date_iso', ''))
@@ -167,8 +167,8 @@ class CascadeDataCollector:
             try:
                 end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
                 seconds_remaining = (end_dt - now).total_seconds()
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning(f"datetime.fromisoformat failed: {e}")
 
             conn.execute(
                 """INSERT INTO cascade_market_snapshots
@@ -293,8 +293,8 @@ class CascadeDataCollector:
                 for key in ('BTCUSDT', 'BTC-USD'):
                     if key in self.bot._price_cache:
                         return float(self.bot._price_cache[key].get('close', 0))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: # Try bot's latest_prices dict (populated during scan loop): {e}")
         return 0.0
 
     def _get_btc_returns(self) -> dict:
@@ -310,8 +310,8 @@ class CascadeDataCollector:
                     rets['3bar'] = bars[-1]['close'] / bars[-4]['close'] - 1 if bars[-4]['close'] > 0 else 0
                 if len(bars) >= 7:
                     rets['6bar'] = bars[-1]['close'] / bars[-7]['close'] - 1 if bars[-7]['close'] > 0 else 0
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: # Try to get from the bot's bar_history for BTCUSDT: {e}")
         return rets
 
     def get_collection_stats(self) -> dict:

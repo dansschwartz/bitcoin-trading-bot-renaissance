@@ -7,8 +7,11 @@ import tempfile
 import unittest
 
 from database_manager import DatabaseManager
+import logging
 
 
+
+logger = logging.getLogger(__name__)
 class TestDatabaseSafety(unittest.TestCase):
     """Verify _get_connection context manager behavior."""
 
@@ -42,8 +45,8 @@ class TestDatabaseSafety(unittest.TestCase):
             with self.db._get_connection() as conn:
                 conn.execute("INSERT INTO market_data (price, volume, bid, ask, spread, timestamp, source) VALUES (1,1,1,1,1,'2024-01-01','test')")
                 raise ValueError("Simulated error")
-        except ValueError:
-            pass
+        except ValueError as e:
+            logger.warning(f"Failed: with self.db._get_connection() as conn:: {e}")
 
         # Data should NOT be committed due to rollback
         with self.db._get_connection() as conn:

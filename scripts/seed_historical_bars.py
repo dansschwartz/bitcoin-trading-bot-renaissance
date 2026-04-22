@@ -14,8 +14,11 @@ import sqlite3
 import time
 import urllib.request
 from datetime import datetime, timezone
+import logging
 
 
+
+logger = logging.getLogger(__name__)
 PAIRS = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "AVAX-USD", "LINK-USD"]
 GRANULARITY = 300  # 5 minutes in seconds
 
@@ -132,8 +135,8 @@ def seed_bars(db_path: str, count: int = 300) -> None:
                      bar["volume"], bar["num_trades"], bar["vwap"], bar["log_return"]),
                 )
                 inserted += 1
-            except sqlite3.IntegrityError:
-                pass  # Duplicate — already exists
+            except sqlite3.IntegrityError as e:
+                logger.warning(f"conn.execute failed: {e}")
 
         conn.commit()
         total_inserted += inserted

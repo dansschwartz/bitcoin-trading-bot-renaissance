@@ -415,8 +415,8 @@ class OracleTradingEngine:
                               ).total_seconds() / 3600
                 hold_bars = int(hold_hours / 4)
                 hold_time = f"{hold_hours:.1f}h ({hold_bars} bars)"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"datetime.fromisoformat failed: {e}")
 
         # Reset position
         wallet.position_open = False

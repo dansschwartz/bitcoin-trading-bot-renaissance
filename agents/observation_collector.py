@@ -137,8 +137,8 @@ class ObservationCollector:
             ).fetchone()
             if row and row[0]:
                 return row[0]
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            logger.warning(f"conn.execute failed: {e}")
         # Fallback: 7 days ago
         return (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
 
@@ -176,8 +176,8 @@ class ObservationCollector:
                         "deployed_at": r["deployed_at"],
                         "description": r["description"],
                     })
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
 
             # Improvement log entries (manual fixes, mega specs)
             try:
@@ -193,8 +193,8 @@ class ObservationCollector:
                         "description": r["description"],
                         "change_type": r["change_type"],
                     })
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
 
             # Active experiments from outcome ledger
             project_root = Path(self.db_path).parent.parent
@@ -206,8 +206,8 @@ class ObservationCollector:
                     active = [e for e in ledger.get("experiments", [])
                               if e.get("status") == "active"]
                     deployments["active_experiments"] = active
-                except (json.JSONDecodeError, KeyError):
-                    pass
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Failed: with open(ledger_path) as f:: {e}")
 
         except Exception as exc:
             logger.warning("Failed to collect recent deployments: %s", exc)
@@ -240,8 +240,8 @@ class ObservationCollector:
                     "title": r["title"], "status": r["status"],
                     "created_at": r["created_at"],
                 })
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            logger.warning(f"conn.execute failed: {e}")
         except Exception as exc:
             logger.warning("Failed to collect in-progress fixes: %s", exc)
             in_progress["error"] = str(exc)
@@ -325,8 +325,8 @@ class ObservationCollector:
                     "created_at": r["created_at"],
                     "description": r["description"],
                 })
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            logger.warning(f"conn.execute failed: {e}")
         except Exception as exc:
             logger.warning("Failed to collect stalled proposals: %s", exc)
 

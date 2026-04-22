@@ -363,14 +363,14 @@ class UnifiedBookManager:
                         best_bid=float(book.best_bid), best_ask=float(book.best_ask),
                         timestamp=book.timestamp.timestamp(),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"self._bar_aggregator.on_orderbook_snapshot failed: {e}")
             # Relay hook — broadcast to remote clients (Bangalore → US)
             if self._mexc_relay_hook:
                 try:
                     await self._mexc_relay_hook(pair, book)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"self._mexc_relay_hook failed: {e}")
         else:
             # Silently ignore — dynamic pairs may be demoted but WS subscription lingers
             pass
@@ -387,8 +387,8 @@ class UnifiedBookManager:
                         best_bid=float(book.best_bid), best_ask=float(book.best_ask),
                         timestamp=book.timestamp.timestamp(),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"self._bar_aggregator.on_orderbook_snapshot failed: {e}")
 
     async def _on_kucoin_update(self, pair: str, book: OrderBook):
         if pair in self.pairs:

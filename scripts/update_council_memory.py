@@ -10,7 +10,10 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+import logging
 
+
+logger = logging.getLogger(__name__)
 PROJ_DIR = Path(__file__).parent.parent
 LEDGER_PATH = PROJ_DIR / "data" / "council_memory" / "outcome_ledger.json"
 
@@ -46,8 +49,8 @@ def update() -> None:
                 "deployed_date": row["deployed_at"],
                 "notes": row["notes"],
             })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Database operation failed: {e}")
 
     # Rolled back
     rolled_back = []
@@ -62,8 +65,8 @@ def update() -> None:
                 "proposer": row["source"],
                 "reason": row["notes"],
             })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Database operation failed: {e}")
 
     # Active sandbox
     sandbox = []
@@ -78,8 +81,8 @@ def update() -> None:
                 "proposer": row["source"],
                 "sandbox_ends": row["sandbox_end"],
             })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Database operation failed: {e}")
 
     # Counts
     def safe_count(query: str) -> int:
@@ -103,8 +106,8 @@ def update() -> None:
         ).fetchone()
         if row and row[0]:
             cumulative_bps = round(row[0], 2)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"conn.execute failed: {e}")
 
     conn.close()
 

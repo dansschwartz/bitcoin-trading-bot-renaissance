@@ -293,8 +293,8 @@ class SpreadCaptureEngine:
         ]:
             try:
                 conn.execute(f"ALTER TABLE spread_capture_windows ADD COLUMN {col} {typedef}")
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
 
         conn.commit()
         conn.close()

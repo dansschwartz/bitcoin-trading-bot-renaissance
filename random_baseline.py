@@ -161,8 +161,8 @@ class RandomEntryBaseline:
                     hours_held = (now - entry_dt).total_seconds() / 3600
                     if hours_held >= 24:
                         exit_reason = "max_hold_24h"
-                except (ValueError, AttributeError):
-                    pass
+                except (ValueError, AttributeError) as e:
+                    logger.warning(f"datetime.fromisoformat failed: {e}")
 
             if exit_reason:
                 conn.execute(

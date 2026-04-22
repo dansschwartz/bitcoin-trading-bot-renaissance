@@ -146,8 +146,8 @@ class SimpleUpBetter:
                         data = json.load(f)
                     if data.get("private_key"):
                         return data
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed: with open(path) as f:: {e}")
         return {}
 
     def _init_clob_client(self) -> None:

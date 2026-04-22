@@ -40,8 +40,8 @@ try:
     except locale.Error:
         try:
             locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-        except locale.Error:
-            pass  # Use system default
+        except locale.Error as e:
+            logger.warning(f"locale.setlocale failed: {e}")
 
     # Set environment variable for UTF-8
     os.environ['PYTHONIOENCODING'] = 'utf-8'

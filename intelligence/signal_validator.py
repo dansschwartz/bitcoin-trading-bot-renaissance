@@ -323,8 +323,8 @@ class SignalValidator:
                 oos_returns = np.array([t.get("return_bps", 0.0) for t in oos_trades], dtype=np.float64)
                 if len(oos_returns) > 1:
                     report.out_of_sample_sharpe = self._compute_sharpe(oos_returns)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"signal_generator_callable failed: {e}")
 
         # ----- Assign tier -----
         report.confidence_tier = self.assign_confidence_tier(report)

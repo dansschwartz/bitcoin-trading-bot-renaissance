@@ -272,8 +272,8 @@ def classify_market(raw: dict) -> Optional[PolymarketMarket]:
         elif isinstance(outcome_prices, list) and len(outcome_prices) >= 2:
             yes_price = float(outcome_prices[0])
             no_price = float(outcome_prices[1])
-    except (ValueError, TypeError, IndexError):
-        pass
+    except (ValueError, TypeError, IndexError) as e:
+        logger.warning(f"JSON parsing failed: {e}")
 
     # If no outcomePrices, try bestBid/bestAsk or other fields
     if yes_price == 0.0:

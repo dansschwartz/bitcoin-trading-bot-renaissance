@@ -50,8 +50,8 @@ try:
         PriceData,
     )
     _NATIVE_INDICATORS = True
-except Exception:
-    pass
+except Exception as e:
+    logger.warning(f"Failed: from enhanced_technical_indicators import (: {e}")
 
 logger = logging.getLogger("backtesting.engine")
 

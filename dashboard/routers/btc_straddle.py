@@ -38,8 +38,8 @@ async def straddle_fleet(request: Request) -> dict[str, Any]:
     if bot and hasattr(bot, "straddle_fleet") and bot.straddle_fleet:
         try:
             return bot.straddle_fleet.get_fleet_status()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: return bot.straddle_fleet.get_fleet_status(): {e}")
 
     # Fallback: derive from database (includes OPEN + CLOSED)
     db = request.app.state.dashboard_config.db_path
@@ -105,8 +105,8 @@ async def straddle_status(request: Request, asset: str = "") -> dict[str, Any] |
             if eng:
                 try:
                     return eng.get_status()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed: return eng.get_status(): {e}")
         return _db_status(request.app.state.dashboard_config.db_path, asset.upper())
 
     if bot and hasattr(bot, "straddle_engines") and bot.straddle_engines:
@@ -114,8 +114,8 @@ async def straddle_status(request: Request, asset: str = "") -> dict[str, Any] |
         for eng in bot.straddle_engines.values():
             try:
                 result.append(eng.get_status())
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"result.append failed: {e}")
         if result:
             return result
 
@@ -165,8 +165,8 @@ def _db_status(db_path: str, asset: str) -> dict:
         try:
             opened = datetime.strptime(row['opened_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
             age = now - opened.timestamp()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"datetime.strptime failed: {e}")
         open_straddles.append({
             'straddle_id': row['id'],
             'asset': asset,

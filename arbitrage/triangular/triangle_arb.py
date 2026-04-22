@@ -377,8 +377,8 @@ class TriangularArbitrage:
                 alloc_limit = budget.get(start_currency, 0)
                 if alloc_limit > 0:
                     wallet = min(wallet, alloc_limit)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"allocator.get_available_budget failed: {e}")
 
         if wallet <= 0:
             return float(self._max_single_trade_usd)  # Fallback to static config
@@ -574,8 +574,8 @@ class TriangularArbitrage:
                                     hold_seconds=result.execution_time_ms / 1000.0,
                                     profit_usd=float(result.profit_usd),
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f"self.velocity_tracker.record_trade failed: {e}")
 
                         # Record capital velocity for triangular trades
                         if self.velocity_tracker and result.status == "filled":
@@ -586,8 +586,8 @@ class TriangularArbitrage:
                                     hold_seconds=result.execution_time_ms / 1000.0,
                                     profit_usd=float(result.profit_usd),
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f"self.velocity_tracker.record_trade failed: {e}")
                     except Exception as e:
                         self._staleness_filter.record_failure(path_key)
                         logger.error(f"Triangular execution error: {e}")

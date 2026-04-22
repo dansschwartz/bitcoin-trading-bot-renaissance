@@ -44,8 +44,8 @@ def _scan_duration(conn: sqlite3.Connection) -> float:
             t1 = datetime.fromisoformat(rows[0][0])
             t2 = datetime.fromisoformat(rows[1][0])
             return round(abs((t1 - t2).total_seconds()), 1)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"conn.execute failed: {e}")
     return 0
 
 

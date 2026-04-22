@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from typing import Any, Dict, Optional
 
+
+logger = logging.getLogger(__name__)
 try:
     from scipy import stats as sp_stats
     SCIPY_AVAILABLE = True
@@ -177,8 +179,8 @@ class SimStatistics:
                 if len(lb) > 1:
                     result["ljung_box_20_stat"] = float(lb["lb_stat"].iloc[1])
                     result["ljung_box_20_pvalue"] = float(lb["lb_pvalue"].iloc[1])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"acorr_ljungbox failed: {e}")
         elif len(returns) > max_lag + 5:
             # Manual ACF fallback
             m = np.mean(returns)

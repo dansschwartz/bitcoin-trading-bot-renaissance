@@ -185,6 +185,6 @@ class BacktestJobManager:
             # Clean up temp config file
             try:
                 os.unlink(config_path)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.warning(f"os.unlink failed: {e}")
             self._process = None

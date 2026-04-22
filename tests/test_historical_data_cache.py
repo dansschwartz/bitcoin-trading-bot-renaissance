@@ -4,8 +4,11 @@ import tempfile
 import os
 import numpy as np
 from historical_data_cache import HistoricalDataCache
+import logging
 
 
+
+logger = logging.getLogger(__name__)
 class TestHistoricalDataCache(unittest.TestCase):
 
     def _make_cache(self, **overrides):
@@ -24,8 +27,8 @@ class TestHistoricalDataCache(unittest.TestCase):
     def tearDown(self):
         try:
             os.unlink(self._db_path)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning(f"os.unlink failed: {e}")
 
     def test_init_tables(self):
         cache = self._make_cache()

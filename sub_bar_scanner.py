@@ -300,8 +300,8 @@ class SubBarScanner:
                     age_seconds = time.time() - float(open_ts)
                     if age_seconds < self._min_position_age_seconds:
                         return None
-                except (ValueError, TypeError):
-                    pass  # If we can't parse the timestamp, proceed with checks
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"time.time failed: {e}")
 
             # Check cooldown
             now = time.time()

@@ -123,8 +123,8 @@ def ensure_agent_tables(db_path: str) -> None:
         for col_def in ["source TEXT DEFAULT 'manual'", "details TEXT"]:
             try:
                 conn.execute(f"ALTER TABLE improvement_log ADD COLUMN {col_def}")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
         conn.commit()
         conn.close()
         logger.info("Agent tables verified (%d tables, %d indexes)", len(_TABLES), len(_INDEXES))

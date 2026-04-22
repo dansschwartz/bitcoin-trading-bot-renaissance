@@ -451,8 +451,8 @@ def retrain_weekly(
                 m.load_state_dict(sd, strict=False)
                 m.to(device).eval()
                 deployed_base_models[name] = m
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to instantiate model from config: {e}")
 
         # Evaluate old meta-ensemble
         old_accuracy = evaluate_existing_meta_ensemble(

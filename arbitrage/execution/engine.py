@@ -291,8 +291,8 @@ class ArbitrageExecutor:
                             _eb[_ex] = _bk
                     self.exhaust_capture.capture_at_execution(
                         signal.signal_id, signal.symbol, _eb)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"pairs.get failed: {e}")
 
         # LAYER 4: Order type — MAKER_EXCHANGES use LIMIT_MAKER (0% fee), others use IOC
         buy_order = OrderRequest(
@@ -420,8 +420,8 @@ class ArbitrageExecutor:
                                     break
                                 elif poll_result.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
                                     break
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"mexc_client_ref.get_order_status failed: {e}")
 
                 # Check BinUS fill
                 _bus_ok = (isinstance(bus_result, OrderResult)
@@ -445,13 +445,13 @@ class ArbitrageExecutor:
                     if isinstance(mexc_result, OrderResult) and mexc_result.order_id:
                         try:
                             await mexc_client_ref.cancel_order(signal.symbol, mexc_result.order_id)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"mexc_client_ref.cancel_order failed: {e}")
                     if isinstance(bus_result, OrderResult) and bus_result.order_id:
                         try:
                             await bus_client_ref.cancel_order(signal.symbol, bus_result.order_id)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"bus_client_ref.cancel_order failed: {e}")
                     result = ExecutionResult(trade_id=trade_id, status="no_fill", signal=signal)
                     self._completed_trades.append(result)
                     return result
@@ -490,8 +490,8 @@ class ArbitrageExecutor:
             logger.error(f"Maker timeout: {trade_id}")
             try:
                 await maker_client.cancel_order(maker_order.symbol, maker_order.client_order_id or "")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"maker_client.cancel_order failed: {e}")
             return ExecutionResult(trade_id=trade_id, status="timeout", signal=signal)
         except Exception as e:
             logger.error(f"Maker order failed: {trade_id} — {e}")
@@ -541,8 +541,8 @@ class ArbitrageExecutor:
                 else:
                     try:
                         await taker_client.cancel_order(taker_order.symbol, oid)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"taker_client.cancel_order failed: {e}")
                     # Don't emergency-close — just accept the inventory shift.
                     # The IOC leg filled but the maker leg didn't. This is a small
                     # inventory imbalance ($20 max) that rebalances over time.
@@ -580,8 +580,8 @@ class ArbitrageExecutor:
                         return result
                     if result.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
                         return result
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"client.get_order_status failed: {e}")
             polls += 1
             await asyncio.sleep(0.5 if polls <= 10 else 1.0)
         return None
@@ -656,11 +656,11 @@ class ArbitrageExecutor:
                                     if _b:
                                         _bs[_e] = _b
                                 _ec.capture_post_execution(_sid, _sym, _bs)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"_bm.pairs.get failed: {e}")
                     _loop.call_later(1.0, _post_capture)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"asyncio.get_event_loop failed: {e}")
 
             edge_tag = "EDGE_SURVIVED" if realistic.edge_survived else "EDGE_LOST"
             logger.info(
@@ -757,8 +757,8 @@ class ArbitrageExecutor:
                             return poll_result
                         elif poll_result.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"client.get_order_status failed: {e}")
             logger.warning(f"EMERGENCY CLOSE: {symbol} MARKET order not filled after polling")
         return result
 
@@ -769,8 +769,8 @@ class ArbitrageExecutor:
                 sell_client.cancel_order(sell_order.symbol, sell_order.client_order_id or ""),
                 return_exceptions=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"asyncio.gather failed: {e}")
 
     def _calculate_actual_profit(self, buy: OrderResult, sell: OrderResult) -> Decimal:
         if not buy.average_fill_price or not sell.average_fill_price:

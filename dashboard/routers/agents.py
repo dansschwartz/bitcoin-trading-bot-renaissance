@@ -73,8 +73,8 @@ async def agent_statuses(request: Request):
                 ).fetchone()
                 if row:
                     last_event = row[0]
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                logger.warning(f"conn.execute failed: {e}")
 
             statuses.append({
                 "name": name,
@@ -117,8 +117,8 @@ async def agent_events(
             if d.get("payload"):
                 try:
                     d["payload"] = json.loads(d["payload"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"JSON parsing failed: {e}")
             result.append(d)
         return result
     except sqlite3.OperationalError:
@@ -153,8 +153,8 @@ async def proposals(
                 if d.get(json_field):
                     try:
                         d[json_field] = json.loads(d[json_field])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.warning(f"JSON parsing failed: {e}")
             result.append(d)
         return result
     except sqlite3.OperationalError:
@@ -223,8 +223,8 @@ async def latest_report(request: Request):
             if d.get("report_json"):
                 try:
                     d["report_json"] = json.loads(d["report_json"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"JSON parsing failed: {e}")
             return d
         return {"message": "No weekly reports available yet"}
     except sqlite3.OperationalError:

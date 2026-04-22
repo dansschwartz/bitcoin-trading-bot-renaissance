@@ -8,8 +8,11 @@ import unittest
 from datetime import datetime, timezone
 
 from database_manager import DatabaseManager
+import logging
 
 
+
+logger = logging.getLogger(__name__)
 def run(coro):
     """Helper to run async coroutines in sync tests (Python 3.12+ safe)."""
     loop = asyncio.new_event_loop()
@@ -30,8 +33,8 @@ class TestPositionPersistence(unittest.TestCase):
     def tearDown(self):
         try:
             os.unlink(self.tmp)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning(f"os.unlink failed: {e}")
 
     def test_save_and_get_open_position(self):
         pos = {
@@ -101,8 +104,8 @@ class TestDailyPnlRecovery(unittest.TestCase):
     def tearDown(self):
         try:
             os.unlink(self.tmp)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning(f"os.unlink failed: {e}")
 
     def test_daily_pnl_from_trades(self):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

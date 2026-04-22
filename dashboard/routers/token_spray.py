@@ -36,8 +36,8 @@ async def spray_status(request: Request) -> dict[str, Any]:
     if bot and hasattr(bot, "token_spray"):
         try:
             return bot.token_spray.get_status()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: return bot.token_spray.get_status(): {e}")
 
     # Fallback: derive from database
     total_sprayed = _safe_query(db, "SELECT COUNT(*) as cnt FROM token_spray_log")
@@ -95,8 +95,8 @@ async def wallet_stats(request: Request) -> list[dict]:
                 })
             result.sort(key=lambda x: x["total_pnl_usd"], reverse=True)
             return result
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: wallets = bot.token_spray.wallets: {e}")
 
     # Fallback: DB aggregate
     return _safe_query(
@@ -192,8 +192,8 @@ async def ab_test(request: Request) -> dict[str, Any]:
     if bot and hasattr(bot, "token_spray") and hasattr(bot.token_spray, "direction_rule"):
         try:
             return {"ab_results": bot.token_spray.direction_rule.rule_stats}
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to get token spray AB test results: {e}")
 
     # Fallback: derive from DB
     rows = _safe_query(
@@ -241,8 +241,8 @@ async def volatility_current(request: Request) -> dict[str, Any]:
                         "tradeable": True,
                     }
             return result
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: engine = bot.garch_engine: {e}")
 
     # Fallback: check DB for recent volatility regimes from spray log
     db = request.app.state.dashboard_config.db_path

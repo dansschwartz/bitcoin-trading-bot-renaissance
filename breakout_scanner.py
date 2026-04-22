@@ -181,8 +181,8 @@ class BreakoutScanner:
                 signal = self._score_ticker(t)
                 if signal and signal.breakout_score >= self.min_breakout_score:
                     signals.append(signal)
-            except Exception:
-                pass  # Skip broken tickers silently
+            except Exception as e:
+                logger.warning(f"self._score_ticker failed: {e}")
 
         # ── Update history for next cycle ──
         for t in usdt_tickers:

@@ -400,8 +400,8 @@ async def arb_status(request: Request):
                     last_arb_dt = datetime.fromisoformat(str(last_arb["ts"]).replace("Z", "+00:00"))
                     if now - last_arb_dt < timedelta(minutes=10):
                         bot_running = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"c.execute failed: {e}")
 
             # Check 2: recent decisions in main DB
             if not bot_running:
@@ -418,8 +418,8 @@ async def arb_status(request: Request):
                             last_decision = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
                             if now - last_decision < timedelta(minutes=10):
                                 bot_running = True
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to check main DB for bot running status: {e}")
 
             return {
                 "running": bot_running,
@@ -526,8 +526,8 @@ async def arb_summary(request: Request):
                 ).fetchall()
                 for r in today_rows:
                     today_by_strategy[r["strategy"]] = round(float(r["today_pnl"]), 4)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"c.execute failed: {e}")
 
             by_strategy = [
                 {
@@ -562,8 +562,8 @@ async def arb_summary(request: Request):
                 ).fetchone()
                 signal_total = sr["total"] or 0
                 signal_approved = sr["approved"] or 0
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"c.execute failed: {e}")
 
             # Today's P&L (all strategies combined)
             daily_arb = c.execute(
@@ -720,8 +720,8 @@ async def arb_wallet(request: Request):
             extra = _query_extra_strategy_totals(c)
             for strat_data in extra.values():
                 total_profit += strat_data["profit_usd"]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed: with _arb_conn() as c:: {e}")
 
     current_balance = initial_balance + total_profit
 
@@ -1827,7 +1827,7 @@ async def arb_temporal(request: Request):
             report = orch.temporal_analyzer.get_report()
             return _sanitize_for_json(report)
         except Exception as e:
-            pass  # Fall through to cache
+            logger.warning(f"orch.temporal_analyzer.get_report failed: {e}")
 
     # Fallback: read from cached file
     cache_path = Path("data/temporal_profiles.json")
@@ -1891,8 +1891,8 @@ async def arb_pair_expansion(request: Request):
             result["manager"] = orch.expanded_pair_manager.get_report()
             result["discovery"] = orch.mexc_pair_discovery.get_report()
             return _sanitize_for_json(result)
-        except Exception:
-            pass  # Fall through to cache
+        except Exception as e:
+            logger.warning(f"Failed to get pair expansion report: {e}")
 
     # Fallback: read from cached file
     cache_path = Path("data/pair_expansion_cache.json")
@@ -1924,8 +1924,8 @@ async def arb_capital_velocity(request: Request):
     if orch:
         try:
             return _sanitize_for_json(orch.velocity_tracker.get_velocity_report())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: return _sanitize_for_json(orch.velocity_tracker.get_velocity...: {e}")
 
     # Fallback: cached file
     cache_path = Path("data/capital_velocity_cache.json")
@@ -1949,8 +1949,8 @@ async def arb_edge_decay(request: Request):
     if orch:
         try:
             return _sanitize_for_json(orch.edge_decay_monitor.get_decay_report())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: return _sanitize_for_json(orch.edge_decay_monitor.get_decay_...: {e}")
 
     cache_path = Path("data/edge_decay_cache.json")
     if cache_path.exists():
@@ -1973,8 +1973,8 @@ async def arb_strategy_allocation(request: Request):
     if orch:
         try:
             return _sanitize_for_json(orch.strategy_allocator.get_allocation_report())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed: return _sanitize_for_json(orch.strategy_allocator.get_alloca...: {e}")
 
     cache_path = Path("data/strategy_allocation_cache.json")
     if cache_path.exists():
@@ -1995,8 +1995,8 @@ async def arb_exhaust_snapshots(request: Request):
         try:
             snapshots = orch.exhaust_capture.get_recent_snapshots(limit=100)
             return _sanitize_for_json({"snapshots": snapshots, "count": len(snapshots)})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"orch.exhaust_capture.get_recent_snapshots failed: {e}")
 
     # Fallback: query DB directly
     try:

@@ -795,8 +795,8 @@ class HedgedMarketMaker:
             try:
                 with open('data/market_maker_candidates.json', 'w') as f:
                     json.dump(candidates, f, indent=2)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed: with open('data/market_maker_candidates.json', 'w') as f:: {e}")
 
             logger.info(f"MM SCAN: {len(candidates)} candidates found")
             return candidates
@@ -1449,8 +1449,8 @@ class HedgedMarketMaker:
                 loop.run_in_executor(self._rest_executor, _sync_cancel),
                 timeout=8.0
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"asyncio.get_running_loop failed: {e}")
 
     async def _on_maker_fill(self, token: str, side: str, fill_result: OrderResult,
                               state: PairState, fill_time: float):
@@ -1710,8 +1710,8 @@ class HedgedMarketMaker:
             asks = data.get("asks", [])
             if bids and asks:
                 return (float(bids[0][0]) + float(asks[0][0])) / 2
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"asyncio.get_running_loop failed: {e}")
         return None
 
     async def _stop_pair(self, token: str):

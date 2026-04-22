@@ -656,8 +656,8 @@ class RecoveryEngine:
                 if hasattr(exchange, "fetch_open_orders"):
                     raw = await exchange.fetch_open_orders()
                     return [o.get("id", "") for o in raw if o.get("id")]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed: exchange = client._exchange: {e}")
         return []
 
     # ------------------------------------------------------------------

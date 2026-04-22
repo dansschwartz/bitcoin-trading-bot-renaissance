@@ -81,8 +81,8 @@ class HeartbeatWriter:
                     logger.exception("Failed to write heartbeat for %s", self._bot_id)
                     try:
                         os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.warning(f"os.unlink failed: {e}")
 
             except asyncio.CancelledError:
                 break

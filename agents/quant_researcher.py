@@ -657,8 +657,8 @@ because they deploy immediately without sandbox overhead.
                     [str(project_root / ".venv" / "bin" / "python3"), str(updater)],
                     timeout=30, capture_output=True, cwd=str(project_root),
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to run council memory updater script: {e}")
 
         self.logger.info(
             "Council cycle complete: %d proposals pass consensus", len(passing_proposals),
@@ -773,8 +773,8 @@ because they deploy immediately without sandbox overhead.
             pre_session_untracked = {
                 f.strip() for f in (pre_result.stdout or "").strip().split("\n") if f.strip()
             }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"subprocess.run failed: {e}")
 
         # Launch Claude Code — cwd=output_dir so it reads restrictive settings.json
         try:
@@ -1175,8 +1175,8 @@ CONSTRAINTS:
             if prop_file.exists():
                 try:
                     other_proposals[other] = json.loads(prop_file.read_text())
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"JSON parsing failed: {e}")
 
         if not other_proposals:
             (output_dir / "reviews.json").write_text("[]")
@@ -1229,8 +1229,8 @@ Be rigorous. Challenge weak reasoning. Endorse only what you'd stake your reputa
                     for p in props:
                         p["_source_researcher"] = name
                     all_props.extend(props)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"json.loads failed: {e}")
         return all_props
 
     def _harvest_journal_update(

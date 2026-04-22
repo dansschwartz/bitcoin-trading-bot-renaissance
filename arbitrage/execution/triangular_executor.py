@@ -297,8 +297,8 @@ class TriangularExecutor:
                 # Cancel any outstanding order to prevent stranded assets
                 try:
                     await self._cancel_leg_order(symbol, f"{trade_id}_leg{leg_num}", trade_id, leg_num)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"self._cancel_leg_order failed: {e}")
                 legs.append(TriLegResult(
                     leg_number=leg_num, symbol=symbol, side=side,
                     status="failed", quantity_in=current_amount,
@@ -317,8 +317,8 @@ class TriangularExecutor:
                     logger.warning(f"TRI LEG {leg_num} IOC returned OPEN — cancelling")
                     try:
                         await self.client.cancel_order(symbol, result.order_id)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"self.client.cancel_order failed: {e}")
                     result.status = OrderStatus.CANCELLED
                 else:
                     # MAKER leg: wait for fill with timeout

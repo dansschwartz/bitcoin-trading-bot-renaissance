@@ -551,8 +551,8 @@ class LiquidationCascadeDetector:
         if data and isinstance(data, list) and len(data) > 0:
             try:
                 return float(data[-1]["fundingRate"])
-            except (KeyError, ValueError, TypeError):
-                pass
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse funding rate from response: {e}")
         return None
 
     async def _fetch_open_interest(self, symbol: str) -> Optional[float]:
@@ -563,8 +563,8 @@ class LiquidationCascadeDetector:
         if data and isinstance(data, dict):
             try:
                 return float(data["openInterest"])
-            except (KeyError, ValueError, TypeError):
-                pass
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse open interest from response: {e}")
         return None
 
     async def _fetch_global_ls_ratio(self, symbol: str) -> Optional[float]:
@@ -576,8 +576,8 @@ class LiquidationCascadeDetector:
         if data and isinstance(data, list) and len(data) > 0:
             try:
                 return float(data[-1]["longShortRatio"])
-            except (KeyError, ValueError, TypeError):
-                pass
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse global long/short ratio: {e}")
         return None
 
     async def _fetch_top_trader_position_ratio(
@@ -591,8 +591,8 @@ class LiquidationCascadeDetector:
         if data and isinstance(data, list) and len(data) > 0:
             try:
                 return float(data[-1]["longShortRatio"])
-            except (KeyError, ValueError, TypeError):
-                pass
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse top trader position ratio: {e}")
         return None
 
     # ----- history management ---------------------------------------------
