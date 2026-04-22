@@ -224,8 +224,8 @@ class PolymarketLiveExecutor:
                         data = json.load(f)
                     if data.get("private_key"):
                         return data
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to load secrets from {path}: {e}")
         return {}
 
     def should_go_live(self, asset: str, bet_amount: float) -> tuple:

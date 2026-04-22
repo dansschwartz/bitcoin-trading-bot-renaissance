@@ -101,16 +101,16 @@ class ConeCalibrator:
         if fn is not None:
             try:
                 return fn(hours=hours)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to get recent exits from devil_tracker: {e}")
         # Fallback: query the reeval_events table if available
         fn2 = getattr(self.devil_tracker, "get_reeval_effectiveness_report", None)
         if fn2 is not None:
             try:
                 report = fn2()
                 return report.get("exits", [])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to get reeval effectiveness report: {e}")
         return []
 
     def get_metrics(self) -> dict:

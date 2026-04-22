@@ -42,8 +42,8 @@ def _load_disabled_models() -> set:
         disabled = config.get('disabled_models', [])
         if isinstance(disabled, list) and disabled:
             return set(disabled)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to load disabled models from config file: {e}")
     return _DEFAULT_DISABLED_MODELS
 
 DISABLED_MODELS: set = _load_disabled_models()
@@ -1389,8 +1389,8 @@ def _detect_input_dim(model_name: str, state_dict: dict) -> Optional[int]:
             elif model_name == 'meta_ensemble':
                 # Linear(input_dim, 128) → weight shape (128, input_dim)
                 return w.shape[1]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to auto-detect input dimension for model '{model_name}': {e}")
     return None
 
 
@@ -1674,8 +1674,8 @@ def _match_feature_dim(
             expected_dim = model.conv_layers[0].in_channels
         elif model_name == 'gru':
             expected_dim = model.gru.input_size
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to detect expected input dimension for model '{model_name}': {e}")
 
     if expected_dim is None or expected_dim == feat_dim:
         return x

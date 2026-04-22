@@ -240,15 +240,15 @@ class StraddleEngine:
             ]:
                 try:
                     conn.execute(f"ALTER TABLE straddle_log ADD COLUMN {col} DEFAULT {default}")
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as e:
+                    self.log.warning(f"StraddleEngine[{self.asset}] ALTER straddle_log ADD {col} skipped: {e}")
             for col, default in [
                 ('peak_pnl_usd', 'NULL'),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE straddle_legs ADD COLUMN {col} DEFAULT {default}")
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as e:
+                    self.log.warning(f"StraddleEngine[{self.asset}] ALTER straddle_legs ADD {col} skipped: {e}")
 
             conn.commit()
             conn.close()
@@ -676,8 +676,8 @@ class StraddleEngine:
             self._exit_task.cancel()
             try:
                 await self._exit_task
-            except asyncio.CancelledError:
-                pass
+            except asyncio.CancelledError as e:
+                self.log.warning(f"StraddleEngine[{self.asset}] exit task cancelled: {e}")
             self._exit_task = None
         self.log.info(f"StraddleEngine[{self.asset}] exit loop stopped")
 
@@ -702,10 +702,10 @@ class StraddleEngine:
                     p = prices.get(self.pair)
                     if p and float(p) > 0:
                         last_price = float(p)
-                except asyncio.TimeoutError:
-                    pass  # use last_price — timeout exits still work
-                except Exception:
-                    pass  # use last_price
+                except asyncio.TimeoutError as e:
+                    self.log.warning(f"StraddleEngine[{self.asset}] price fetch timeout, using last_price: {e}")
+                except Exception as e:
+                    self.log.warning(f"StraddleEngine[{self.asset}] price fetch failed, using last_price: {e}")
 
                 if last_price > 0:
                     # Record price for vol computation

@@ -20,7 +20,7 @@ import logging
 # Import Step 9 and Step 10 components
 try:
     from real_time_risk_monitor import RealTimeRiskMonitor
-    from market_mictostructure_analyzer import MarketMicrostructureAnalyzer
+    from market_microstructure_analyzer import MarketMicrostructureAnalyzer
     from execution_algorithm_suite import ExecutionAlgorithmSuite
 except ImportError:
     logging.warning("Step 9/10 components not found - running in standalone mode")

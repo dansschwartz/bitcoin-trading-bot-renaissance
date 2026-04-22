@@ -698,8 +698,8 @@ class TokenSprayEngine:
             self._exit_task.cancel()
             try:
                 await self._exit_task
-            except asyncio.CancelledError:
-                pass
+            except asyncio.CancelledError as e:
+                self.log.warning(f"Spray exit task cancelled: {e}")
             self._exit_task = None
         self.log.info("TokenSprayEngine exit loop stopped")
 

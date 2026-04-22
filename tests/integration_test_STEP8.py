@@ -11,6 +11,7 @@ Comprehensive testing framework for:
 - Performance benchmarking and metrics
 """
 
+import logging
 import os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -24,6 +25,8 @@ from datetime import datetime, timedelta
 import json
 
 warnings.filterwarnings('ignore')
+
+logger = logging.getLogger(__name__)
 
 # Configure UTF-8 encoding for proper emoji display
 try:

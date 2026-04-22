@@ -782,8 +782,8 @@ class ReversalStrategy:
                                 return "up"
                             elif yes_price <= 0.05:
                                 return "down"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[REVERSAL] Gamma API resolution check failed for {slug}: {e}")
 
         return None
 

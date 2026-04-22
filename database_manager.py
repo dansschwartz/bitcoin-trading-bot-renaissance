@@ -128,8 +128,8 @@ class DatabaseManager:
             ]:
                 try:
                     cursor.execute(f"ALTER TABLE open_positions ADD COLUMN {col_def}")
-                except sqlite3.OperationalError:
-                    pass  # Column already exists
+                except sqlite3.OperationalError as e:
+                    self.logger.warning(f"Migration: open_positions ADD COLUMN {col_def} skipped: {e}")
 
             # Medallion Intelligence: Expanded data capture tables
             cursor.execute('''CREATE TABLE IF NOT EXISTS funding_rate_history (
@@ -307,8 +307,8 @@ class DatabaseManager:
             ]:
                 try:
                     cursor.execute(f"ALTER TABLE ml_predictions ADD COLUMN {col_def}")
-                except sqlite3.OperationalError:
-                    pass  # Column already exists
+                except sqlite3.OperationalError as e:
+                    self.logger.warning(f"Migration: ml_predictions ADD COLUMN {col_def} skipped: {e}")
 
             # ── Council S3: ML Model Accuracy Scorecard ──
             cursor.execute('''CREATE TABLE IF NOT EXISTS model_accuracy_scorecard (
@@ -375,14 +375,14 @@ class DatabaseManager:
             # Migration: add peak_pnl_bps column to existing token_spray_log tables
             try:
                 cursor.execute("ALTER TABLE token_spray_log ADD COLUMN peak_pnl_bps REAL")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                self.logger.warning(f"Migration: token_spray_log ADD COLUMN peak_pnl_bps skipped: {e}")
 
             # Migration: add wallet_id column for per-model wallet tracking
             try:
                 cursor.execute("ALTER TABLE token_spray_log ADD COLUMN wallet_id TEXT DEFAULT 'default'")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                self.logger.warning(f"Migration: token_spray_log ADD COLUMN wallet_id skipped: {e}")
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_spray_wallet ON token_spray_log(wallet_id)')
 
             # ── Straddle Engine tables ──
@@ -717,8 +717,8 @@ class DatabaseManager:
                     try:
                         opened = datetime.fromisoformat(row[0])
                         hold_duration = (datetime.now(timezone.utc) - opened.replace(tzinfo=timezone.utc)).total_seconds()
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e:
+                        self.logger.warning(f"Failed to parse opened_at timestamp for hold duration calculation: {e}")
                 closed_at = datetime.now(timezone.utc).isoformat()
                 cursor.execute(
                     """UPDATE open_positions
@@ -882,8 +882,8 @@ class DatabaseManager:
                                 f"ALTER TABLE decision_audit_log ADD COLUMN {col} TEXT"
                             )
                             self.logger.info(f"Audit log migration: added column '{col}'")
-                        except Exception:
-                            pass  # Column already exists or other benign error
+                        except Exception as e:
+                            self.logger.warning(f"Migration: decision_audit_log ADD COLUMN {col} skipped: {e}")
                 conn.commit()
         except Exception as e:
             self.logger.error(f"Error ensuring audit columns: {e}")
@@ -1125,8 +1125,8 @@ class DatabaseManager:
                             ''', (pid, _target_epoch - 60, _target_epoch + 120)).fetchone()
                             if bar_1bar:
                                 current_px = float(bar_1bar[0])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self.logger.warning(f"Failed to get 1-bar-later price for ML prediction {row_id} ({pid}): {e}")
                     if not current_px:
                         continue
                     # If price_at_prediction is NULL, look up from five_minute_bars
@@ -1176,8 +1176,8 @@ class DatabaseManager:
                         ''', (pid, _target_6bar - 60, _target_6bar + 120)).fetchone()
                         if bar_6:
                             actual_return_6bar = round((float(bar_6[0]) - entry_px) / entry_px, 6)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Failed to compute 6-bar return for ML prediction {row_id} ({pid}): {e}")
 
                     cursor.execute('''
                         UPDATE ml_predictions
@@ -1249,8 +1249,8 @@ class DatabaseManager:
                                 ''', (pid, _target_epoch - 60, _target_epoch + 120)).fetchone()
                                 if bar_1bar:
                                     current_px = float(bar_1bar[0])
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                self.logger.warning(f"Batch ML eval: failed to get 1-bar-later price for prediction {row_id} ({pid}): {e}")
                         if not current_px:
                             continue
                         if not entry_px or entry_px <= 0:

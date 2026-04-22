@@ -11,6 +11,7 @@ Comprehensive testing framework for:
 - Revolutionary 66% annual returns verification
 """
 
+import logging
 import os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -20,6 +21,8 @@ import numpy as np
 import warnings
 from typing import Dict, Any, List
 warnings.filterwarnings('ignore')
+
+logger = logging.getLogger(__name__)
 
 # Configure UTF-8 encoding for proper emoji display
 try:

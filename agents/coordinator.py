@@ -602,8 +602,8 @@ class AgentCoordinator:
                 payload=payload,
                 severity="warning",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning(f"Failed to log circuit breaker event: {e}")
 
     def _on_trade_signal(self, channel: str, payload: Dict[str, Any]) -> None:
         """Log significant trade signals to DB."""
@@ -618,5 +618,5 @@ class AgentCoordinator:
                     payload=payload,
                     severity="info",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Failed to log high-confidence trade signal: {e}")

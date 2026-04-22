@@ -15,8 +15,11 @@ Performance: < 2ms per position per horizon.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from core.data_structures import HorizonEstimate
 

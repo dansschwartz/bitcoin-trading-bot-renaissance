@@ -53,8 +53,8 @@ class ConfigDeployer:
             # Clean up tmp file on failure
             try:
                 os.unlink(tmp_path)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.warning(f"Failed to clean up tmp file {tmp_path}: {e}")
             raise
 
     def backup(self, proposal_id: int) -> Path:

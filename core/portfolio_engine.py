@@ -376,8 +376,8 @@ class PortfolioEngine:
                 try:
                     summ = pm.get_position_summary()
                     equity = getattr(summ, "total_exposure_usd", 10_000.0) or 10_000.0
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to get position summary for equity calculation: {e}")
 
             actual = PortfolioActual(
                 positions=positions,
@@ -479,7 +479,8 @@ class PortfolioEngine:
                 if self.cost_model and hasattr(self.cost_model, "estimate_round_trip_cost"):
                     try:
                         est_cost_bps = self.cost_model.estimate_round_trip_cost() * 10_000.0
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"Failed to estimate round-trip cost for {pair}: {e}")
                         est_cost_bps = 0.0
 
                 if est_cost_bps > max_cost and max_cost > 0:
@@ -642,8 +643,8 @@ class PortfolioEngine:
                         market[pair] = {
                             "last_price": getattr(pos, "current_price", 0) or pos.get("current_price", 0),
                         }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to build market state from position manager: {e}")
         return market
 
     def _execute_reeval_action(self, result: ReEvalResult) -> None:
