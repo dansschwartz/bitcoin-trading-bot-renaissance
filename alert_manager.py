@@ -1,5 +1,24 @@
 """
 Alert Manager — Slack webhook and log-based alerting for production monitoring.
+
+DEPRECATION NOTICE
+------------------
+This is the **legacy** alert manager.  It provides simple Slack-webhook and
+in-memory-log alerting that is always active (no external dependencies beyond
+an optional Slack URL).
+
+The **canonical** alert system is ``monitoring/alert_manager.py`` which adds:
+  * Telegram routing via TelegramAlerter
+  * Content-hash deduplication (60 s window)
+  * SQLite persistence to the ``system_state_log`` table
+  * Richer convenience methods (trade alerts, daily summaries, system events)
+
+Both alert managers are imported in ``renaissance_trading_bot.py``:
+  * ``alert_manager.AlertManager``              → basic Slack (always on)
+  * ``monitoring.alert_manager.AlertManager``    → full Telegram + persistence (feature-gated)
+
+The root AlertManager is retained as a lightweight fallback so alerting still
+works even when the monitoring subsystem is disabled or unavailable.
 """
 
 import json

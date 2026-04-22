@@ -61,6 +61,8 @@ from performance_attribution_engine import PerformanceAttributionEngine
 # Order Execution & Position Management
 from coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
 from position_manager import EnhancedPositionManager, RiskLimits, PositionStatus
+# Legacy AlertManager (Slack webhook, always on) — lightweight fallback.
+# The canonical alert system is monitoring.alert_manager.AlertManager (Telegram + persistence).
 from alert_manager import AlertManager
 from coinbase_advanced_client import CoinbaseAdvancedClient
 from logger import SecretMaskingFilter
@@ -161,6 +163,7 @@ try:
 except ImportError:
     RECOVERY_AVAILABLE = False
 
+# Canonical alert system — Telegram routing, dedup, SQLite persistence (feature-gated)
 try:
     from monitoring.telegram_bot import TelegramAlerter
     from monitoring.alert_manager import AlertManager as MonitoringAlertManager
