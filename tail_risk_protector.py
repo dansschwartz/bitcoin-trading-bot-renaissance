@@ -1,14 +1,14 @@
 """
-🛡️ RENAISSANCE TECHNOLOGIES TAIL RISK PROTECTOR
+RENAISSANCE TECHNOLOGIES TAIL RISK PROTECTOR
 ================================================================
 
 Advanced black swan defense system with multiple VaR methodologies,
-consciousness-enhanced tail risk prediction, and comprehensive stress testing
+tail risk prediction, and comprehensive stress testing
 for extreme market event protection.
 
 Key Features:
 - Multiple VaR calculation methods (Historical, Parametric, Monte Carlo)
-- Conditional Value-at-Risk (CVaR) with consciousness enhancement (+14.2%)
+- Conditional Value-at-Risk (CVaR)
 - Extreme Value Theory for tail risk modeling
 - Historical stress testing (2008, 2020, flash crashes, Bitcoin-specific events)
 - Black swan detection and protection mechanisms
@@ -77,8 +77,6 @@ class VaRResult:
     time_horizon: int
     var_value: float
     cvar_value: float
-    consciousness_enhanced_var: float
-    consciousness_enhanced_cvar: float
     calculation_timestamp: datetime
     market_regime: str = "unknown"
     tail_risk_level: TailRiskLevel = TailRiskLevel.LOW
@@ -92,7 +90,6 @@ class StressTestResult:
     max_drawdown: float
     recovery_time_days: int
     scenario_probability: float
-    consciousness_enhanced_loss: float
     hedging_cost: float
     survival_probability: float
     test_timestamp: datetime
@@ -108,7 +105,6 @@ class TailRiskMetrics:
     tail_expectation: float
     extreme_tail_probability: float
     black_swan_probability: float
-    consciousness_boost_factor: float
     risk_level: TailRiskLevel
     early_warning_triggered: bool = False
     recommended_hedging_ratio: float = 0.0
@@ -123,20 +119,17 @@ class HedgingRecommendation:
     protection_level: float
     implementation_urgency: str
     market_instruments: List[str]
-    consciousness_adjusted_ratio: float
 
 
 class TailRiskProtector:
     """
-    🛡️ Renaissance Technologies Tail Risk Protector
+    Renaissance Technologies Tail Risk Protector
 
-    Advanced black swan defense system with consciousness-enhanced
-    tail risk prediction and comprehensive protection mechanisms
-    for extreme market events.
+    Advanced black swan defense system with tail risk prediction
+    and comprehensive protection mechanisms for extreme market events.
     """
 
     def __init__(self,
-                 consciousness_boost: float = 0.0,
                  default_confidence_levels: List[float] = None,
                  monte_carlo_simulations: int = 10000,
                  tail_threshold: float = 0.05):
@@ -144,12 +137,10 @@ class TailRiskProtector:
         Initialize Tail Risk Protector
 
         Args:
-            consciousness_boost: Renaissance consciousness enhancement factor
             default_confidence_levels: VaR confidence levels to calculate
             monte_carlo_simulations: Number of Monte Carlo simulations
             tail_threshold: Threshold for tail event classification
         """
-        self.consciousness_boost = consciousness_boost
         self.confidence_levels = default_confidence_levels or [0.90, 0.95, 0.99, 0.999]
         self.monte_carlo_simulations = monte_carlo_simulations
         self.tail_threshold = tail_threshold
@@ -179,11 +170,10 @@ class TailRiskProtector:
             TailRiskLevel.BLACK_SWAN: 0.12
         }
 
-        logger.info("🛡️ Tail Risk Protector initialized")
-        logger.info(f"   • Consciousness Boost: +{self.consciousness_boost * 100:.1f}%")
-        logger.info(f"   • Monte Carlo Simulations: {self.monte_carlo_simulations:,}")
-        logger.info(f"   • Confidence Levels: {self.confidence_levels}")
-        logger.info(f"   • Stress Scenarios: {len(self.stress_scenarios)}")
+        logger.info("Tail Risk Protector initialized")
+        logger.info(f"   Monte Carlo Simulations: {self.monte_carlo_simulations:,}")
+        logger.info(f"   Confidence Levels: {self.confidence_levels}")
+        logger.info(f"   Stress Scenarios: {len(self.stress_scenarios)}")
 
     def _initialize_stress_scenarios(self) -> Dict[StressScenario, Dict[str, float]]:
         """Initialize historical stress test scenarios"""
@@ -243,7 +233,7 @@ class TailRiskProtector:
                                 confidence_level: float = 0.95,
                                 time_horizon: int = 1) -> VaRResult:
         """
-        Calculate Historical Value-at-Risk with consciousness enhancement
+        Calculate Historical Value-at-Risk
 
         Args:
             returns: Historical return series
@@ -251,7 +241,7 @@ class TailRiskProtector:
             time_horizon: Time horizon in days
 
         Returns:
-            VaRResult with consciousness-enhanced values
+            VaRResult with calculated values
         """
         try:
             if len(returns) == 0:
@@ -269,13 +259,8 @@ class TailRiskProtector:
             tail_losses = returns[returns <= historical_var]
             historical_cvar = np.mean(tail_losses) if len(tail_losses) > 0 else historical_var
 
-            # Apply consciousness enhancement
-            consciousness_factor = 1 + self.consciousness_boost
-            enhanced_var = historical_var * consciousness_factor
-            enhanced_cvar = historical_cvar * consciousness_factor
-
             # Determine tail risk level
-            tail_risk_level = self._assess_tail_risk_level(abs(enhanced_var))
+            tail_risk_level = self._assess_tail_risk_level(abs(historical_var))
 
             return VaRResult(
                 method=VaRMethod.HISTORICAL,
@@ -283,8 +268,6 @@ class TailRiskProtector:
                 time_horizon=time_horizon,
                 var_value=historical_var,
                 cvar_value=historical_cvar,
-                consciousness_enhanced_var=enhanced_var,
-                consciousness_enhanced_cvar=enhanced_cvar,
                 calculation_timestamp=datetime.now(),
                 tail_risk_level=tail_risk_level
             )
@@ -299,7 +282,7 @@ class TailRiskProtector:
                                 time_horizon: int = 1,
                                 distribution: str = 'normal') -> VaRResult:
         """
-        Calculate Parametric Value-at-Risk with consciousness enhancement
+        Calculate Parametric Value-at-Risk
 
         Args:
             returns: Historical return series
@@ -308,7 +291,7 @@ class TailRiskProtector:
             distribution: Assumed distribution ('normal', 'student_t', 'skewed_t')
 
         Returns:
-            VaRResult with consciousness-enhanced values
+            VaRResult with calculated values
         """
         try:
             if len(returns) == 0:
@@ -345,13 +328,8 @@ class TailRiskProtector:
                 # Approximate CVaR
                 parametric_cvar = parametric_var * 1.2
 
-            # Apply consciousness enhancement
-            consciousness_factor = 1 + self.consciousness_boost
-            enhanced_var = parametric_var * consciousness_factor
-            enhanced_cvar = parametric_cvar * consciousness_factor
-
             # Determine tail risk level
-            tail_risk_level = self._assess_tail_risk_level(abs(enhanced_var))
+            tail_risk_level = self._assess_tail_risk_level(abs(parametric_var))
 
             return VaRResult(
                 method=VaRMethod.PARAMETRIC,
@@ -359,8 +337,6 @@ class TailRiskProtector:
                 time_horizon=time_horizon,
                 var_value=parametric_var,
                 cvar_value=parametric_cvar,
-                consciousness_enhanced_var=enhanced_var,
-                consciousness_enhanced_cvar=enhanced_cvar,
                 calculation_timestamp=datetime.now(),
                 tail_risk_level=tail_risk_level
             )
@@ -375,7 +351,7 @@ class TailRiskProtector:
                                  time_horizon: int = 1,
                                  simulations: int = None) -> VaRResult:
         """
-        Calculate Monte Carlo Value-at-Risk with consciousness enhancement
+        Calculate Monte Carlo Value-at-Risk
 
         Args:
             returns: Historical return series for parameter estimation
@@ -384,7 +360,7 @@ class TailRiskProtector:
             simulations: Number of Monte Carlo simulations
 
         Returns:
-            VaRResult with consciousness-enhanced values
+            VaRResult with calculated values
         """
         try:
             if len(returns) == 0:
@@ -416,13 +392,8 @@ class TailRiskProtector:
             tail_losses = simulated_returns[simulated_returns <= mc_var]
             mc_cvar = np.mean(tail_losses) if len(tail_losses) > 0 else mc_var
 
-            # Apply consciousness enhancement
-            consciousness_factor = 1 + self.consciousness_boost
-            enhanced_var = mc_var * consciousness_factor
-            enhanced_cvar = mc_cvar * consciousness_factor
-
             # Determine tail risk level
-            tail_risk_level = self._assess_tail_risk_level(abs(enhanced_var))
+            tail_risk_level = self._assess_tail_risk_level(abs(mc_var))
 
             return VaRResult(
                 method=VaRMethod.MONTE_CARLO,
@@ -430,8 +401,6 @@ class TailRiskProtector:
                 time_horizon=time_horizon,
                 var_value=mc_var,
                 cvar_value=mc_cvar,
-                consciousness_enhanced_var=enhanced_var,
-                consciousness_enhanced_cvar=enhanced_cvar,
                 calculation_timestamp=datetime.now(),
                 tail_risk_level=tail_risk_level
             )
@@ -446,7 +415,7 @@ class TailRiskProtector:
                                    time_horizon: int = 1,
                                    threshold_percentile: float = 0.90) -> VaRResult:
         """
-        Calculate Extreme Value Theory VaR with consciousness enhancement
+        Calculate Extreme Value Theory VaR
 
         Args:
             returns: Historical return series
@@ -455,7 +424,7 @@ class TailRiskProtector:
             threshold_percentile: Percentile for extreme value threshold
 
         Returns:
-            VaRResult with consciousness-enhanced extreme tail predictions
+            VaRResult with extreme tail predictions
         """
         try:
             if len(returns) == 0:
@@ -515,13 +484,8 @@ class TailRiskProtector:
             else:
                 evt_cvar = evt_var * 1.3  # Conservative approximation
 
-            # Apply consciousness enhancement with extra boost for extreme tails
-            consciousness_factor = 1 + self.consciousness_boost * 1.5  # Extra boost for tail events
-            enhanced_var = evt_var * consciousness_factor
-            enhanced_cvar = evt_cvar * consciousness_factor
-
             # Tail risk level for extreme value theory is typically higher
-            tail_risk_level = self._assess_tail_risk_level(abs(enhanced_var), extreme_value=True)
+            tail_risk_level = self._assess_tail_risk_level(abs(evt_var), extreme_value=True)
 
             return VaRResult(
                 method=VaRMethod.EXTREME_VALUE,
@@ -529,8 +493,6 @@ class TailRiskProtector:
                 time_horizon=time_horizon,
                 var_value=evt_var,
                 cvar_value=evt_cvar,
-                consciousness_enhanced_var=enhanced_var,
-                consciousness_enhanced_cvar=enhanced_cvar,
                 calculation_timestamp=datetime.now(),
                 tail_risk_level=tail_risk_level
             )
@@ -550,7 +512,7 @@ class TailRiskProtector:
             scenarios: List of stress scenarios to test
 
         Returns:
-            List of stress test results with consciousness-enhanced projections
+            List of stress test results
         """
         try:
             scenarios = scenarios or list(self.stress_scenarios.keys())
@@ -601,10 +563,9 @@ class TailRiskProtector:
             portfolio_value = sum(portfolio.values())
             portfolio_loss = portfolio_value * total_drawdown
 
-            # Estimate recovery time (consciousness-enhanced)
+            # Estimate recovery time
             base_recovery_days = duration_days * 2  # Typical recovery is 2x crash duration
-            consciousness_factor = 1 - self.consciousness_boost  # Faster recovery with consciousness
-            recovery_time = int(base_recovery_days * consciousness_factor)
+            recovery_time = int(base_recovery_days)
 
             # Calculate scenario probability (based on historical frequency)
             scenario_probabilities = {
@@ -617,9 +578,6 @@ class TailRiskProtector:
             }
 
             scenario_probability = scenario_probabilities.get(scenario, 0.05)
-
-            # Apply consciousness enhancement to loss prediction
-            consciousness_enhanced_loss = portfolio_loss * (1 + self.consciousness_boost)
 
             # Calculate hedging cost estimate
             hedging_cost = abs(portfolio_loss) * 0.02  # 2% of potential loss
@@ -634,7 +592,6 @@ class TailRiskProtector:
                 max_drawdown=total_drawdown,
                 recovery_time_days=recovery_time,
                 scenario_probability=scenario_probability,
-                consciousness_enhanced_loss=consciousness_enhanced_loss,
                 hedging_cost=hedging_cost,
                 survival_probability=survival_probability,
                 test_timestamp=datetime.now()
@@ -648,7 +605,6 @@ class TailRiskProtector:
                 max_drawdown=0.0,
                 recovery_time_days=0,
                 scenario_probability=0.0,
-                consciousness_enhanced_loss=0.0,
                 hedging_cost=0.0,
                 survival_probability=1.0,
                 test_timestamp=datetime.now()
@@ -658,7 +614,7 @@ class TailRiskProtector:
                                     market_data: Dict[str, Any],
                                     returns: np.ndarray) -> Dict[str, Any]:
         """
-        Detect potential black swan conditions with consciousness-enhanced prediction
+        Detect potential black swan conditions
 
         Args:
             market_data: Current market data
@@ -714,17 +670,14 @@ class TailRiskProtector:
                 black_swan_indicators['market_structure_stress'] = True
                 warning_level += 1
 
-            # Apply consciousness enhancement to warning level
-            consciousness_enhanced_warning = warning_level * (1 + self.consciousness_boost)
-
             # Determine black swan probability
-            if consciousness_enhanced_warning >= 8:
+            if warning_level >= 8:
                 black_swan_probability = 0.8
                 risk_level = TailRiskLevel.BLACK_SWAN
-            elif consciousness_enhanced_warning >= 6:
+            elif warning_level >= 6:
                 black_swan_probability = 0.5
                 risk_level = TailRiskLevel.EXTREME
-            elif consciousness_enhanced_warning >= 4:
+            elif warning_level >= 4:
                 black_swan_probability = 0.2
                 risk_level = TailRiskLevel.HIGH
             else:
@@ -734,7 +687,6 @@ class TailRiskProtector:
             return {
                 'black_swan_indicators': black_swan_indicators,
                 'warning_level': warning_level,
-                'consciousness_enhanced_warning': consciousness_enhanced_warning,
                 'black_swan_probability': black_swan_probability,
                 'risk_level': risk_level,
                 'recommended_action': self._get_black_swan_action(risk_level),
@@ -746,7 +698,6 @@ class TailRiskProtector:
             return {
                 'black_swan_indicators': {},
                 'warning_level': 0,
-                'consciousness_enhanced_warning': 0,
                 'black_swan_probability': 0.05,
                 'risk_level': TailRiskLevel.LOW,
                 'recommended_action': 'monitor',
@@ -766,7 +717,7 @@ class TailRiskProtector:
             market_regime: Current market regime
 
         Returns:
-            List of hedging recommendations with consciousness enhancement
+            List of hedging recommendations
         """
         try:
             recommendations = []
@@ -781,22 +732,18 @@ class TailRiskProtector:
                 TailRiskLevel.BLACK_SWAN: 0.50
             }
 
-            base_hedge_ratio = base_hedge_ratios.get(tail_risk_metrics.risk_level, 0.10)
-
-            # Apply consciousness enhancement
-            consciousness_adjusted_ratio = base_hedge_ratio * (1 + self.consciousness_boost)
-            consciousness_adjusted_ratio = min(consciousness_adjusted_ratio, 0.60)  # Cap at 60%
+            hedge_ratio = base_hedge_ratios.get(tail_risk_metrics.risk_level, 0.10)
+            hedge_ratio = min(hedge_ratio, 0.60)  # Cap at 60%
 
             # 1. VIX/Volatility Hedge
             if tail_risk_metrics.current_var_99 > 0.08:  # High tail risk
                 vix_hedge = HedgingRecommendation(
                     hedge_type="volatility_hedge",
-                    hedge_ratio=consciousness_adjusted_ratio * 0.4,
+                    hedge_ratio=hedge_ratio * 0.4,
                     expected_cost=portfolio_value * 0.02,
                     protection_level=0.7,
                     implementation_urgency="high",
-                    market_instruments=["VIX_calls", "volatility_swaps"],
-                    consciousness_adjusted_ratio=consciousness_adjusted_ratio * 0.4
+                    market_instruments=["VIX_calls", "volatility_swaps"]
                 )
                 recommendations.append(vix_hedge)
 
@@ -804,12 +751,11 @@ class TailRiskProtector:
             if tail_risk_metrics.risk_level in [TailRiskLevel.HIGH, TailRiskLevel.EXTREME, TailRiskLevel.BLACK_SWAN]:
                 put_hedge = HedgingRecommendation(
                     hedge_type="put_protection",
-                    hedge_ratio=consciousness_adjusted_ratio * 0.6,
+                    hedge_ratio=hedge_ratio * 0.6,
                     expected_cost=portfolio_value * 0.03,
                     protection_level=0.85,
                     implementation_urgency="immediate" if tail_risk_metrics.risk_level == TailRiskLevel.BLACK_SWAN else "high",
-                    market_instruments=["BTC_puts", "protective_puts"],
-                    consciousness_adjusted_ratio=consciousness_adjusted_ratio * 0.6
+                    market_instruments=["BTC_puts", "protective_puts"]
                 )
                 recommendations.append(put_hedge)
 
@@ -817,12 +763,11 @@ class TailRiskProtector:
             if market_regime in ["crisis", "high_volatility"]:
                 correlation_hedge = HedgingRecommendation(
                     hedge_type="correlation_hedge",
-                    hedge_ratio=consciousness_adjusted_ratio * 0.3,
+                    hedge_ratio=hedge_ratio * 0.3,
                     expected_cost=portfolio_value * 0.015,
                     protection_level=0.5,
                     implementation_urgency="medium",
-                    market_instruments=["gold", "treasuries", "inverse_correlation_assets"],
-                    consciousness_adjusted_ratio=consciousness_adjusted_ratio * 0.3
+                    market_instruments=["gold", "treasuries", "inverse_correlation_assets"]
                 )
                 recommendations.append(correlation_hedge)
 
@@ -830,12 +775,11 @@ class TailRiskProtector:
             if tail_risk_metrics.black_swan_probability > 0.3:
                 tail_hedge = HedgingRecommendation(
                     hedge_type="tail_risk_hedge",
-                    hedge_ratio=consciousness_adjusted_ratio * 0.8,
+                    hedge_ratio=hedge_ratio * 0.8,
                     expected_cost=portfolio_value * 0.05,
                     protection_level=0.95,
                     implementation_urgency="immediate",
-                    market_instruments=["tail_risk_funds", "deep_otm_puts", "crisis_alpha_strategies"],
-                    consciousness_adjusted_ratio=consciousness_adjusted_ratio * 0.8
+                    market_instruments=["tail_risk_funds", "deep_otm_puts", "crisis_alpha_strategies"]
                 )
                 recommendations.append(tail_hedge)
 
@@ -852,7 +796,7 @@ class TailRiskProtector:
                                            returns: np.ndarray,
                                            confidence_levels: List[float] = None) -> TailRiskMetrics:
         """
-        Calculate comprehensive tail risk metrics with consciousness enhancement
+        Calculate comprehensive tail risk metrics
 
         Args:
             returns: Historical return series
@@ -865,12 +809,12 @@ class TailRiskProtector:
             confidence_levels = confidence_levels or self.confidence_levels
 
             # Calculate VaR at different confidence levels
-            var_95 = self.calculate_historical_var(returns, 0.95).consciousness_enhanced_var
-            var_99 = self.calculate_historical_var(returns, 0.99).consciousness_enhanced_var
+            var_95 = self.calculate_historical_var(returns, 0.95).var_value
+            var_99 = self.calculate_historical_var(returns, 0.99).var_value
 
             # Calculate CVaR
-            cvar_95 = self.calculate_historical_var(returns, 0.95).consciousness_enhanced_cvar
-            cvar_99 = self.calculate_historical_var(returns, 0.99).consciousness_enhanced_cvar
+            cvar_95 = self.calculate_historical_var(returns, 0.95).cvar_value
+            cvar_99 = self.calculate_historical_var(returns, 0.99).cvar_value
 
             # Calculate tail expectation (expected loss in worst 1% of cases)
             tail_threshold = np.percentile(returns, 1)
@@ -884,9 +828,6 @@ class TailRiskProtector:
             # Black swan probability (>20% loss)
             black_swan_threshold = -0.20
             black_swan_probability = np.mean(returns <= black_swan_threshold)
-
-            # Apply consciousness boost factor
-            consciousness_boost_factor = 1 + self.consciousness_boost
 
             # Determine overall risk level
             risk_level = self._assess_tail_risk_level(abs(var_99))
@@ -912,7 +853,6 @@ class TailRiskProtector:
                 tail_expectation=tail_expectation,
                 extreme_tail_probability=extreme_tail_probability,
                 black_swan_probability=black_swan_probability,
-                consciousness_boost_factor=consciousness_boost_factor,
                 risk_level=risk_level,
                 early_warning_triggered=early_warning_triggered,
                 recommended_hedging_ratio=recommended_hedging_ratio
@@ -928,7 +868,6 @@ class TailRiskProtector:
                 tail_expectation=-0.12,
                 extreme_tail_probability=0.02,
                 black_swan_probability=0.005,
-                consciousness_boost_factor=1 + self.consciousness_boost,
                 risk_level=TailRiskLevel.MODERATE,
                 early_warning_triggered=False,
                 recommended_hedging_ratio=0.10
@@ -992,7 +931,7 @@ class TailRiskProtector:
     def _generate_stress_based_hedging_recommendations(self, stress_results: List[StressTestResult]):
         """Generate hedging recommendations based on stress test results"""
         try:
-            worst_case_loss = min([result.consciousness_enhanced_loss for result in stress_results])
+            worst_case_loss = min([result.portfolio_loss for result in stress_results])
             if worst_case_loss < -0.25:  # 25%+ worst case loss
                 logger.warning(f"Severe stress test results: {worst_case_loss:.2%} worst case loss")
                 # In production, would trigger additional hedging recommendations
@@ -1007,8 +946,6 @@ class TailRiskProtector:
             time_horizon=time_horizon,
             var_value=-0.05,
             cvar_value=-0.07,
-            consciousness_enhanced_var=-0.05 * (1 + self.consciousness_boost),
-            consciousness_enhanced_cvar=-0.07 * (1 + self.consciousness_boost),
             calculation_timestamp=datetime.now(),
             tail_risk_level=TailRiskLevel.MODERATE
         )
@@ -1023,7 +960,6 @@ class TailRiskProtector:
                 'recent_calculations': len(recent_results),
                 'recent_stress_tests': len(recent_stress_tests),
                 'active_hedging_recommendations': len(self.hedging_recommendations),
-                'consciousness_boost_active': self.consciousness_boost > 0,
                 'monte_carlo_simulations': self.monte_carlo_simulations,
                 'confidence_levels_monitored': self.confidence_levels,
                 'tail_protection_status': 'active'
@@ -1035,7 +971,7 @@ class TailRiskProtector:
 
 def test_tail_risk_protector():
     """Test the Tail Risk Protector system"""
-    print("🛡️ TESTING TAIL RISK PROTECTOR - BLACK SWAN DEFENSE")
+    print("TESTING TAIL RISK PROTECTOR - BLACK SWAN DEFENSE")
     print("=" * 60)
 
     # Initialize protector
@@ -1051,29 +987,29 @@ def test_tail_risk_protector():
     test_returns = np.concatenate([normal_returns, tail_events])
     np.random.shuffle(test_returns)
 
-    print(f"📊 Test Data: {len(test_returns)} days, {np.sum(test_returns < -0.05)} extreme events")
+    print(f"Test Data: {len(test_returns)} days, {np.sum(test_returns < -0.05)} extreme events")
 
     # Test VaR calculations
-    print("\n🧮 Testing VaR Calculations:")
+    print("\nTesting VaR Calculations:")
 
     # Historical VaR
     hist_var = protector.calculate_historical_var(test_returns, 0.95)
-    print(f"Historical VaR (95%): {hist_var.consciousness_enhanced_var:.4f}")
+    print(f"Historical VaR (95%): {hist_var.var_value:.4f}")
 
     # Parametric VaR
     param_var = protector.calculate_parametric_var(test_returns, 0.95)
-    print(f"Parametric VaR (95%): {param_var.consciousness_enhanced_var:.4f}")
+    print(f"Parametric VaR (95%): {param_var.var_value:.4f}")
 
     # Monte Carlo VaR
     mc_var = protector.calculate_monte_carlo_var(test_returns, 0.95)
-    print(f"Monte Carlo VaR (95%): {mc_var.consciousness_enhanced_var:.4f}")
+    print(f"Monte Carlo VaR (95%): {mc_var.var_value:.4f}")
 
     # Extreme Value VaR
     evt_var = protector.calculate_extreme_value_var(test_returns, 0.99)
-    print(f"Extreme Value VaR (99%): {evt_var.consciousness_enhanced_var:.4f}")
+    print(f"Extreme Value VaR (99%): {evt_var.var_value:.4f}")
 
     # Test comprehensive tail metrics
-    print("\n📈 Testing Comprehensive Tail Metrics:")
+    print("\nTesting Comprehensive Tail Metrics:")
     tail_metrics = protector.calculate_comprehensive_tail_metrics(test_returns)
     print(f"VaR 99%: {tail_metrics.current_var_99:.4f}")
     print(f"CVaR 99%: {tail_metrics.current_cvar_99:.4f}")
@@ -1082,16 +1018,16 @@ def test_tail_risk_protector():
     print(f"Early Warning: {tail_metrics.early_warning_triggered}")
 
     # Test stress testing
-    print("\n⚡ Testing Stress Testing:")
+    print("\nTesting Stress Testing:")
     test_portfolio = {"BTC": 50000, "cash": 10000}
     stress_results = protector.run_comprehensive_stress_test(test_portfolio)
 
     for result in stress_results[:3]:  # Show first 3 scenarios
-        print(f"{result.scenario.value}: {result.consciousness_enhanced_loss:.2f} loss, "
+        print(f"{result.scenario.value}: {result.portfolio_loss:.2f} loss, "
               f"{result.recovery_time_days} days recovery")
 
     # Test black swan detection
-    print("\n🌪️ Testing Black Swan Detection:")
+    print("\nTesting Black Swan Detection:")
     market_data = {
         'volatility': 0.08,  # High volatility
         'volume_ratio': 0.4,  # Low volume
@@ -1105,23 +1041,21 @@ def test_tail_risk_protector():
     print(f"Recommended Action: {black_swan_result['recommended_action']}")
 
     # Test hedging recommendations
-    print("\n💡 Testing Hedging Recommendations:")
+    print("\nTesting Hedging Recommendations:")
     hedging_recs = protector.generate_hedging_recommendations(test_portfolio, tail_metrics)
 
     for rec in hedging_recs:
-        print(f"{rec.hedge_type}: {rec.consciousness_adjusted_ratio:.3f} ratio, "
+        print(f"{rec.hedge_type}: {rec.hedge_ratio:.3f} ratio, "
               f"{rec.implementation_urgency} urgency")
 
     # Summary
     summary = protector.get_tail_risk_summary()
-    print(f"\n📋 System Summary:")
+    print(f"\nSystem Summary:")
     print(f"Monte Carlo Simulations: {summary['monte_carlo_simulations']:,}")
     print(f"Confidence Levels: {summary['confidence_levels_monitored']}")
-    print(f"Consciousness Boost Active: {summary['consciousness_boost_active']}")
 
-    print("\n✅ Tail Risk Protector: BLACK SWAN DEFENSE OPERATIONAL")
-    print("🛡️ Ready for extreme market event protection!")
-    print("🎯 66% annual return target protected with consciousness enhancement!")
+    print("\nTail Risk Protector: BLACK SWAN DEFENSE OPERATIONAL")
+    print("Ready for extreme market event protection!")
 
 
 if __name__ == "__main__":

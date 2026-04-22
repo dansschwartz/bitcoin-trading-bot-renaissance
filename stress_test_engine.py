@@ -1,22 +1,22 @@
 """
-🔬 RENAISSANCE TECHNOLOGIES STRESS TEST ENGINE
+RENAISSANCE TECHNOLOGIES STRESS TEST ENGINE
 ================================================================
 
 Advanced stress testing engine for comprehensive scenario analysis
-with consciousness-enhanced Monte Carlo simulation and historical
-stress testing for institutional-grade risk management.
+with Monte Carlo simulation and historical stress testing for
+institutional-grade risk management.
 
 Key Features:
 - Historical stress scenarios (Black Monday 1987, Dot-com crash, 2008 crisis, COVID-19)
 - Synthetic stress scenario generation with Monte Carlo simulation
 - Correlation breakdown analysis and regime-specific stress testing
-- Multi-factor stress testing with consciousness enhancement (+14.2% boost)
+- Multi-factor stress testing
 - Integration with portfolio_risk_analyzer.py and tail_risk_protector.py
 - Emergency scenario protocols with automatic hedging recommendations
 - Comprehensive stress test reporting and visualization
 
 Author: Renaissance AI Risk Systems
-Version: 9.0 Revolutionary
+Version: 9.0
 """
 
 import numpy as np
@@ -103,7 +103,6 @@ class StressTestResult:
     correlation_impact: float
     sector_impacts: Dict[str, float]
     hedging_recommendations: List[Dict[str, Any]]
-    consciousness_protection: float
     confidence_interval: Tuple[float, float]
     probability: float
     severity_score: float
@@ -111,14 +110,13 @@ class StressTestResult:
 
 class StressTestEngine:
     """
-    🔬 Advanced Stress Test Engine
+    Advanced Stress Test Engine
 
-    Comprehensive stress testing system with historical scenarios,
-    Monte Carlo simulation, and consciousness-enhanced protection.
+    Comprehensive stress testing system with historical scenarios
+    and Monte Carlo simulation.
     """
 
     def __init__(self,
-                 consciousness_boost: float = 0.0,
                  monte_carlo_simulations: int = 100000,
                  confidence_levels: List[float] = [0.95, 0.99, 0.999],
                  max_correlation_breakdown: float = 0.95):
@@ -126,12 +124,10 @@ class StressTestEngine:
         Initialize Advanced Stress Test Engine
 
         Args:
-            consciousness_boost: Renaissance consciousness enhancement factor
             monte_carlo_simulations: Number of Monte Carlo simulations
             confidence_levels: VaR confidence levels for stress testing
             max_correlation_breakdown: Maximum correlation in breakdown scenarios
         """
-        self.consciousness_boost = consciousness_boost
         self.monte_carlo_simulations = monte_carlo_simulations
         self.confidence_levels = confidence_levels
         self.max_correlation_breakdown = max_correlation_breakdown
@@ -151,17 +147,7 @@ class StressTestEngine:
             'volatility_spike': 0.06  # 6% volatility spike triggers emergency
         }
 
-        # Consciousness protection factors
-        self.consciousness_protection = {
-            'historical_scenarios': 0.25,  # 25% of boost for historical protection
-            'synthetic_scenarios': 0.30,  # 30% of boost for synthetic protection
-            'correlation_breakdown': 0.35,  # 35% of boost for correlation protection
-            'liquidity_crisis': 0.20,  # 20% of boost for liquidity protection
-            'extreme_tail': 0.40  # 40% of boost for extreme tail protection
-        }
-
-        logger.info("🔬 Advanced Stress Test Engine Initialized")
-        logger.info(f"Consciousness Boost: +{self.consciousness_boost * 100:.1f}%")
+        logger.info("Advanced Stress Test Engine Initialized")
         logger.info(f"Monte Carlo Simulations: {self.monte_carlo_simulations:,}")
 
     def run_comprehensive_stress_test(self,
@@ -420,40 +406,33 @@ class StressTestEngine:
                     scenario.correlation_spike, scenario.liquidity_impact
                 )
 
-                # Apply consciousness protection
-                consciousness_factor = 1 - self.consciousness_boost * self.consciousness_protection[
-                    'historical_scenarios']
-                protected_impact = portfolio_impact * consciousness_factor
-
                 # Calculate VaR impacts
                 var_impacts = {
-                    f'var_{int(cl * 1000)}': protected_impact * (1 + (1 - cl) * 2)
+                    f'var_{int(cl * 1000)}': portfolio_impact * (1 + (1 - cl) * 2)
                     for cl in self.confidence_levels
                 }
 
                 # Estimate recovery time
-                recovery_time = scenario.recovery_time_days * (1 - self.consciousness_boost * 0.3)
+                recovery_time = scenario.recovery_time_days
 
                 # Generate hedging recommendations
-                hedging_recs = self._generate_hedging_recommendations(scenario, protected_impact)
+                hedging_recs = self._generate_hedging_recommendations(scenario, portfolio_impact)
 
                 # Calculate severity score
-                severity_score = self._calculate_severity_score(scenario, protected_impact)
+                severity_score = self._calculate_severity_score(scenario, portfolio_impact)
 
                 results[scenario_name] = StressTestResult(
                     scenario_name=scenario_name,
                     test_type=StressTestType.HISTORICAL,
-                    portfolio_impact=protected_impact,
+                    portfolio_impact=portfolio_impact,
                     var_impact=var_impacts,
-                    drawdown_estimate=protected_impact * 1.2,
+                    drawdown_estimate=portfolio_impact * 1.2,
                     recovery_time_estimate=recovery_time,
                     liquidity_impact=scenario.liquidity_impact,
                     correlation_impact=scenario.correlation_spike,
                     sector_impacts=self._calculate_sector_impacts(portfolio_data, scenario),
                     hedging_recommendations=hedging_recs,
-                    consciousness_protection=self.consciousness_boost * self.consciousness_protection[
-                        'historical_scenarios'],
-                    confidence_interval=(protected_impact * 0.8, protected_impact * 1.3),
+                    confidence_interval=(portfolio_impact * 0.8, portfolio_impact * 1.3),
                     probability=scenario.probability_annual,
                     severity_score=severity_score
                 )
@@ -484,36 +463,29 @@ class StressTestEngine:
                     portfolio_data, market_shock, vol_multiplier, corr_spike, liquidity_impact
                 )
 
-                # Apply consciousness protection
-                consciousness_factor = 1 - self.consciousness_boost * self.consciousness_protection[
-                    'synthetic_scenarios']
-                protected_impact = portfolio_impact * consciousness_factor
-
                 # Calculate VaR impacts
                 var_impacts = {
-                    f'var_{int(cl * 1000)}': protected_impact * (1 + (1 - cl) * 1.5)
+                    f'var_{int(cl * 1000)}': portfolio_impact * (1 + (1 - cl) * 1.5)
                     for cl in self.confidence_levels
                 }
 
                 # Generate hedging recommendations
-                hedging_recs = self._generate_synthetic_hedging_recommendations(scenario, protected_impact)
+                hedging_recs = self._generate_synthetic_hedging_recommendations(scenario, portfolio_impact)
 
                 results[scenario_name] = StressTestResult(
                     scenario_name=scenario_name,
                     test_type=StressTestType.SYNTHETIC,
-                    portfolio_impact=protected_impact,
+                    portfolio_impact=portfolio_impact,
                     var_impact=var_impacts,
-                    drawdown_estimate=protected_impact * 1.1,
-                    recovery_time_estimate=120 * (1 - self.consciousness_boost * 0.2),
+                    drawdown_estimate=portfolio_impact * 1.1,
+                    recovery_time_estimate=120,
                     liquidity_impact=liquidity_impact,
                     correlation_impact=corr_spike,
                     sector_impacts={},
                     hedging_recommendations=hedging_recs,
-                    consciousness_protection=self.consciousness_boost * self.consciousness_protection[
-                        'synthetic_scenarios'],
                     confidence_interval=scenario.confidence_interval,
                     probability=scenario.probability,
-                    severity_score=self._calculate_synthetic_severity_score(scenario, protected_impact)
+                    severity_score=self._calculate_synthetic_severity_score(scenario, portfolio_impact)
                 )
 
         except Exception as e:
@@ -539,40 +511,33 @@ class StressTestEngine:
                 # Get loss at percentile
                 loss_at_percentile = -np.percentile(mc_returns, percentile)
 
-                # Apply consciousness protection
-                consciousness_factor = 1 - self.consciousness_boost * self.consciousness_protection[
-                    'synthetic_scenarios']
-                protected_loss = loss_at_percentile * consciousness_factor
-
                 # Calculate expected shortfall for this percentile
                 tail_returns = mc_returns[mc_returns <= -loss_at_percentile]
                 expected_shortfall = -np.mean(tail_returns) if len(tail_returns) > 0 else loss_at_percentile
 
                 # VaR impacts
                 var_impacts = {
-                    f'var_{int(cl * 1000)}': protected_loss * (0.8 + 0.4 * (1 - cl))
+                    f'var_{int(cl * 1000)}': loss_at_percentile * (0.8 + 0.4 * (1 - cl))
                     for cl in self.confidence_levels
                 }
 
                 # Estimate recovery time based on loss magnitude
-                recovery_time = min(protected_loss * 1000, 365)  # Cap at 1 year
+                recovery_time = min(loss_at_percentile * 1000, 365)  # Cap at 1 year
 
                 results[scenario_name] = StressTestResult(
                     scenario_name=scenario_name,
                     test_type=StressTestType.MONTE_CARLO,
-                    portfolio_impact=protected_loss,
+                    portfolio_impact=loss_at_percentile,
                     var_impact=var_impacts,
-                    drawdown_estimate=expected_shortfall * consciousness_factor,
+                    drawdown_estimate=expected_shortfall,
                     recovery_time_estimate=recovery_time,
-                    liquidity_impact=min(protected_loss * 2, 0.8),
-                    correlation_impact=min(protected_loss * 1.5, 0.9),
+                    liquidity_impact=min(loss_at_percentile * 2, 0.8),
+                    correlation_impact=min(loss_at_percentile * 1.5, 0.9),
                     sector_impacts={},
-                    hedging_recommendations=self._generate_monte_carlo_hedging_recommendations(protected_loss),
-                    consciousness_protection=self.consciousness_boost * self.consciousness_protection[
-                        'synthetic_scenarios'],
-                    confidence_interval=(protected_loss * 0.7, expected_shortfall),
+                    hedging_recommendations=self._generate_monte_carlo_hedging_recommendations(loss_at_percentile),
+                    confidence_interval=(loss_at_percentile * 0.7, expected_shortfall),
                     probability=percentile / 100,
-                    severity_score=min(protected_loss * 10, 10.0)
+                    severity_score=min(loss_at_percentile * 10, 10.0)
                 )
 
         except Exception as e:
@@ -607,34 +572,27 @@ class StressTestEngine:
                 # Portfolio impact from correlation breakdown
                 volatility_impact = (stressed_volatility - base_portfolio_vol) * 3  # Scale impact
 
-                # Apply consciousness protection
-                consciousness_factor = 1 - self.consciousness_boost * self.consciousness_protection[
-                    'correlation_breakdown']
-                protected_impact = volatility_impact * consciousness_factor
-
                 # VaR impacts
                 var_impacts = {
-                    f'var_{int(cl * 1000)}': protected_impact * (1.5 + (1 - cl) * 2)
+                    f'var_{int(cl * 1000)}': volatility_impact * (1.5 + (1 - cl) * 2)
                     for cl in self.confidence_levels
                 }
 
                 # Generate correlation-specific hedging
-                hedging_recs = self._generate_correlation_hedging_recommendations(target_corr, protected_impact)
+                hedging_recs = self._generate_correlation_hedging_recommendations(target_corr, volatility_impact)
 
                 results[scenario_name] = StressTestResult(
                     scenario_name=scenario_name,
                     test_type=StressTestType.CORRELATION_BREAKDOWN,
-                    portfolio_impact=protected_impact,
+                    portfolio_impact=volatility_impact,
                     var_impact=var_impacts,
-                    drawdown_estimate=protected_impact * 1.4,
+                    drawdown_estimate=volatility_impact * 1.4,
                     recovery_time_estimate=90 * (target_corr / 0.5),  # Higher correlation = longer recovery
                     liquidity_impact=target_corr * 0.6,  # Correlation affects liquidity
                     correlation_impact=target_corr,
                     sector_impacts={},
                     hedging_recommendations=hedging_recs,
-                    consciousness_protection=self.consciousness_boost * self.consciousness_protection[
-                        'correlation_breakdown'],
-                    confidence_interval=(protected_impact * 0.6, protected_impact * 1.8),
+                    confidence_interval=(volatility_impact * 0.6, volatility_impact * 1.8),
                     probability=scenario['probability'],
                     severity_score=(target_corr - 0.3) * 10  # Higher correlation = higher severity
                 )
@@ -669,33 +627,26 @@ class StressTestEngine:
                 transition_uncertainty = abs(shock_magnitude) * 0.3
                 total_impact = abs(regime_adjusted_impact) + transition_uncertainty
 
-                # Apply consciousness protection
-                consciousness_factor = 1 - self.consciousness_boost * self.consciousness_protection[
-                    'synthetic_scenarios']
-                protected_impact = total_impact * consciousness_factor
-
                 # VaR impacts
                 var_impacts = {
-                    f'var_{int(cl * 1000)}': protected_impact * (1.2 + (1 - cl))
+                    f'var_{int(cl * 1000)}': total_impact * (1.2 + (1 - cl))
                     for cl in self.confidence_levels
                 }
 
                 results[scenario_name] = StressTestResult(
                     scenario_name=scenario_name,
                     test_type=StressTestType.REGIME_SHIFT,
-                    portfolio_impact=protected_impact,
+                    portfolio_impact=total_impact,
                     var_impact=var_impacts,
-                    drawdown_estimate=protected_impact * 1.3,
-                    recovery_time_estimate=150 * (1 - self.consciousness_boost * 0.25),
-                    liquidity_impact=min(protected_impact * 1.5, 0.7),
-                    correlation_impact=min(0.4 + protected_impact, 0.8),
+                    drawdown_estimate=total_impact * 1.3,
+                    recovery_time_estimate=150,
+                    liquidity_impact=min(total_impact * 1.5, 0.7),
+                    correlation_impact=min(0.4 + total_impact, 0.8),
                     sector_impacts={},
-                    hedging_recommendations=self._generate_regime_hedging_recommendations(shift, protected_impact),
-                    consciousness_protection=self.consciousness_boost * self.consciousness_protection[
-                        'synthetic_scenarios'],
-                    confidence_interval=(protected_impact * 0.7, protected_impact * 1.6),
+                    hedging_recommendations=self._generate_regime_hedging_recommendations(shift, total_impact),
+                    confidence_interval=(total_impact * 0.7, total_impact * 1.6),
                     probability=shift['probability'],
-                    severity_score=protected_impact * 8
+                    severity_score=total_impact * 8
                 )
 
         except Exception as e:
@@ -730,33 +681,27 @@ class StressTestEngine:
                     compound_factor = 1 + (sigma_multiplier - 5) * 0.2
                     extreme_loss *= compound_factor
 
-                # Apply consciousness protection (stronger for extreme events)
-                consciousness_factor = 1 - self.consciousness_boost * self.consciousness_protection['extreme_tail']
-                protected_impact = extreme_loss * consciousness_factor
-
                 # VaR impacts (extreme scenarios affect all VaR levels)
                 var_impacts = {
-                    f'var_{int(cl * 1000)}': protected_impact * (0.8 + (1 - cl) * 0.5)
+                    f'var_{int(cl * 1000)}': extreme_loss * (0.8 + (1 - cl) * 0.5)
                     for cl in self.confidence_levels
                 }
 
                 # Extreme recovery times
-                recovery_time = sigma_multiplier * 60 * (
-                            1 - self.consciousness_boost * 0.4)  # Consciousness helps recovery
+                recovery_time = sigma_multiplier * 60
 
                 results[scenario_name] = StressTestResult(
                     scenario_name=scenario_name,
                     test_type=StressTestType.EXTREME_TAIL,
-                    portfolio_impact=protected_impact,
+                    portfolio_impact=extreme_loss,
                     var_impact=var_impacts,
-                    drawdown_estimate=protected_impact * 1.5,
+                    drawdown_estimate=extreme_loss * 1.5,
                     recovery_time_estimate=min(recovery_time, 730),  # Cap at 2 years
-                    liquidity_impact=min(protected_impact * 2, 0.95),
-                    correlation_impact=min(0.5 + protected_impact * 1.5, 0.98),
+                    liquidity_impact=min(extreme_loss * 2, 0.95),
+                    correlation_impact=min(0.5 + extreme_loss * 1.5, 0.98),
                     sector_impacts={},
-                    hedging_recommendations=self._generate_extreme_hedging_recommendations(scenario, protected_impact),
-                    consciousness_protection=self.consciousness_boost * self.consciousness_protection['extreme_tail'],
-                    confidence_interval=(protected_impact * 0.5, protected_impact * 2.0),
+                    hedging_recommendations=self._generate_extreme_hedging_recommendations(scenario, extreme_loss),
+                    confidence_interval=(extreme_loss * 0.5, extreme_loss * 2.0),
                     probability=scenario['probability'],
                     severity_score=sigma_multiplier * 1.5
                 )
@@ -1282,9 +1227,6 @@ class StressTestEngine:
                     results_by_type[test_type] = []
                 results_by_type[test_type].append((name, result))
 
-            # Calculate consciousness protection effectiveness
-            total_protection = np.mean([result.consciousness_protection for result in stress_test_results.values()])
-
             # Emergency scenarios count
             emergency_count = sum(1 for result in stress_test_results.values()
                                   if result.portfolio_impact > self.emergency_thresholds['portfolio_loss'])
@@ -1319,11 +1261,6 @@ class StressTestEngine:
                     }
                     for test_type, results in results_by_type.items()
                 },
-                'consciousness_protection': {
-                    'average_protection': total_protection,
-                    'protection_effectiveness': f"{total_protection * 100:.1f}%",
-                    'protected_worst_case': worst_case[1].portfolio_impact
-                },
                 'emergency_assessment': {
                     'emergency_scenarios_count': emergency_count,
                     'emergency_threshold': self.emergency_thresholds['portfolio_loss'],
@@ -1353,7 +1290,7 @@ class StressTestEngine:
 
 def test_stress_test_engine():
     """Test the Stress Test Engine"""
-    print("🔬 TESTING ADVANCED STRESS TEST ENGINE 🔬")
+    print("TESTING ADVANCED STRESS TEST ENGINE")
     print("=" * 60)
 
     # Initialize engine
@@ -1407,11 +1344,10 @@ def test_stress_test_engine():
     print(f"Worst Case: {report['worst_case_scenario']['name']} ({report['worst_case_scenario']['impact']:.1%})")
     print(f"Average Impact: {report['summary_statistics']['average_impact']:.1%}")
     print(f"Emergency Scenarios: {report['emergency_assessment']['emergency_scenarios_count']}")
-    print(f"Consciousness Protection: {report['consciousness_protection']['protection_effectiveness']}")
     print(f"Total Hedging Recommendations: {report['hedging_summary']['total_recommendations']}")
 
-    print("\n✅ Advanced Stress Test Engine: FULLY OPERATIONAL")
-    print("🛡️ Ready for comprehensive risk scenario analysis!")
+    print("\nAdvanced Stress Test Engine: FULLY OPERATIONAL")
+    print("Ready for comprehensive risk scenario analysis!")
 
 
 if __name__ == "__main__":

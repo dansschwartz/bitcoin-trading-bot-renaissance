@@ -1,5 +1,5 @@
 """
-Advanced Inventory Manager with Consciousness Enhancement
+Advanced Inventory Manager
 Manages trading inventory, risk assessment, and rebalancing signals.
 """
 
@@ -25,7 +25,6 @@ class RebalanceAction(Enum):
 class InventoryConfig:
     """Configuration for inventory management"""
     max_position_size: float = 10.0
-    consciousness_boost: float = 1.0
     target_inventory: float = 0.0
     risk_limit: float = 0.8
     max_drawdown_limit: float = 0.15
@@ -57,7 +56,7 @@ class RiskMetrics:
 
 class AdvancedInventoryManager:
     """
-    Advanced Inventory Manager with Consciousness Enhancement
+    Advanced Inventory Manager
 
     Tracks positions, assesses risk, calculates optimal inventory,
     and generates rebalancing signals.
@@ -73,9 +72,7 @@ class AdvancedInventoryManager:
 
     def update_inventory(self, base_change: float, quote_change: float,
                          market_price: float, market_data: Dict[str, Any]) -> InventoryState:
-        """Update inventory positions with consciousness enhancement"""
-        consciousness = self.config.consciousness_boost
-
+        """Update inventory positions"""
         # Update positions
         self.current_state.base_position += base_change
         self.current_state.quote_position += quote_change
@@ -87,7 +84,7 @@ class AdvancedInventoryManager:
             self.current_state.quote_position
         )
 
-        # Compute adverse selection exposure using consciousness enhancement
+        # Compute adverse selection exposure
         volatility = market_data.get('volatility', 0.02)
         order_flow = market_data.get('order_flow_imbalance', 0.0)
         spread = market_data.get('spread', 0.0001)
@@ -95,8 +92,7 @@ class AdvancedInventoryManager:
         self.current_state.adverse_selection_exposure = (
             abs(self.current_state.base_position) *
             volatility *
-            (1.0 + abs(order_flow)) *
-            consciousness
+            (1.0 + abs(order_flow))
         )
 
         # Compute microstructure alpha
@@ -111,7 +107,7 @@ class AdvancedInventoryManager:
             tick_direction * 0.1 * spread +
             (trade_size_ratio - 1.0) * 0.15 +
             (1.0 / max(time_between, 0.01)) * 0.001
-        ) * consciousness
+        )
 
         # Store in history
         self.state_history.append(InventoryState(
@@ -137,8 +133,7 @@ class AdvancedInventoryManager:
         return self.current_state
 
     def calculate_optimal_inventory(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate optimal inventory position with consciousness enhancement"""
-        consciousness = self.config.consciousness_boost
+        """Calculate optimal inventory position"""
         current_pos = self.current_state.base_position
         target = self.config.target_inventory
 
@@ -147,11 +142,11 @@ class AdvancedInventoryManager:
         mid_price = market_data.get('mid_price', 50000.0)
 
         # Risk-adjusted optimal position
-        risk_aversion = 0.01 / max(consciousness, 0.01)
+        risk_aversion = 0.01
         vol_penalty = volatility * abs(current_pos) * risk_aversion
 
         # Flow-based adjustment
-        flow_signal = order_flow * consciousness * 0.5
+        flow_signal = order_flow * 0.5
 
         # Optimal position considers target, flow, and risk
         optimal = target + flow_signal - vol_penalty * np.sign(current_pos)
@@ -159,24 +154,22 @@ class AdvancedInventoryManager:
 
         position_delta = optimal - current_pos
 
-        # Confidence based on data quality and consciousness
+        # Confidence based on data quality
         data_quality = min(1.0, len(self.state_history) / 50.0)
         confidence = min(1.0, data_quality * 0.7 + (1.0 - volatility * 10) * 0.3)
-        confidence = max(0.0, min(confidence * consciousness, 1.0))
+        confidence = max(0.0, min(confidence, 1.0))
 
         return {
             'optimal_position': float(optimal),
             'current_position': float(current_pos),
             'position_delta': float(position_delta),
             'confidence': float(confidence),
-            'consciousness_applied': True,
             'risk_aversion': risk_aversion,
             'flow_signal': flow_signal,
         }
 
     def assess_inventory_risk(self, market_data: Dict[str, Any]) -> RiskMetrics:
         """Assess comprehensive inventory risk"""
-        consciousness = self.config.consciousness_boost
         pos = self.current_state.base_position
         volatility = market_data.get('volatility', 0.02)
         mid_price = market_data.get('mid_price', 50000.0)
@@ -223,8 +216,7 @@ class AdvancedInventoryManager:
         )
 
     def generate_rebalance_signal(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate rebalancing signal with consciousness enhancement"""
-        consciousness = self.config.consciousness_boost
+        """Generate rebalancing signal"""
         pos = self.current_state.base_position
         max_pos = self.config.max_position_size
         target = self.config.target_inventory
@@ -235,11 +227,11 @@ class AdvancedInventoryManager:
 
         # Urgency based on position size and risk
         risk_metrics = self.assess_inventory_risk(market_data)
-        urgency = min(1.0, (
+        urgency = min(1.0,
             utilization * 0.4 +
             risk_metrics.inventory_risk_score * 0.3 +
             deviation * 0.3
-        ) * consciousness)
+        )
 
         # Determine action
         if utilization > 0.9:
@@ -268,7 +260,6 @@ class AdvancedInventoryManager:
             'action': action,
             'recommended_size': float(recommended_size),
             'urgency_score': float(urgency),
-            'consciousness_enhanced': True,
             'current_utilization': float(utilization),
             'risk_score': float(risk_metrics.inventory_risk_score),
         }

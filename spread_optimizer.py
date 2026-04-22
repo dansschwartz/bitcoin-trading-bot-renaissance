@@ -1,5 +1,5 @@
 """
-Dynamic Spread Optimizer with Consciousness Enhancement
+Dynamic Spread Optimizer
 Advanced spread calculation and optimization for market making with Renaissance Technologies-level sophistication
 """
 
@@ -37,7 +37,7 @@ class OptimizationMethod(Enum):
     AVELLANEDA_STOIKOV = "avellaneda_stoikov"
     GLOSTEN_MILGROM = "glosten_milgrom"
     HO_STOLL = "ho_stoll"
-    CONSCIOUSNESS_ENHANCED = "consciousness_enhanced"
+    MULTI_MODEL = "multi_model"
     ADAPTIVE_HYBRID = "adaptive_hybrid"
 
 
@@ -47,14 +47,13 @@ class SpreadConfig:
     base_spread_bps: float = 5.0  # Base spread in basis points
     min_spread_bps: float = 1.0  # Minimum spread
     max_spread_bps: float = 50.0  # Maximum spread
-    consciousness_boost: float = 1.0  # Neutralized (was 1.142)
     risk_aversion_gamma: float = 0.01  # Risk aversion parameter
     inventory_penalty: float = 0.001  # Inventory penalty coefficient
     adverse_selection_factor: float = 0.5  # Adverse selection impact
     volatility_scaling: float = 2.0  # Volatility impact scaling
     liquidity_scaling: float = 1.5  # Liquidity impact scaling
     regime_adaptation_speed: float = 0.1  # How quickly to adapt to regime changes
-    optimization_method: OptimizationMethod = OptimizationMethod.CONSCIOUSNESS_ENHANCED
+    optimization_method: OptimizationMethod = OptimizationMethod.MULTI_MODEL
 
 
 @dataclass
@@ -84,7 +83,6 @@ class SpreadComponents:
     adverse_selection_component: float
     liquidity_component: float
     regime_component: float
-    consciousness_component: float
     total_spread: float
 
 
@@ -106,11 +104,10 @@ class OptimizationResult:
 
 class DynamicSpreadOptimizer:
     """
-    Dynamic Spread Optimizer with Consciousness Enhancement
+    Dynamic Spread Optimizer
 
     Features:
     - Multiple theoretical models (Avellaneda-Stoikov, Glosten-Milgrom, etc.)
-    - Consciousness-enhanced optimization with 1.142x boost
     - Regime-aware adaptive spreading
     - Real-time adverse selection protection
     - Multi-objective optimization (PnL vs Risk)
@@ -145,8 +142,7 @@ class DynamicSpreadOptimizer:
         self.current_regime = SpreadRegime.NORMAL
         self.regime_confidence = 0.5
 
-        self.logger.info(
-            f"Dynamic Spread Optimizer initialized with consciousness factor: {config.consciousness_boost}")
+        self.logger.info(f"Dynamic Spread Optimizer initialized")
         self.logger.info(f"Optimization method: {config.optimization_method.value}")
 
     def _setup_logging(self) -> logging.Logger:
@@ -182,11 +178,6 @@ class DynamicSpreadOptimizer:
             'hs_processing_cost': 0.0001,  # Processing cost component
             'hs_inventory_holding_cost': 0.0005,  # Inventory holding cost
 
-            # Consciousness enhancement parameters
-            'consciousness_alpha': self.config.consciousness_boost - 1.0,
-            'consciousness_beta': 0.5,
-            'consciousness_gamma': 0.3,
-
             # Adaptive parameters
             'adaptation_learning_rate': 0.01,
             'regime_weights': {
@@ -206,14 +197,13 @@ class DynamicSpreadOptimizer:
             'spread_accuracy_score': 0.0,
             'pnl_improvement': 0.0,
             'risk_reduction': 0.0,
-            'consciousness_effectiveness': 0.0,
             'regime_adaptation_score': 0.0,
             'adverse_selection_mitigation': 0.0,
             'start_time': time.time()
         }
 
     def optimize_spread(self, market_state: MarketState) -> OptimizationResult:
-        """Optimize spreads using consciousness-enhanced multi-model approach"""
+        """Optimize spreads using multi-model approach"""
 
         start_time = time.time()
 
@@ -237,8 +227,8 @@ class DynamicSpreadOptimizer:
             self.market_history.append(market_state)
 
             # Choose optimization method based on configuration
-            if self.config.optimization_method == OptimizationMethod.CONSCIOUSNESS_ENHANCED:
-                result = self._optimize_consciousness_enhanced(market_state)
+            if self.config.optimization_method == OptimizationMethod.MULTI_MODEL:
+                result = self._optimize_multi_model(market_state)
             elif self.config.optimization_method == OptimizationMethod.AVELLANEDA_STOIKOV:
                 result = self._optimize_avellaneda_stoikov(market_state)
             elif self.config.optimization_method == OptimizationMethod.GLOSTEN_MILGROM:
@@ -248,7 +238,7 @@ class DynamicSpreadOptimizer:
             elif self.config.optimization_method == OptimizationMethod.ADAPTIVE_HYBRID:
                 result = self._optimize_adaptive_hybrid(market_state)
             else:
-                result = self._optimize_consciousness_enhanced(market_state)
+                result = self._optimize_multi_model(market_state)
 
             # Apply bounds and validation
             result = self._apply_spread_bounds(result, market_state)
@@ -276,35 +266,33 @@ class DynamicSpreadOptimizer:
             self.logger.error(f"Error in spread optimization: {e}")
             return self._create_fallback_result(market_state)
 
-    def _optimize_consciousness_enhanced(self, market_state: MarketState) -> OptimizationResult:
-        """Consciousness-enhanced spread optimization combining multiple models"""
+    def _optimize_multi_model(self, market_state: MarketState) -> OptimizationResult:
+        """Multi-model spread optimization combining multiple approaches"""
 
-        consciousness_factor = self.config.consciousness_boost
-
-        # Calculate base spread components with consciousness enhancement
+        # Calculate base spread components
         components = self._calculate_enhanced_spread_components(market_state)
 
-        # Multi-objective optimization with consciousness boost
+        # Multi-objective optimization
         def objective_function(spreads):
             bid_spread, ask_spread = spreads
 
-            # Expected PnL with consciousness enhancement
+            # Expected PnL
             expected_pnl = self._calculate_expected_pnl_enhanced(
                 market_state, bid_spread, ask_spread
             )
 
-            # Risk penalty with consciousness mitigation
+            # Risk penalty
             risk_penalty = self._calculate_risk_penalty_enhanced(
                 market_state, bid_spread, ask_spread
             )
 
-            # Consciousness bonus for optimal behavior
-            consciousness_bonus = self._calculate_consciousness_bonus(
+            # Behavior bonus for optimal spread placement
+            behavior_bonus = self._calculate_behavior_bonus(
                 market_state, bid_spread, ask_spread
             )
 
-            # Combined objective (maximize PnL - Risk + Consciousness)
-            objective = expected_pnl - risk_penalty + consciousness_bonus
+            # Combined objective (maximize PnL - Risk + Bonus)
+            objective = expected_pnl - risk_penalty + behavior_bonus
 
             return -objective  # Minimize negative for optimization
 
@@ -312,7 +300,7 @@ class DynamicSpreadOptimizer:
         def spread_constraint(spreads):
             bid_spread, ask_spread = spreads
             # Ensure reasonable asymmetry based on inventory and flow
-            max_asymmetry = 0.3 * consciousness_factor  # Enhanced asymmetry tolerance
+            max_asymmetry = 0.3
             symmetric_spread = (bid_spread + ask_spread) / 2
             return max_asymmetry - abs((bid_spread - ask_spread) / symmetric_spread)
 
@@ -365,7 +353,7 @@ class DynamicSpreadOptimizer:
 
         sharpe_ratio = expected_pnl / max(expected_risk, 1e-8)
 
-        # Fill probabilities with consciousness enhancement
+        # Fill probabilities
         fill_prob_bid = self._calculate_fill_probability_enhanced(
             market_state, optimal_bid_spread, 'bid'
         )
@@ -374,7 +362,7 @@ class DynamicSpreadOptimizer:
             market_state, optimal_ask_spread, 'ask'
         )
 
-        # Confidence score based on model convergence and consciousness
+        # Confidence score based on model convergence
         confidence_score = self._calculate_confidence_score(
             market_state, optimal_bid_spread, optimal_ask_spread
         )
@@ -394,19 +382,19 @@ class DynamicSpreadOptimizer:
         )
 
     def _optimize_avellaneda_stoikov(self, market_state: MarketState) -> OptimizationResult:
-        """Avellaneda-Stoikov model with consciousness enhancement"""
+        """Avellaneda-Stoikov model for optimal market making spreads"""
 
-        # Model parameters with consciousness boost
-        gamma = self.model_parameters['as_gamma'] / self.config.consciousness_boost
-        kappa = self.model_parameters['as_kappa'] * self.config.consciousness_boost
-        A = self.model_parameters['as_A'] * self.config.consciousness_boost
+        # Model parameters
+        gamma = self.model_parameters['as_gamma']
+        kappa = self.model_parameters['as_kappa']
+        A = self.model_parameters['as_A']
         k = self.model_parameters['as_k']
 
         # Current inventory
         q = market_state.inventory_position
 
-        # Volatility estimate with consciousness enhancement
-        sigma = market_state.volatility * (2.0 - self.config.consciousness_boost)
+        # Volatility estimate
+        sigma = market_state.volatility
 
         # Time to horizon (assume 1 minute)
         T = 60.0
@@ -423,32 +411,26 @@ class DynamicSpreadOptimizer:
         optimal_bid_spread = (optimal_spread / 2 + inventory_skew) * 10000  # Convert to bps
         optimal_ask_spread = (optimal_spread / 2 - inventory_skew) * 10000  # Convert to bps
 
-        # Apply consciousness enhancement
-        consciousness_adjustment = 1.0 / self.config.consciousness_boost
-        optimal_bid_spread *= consciousness_adjustment
-        optimal_ask_spread *= consciousness_adjustment
-
         return self._build_optimization_result(
             market_state, optimal_bid_spread, optimal_ask_spread
         )
 
     def _optimize_glosten_milgrom(self, market_state: MarketState) -> OptimizationResult:
-        """Glosten-Milgrom model with consciousness enhancement"""
+        """Glosten-Milgrom model for adverse selection-aware spreads"""
 
         # Model parameters
         alpha = self.model_parameters['gm_alpha']  # Probability of informed trade
         sigma_u = self.model_parameters['gm_sigma_u']  # Uninformed volatility
         sigma_i = self.model_parameters['gm_sigma_i']  # Informed volatility
 
-        # Enhanced adverse selection detection with consciousness
+        # Adverse selection detection
         adverse_selection_prob = market_state.adverse_selection_risk * alpha
-        enhanced_detection = adverse_selection_prob / self.config.consciousness_boost
 
         # Expected value conditional on informed trading
         informed_value_impact = sigma_i * math.sqrt(2 / math.pi)
 
         # Bid-ask spread calculation
-        spread_half = enhanced_detection * informed_value_impact + (1 - enhanced_detection) * sigma_u
+        spread_half = adverse_selection_prob * informed_value_impact + (1 - adverse_selection_prob) * sigma_u
 
         # Inventory adjustment
         inventory_adjustment = abs(market_state.inventory_position) * 0.001
@@ -457,30 +439,23 @@ class DynamicSpreadOptimizer:
         optimal_bid_spread = (spread_half + inventory_adjustment) * 10000
         optimal_ask_spread = (spread_half + inventory_adjustment) * 10000
 
-        # Apply consciousness factor
-        consciousness_multiplier = 1.0 / self.config.consciousness_boost
-        optimal_bid_spread *= consciousness_multiplier
-        optimal_ask_spread *= consciousness_multiplier
-
         return self._build_optimization_result(
             market_state, optimal_bid_spread, optimal_ask_spread
         )
 
     def _optimize_ho_stoll(self, market_state: MarketState) -> OptimizationResult:
-        """Ho-Stoll model with consciousness enhancement"""
+        """Ho-Stoll model for inventory-aware spreads"""
 
         # Processing cost component
         processing_cost = self.model_parameters['hs_processing_cost']
 
-        # Inventory holding cost with consciousness adjustment
+        # Inventory holding cost
         holding_cost = (self.model_parameters['hs_inventory_holding_cost'] *
-                        abs(market_state.inventory_position) /
-                        self.config.consciousness_boost)
+                        abs(market_state.inventory_position))
 
-        # Adverse selection component enhanced by consciousness
+        # Adverse selection component
         adverse_selection_cost = (market_state.adverse_selection_risk *
-                                  market_state.volatility *
-                                  self.config.consciousness_boost)
+                                  market_state.volatility)
 
         # Total spread
         total_spread = processing_cost + holding_cost + adverse_selection_cost
@@ -497,24 +472,23 @@ class DynamicSpreadOptimizer:
         )
 
     def _optimize_adaptive_hybrid(self, market_state: MarketState) -> OptimizationResult:
-        """Adaptive hybrid model combining multiple approaches with consciousness"""
+        """Adaptive hybrid model combining multiple approaches"""
 
         # Calculate spreads using different models
         as_result = self._optimize_avellaneda_stoikov(market_state)
         gm_result = self._optimize_glosten_milgrom(market_state)
         hs_result = self._optimize_ho_stoll(market_state)
-        ce_result = self._optimize_consciousness_enhanced(market_state)
+        ce_result = self._optimize_multi_model(market_state)
 
-        # Adaptive weights based on market conditions and consciousness
+        # Adaptive weights based on market conditions
         regime_weight = self.model_parameters['regime_weights'][self.current_regime]
-        consciousness_weight = self.config.consciousness_boost
 
         # Weight calculation based on historical performance and current regime
         weights = {
             'as': 0.25 * regime_weight,
             'gm': 0.25 * (1 + market_state.adverse_selection_risk),
             'hs': 0.20 * market_state.liquidity_score,
-            'ce': 0.30 * consciousness_weight
+            'ce': 0.30
         }
 
         # Normalize weights
@@ -541,35 +515,33 @@ class DynamicSpreadOptimizer:
         )
 
     def _calculate_enhanced_spread_components(self, market_state: MarketState) -> SpreadComponents:
-        """Calculate detailed spread components with consciousness enhancement"""
-
-        consciousness_factor = self.config.consciousness_boost
+        """Calculate detailed spread components"""
 
         # 1. Base component
         base_component = self.config.base_spread_bps
 
-        # 2. Volatility component with consciousness enhancement
-        vol_scaling = self.config.volatility_scaling / consciousness_factor
+        # 2. Volatility component
+        vol_scaling = self.config.volatility_scaling
         volatility_component = market_state.volatility * 10000 * vol_scaling
 
         # 3. Inventory component
         max_inventory = 10.0  # Assumed max inventory for normalization
         inventory_ratio = market_state.inventory_position / max_inventory
         inventory_component = (
-                abs(inventory_ratio) * self.config.inventory_penalty * 10000 * consciousness_factor
+                abs(inventory_ratio) * self.config.inventory_penalty * 10000
         )
 
-        # 4. Adverse selection component with consciousness mitigation
+        # 4. Adverse selection component
         adverse_selection_component = (
                 market_state.adverse_selection_risk *
                 self.config.adverse_selection_factor *
-                10000 / consciousness_factor
+                10000
         )
 
         # 5. Liquidity component
         liquidity_penalty = max(0, 1 - market_state.liquidity_score)
         liquidity_component = (
-                liquidity_penalty * self.config.liquidity_scaling * 10000 / consciousness_factor
+                liquidity_penalty * self.config.liquidity_scaling * 10000
         )
 
         # 6. Regime component
@@ -582,10 +554,7 @@ class DynamicSpreadOptimizer:
         }
 
         regime_multiplier = regime_multipliers.get(self.current_regime, 1.0)
-        regime_component = base_component * (regime_multiplier - 1.0) / consciousness_factor
-
-        # 7. Consciousness component (additive enhancement)
-        consciousness_component = (consciousness_factor - 1.0) * base_component * 0.5
+        regime_component = base_component * (regime_multiplier - 1.0)
 
         # Total spread
         total_spread = (
@@ -594,8 +563,7 @@ class DynamicSpreadOptimizer:
                 inventory_component +
                 adverse_selection_component +
                 liquidity_component +
-                regime_component +
-                consciousness_component
+                regime_component
         )
 
         return SpreadComponents(
@@ -605,7 +573,6 @@ class DynamicSpreadOptimizer:
             adverse_selection_component=adverse_selection_component,
             liquidity_component=liquidity_component,
             regime_component=regime_component,
-            consciousness_component=consciousness_component,
             total_spread=total_spread
         )
 
@@ -613,22 +580,20 @@ class DynamicSpreadOptimizer:
                                          market_state: MarketState,
                                          bid_spread: float,
                                          ask_spread: float) -> float:
-        """Calculate expected PnL with consciousness enhancement"""
+        """Calculate expected PnL"""
 
-        consciousness_factor = self.config.consciousness_boost
-
-        # Fill probabilities with consciousness boost
+        # Fill probabilities
         bid_fill_prob = self._calculate_fill_probability_enhanced(market_state, bid_spread, 'bid')
         ask_fill_prob = self._calculate_fill_probability_enhanced(market_state, ask_spread, 'ask')
 
-        # Expected spread capture (consciousness improves efficiency)
-        expected_bid_capture = bid_fill_prob * bid_spread * consciousness_factor
-        expected_ask_capture = ask_fill_prob * ask_spread * consciousness_factor
+        # Expected spread capture
+        expected_bid_capture = bid_fill_prob * bid_spread
+        expected_ask_capture = ask_fill_prob * ask_spread
 
-        # Adverse selection cost mitigation through consciousness
+        # Adverse selection cost
         adverse_selection_cost = (
                 market_state.adverse_selection_risk *
-                (bid_spread + ask_spread) * 0.1 / consciousness_factor
+                (bid_spread + ask_spread) * 0.1
         )
 
         # Inventory carrying cost
@@ -646,9 +611,7 @@ class DynamicSpreadOptimizer:
                                          market_state: MarketState,
                                          bid_spread: float,
                                          ask_spread: float) -> float:
-        """Calculate risk penalty with consciousness mitigation"""
-
-        consciousness_factor = self.config.consciousness_boost
+        """Calculate risk penalty"""
 
         # Base risk from volatility
         volatility_risk = market_state.volatility ** 2 * (bid_spread + ask_spread)
@@ -662,36 +625,34 @@ class DynamicSpreadOptimizer:
                                   market_state.volatility *
                                   (bid_spread + ask_spread) * 0.01)
 
-        # Total risk with consciousness mitigation
-        total_risk = (volatility_risk + inventory_risk + adverse_selection_risk) / consciousness_factor
+        # Total risk
+        total_risk = volatility_risk + inventory_risk + adverse_selection_risk
 
         return total_risk * self.config.risk_aversion_gamma
 
-    def _calculate_consciousness_bonus(self,
-                                       market_state: MarketState,
-                                       bid_spread: float,
-                                       ask_spread: float) -> float:
-        """Calculate consciousness-specific bonus for optimal behavior"""
+    def _calculate_behavior_bonus(self,
+                                   market_state: MarketState,
+                                   bid_spread: float,
+                                   ask_spread: float) -> float:
+        """Calculate bonus for optimal spread placement behavior"""
 
-        consciousness_factor = self.config.consciousness_boost
-
-        # Bonus for symmetric spreads (consciousness promotes balance)
+        # Bonus for symmetric spreads (promotes balance)
         symmetry_bonus = 0.0
         if bid_spread > 0 and ask_spread > 0:
             spread_ratio = min(bid_spread, ask_spread) / max(bid_spread, ask_spread)
-            symmetry_bonus = spread_ratio * consciousness_factor * 0.1
+            symmetry_bonus = spread_ratio * 0.1
 
         # Bonus for optimal inventory management
         inventory_bonus = 0.0
         if abs(market_state.inventory_position) < 1.0:  # Good inventory control
-            inventory_bonus = (1.0 - abs(market_state.inventory_position)) * consciousness_factor * 0.05
+            inventory_bonus = (1.0 - abs(market_state.inventory_position)) * 0.05
 
         # Bonus for market quality improvement
-        market_quality_bonus = market_state.liquidity_score * consciousness_factor * 0.03
+        market_quality_bonus = market_state.liquidity_score * 0.03
 
         # Bonus for adverse selection mitigation
         adverse_selection_bonus = (
-                (1.0 - market_state.adverse_selection_risk) * consciousness_factor * 0.02
+                (1.0 - market_state.adverse_selection_risk) * 0.02
         )
 
         total_bonus = (
@@ -704,13 +665,11 @@ class DynamicSpreadOptimizer:
     def _calculate_optimal_asymmetry(self, market_state: MarketState) -> float:
         """Calculate optimal spread asymmetry based on market conditions"""
 
-        consciousness_factor = self.config.consciousness_boost
-
         # Inventory-driven asymmetry
         inventory_asymmetry = market_state.inventory_position * 0.1
 
-        # Flow-driven asymmetry with consciousness enhancement
-        flow_asymmetry = market_state.order_flow_imbalance * 0.2 * consciousness_factor
+        # Flow-driven asymmetry
+        flow_asymmetry = market_state.order_flow_imbalance * 0.2
 
         # Microstructure signal asymmetry
         signal_asymmetry = market_state.microstructure_signal * 0.15
@@ -718,21 +677,16 @@ class DynamicSpreadOptimizer:
         # Total asymmetry (bounded)
         total_asymmetry = inventory_asymmetry + flow_asymmetry + signal_asymmetry
 
-        # Consciousness factor reduces extreme asymmetries
-        enhanced_asymmetry = total_asymmetry / consciousness_factor
-
-        return max(-2.0, min(enhanced_asymmetry, 2.0))  # Bound asymmetry
+        return max(-2.0, min(total_asymmetry, 2.0))  # Bound asymmetry
 
     def _calculate_fill_probability_enhanced(self,
                                              market_state: MarketState,
                                              spread: float,
                                              side: str) -> float:
-        """Calculate fill probability with consciousness enhancement"""
-
-        consciousness_factor = self.config.consciousness_boost
+        """Calculate fill probability based on market microstructure"""
 
         # Base fill probability using exponential model
-        base_lambda = 100.0 * consciousness_factor  # Enhanced arrival rate
+        base_lambda = 100.0  # Arrival rate
 
         # Spread impact on fill probability
         spread_impact = math.exp(-spread / 10.0)  # Exponential decay
@@ -752,11 +706,11 @@ class DynamicSpreadOptimizer:
         else:  # ask
             flow_impact = 1.0 - market_state.order_flow_imbalance * 0.2
 
-        # Combined fill probability with consciousness enhancement
+        # Combined fill probability
         fill_probability = (
-                                   base_lambda * spread_impact * liquidity_impact *
-                                   signal_impact * flow_impact * consciousness_factor
-                           ) / 3600.0  # Per second
+                base_lambda * spread_impact * liquidity_impact *
+                signal_impact * flow_impact
+        ) / 3600.0  # Per second
 
         # Bound probability between 0 and 1
         return max(0.001, min(fill_probability, 0.999))
@@ -786,8 +740,6 @@ class DynamicSpreadOptimizer:
                                     ask_spread: float) -> float:
         """Calculate confidence score for optimization result"""
 
-        consciousness_factor = self.config.consciousness_boost
-
         # Data quality score
         data_quality = min(market_state.liquidity_score, 1.0 - market_state.adverse_selection_risk)
 
@@ -803,25 +755,21 @@ class DynamicSpreadOptimizer:
             recent_performance = [p.get('accuracy', 0.8) for p in list(self.performance_history)[-10:]]
             historical_performance = np.mean(recent_performance)
 
-        # Consciousness boost to confidence
-        base_confidence = (
+        # Combined confidence
+        confidence = (
                 data_quality * 0.3 +
                 spread_reasonableness * 0.3 +
                 regime_confidence * 0.2 +
                 historical_performance * 0.2
         )
 
-        enhanced_confidence = min(base_confidence * consciousness_factor, 1.0)
-
-        return enhanced_confidence
+        return min(confidence, 1.0)
 
     def _update_spread_regime(self, market_state: MarketState) -> None:
-        """Update spread regime detection with consciousness enhancement"""
+        """Update spread regime detection"""
 
         if len(self.market_history) < 10:
             return
-
-        consciousness_factor = self.config.consciousness_boost
 
         # FIXED: Convert deque to list before slicing to avoid TypeError
         recent_history = list(self.market_history)[-10:]
@@ -833,10 +781,10 @@ class DynamicSpreadOptimizer:
         avg_liquidity = np.mean(recent_liquidity)
         avg_adverse_selection = np.mean(recent_adverse_selection)
 
-        # Regime classification with consciousness enhancement
-        volatility_score = min(avg_volatility * 100 * consciousness_factor, 1.0)
+        # Regime classification
+        volatility_score = min(avg_volatility * 100, 1.0)
         liquidity_score = avg_liquidity
-        stress_score = avg_adverse_selection / consciousness_factor
+        stress_score = avg_adverse_selection
 
         # Combined regime indicator
         regime_score = (volatility_score + (1 - liquidity_score) + stress_score) / 3
@@ -858,14 +806,11 @@ class DynamicSpreadOptimizer:
             new_regime = SpreadRegime.CRISIS
             confidence = regime_score
 
-        # Apply consciousness enhancement to confidence
-        enhanced_confidence = min(confidence * consciousness_factor, 1.0)
-
         # Update regime if confidence is high enough
-        if enhanced_confidence > 0.7 and new_regime != self.current_regime:
+        if confidence > 0.7 and new_regime != self.current_regime:
             self.logger.info(f"Spread regime transition: {self.current_regime.value} -> {new_regime.value}")
             self.current_regime = new_regime
-            self.regime_confidence = enhanced_confidence
+            self.regime_confidence = confidence
 
     def _build_optimization_result(self,
                                    market_state: MarketState,
@@ -992,7 +937,6 @@ class DynamicSpreadOptimizer:
                 adverse_selection_component=0.0,
                 liquidity_component=0.0,
                 regime_component=0.0,
-                consciousness_component=0.0,
                 total_spread=fallback_spread
             ),
             expected_pnl=0.0,
@@ -1018,12 +962,6 @@ class DynamicSpreadOptimizer:
         # Track confidence scores
         self.performance_metrics['spread_accuracy_score'] = (
                 (self.performance_metrics['spread_accuracy_score'] * (n - 1) + result.confidence_score) / n
-        )
-
-        # Track consciousness effectiveness
-        consciousness_effectiveness = result.confidence_score * self.config.consciousness_boost
-        self.performance_metrics['consciousness_effectiveness'] = (
-                (self.performance_metrics['consciousness_effectiveness'] * (n - 1) + consciousness_effectiveness) / n
         )
 
         # Store result for historical analysis
@@ -1065,7 +1003,7 @@ class DynamicSpreadOptimizer:
                 'bid_spread': result.optimal_bid_spread / 10000,  # Convert bps to decimal
                 'ask_spread': result.optimal_ask_spread / 10000,
                 'algorithm_results': {
-                    'consciousness_enhanced': {
+                    'multi_model': {
                         'bid_spread': result.optimal_bid_spread / 10000,
                         'ask_spread': result.optimal_ask_spread / 10000
                     }
@@ -1183,7 +1121,6 @@ class DynamicSpreadOptimizer:
 
         return {
             'configuration': {
-                'consciousness_factor': self.config.consciousness_boost,
                 'optimization_method': self.config.optimization_method.value,
                 'base_spread_bps': self.config.base_spread_bps,
                 'risk_aversion_gamma': self.config.risk_aversion_gamma
@@ -1212,11 +1149,10 @@ class DynamicSpreadOptimizer:
 
 # Example usage and testing
 if __name__ == "__main__":
-    # Create configuration with consciousness enhancement
+    # Create configuration
     config = SpreadConfig(
         base_spread_bps=5.0,
-        consciousness_boost=1.0,
-        optimization_method=OptimizationMethod.CONSCIOUSNESS_ENHANCED
+        optimization_method=OptimizationMethod.MULTI_MODEL
     )
 
     # Initialize optimizer

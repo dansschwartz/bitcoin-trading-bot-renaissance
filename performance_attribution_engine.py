@@ -1,12 +1,12 @@
 """
-📊 PERFORMANCE ATTRIBUTION ENGINE
+PERFORMANCE ATTRIBUTION ENGINE
 =================================
 
 Advanced performance attribution system implementing Renaissance Technologies-inspired
-factor-based analysis with consciousness enhancement and multi-dimensional attribution.
+factor-based analysis and multi-dimensional attribution.
 
 Author: Renaissance AI Performance Systems
-Version: 10.0 Revolutionary
+Version: 10.0
 Target: Comprehensive performance analysis with predictive insights
 """
 
@@ -21,12 +21,11 @@ class PerformanceAttributionEngine:
     """
     Renaissance Technologies-inspired Performance Attribution Engine
 
-    Provides comprehensive performance attribution analysis with consciousness enhancement
+    Provides comprehensive performance attribution analysis
     for superior investment insights and decision support.
     """
 
     def __init__(self):
-        self.consciousness_boost = 0.0  # 14.2% enhancement factor
         self.attribution_factors = ['market', 'size', 'value', 'momentum', 'quality', 'volatility']
         self.risk_factors = ['systematic', 'idiosyncratic', 'tail', 'correlation']
         self.time_horizons = ['daily', 'weekly', 'monthly', 'quarterly']
@@ -36,20 +35,14 @@ class PerformanceAttributionEngine:
         self.attribution_history = []
         self.performance_cache = {}
 
-        # Consciousness-enhanced parameters
-        self.consciousness_insight_enhancement = 1 + self.consciousness_boost * 0.35
-        self.consciousness_prediction_accuracy = 1 + self.consciousness_boost * 0.28
-        self.consciousness_attribution_precision = 1 + self.consciousness_boost * 0.22
-
-        print("📊 Performance Attribution Engine initialized")
-        print(f"   • Consciousness Enhancement: +{self.consciousness_boost * 100:.1f}%")
-        print(f"   • Attribution Factors: {len(self.attribution_factors)}")
-        print(f"   • Time Horizons: {len(self.time_horizons)}")
+        print("Performance Attribution Engine initialized")
+        print(f"   Attribution Factors: {len(self.attribution_factors)}")
+        print(f"   Time Horizons: {len(self.time_horizons)}")
 
     def analyze_performance_attribution(self, portfolio_returns, benchmark_returns,
                                         factor_exposures, market_data, time_horizon='daily'):
         """
-        Comprehensive performance attribution analysis with consciousness enhancement
+        Comprehensive performance attribution analysis
 
         Args:
             portfolio_returns: Historical portfolio returns
@@ -94,8 +87,8 @@ class PerformanceAttributionEngine:
                 analysis_data, time_horizon
             )
 
-            # Consciousness-enhanced insights
-            enhanced_insights = self._generate_consciousness_insights(
+            # Enhanced insights
+            enhanced_insights = self._generate_enhanced_insights(
                 factor_attribution, risk_attribution, style_attribution
             )
 
@@ -112,11 +105,10 @@ class PerformanceAttributionEngine:
                 'style_attribution': style_attribution,
                 'asset_attribution': asset_attribution,
                 'timing_selection_effects': timing_selection,
-                'consciousness_insights': enhanced_insights,
+                'enhanced_insights': enhanced_insights,
                 'predictive_analysis': predictive_analysis,
                 'performance_summary': self._generate_performance_summary(analysis_data),
                 'analysis_time': analysis_time,
-                'consciousness_boost_applied': self.consciousness_boost,
                 'time_horizon': time_horizon
             }
 
@@ -150,8 +142,7 @@ class PerformanceAttributionEngine:
             if isinstance(factor_exposures, dict):
                 factor_exposures = pd.DataFrame(factor_exposures)
 
-            # Consciousness enhancement for data quality
-            data_quality_score = min(len(common_dates) / 252, 1.0) * self.consciousness_insight_enhancement
+            data_quality_score = min(len(common_dates) / 252, 1.0)
 
             return {
                 'portfolio_returns': portfolio_returns,
@@ -199,16 +190,13 @@ class PerformanceAttributionEngine:
                 # Factor contribution to active return
                 factor_contribution = active_exposure * factor_return
 
-                # Consciousness enhancement
-                consciousness_adjusted_contribution = factor_contribution * self.consciousness_attribution_precision
-
                 attribution_results[factor] = {
-                    'contribution': consciousness_adjusted_contribution.sum(),
-                    'average_contribution': consciousness_adjusted_contribution.mean(),
-                    'volatility': consciousness_adjusted_contribution.std(),
-                    'information_ratio': consciousness_adjusted_contribution.mean() / max(
-                        consciousness_adjusted_contribution.std(), 0.001),
-                    'hit_rate': (consciousness_adjusted_contribution > 0).mean()
+                    'contribution': factor_contribution.sum(),
+                    'average_contribution': factor_contribution.mean(),
+                    'volatility': factor_contribution.std(),
+                    'information_ratio': factor_contribution.mean() / max(
+                        factor_contribution.std(), 0.001),
+                    'hit_rate': (factor_contribution > 0).mean()
                 }
 
         # Selection and allocation effects
@@ -226,7 +214,6 @@ class PerformanceAttributionEngine:
             'total_factor_contribution': total_factor_contribution,
             'residual_return': residual_return,
             'r_squared': self._calculate_attribution_r_squared(analysis_data),
-            'consciousness_precision_boost': self.consciousness_attribution_precision - 1
         }
 
     def _perform_style_attribution(self, analysis_data, time_horizon):
@@ -279,12 +266,9 @@ class PerformanceAttributionEngine:
                         style_beta = model.coef_[0]
                         style_contribution = style_beta * np.mean(style_returns)
 
-                        # Apply consciousness enhancement
-                        consciousness_enhanced_contribution = style_contribution * self.consciousness_attribution_precision
-
                         style_attribution[style_name] = {
                             'beta': style_beta,
-                            'contribution': consciousness_enhanced_contribution,
+                            'contribution': style_contribution,
                             'r_squared': model.score(X, y),
                             'significance': abs(style_beta) > 0.1
                         }
@@ -309,7 +293,6 @@ class PerformanceAttributionEngine:
             return {
                 'style_contributions': style_attribution,
                 'total_style_contribution': total_style_contribution,
-                'consciousness_enhancement': self.consciousness_attribution_precision - 1
             }
 
         except Exception as e:
@@ -363,13 +346,10 @@ class PerformanceAttributionEngine:
                 # Total asset contribution
                 total_contribution = allocation_effect + selection_effect
 
-                # Apply consciousness enhancement
-                consciousness_enhanced_contribution = total_contribution * self.consciousness_attribution_precision
-
                 asset_attribution[asset_name] = {
                     'allocation_effect': allocation_effect,
                     'selection_effect': selection_effect,
-                    'total_contribution': consciousness_enhanced_contribution,
+                    'total_contribution': total_contribution,
                     'weight_portfolio': asset_weights_portfolio[i],
                     'weight_benchmark': asset_weights_benchmark[i],
                     'weight_difference': weight_diff
@@ -386,7 +366,6 @@ class PerformanceAttributionEngine:
                 'total_selection_effect': total_selection,
                 'total_asset_contribution': total_asset_contribution,
                 'n_assets': n_assets,
-                'consciousness_enhancement': self.consciousness_attribution_precision - 1
             }
 
         except Exception as e:
@@ -435,22 +414,17 @@ class PerformanceAttributionEngine:
             selection_consistency = 1 - (
                         np.std(selection_effects) / max(abs(avg_selection_effect), 0.001)) if selection_effects else 0
 
-            # Consciousness enhancement for insights
-            consciousness_enhanced_timing = timing_effect * self.consciousness_insight_enhancement
-            consciousness_enhanced_selection = avg_selection_effect * self.consciousness_insight_enhancement
-
             # Interaction effects (timing and selection working together)
             interaction_effect = np.corrcoef(portfolio_returns, benchmark_returns)[0, 1] - 0.5
 
             return {
-                'timing_effect': consciousness_enhanced_timing,
-                'selection_effect': consciousness_enhanced_selection,
+                'timing_effect': timing_effect,
+                'selection_effect': avg_selection_effect,
                 'interaction_effect': interaction_effect,
                 'timing_up_periods': timing_up_periods,
                 'timing_down_periods': timing_down_periods,
                 'selection_consistency': max(selection_consistency, 0),
                 'analysis_windows': len(selection_effects),
-                'consciousness_enhancement': self.consciousness_insight_enhancement - 1
             }
 
         except Exception as e:
@@ -482,8 +456,8 @@ class PerformanceAttributionEngine:
         # Implement risk-based attribution logic here
         return {'systematic': 0.5, 'idiosyncratic': 0.3, 'tail': 0.1, 'correlation': 0.1}
 
-    def _generate_consciousness_insights(self, factor_attribution, risk_attribution, style_attribution):
-        # Implement consciousness-enhanced insight generation
+    def _generate_enhanced_insights(self, factor_attribution, risk_attribution, style_attribution):
+        # Implement enhanced insight generation
         return {'insight_score': 0.75, 'confidence': 0.9}
 
     def _generate_predictive_attribution(self, analysis_data, enhanced_insights):
@@ -544,14 +518,13 @@ if __name__ == "__main__":
     )
 
     if 'error' not in result:
-        print("✅ Performance attribution analysis successful!")
-        print(f"   • R-squared: {result['factor_attribution']['r_squared']:.3f}")
-        print(f"   • Total Factor Contribution: {result['factor_attribution']['total_factor_contribution'] * 100:.2f}%")
-        print(f"   • Style Contribution: {result['style_attribution']['total_style_contribution'] * 100:.2f}%")
-        print(f"   • Asset Contribution: {result['asset_attribution']['total_asset_contribution'] * 100:.2f}%")
-        print(f"   • Timing Effect: {result['timing_selection_effects']['timing_effect'] * 100:.2f}%")
-        print(f"   • Selection Effect: {result['timing_selection_effects']['selection_effect'] * 100:.2f}%")
-        print(f"   • Analysis Time: {result['analysis_time'] * 1000:.1f}ms")
-        print(f"   • Consciousness Enhancement: +{result['consciousness_boost_applied'] * 100:.1f}%")
+        print("Performance attribution analysis successful!")
+        print(f"   R-squared: {result['factor_attribution']['r_squared']:.3f}")
+        print(f"   Total Factor Contribution: {result['factor_attribution']['total_factor_contribution'] * 100:.2f}%")
+        print(f"   Style Contribution: {result['style_attribution']['total_style_contribution'] * 100:.2f}%")
+        print(f"   Asset Contribution: {result['asset_attribution']['total_asset_contribution'] * 100:.2f}%")
+        print(f"   Timing Effect: {result['timing_selection_effects']['timing_effect'] * 100:.2f}%")
+        print(f"   Selection Effect: {result['timing_selection_effects']['selection_effect'] * 100:.2f}%")
+        print(f"   Analysis Time: {result['analysis_time'] * 1000:.1f}ms")
     else:
-        print(f"❌ Attribution analysis failed: {result['error']}")
+        print(f"Attribution analysis failed: {result['error']}")
