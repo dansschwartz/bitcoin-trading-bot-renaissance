@@ -825,56 +825,13 @@ class RenaissanceTradingBot:
     def _compute_realized_pnl(entry_price: float, close_price: float,
                                size: float, side: str) -> float:
         """Compute realized PnL from entry/close prices and position side."""
-        if entry_price <= 0 or close_price <= 0 or size <= 0:
-            return 0.0
-        side_upper = side.upper() if isinstance(side, str) else str(side).upper()
-        if side_upper in ("LONG", "BUY"):
-            return (close_price - entry_price) * size
-        elif side_upper in ("SHORT", "SELL"):
-            return (entry_price - close_price) * size
-        return 0.0
+        from bot.position_ops import compute_realized_pnl
+        return compute_realized_pnl(entry_price, close_price, size, side)
 
     async def _resolve_close_price(self, pos) -> float:
-        """Resolve the best available market price for closing a position.
-
-        Fallback chain:
-          1. pos.current_price (if recently updated and > 0)
-          2. self._last_prices cache
-          3. Live Binance ticker fetch
-          4. pos.entry_price (last resort — better than 0)
-        """
-        _cpx = getattr(pos, 'current_price', 0.0) or 0.0
-
-        if _cpx <= 0:
-            _pair_id = getattr(pos, 'product_id', '') or (
-                pos.position_id.rsplit('_', 2)[0] if '_' in pos.position_id else pos.position_id
-            )
-            if hasattr(self, '_last_prices'):
-                _cpx = self._last_prices.get(_pair_id, 0.0)
-
-        if _cpx <= 0:
-            try:
-                _pair_id = getattr(pos, 'product_id', '') or (
-                    pos.position_id.rsplit('_', 2)[0] if '_' in pos.position_id else pos.position_id
-                )
-                bsym = to_binance_symbol(_pair_id)
-                ticker = await self.binance_spot.fetch_ticker(bsym)
-                if ticker and ticker.get('price', 0) > 0:
-                    _cpx = float(ticker['price'])
-                    self.logger.info(
-                        f"CLOSE PRICE RESOLVED via Binance: {_pair_id} = ${_cpx:,.4f}"
-                    )
-            except Exception as e:
-                self.logger.debug(f"Binance ticker fetch for close price failed: {e}")
-
-        if _cpx <= 0:
-            _cpx = getattr(pos, 'entry_price', 0.0) or 0.0
-            if _cpx > 0:
-                self.logger.warning(
-                    f"CLOSE PRICE FALLBACK: {pos.position_id} using entry price ${_cpx:,.4f}"
-                )
-
-        return float(_cpx)
+        """Resolve the best available market price for closing a position."""
+        from bot.position_ops import resolve_close_price
+        return await resolve_close_price(self, pos)
 
     async def _shutdown(self):
         """Cancel background tasks and cleanup resources."""
@@ -1100,35 +1057,8 @@ class RenaissanceTradingBot:
 
     def _calculate_dynamic_position_size(self, product_id: str, confidence: float, weighted_signal: float, current_price: float) -> float:
         """Calculate dynamic position size using Step 10 Portfolio Optimizer"""
-        try:
-            # Prepare minimal data for optimizer
-            # For a single asset, we optimize between cash and the asset
-            universe_data = {
-                'returns': np.array([weighted_signal * 0.01]), # Expected return based on signal
-                'market_cap': np.array([1.0]),
-                'assets': [product_id]
-            }
-            
-            market_data = {
-                'bid_ask_spread': np.array([0.0005]),
-                'market_impact': np.array([0.0002])
-            }
-            
-            opt_result = self.portfolio_optimizer.optimize_portfolio(universe_data, market_data)
-            
-            if 'weights' in opt_result:
-                # Weight for the asset (index 0)
-                optimized_weight = float(opt_result['weights'][0])
-                # Scale by confidence
-                final_size = optimized_weight * confidence
-                return float(np.clip(final_size, 0.0, 0.3)) # Cap at 30%
-            
-            # Fallback to standard sizing
-            return min(confidence * 0.5, 0.3)
-            
-        except Exception as e:
-            self.logger.error(f"Portfolio optimization sizing failed: {e}")
-            return min(confidence * 0.5, 0.3)
+        from bot.position_ops import calculate_dynamic_position_size
+        return calculate_dynamic_position_size(self, product_id, confidence, weighted_signal, current_price)
 
     def make_trading_decision(self, weighted_signal: float, signal_contributions: Dict[str, float],
                               current_price: float = 0.0, real_time_result: Optional[Dict[str, Any]] = None,
@@ -1147,230 +1077,9 @@ class RenaissanceTradingBot:
         )
 
     async def _execute_smart_order(self, decision: TradingDecision, market_data: Dict[str, Any]):
-        """Execute order through position manager (real or paper) with slippage analysis.
-
-        Routes through MEXC (0% maker) for Binance-sourced pairs, Coinbase for legacy.
-        """
-        try:
-            product_id = market_data.get('product_id', 'BTC-USD')
-            current_price = decision.reasoning.get('current_price', 0.0)
-
-            # Determine execution venue
-            is_mexc_execution = (
-                self._universe_built
-                and product_id in self._pair_binance_symbols
-            )
-
-            # For MEXC execution: use limit order at best bid/ask for 0% maker fee
-            if is_mexc_execution:
-                ticker = market_data.get('ticker', {})
-                if decision.action == 'BUY':
-                    limit_price = float(ticker.get('bid', current_price))
-                    limit_price *= 1.0001  # Tiny premium for fill probability
-                else:
-                    limit_price = float(ticker.get('ask', current_price))
-                    limit_price *= 0.9999  # Tiny discount
-                # In paper mode, limit_price ≈ current_price (negligible difference)
-                current_price = limit_price if limit_price > 0 else current_price
-                order_type = 'LIMIT_MAKER'
-                execution_exchange = 'mexc'
-            else:
-                order_type = 'MARKET'
-                execution_exchange = 'coinbase'
-
-            order_details = {
-                'product_id': product_id,
-                'side': decision.action,
-                'size': decision.position_size,
-                'price': current_price,
-                'type': order_type,
-                'exchange': execution_exchange,
-            }
-
-            # 1. Analyze Slippage Risk
-            slippage_risk = self.slippage_protection.analyze_slippage_risk(order_details, market_data)
-            self.logger.info(f"Slippage risk for {product_id}: {slippage_risk.get('risk_level', 'UNKNOWN')}")
-
-            # Council #4: Apply spread-based slippage in paper mode
-            # half-spread + 1bps adverse selection, floor 0.5bps
-            fill_price = current_price
-            _slippage_bps = 0.0
-            if self.paper_trading and current_price > 0:
-                ticker = market_data.get('ticker', {})
-                _bid = self._force_float(ticker.get('bid', 0))
-                _ask = self._force_float(ticker.get('ask', 0))
-                if _bid > 0 and _ask > 0:
-                    half_spread_bps = ((_ask - _bid) / ((_ask + _bid) / 2)) * 10000 / 2.0
-                else:
-                    half_spread_bps = 0.5  # floor
-                # Council S3: Per-pair adverse selection from config, with volume-based fallback
-                _adv_cfg = self.config.get('adverse_selection_bps', {})
-                _pair_key = product_id.replace('-', '').replace('/', '').upper()
-                if _pair_key in _adv_cfg:
-                    adverse_bps = float(_adv_cfg[_pair_key])
-                else:
-                    # Volume-based fallback
-                    try:
-                        _vol_24h = self._force_float(ticker.get('volume_24h') or ticker.get('volume', 0))
-                        _daily_vol_usd = _vol_24h * current_price if _vol_24h > 0 else 0
-                        if _daily_vol_usd > 50_000_000:
-                            adverse_bps = float(_adv_cfg.get('__default_large_cap__', 0.20))
-                        else:
-                            adverse_bps = float(_adv_cfg.get('__default_small_cap__', 0.80))
-                    except Exception:
-                        adverse_bps = float(_adv_cfg.get('__default_small_cap__', 0.80))
-                floor_bps = float(self.config.get('paper_trading', {}).get('slippage_floor_bps', 0.5))
-                _slippage_bps = max(half_spread_bps + adverse_bps, floor_bps)
-                slippage_frac = _slippage_bps / 10000.0
-                if decision.action == 'BUY':
-                    fill_price = current_price * (1 + slippage_frac)  # worse fill for buyer
-                else:
-                    fill_price = current_price * (1 - slippage_frac)  # worse fill for seller
-
-            # 2. Map action to position side
-            side = "LONG" if decision.action == "BUY" else "SHORT"
-
-            # 3. Execute through position manager (risk checks -> API call -> position tracking)
-            success, message, position = self.position_manager.open_position(
-                product_id=product_id,
-                side=side,
-                size=decision.position_size,
-                entry_price=fill_price,
-            )
-
-            exec_result = {
-                'status': 'EXECUTED' if success else 'REJECTED',
-                'message': message,
-                'position_id': position.position_id if position else None,
-                'execution_price': fill_price,
-                'signal_price': current_price,
-                'slippage_bps': _slippage_bps,
-                'slippage': slippage_risk.get('predicted_slippage', 0.0),
-                'exchange': execution_exchange,
-                'order_type': order_type,
-            }
-
-            # Record trade cycle for anti-churn cooldown
-            if success:
-                self._last_trade_cycle[product_id] = getattr(self, 'scan_cycle_count', 0)
-                if _slippage_bps > 0:
-                    self.logger.info(
-                        f"PAPER FILL: {decision.action} {product_id} signal=${current_price:.2f} "
-                        f"fill=${fill_price:.2f} slippage={_slippage_bps:.1f}bps"
-                    )
-                # Log MEXC maker order
-                if is_mexc_execution:
-                    self.logger.info(
-                        f"MEXC LIMIT ORDER: {decision.action} {decision.position_size:.8f} "
-                        f"{product_id} @ ${fill_price:.2f} (maker, 0% fee)"
-                    )
-
-            # Devil Tracker — record fill with spread-calibrated slippage
-            if success and self.devil_tracker:
-                try:
-                    _dtid = getattr(self, '_last_devil_trade_id', {}).get(product_id)
-                    if _dtid:
-                        self.devil_tracker.record_order_submission(_dtid, current_price)
-                        # Spread-calibrated fill: use bid/ask to model realistic execution
-                        _ticker = market_data.get('ticker', {})
-                        _bid = self._force_float(_ticker.get('bid', 0))
-                        _ask = self._force_float(_ticker.get('ask', 0))
-                        if _bid > 0 and _ask > 0:
-                            # BUY fills at ask (higher), SELL fills at bid (lower)
-                            _calibrated_fill = _ask if decision.action == 'BUY' else _bid
-                        else:
-                            _calibrated_fill = current_price
-                        # MEXC maker fee = 0%, non-MEXC = 5bps taker
-                        _fee_bps = 0.0 if is_mexc_execution else 5.0
-                        _fill_fee = _fee_bps / 10000.0 * decision.position_size * current_price
-                        self.devil_tracker.record_fill(
-                            _dtid,
-                            fill_price=_calibrated_fill,
-                            fill_quantity=decision.position_size,
-                            fill_fee=_fill_fee,
-                        )
-                except Exception as _dt_err:
-                    self.logger.debug(f"Devil tracker fill record failed: {_dt_err}")
-
-            # 4. Persist Trade
-            if success and self.db_enabled:
-                trade_data = {
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
-                    'product_id': product_id,
-                    'side': decision.action,
-                    'size': decision.position_size,
-                    'price': current_price,
-                    'status': 'EXECUTED',
-                    'algo_used': f'POSITION_MANAGER_{execution_exchange.upper()}',
-                    'slippage': slippage_risk.get('predicted_slippage', 0.0) if not is_mexc_execution else 0.0,
-                    'execution_time': 0.0,
-                }
-                self._track_task(self.db_manager.store_trade(trade_data))
-                # Persist position to DB for state recovery
-                if position:
-                    self._track_task(self.db_manager.save_position({
-                        'position_id': position.position_id,
-                        'product_id': product_id,
-                        'side': side,
-                        'size': decision.position_size,
-                        'entry_price': current_price,
-                        'stop_loss_price': position.stop_loss_price,
-                        'take_profit_price': position.take_profit_price,
-                        'opened_at': position.entry_time.isoformat(),
-                        'status': 'OPEN',
-                    }))
-
-            # 4.3 Feed trade to BarAggregator (BUG 7 fix — was never called)
-            if success and self.bar_aggregator:
-                try:
-                    import time as _time
-                    self.bar_aggregator.on_trade(
-                        pair=product_id,
-                        exchange=execution_exchange,
-                        price=current_price,
-                        quantity=decision.position_size,
-                        side=decision.action.lower(),
-                        timestamp=_time.time(),
-                    )
-                except Exception as e:
-                    self.logger.warning(f"BarAggregator trade feed failed for {product_id}: {e}")
-
-            # 4.5 Send monitoring alert for executed trade (Module C)
-            if success and self.monitoring_alert_manager:
-                try:
-                    self._track_task(self.monitoring_alert_manager.send_trade_alert({
-                        'product_id': product_id,
-                        'side': decision.action,
-                        'size': decision.position_size,
-                        'price': current_price,
-                        'confidence': decision.confidence,
-                        'slippage': slippage_risk.get('predicted_slippage', 0.0),
-                    }))
-                except Exception as e:
-                    self.logger.warning(f"Monitoring trade alert failed for {product_id}: {e}")
-
-            # 5. Check daily loss after trade
-            if self.position_manager.daily_pnl < -self.daily_loss_limit:
-                self.trigger_kill_switch(
-                    f"Daily loss limit breached: ${abs(self.position_manager.daily_pnl):.2f}"
-                )
-
-            if exec_result['status'] == 'REJECTED':
-                n_pos = len(self.position_manager.positions)
-                exp = self.position_manager._calculate_total_exposure()
-                lim = self.position_manager.risk_limits.max_total_exposure_usd
-                self.logger.info(
-                    f"Smart execution complete: REJECTED ({product_id}) | {message} "
-                    f"| positions={n_pos}, exposure=${exp:.0f}, limit=${lim:.0f}, "
-                    f"trade_usd=${decision.position_size * current_price:.0f}"
-                )
-            else:
-                self.logger.info(f"Smart execution complete: {exec_result['status']} | {message}")
-            return exec_result
-
-        except Exception as e:
-            self.logger.error(f"Smart execution failed: {e}")
-            return {'status': 'FAILED', 'error': str(e)}
+        """Execute order through position manager — delegates to bot.position_ops."""
+        from bot.position_ops import execute_smart_order
+        return await execute_smart_order(self, decision, market_data)
 
     async def _run_adaptive_learning_cycle(self):
         """Step 15: Online model calibration and attribution analysis"""
@@ -1536,28 +1245,9 @@ class RenaissanceTradingBot:
             self.logger.error(f"Performance attribution failed: {e}")
 
     def _fetch_account_balance(self) -> float:
-        """Fetch current USD account balance, hard-capped to prevent phantom inflation.
-
-        Paper trading short-sell accounting inflates the cash balance because
-        borrowed-share liabilities aren't tracked.  We cap at INITIAL_CAPITAL
-        so position sizing stays anchored to real capital.
-        """
-        INITIAL_CAPITAL = 10_000.0
-        MAX_BALANCE = INITIAL_CAPITAL * 1.5  # Allow some growth, but cap phantom inflation
-
-        try:
-            portfolio = self.coinbase_client.get_portfolio_breakdown()
-            if "error" not in portfolio:
-                balance = portfolio.get("total_balance_usd", 0.0)
-                if balance > 0:
-                    # Hard cap: never size off more than 1.5x initial capital
-                    balance = min(balance, MAX_BALANCE)
-                    self._cached_balance_usd = balance
-                    return balance
-        except Exception as e:
-            self.logger.debug(f"Balance fetch failed: {e}")
-        # Return cached or default (INITIAL_CAPITAL, not phantom 50K)
-        return self._cached_balance_usd if self._cached_balance_usd > 0 else INITIAL_CAPITAL
+        """Fetch current USD account balance — delegates to bot.position_ops."""
+        from bot.position_ops import fetch_account_balance
+        return fetch_account_balance(self)
 
     def _check_bar_liveness(self) -> None:
         """Council S6: Check if bar pipeline is alive. Log CRITICAL if newest bar > 15min old."""
@@ -4487,54 +4177,9 @@ class RenaissanceTradingBot:
     #  State Recovery
     # ──────────────────────────────────────────────
     async def _restore_state(self):
-        """Restore positions and daily PnL from the database after restart."""
-        try:
-            # Restore open positions
-            open_positions = await self.db_manager.get_open_positions()
-            restored = 0
-            net_position = 0.0
-            for row in open_positions:
-                from position_manager import Position, PositionSide, PositionStatus
-                pos = Position(
-                    position_id=row['position_id'],
-                    product_id=row['product_id'],
-                    side=PositionSide(row['side']),
-                    size=row['size'],
-                    entry_price=row['entry_price'],
-                    current_price=row['entry_price'],
-                    stop_loss_price=row.get('stop_loss_price'),
-                    take_profit_price=row.get('take_profit_price'),
-                    status=PositionStatus.OPEN,
-                    entry_time=datetime.fromisoformat(row['opened_at']),
-                )
-                self.position_manager.positions[pos.position_id] = pos
-                sign = 1.0 if pos.side == PositionSide.LONG else -1.0
-                net_position += sign * pos.size
-                restored += 1
-
-            # Restore daily PnL from today's trades
-            today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-            daily_pnl = await self.db_manager.get_daily_pnl(today)
-            self.position_manager.daily_pnl = daily_pnl
-            self.daily_pnl = daily_pnl
-            self.current_position = net_position
-
-            if restored > 0 or daily_pnl != 0:
-                self.logger.info(
-                    f"State restored: {restored} open positions, "
-                    f"net_position={net_position:.6f}, daily_pnl=${daily_pnl:.2f}"
-                )
-
-            # Reconcile with exchange after restoring state (skip in paper trading)
-            if not self.paper_trading:
-                recon = self.position_manager.reconcile_with_exchange()
-                if recon.get("status") == "MISMATCH":
-                    asyncio.ensure_future(
-                        self.alert_manager.send_alert("CRITICAL", "Position Mismatch",
-                            f"{len(recon['discrepancies'])} discrepancies found on startup")
-                    )
-        except Exception as e:
-            self.logger.warning(f"State recovery skipped: {e}")
+        """Restore positions and daily PnL — delegates to bot.position_ops."""
+        from bot.position_ops import restore_state
+        return await restore_state(self)
 
     def _prune_old_data(self) -> None:
         """Prune old database rows and bound in-memory collections."""
@@ -4631,154 +4276,19 @@ class RenaissanceTradingBot:
             self.logger.warning(f"Prune error: {e}")
 
     async def _get_spray_prices(self, pairs: List[str]) -> Dict[str, float]:
-        """Fetch current prices for token spray exit checks.
-
-        Called every 5s by the exit loop.  Fetches live Binance tickers
-        in parallel, falling back to ``_last_prices`` for any that fail.
-        """
-        prices: Dict[str, float] = {}
-        provider = getattr(self, 'binance_spot', None)
-        pair_map = getattr(self, '_pair_binance_symbols', {})
-
-        # Parallel Binance fetch for all pairs that have a symbol mapping
-        if provider:
-            fetchable = [(p, pair_map[p]) for p in pairs if pair_map.get(p)]
-            if fetchable:
-                try:
-                    results = await asyncio.gather(
-                        *(provider.fetch_ticker(bsym) for _, bsym in fetchable),
-                        return_exceptions=True,
-                    )
-                    for (pair, _), ticker in zip(fetchable, results):
-                        if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
-                            prices[pair] = float(ticker['price'])
-                except Exception as e:
-                    self.logger.warning(f"Batch price fetch from provider failed: {e}")
-
-        # Fill gaps from _last_prices cache
-        last = getattr(self, '_last_prices', {})
-        for pair in pairs:
-            if pair not in prices and last.get(pair, 0) > 0:
-                prices[pair] = float(last[pair])
-
-        return prices
+        """Fetch current prices for token spray exit checks — delegates to bot.position_ops."""
+        from bot.position_ops import get_spray_prices
+        return await get_spray_prices(self, pairs)
 
     async def _get_straddle_price(self, pair: str = '') -> Dict[str, float]:
-        """Fetch current price for straddle exit checks.
-
-        When called with a specific pair, fetches ONLY that pair (fast path
-        for per-engine exit loops). Without args, fetches all engine pairs.
-        """
-        # Collect pairs we need — only the requested one, or all if none specified
-        pairs_needed = set()
-        if pair:
-            pairs_needed.add(pair)
-        else:
-            for eng in self.straddle_engines.values():
-                pairs_needed.add(eng.pair)
-
-        result: Dict[str, float] = {}
-        provider = getattr(self, 'binance_spot', None)
-        pair_map = getattr(self, '_pair_binance_symbols', {})
-
-        for p in pairs_needed:
-            binance_sym = pair_map.get(p, p.replace('-USD', 'USDT'))
-            if provider:
-                try:
-                    ticker = await provider.fetch_ticker(binance_sym)
-                    if isinstance(ticker, dict) and ticker.get('price', 0) > 0:
-                        result[p] = float(ticker['price'])
-                        continue
-                except Exception as e:
-                    self.logger.warning(f"Straddle price fetch failed for {p}: {e}")
-            # Fallback to cached price
-            last = getattr(self, '_last_prices', {})
-            if last.get(p, 0) > 0:
-                result[p] = float(last[p])
-
-        return result
+        """Fetch current price for straddle exit checks — delegates to bot.position_ops."""
+        from bot.position_ops import get_straddle_price
+        return await get_straddle_price(self, pair)
 
     async def _deduplicate_positions_on_startup(self) -> None:
-        """Close duplicate and opposing positions found after DB restore.
-
-        Rules:
-        1. If multiple same-side positions exist for a product, keep the newest, close the rest.
-        2. If opposing positions exist for a product (LONG + SHORT), close both and go flat.
-        """
-        from position_manager import PositionSide, PositionStatus
-        from collections import defaultdict
-
-        # Group open positions by product_id
-        by_product: Dict[str, List] = defaultdict(list)
-        with self.position_manager._lock:
-            for pos in list(self.position_manager.positions.values()):
-                if pos.status == PositionStatus.OPEN:
-                    by_product[pos.product_id].append(pos)
-
-        closed_count = 0
-        for product_id, positions in by_product.items():
-            longs = [p for p in positions if p.side == PositionSide.LONG]
-            shorts = [p for p in positions if p.side == PositionSide.SHORT]
-
-            # Rule 2: Opposing positions — close ALL (go flat)
-            if longs and shorts:
-                self.logger.warning(
-                    f"STARTUP DEDUP: {product_id} has {len(longs)} LONG + {len(shorts)} SHORT — closing all (go flat)"
-                )
-                for pos in longs + shorts:
-                    ok, msg = self.position_manager.close_position(
-                        pos.position_id, reason="startup_dedup_opposing"
-                    )
-                    if ok:
-                        _cpx = await self._resolve_close_price(pos)
-                        _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
-                        _rpnl = self._compute_realized_pnl(
-                            pos.entry_price, _cpx, pos.size, _side
-                        )
-                        self._track_task(
-                            self.db_manager.close_position_record(
-                                pos.position_id,
-                                close_price=float(_cpx),
-                                realized_pnl=float(_rpnl),
-                                exit_reason="startup_dedup_opposing",
-                            )
-                        )
-                        closed_count += 1
-                continue
-
-            # Rule 1: Duplicate same-side — keep newest, close rest
-            for group in [longs, shorts]:
-                if len(group) > 1:
-                    # Sort by entry_time descending (newest first)
-                    group.sort(key=lambda p: p.entry_time, reverse=True)
-                    keep = group[0]
-                    dupes = group[1:]
-                    self.logger.warning(
-                        f"STARTUP DEDUP: {product_id} has {len(group)} {keep.side.value} positions — "
-                        f"keeping {keep.position_id}, closing {len(dupes)} duplicates"
-                    )
-                    for pos in dupes:
-                        ok, msg = self.position_manager.close_position(
-                            pos.position_id, reason="startup_dedup_duplicate"
-                        )
-                        if ok:
-                            _cpx = await self._resolve_close_price(pos)
-                            _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
-                            _rpnl = self._compute_realized_pnl(
-                                pos.entry_price, _cpx, pos.size, _side
-                            )
-                            self._track_task(
-                                self.db_manager.close_position_record(
-                                    pos.position_id,
-                                    close_price=float(_cpx),
-                                    realized_pnl=float(_rpnl),
-                                    exit_reason="startup_dedup_duplicate",
-                                )
-                            )
-                            closed_count += 1
-
-        if closed_count > 0:
-            self.logger.info(f"STARTUP DEDUP: closed {closed_count} duplicate/opposing positions")
+        """Close duplicate and opposing positions — delegates to bot.position_ops."""
+        from bot.position_ops import deduplicate_positions_on_startup
+        return await deduplicate_positions_on_startup(self)
 
     async def run_continuous_trading(self, cycle_interval: int = 300):
         """Run continuous Renaissance trading (default 5-minute cycles)"""
