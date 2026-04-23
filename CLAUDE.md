@@ -22,21 +22,39 @@ your own work with evidence before moving on.
 
 ```
 bitcoin-trading-bot-renaissance/
-├── main.py                          # Main bot entry point — the core loop
-├── config.yaml                      # All configuration (strategies, thresholds, pairs, etc.)
-├── dashboard/                       # Web dashboard (localhost:8080)
-├── models/                          # Trained ML models (.pkl files)
-│   └── hmm_regime.pkl               # Trained 3-state GaussianHMM (exists but not wired correctly)
-├── data/
-│   └── trading.db                   # SQLite database (positions, decisions, bars, P&L)
-├── .venv/                           # Python virtual environment
-├── logs/                            # Application logs
-└── [spec documents]                 # 12 specification documents (see below)
+├── run_renaissance_bot.py               # Main entry point
+├── renaissance_trading_bot.py           # Core orchestrator (2,149 lines)
+├── bot/                                 # Extracted subsystems (9 modules, 6,513 lines)
+│   ├── builder.py                       # Component initialization (BotBuilder)
+│   ├── signals.py                       # Signal generation & weighted fusion
+│   ├── decision.py                      # Trading decisions with Kelly sizing
+│   ├── data_collection.py               # Market data fetching & bar aggregation
+│   ├── position_ops.py                  # Position management & P&L
+│   ├── lifecycle.py                     # Startup, shutdown, background loops
+│   ├── cycle_ops.py                     # Per-cycle helpers, drawdown, exposure
+│   ├── adaptive.py                      # Adaptive weights, attribution, Kelly
+│   └── helpers.py                       # Logging setup, heartbeat, summaries
+├── dashboard/                           # React + FastAPI dashboard (localhost:8080)
+│   ├── server.py                        # FastAPI + Uvicorn backend
+│   ├── routers/                         # 23 API endpoint routers
+│   └── frontend/                        # React + TypeScript + Tailwind SPA
+├── arbitrage/                           # Cross-exchange arbitrage package
+├── agents/                              # Multi-agent orchestration framework
+├── config/                              # config.json + config.example.json
+├── models/                              # Trained ML models (.pkl files)
+├── data/                                # SQLite database (trading.db)
+├── tests/                               # 87 unit & integration tests
+├── Dockerfile                           # Python 3.11 container
+├── docker-compose.yml                   # 3-service stack (bot, dashboard, arbitrage)
+├── Makefile                             # test, lint, format, docker targets
+├── .venv/                               # Python virtual environment
+├── logs/                                # Application logs
+└── [spec documents]                     # 12 specification documents (see below)
 ```
 
-**Tech stack:** Python 3.11, SQLite, WebSockets, REST APIs, hmmlearn, scikit-learn, asyncio
-**Exchanges:** MEXC (execution, 0% maker), Binance (data, derivatives, arbitrage)
-**Dashboard:** HTML/JS frontend served by Python backend at port 8080
+**Tech stack:** Python 3.11, SQLite, WebSockets, REST APIs, hmmlearn, scikit-learn, PyTorch, asyncio
+**Exchanges:** Binance (data, free, no auth), MEXC (execution, 0% maker)
+**Dashboard:** React + FastAPI at port 8080
 
 ## TRADING UNIVERSE & DATA ARCHITECTURE (Updated 2026-02-22)
 
@@ -84,45 +102,48 @@ exact fix instructions.
 
 ---
 
-## CURRENT PRIORITIES (updated 2026-02-15)
+## CURRENT PRIORITIES (updated 2026-04-23)
 
-### 🔴 CRITICAL — Fix immediately
-1. **Regime detector not classifying** — HMM needs OHLCV bars from five_minute_bars table,
-   not ticker snapshots. Seed historical bars via exchange API (200 five-minute candles
-   per pair). Implement bootstrap regime rules for immediate classification.
-   See: DASHBOARD_FIXES.md Bug B-1
+### 🔴 CRITICAL — DONE
+1. ~~Regime detector not classifying~~ — DONE (`02c691b`). Bootstrap rules provide instant
+   classification; AdvancedRegimeDetector wired to OHLCV bars from five_minute_bars table.
+2. ~~Position netting missing~~ — DONE (`02c691b`). Opposing position check added to
+   decision path.
+3. ~~Low_volatility regime blocks all trading~~ — DONE (`02c691b`). Low vol now boosts
+   mean reversion confidence instead of zeroing all signals.
+4. ~~Exposure calculation broken~~ — DONE (`02c691b`). Exposure computed from live positions.
+5. ~~Equity tracking broken~~ — DONE (`02c691b`). Peak equity, drawdown, and Sharpe now
+   compute correctly.
 
-2. **Position netting missing** — System opens opposing positions (long AND short) on same
-   asset simultaneously, bleeding money through spread costs.
-   See: DASHBOARD_FIXES.md Bug P-1
+### 🟡 HIGH — DONE
+6. ~~Realized vs unrealized P&L split~~ — DONE (`a0f4f34`)
+7. ~~VAE loss not persisted to database~~ — DONE (`a0f4f34`)
+8. ~~Confluence WebSocket relay stale~~ — DONE (`a0f4f34`)
+9. ~~Risk alerts not firing~~ — DONE (`a0f4f34`)
+10. ~~Risk gateway log empty~~ — DONE (`a0f4f34`)
 
-3. **Low_volatility regime blocks all trading** — The regime label "Low_volatility" is
-   zeroing out signal confidence. Low vol should BOOST mean reversion, not kill all signals.
-   Find the code path: regime label → signal confidence multiplier → 0.0%.
-
-4. **Exposure calculation broken** — Shows $0 despite 41 open positions.
-   See: DASHBOARD_FIXES.md Bug X-1
-
-5. **Equity tracking broken** — Max drawdown 0%, peak equity $0, Sharpe blank.
-   See: DASHBOARD_FIXES.md Bug X-2
-
-### 🟡 HIGH — Fix soon
-6. Realized vs unrealized P&L split (Bug X-3)
-7. VAE loss not persisted to database (add to decision persist dict)
-8. Confluence WebSocket relay stale (clear on bot startup)
-9. Risk alerts not firing (Bug R-3)
-10. Risk gateway log empty (Bug R-4)
-
-### 🟢 MEDIUM — Enhance when critical items done
-11. Activity feed filtering (Bug CC-1)
-12. Asset summary replacing position list on Command Center (Bug CC-4)
-13. System health bar (Bug CC-5)
-14. Doc 8 errata — 14 cross-document bugs
+### 🟢 MEDIUM — DONE
+11. ~~Activity feed filtering~~ — DONE (`8f901f1`)
+12. ~~Asset summary on Command Center~~ — DONE (`9074888`)
+13. ~~System health bar~~ — DONE (`8f901f1`)
+14. Doc 8 errata — Partially addressed across multiple commits
 
 ### 🔵 FUTURE — After system is stable and profitable
 15. Doc 9 — WebSocket streams, speed tiers, multi-bot
 16. Doc 10 — Continuous position re-evaluation engine
 17. Doc 11 — Multi-horizon probability estimator
+
+### Additional work completed (2026-04-22 — 2026-04-23)
+- **God class decomposition**: `renaissance_trading_bot.py` reduced from 7,681 to 2,149 lines
+  across 8 refactoring commits. 9 modules extracted to `bot/` package.
+- **ML accuracy audit**: All 7 models found at 47-49% accuracy (worse than random).
+  6 root causes identified and fixed across commits `602fc81`—`0a86ebc`.
+  See `docs/ML_ACCURACY_INVESTIGATION.md`.
+- **Dead code removal**: 2,200 lines of consciousness_boost code removed (`a98b1f3`),
+  12 dead files totaling 8,260 lines removed (`eafac1a`).
+- **Stability fixes**: 4 crash loop causes resolved (`b872a64`), reducing 13 crashes/day to 0.
+- **Infrastructure**: Docker, CI, Makefile added (`4088f63`).
+- **Tests**: 87 tests added across bot, arbitrage, polymarket, and ML modules.
 
 ---
 
@@ -183,38 +204,30 @@ The regime should now show correctly on the dashboard.
 
 ---
 
-## KNOWN SYSTEM STATE
+## KNOWN SYSTEM STATE (updated 2026-04-23)
 
 ### Database: data/trading.db
 Key tables:
-- `five_minute_bars` — OHLCV bars (pair, exchange, bar_start, bar_end, open, high, low, close, volume, ...)
-- `decisions` — Every cycle's decision (product_id, action, confidence, signal, hmm_regime, ...)
-- `positions` — Open and closed positions
-- `devil_tracker` — Cost tracking (may be empty)
-- `signal_daily_pnl` — Daily P&L by signal
+- `five_minute_bars` — OHLCV bars (pair, exchange, bar_start, bar_end, open, high, low, close, volume)
+- `decisions` — Every cycle's decision (product_id, action, confidence, signal, hmm_regime, vae_loss, ...)
+- `positions` — Open and closed positions with realized/unrealized P&L
+- `trades` — Executed trades with exchange, side, size, price, fee
+- `devil_tracker` — Per-position cost tracking
+- `signal_daily_pnl` — Daily P&L by signal source
 
-### Known data issues:
-- five_minute_bars: Coinbase pairs have very few bars (BTC: 9, ETH: 11, SOL: 3)
-  Binance arb pairs have 60 each. Need to seed historical data.
-- decisions.hmm_regime: ALL rows are "unknown" (2,783+ decisions)
-- decisions.vae_loss: ALL rows are NULL (not being persisted)
-- devil_tracker: 0 rows (not wired up)
+### Previous data issues (now resolved):
+- ~~decisions.hmm_regime ALL "unknown"~~ — Fixed: regime now populated via bootstrap + HMM
+- ~~decisions.vae_loss ALL NULL~~ — Fixed: VAE loss now persisted in decision dict
+- ~~devil_tracker 0 rows~~ — Wired up in position management
 
-### HMM Model:
-- File: models/hmm_regime.pkl
-- Contains: Trained 3-state GaussianHMM (dict with keys: model, feature_means,
-  feature_stds, state_to_regime, n_states, last_train_time)
-- Problem: Used by MedallionRegimeDetector (observation loop), NOT by the main
-  decision path which uses AdvancedRegimeDetector
-- The AdvancedRegimeDetector needs min_samples=200, gets fed ticker snapshots
-  instead of OHLCV bars
-
-### Architecture Pain Points:
-- RegimeOverlay.update() feeds ticker snapshots to AdvancedRegimeDetector
-  which expects OHLCV bars — this is the regime bug
-- BarAggregator IS working (bars accumulate correctly in DB)
-- The main decision loop runs ~every 10 seconds
-- Paper trading: slippage is simulated at 0%, which masks execution issues
+### Architecture (post-refactor):
+- `renaissance_trading_bot.py` (2,149 lines) delegates to `bot/` package (9 modules, 6,513 lines)
+- RegimeOverlay uses 3-tier hierarchy: bootstrap → AdvancedRegimeDetector → HMM
+- BarAggregator feeds OHLCV bars to regime detector (not ticker snapshots)
+- Data source: Binance spot API (free, no auth) for 70-90 pairs
+- Execution: MEXC paper trades at 0% maker fee
+- Main decision loop runs ~every 10 seconds
+- Dashboard: React + FastAPI at localhost:8080 with 23 API routers
 
 ---
 
@@ -408,8 +421,8 @@ so the HMM can activate immediately instead of waiting 17 hours.
 ## COMMON PITFALLS
 
 1. **Don't trust "I already fixed this"** — Verify with evidence every time.
-2. **The bot may need restarting** after code changes to main.py or core modules.
-   Use: `pkill -f "python.*main" && sleep 2 && .venv/bin/python3 main.py &`
+2. **The bot may need restarting** after code changes to renaissance_trading_bot.py or bot/ modules.
+   Use: `pkill -f "python.*run_renaissance" && sleep 2 && .venv/bin/python3 run_renaissance_bot.py --run &`
 3. **SQLite locks** — If the bot is running, DB writes from diagnostics may fail.
    Use read-only connections for diagnostics: `sqlite3.connect('file:data/trading.db?mode=ro', uri=True)`
 4. **Paper vs live** — We are PAPER TRADING. Do not change this. The `PAPER TRADING`
@@ -418,26 +431,29 @@ so the HMM can activate immediately instead of waiting 17 hours.
    When in doubt, restart.
 6. **The five_minute_bars table uses 'pair' not 'product_id'** — Column names matter.
    Always check schema before writing queries.
+7. **bot/ package imports** — The bot class delegates to bot/builder.py, bot/signals.py,
+   etc. When modifying trading logic, find the right module in bot/ rather than editing
+   renaissance_trading_bot.py directly. See ARCHITECTURE.md for module responsibilities.
 
 ---
 
-## SUCCESS CRITERIA
+## SUCCESS CRITERIA (all met as of 2026-04-23)
 
 The system is working correctly when:
-- [ ] Regime detector classifies a non-"Unknown" regime with >50% confidence
-- [ ] No opposing positions on the same asset
-- [ ] Exposure calculation shows actual dollar amounts, not $0
-- [ ] Equity curve tracks peak equity and drawdown correctly
-- [ ] Sharpe ratio computes (not blank)
-- [ ] P&L is split into realized and unrealized everywhere
-- [ ] Risk alerts fire when thresholds are breached
-- [ ] Risk gateway log shows entries (both PASS and REJECT)
-- [ ] Win rate includes context (closed trades vs open positions)
-- [ ] Signal confidence is not zeroed out by Low_volatility regime
-- [ ] The system generates at least some BUY/SELL signals per hour (not just HOLD)
-- [ ] The bot has been running for 1+ hours without crashing
+- [x] Regime detector classifies a non-"Unknown" regime with >50% confidence (`02c691b`)
+- [x] No opposing positions on the same asset (`02c691b`)
+- [x] Exposure calculation shows actual dollar amounts, not $0 (`02c691b`)
+- [x] Equity curve tracks peak equity and drawdown correctly (`02c691b`)
+- [x] Sharpe ratio computes (not blank) (`02c691b`)
+- [x] P&L is split into realized and unrealized everywhere (`a0f4f34`)
+- [x] Risk alerts fire when thresholds are breached (`a0f4f34`)
+- [x] Risk gateway log shows entries (both PASS and REJECT) (`a0f4f34`)
+- [x] Win rate includes context (closed trades vs open positions) (`8f901f1`)
+- [x] Signal confidence is not zeroed out by Low_volatility regime (`02c691b`)
+- [x] The system generates at least some BUY/SELL signals per hour (not just HOLD)
+- [x] The bot has been running for 1+ hours without crashing (`b872a64`)
 
-When ALL checkboxes are met, move to the MEDIUM and FUTURE priority items.
+All criteria met. Current focus: FUTURE priority items (Docs 9-11).
 
 ---
 
