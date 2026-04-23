@@ -1212,6 +1212,31 @@ def build_feature_sequence(
         cross_data = _cross if _cross else None
 
     df = df.reset_index(drop=True)
+
+    # ── Feature staleness check (Finding 6) ──────────────────────────────────
+    # Log the timestamp of the most recent bar. Warn if >10 minutes old,
+    # which indicates stale features that may degrade prediction quality.
+    if 'timestamp' in df.columns:
+        try:
+            last_ts = df['timestamp'].iloc[-1]
+            # Handle both epoch seconds and datetime objects
+            if isinstance(last_ts, (int, float)):
+                from datetime import timezone as _tz
+                bar_time = datetime.fromtimestamp(float(last_ts) / 1000 if last_ts > 1e12 else float(last_ts), tz=_tz.utc)
+            else:
+                bar_time = last_ts
+            now = datetime.now(timezone.utc)
+            staleness_minutes = (now - bar_time).total_seconds() / 60.0
+            _stale_pair = pair_name or "unknown"
+            if staleness_minutes > 10.0:
+                logger.warning(
+                    f"FEATURE STALENESS: {_stale_pair} most recent bar is "
+                    f"{staleness_minutes:.1f} min old (threshold: 10 min) — "
+                    f"predictions may lag reality"
+                )
+        except Exception:
+            pass  # Don't fail feature building over staleness logging
+
     close = df['close'].astype(float) if 'close' in df.columns else None
     if close is None:
         return None
