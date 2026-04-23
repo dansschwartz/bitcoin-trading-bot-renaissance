@@ -39,7 +39,9 @@ class PerformanceTracker:
         self._start_time = datetime.utcnow()
 
     def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS arb_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -415,7 +417,9 @@ class PerformanceTracker:
     def record_signal(self, signal, approved: bool, executed: bool):
         """Record a detected signal for analysis."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.execute(
                 "INSERT INTO arb_signals (signal_id, strategy, symbol, gross_spread_bps, "
                 "net_spread_bps, approved, executed, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -432,7 +436,9 @@ class PerformanceTracker:
 
     def _persist_trade(self, trade: dict):
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             cols = ", ".join(trade.keys())
             placeholders = ", ".join("?" * len(trade))
             conn.execute(
@@ -469,7 +475,9 @@ class PerformanceTracker:
         """Update rolling path performance stats after every attempt."""
         import time as _time
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.row_factory = sqlite3.Row
 
             # Query last 200 attempts for this path to compute rolling stats
@@ -517,7 +525,7 @@ class PerformanceTracker:
     def get_path_performance(self, path: str) -> Optional[dict]:
         """Get performance stats for a specific path."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM path_performance WHERE path = ?", (path,)
@@ -530,7 +538,7 @@ class PerformanceTracker:
     def get_all_path_performance(self) -> List[dict]:
         """Get performance stats for all tracked paths."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM path_performance ORDER BY priority_score DESC"

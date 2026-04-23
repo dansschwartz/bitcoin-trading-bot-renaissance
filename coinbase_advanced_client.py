@@ -1,4 +1,5 @@
 # coinbase_advanced_client.py
+import asyncio
 import numpy as np
 import websockets
 import json
@@ -56,6 +57,13 @@ class CoinbaseAdvancedClient:
 
         Raises on failure so the caller can implement its own retry/backoff.
         """
+        if self.websocket:
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
+            self.websocket = None
+
         self.websocket = await websockets.connect(self.base_url)
 
         # Subscribe to channels
@@ -70,6 +78,10 @@ class CoinbaseAdvancedClient:
 
     async def listen_for_messages(self, data_queue: queue.Queue):
         """Listen for WebSocket messages and process them"""
+        if self.websocket is None:
+            self.logger.warning("No WebSocket connection, cannot listen")
+            return
+
         try:
             async for message in self.websocket:
                 data = json.loads(message)
@@ -91,6 +103,32 @@ class CoinbaseAdvancedClient:
             self.logger.warning("Coinbase WebSocket connection closed")
         except Exception as e:
             self.logger.error(f"Error processing Coinbase message: {e}")
+
+    async def run_forever(self, data_queue: queue.Queue, max_retries: int = 0):
+        """Connect and listen with automatic reconnection on failure.
+
+        Uses exponential backoff: 1s, 2s, 4s, 8s, ... up to 60s.
+        Set max_retries=0 for unlimited retries.
+        """
+        attempt = 0
+        while max_retries == 0 or attempt < max_retries:
+            try:
+                attempt += 1
+                await self.connect_websocket()
+                attempt = 0  # Reset on successful connection
+                await self.listen_for_messages(data_queue)
+            except websockets.exceptions.ConnectionClosed:
+                self.logger.warning("WebSocket connection closed, reconnecting...")
+            except Exception as e:
+                self.logger.error(f"WebSocket error: {e}")
+            finally:
+                self.websocket = None
+
+            backoff = min(2 ** min(attempt, 6), 60)  # 1s, 2s, 4s, ..., 60s max
+            self.logger.info(f"Reconnecting in {backoff}s (attempt {attempt})...")
+            await asyncio.sleep(backoff)
+
+        self.logger.error(f"WebSocket gave up after {max_retries} retries")
 
     async def _process_coinbase_message(self, data: Dict) -> Optional[MarketData]:
         """Process individual Coinbase messages"""

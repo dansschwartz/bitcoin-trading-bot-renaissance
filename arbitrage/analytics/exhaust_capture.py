@@ -23,7 +23,9 @@ class ExhaustCapture:
         self._init_db()
 
     def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS arb_signal_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +74,9 @@ class ExhaustCapture:
                         exchange: str, book_data: Dict):
         """Persist a single book snapshot to SQLite."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.execute(
                 """INSERT INTO arb_signal_snapshots
                    (signal_id, phase, timestamp, symbol, exchange,
@@ -139,7 +143,7 @@ class ExhaustCapture:
     def get_recent_snapshots(self, limit: int = 100) -> List[Dict]:
         """Return recent snapshots for dashboard display."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """SELECT * FROM arb_signal_snapshots

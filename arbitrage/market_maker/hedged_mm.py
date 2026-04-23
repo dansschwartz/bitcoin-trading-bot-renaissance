@@ -161,7 +161,9 @@ class HedgedMarketMaker:
 
     def _init_db(self):
         """Create mm_trades table if it doesn't exist."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS mm_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -523,7 +525,9 @@ class HedgedMarketMaker:
     def _persist_opportunity(self, opp: dict):
         """Save opportunity to mm_opportunities table."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.execute(
                 """INSERT INTO mm_opportunities
                    (token, side, usdc_spread_bps, usdt_spread_bps, net_bps,
@@ -1741,7 +1745,9 @@ class HedgedMarketMaker:
     def _persist_trade(self, trade: dict):
         """Save trade to SQLite."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             cols = ", ".join(trade.keys())
             placeholders = ", ".join("?" * len(trade))
             conn.execute(

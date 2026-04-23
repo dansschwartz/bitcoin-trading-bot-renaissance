@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import pickle
+import tempfile
 import sqlite3
 import warnings
 from contextlib import contextmanager
@@ -470,15 +471,15 @@ class RegimeDetector:
         Pickle the trained HMM model and normalization parameters to disk.
 
         Saves to the path specified in config (default ``models/hmm_regime.pkl``).
+        Uses atomic writes (temp file + rename) to avoid corruption on crash.
         Returns True on success.
         """
         if self._model is None:
             self.logger.warning("No trained model to save.")
             return False
 
-        model_dir = os.path.dirname(self.model_path)
-        if model_dir:
-            os.makedirs(model_dir, exist_ok=True)
+        model_dir = os.path.dirname(self.model_path) or "."
+        os.makedirs(model_dir, exist_ok=True)
 
         payload = {
             "model": self._model,
@@ -490,8 +491,21 @@ class RegimeDetector:
         }
 
         try:
-            with open(self.model_path, "wb") as fh:
-                pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            # Atomic write: write to temp file, then rename
+            fd, tmp_path = tempfile.mkstemp(
+                dir=model_dir, suffix=".pkl.tmp"
+            )
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+                os.replace(tmp_path, self.model_path)
+            except BaseException:
+                # Clean up temp file on any failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             self.logger.info("Model saved to %s", self.model_path)
             return True
         except PermissionError as exc:

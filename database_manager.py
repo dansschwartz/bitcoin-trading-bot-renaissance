@@ -10,6 +10,20 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
 
+def safe_connect(db_path: str, timeout: float = 30.0, readonly: bool = False) -> sqlite3.Connection:
+    """Create a SQLite connection with WAL mode and busy timeout.
+
+    Use this instead of raw sqlite3.connect() to prevent 'database is locked' crashes.
+    """
+    if readonly:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
+    else:
+        conn = sqlite3.connect(db_path, timeout=timeout)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
 @dataclass
 class MarketData:
     """Market data structure"""

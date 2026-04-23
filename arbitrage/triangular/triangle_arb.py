@@ -393,15 +393,26 @@ class TriangularArbitrage:
         cache_loaded = self._load_pair_graph_cache()
 
         if not cache_loaded:
-            # No cache — build pair graph with blocking retry (existing behavior)
-            attempt = 0
-            while self._running:
-                attempt += 1
+            # No cache — build pair graph with bounded retry (non-blocking)
+            max_startup_attempts = 3
+            for attempt in range(1, max_startup_attempts + 1):
                 if await self._build_pair_graph():
                     break
-                backoff = min(30 * attempt, 300)  # 30s, 60s, 90s, ... capped at 5min
-                logger.warning(f"TriangularArbitrage: pair graph build failed (attempt {attempt}), retrying in {backoff}s")
+                backoff = min(30 * attempt, 120)
+                logger.warning(
+                    f"TRIANGLE_ARB: Pair graph build failed (attempt {attempt}/{max_startup_attempts}), "
+                    f"retrying in {backoff}s"
+                )
                 await asyncio.sleep(backoff)
+            else:
+                logger.error(
+                    "TRIANGLE_ARB: Failed to build pair graph after %d attempts. "
+                    "Running without triangular arb — will retry in background.",
+                    max_startup_attempts,
+                )
+                # Schedule background rebuilds so triangular arb can activate later
+                asyncio.ensure_future(self._background_pair_graph_rebuild())
+                return
         else:
             # Cache loaded — kick off a background refresh (non-blocking)
             async def _background_refresh():
@@ -774,6 +785,37 @@ class TriangularArbitrage:
             logger.error("Pair graph traceback: " + traceback.format_exc())
             return False
 
+    async def _background_pair_graph_rebuild(self) -> None:
+        """Periodically retry building the pair graph in the background.
+
+        Called when startup pair graph build fails all attempts.
+        Retries with exponential backoff until success or shutdown.
+        Once the graph is built, kicks off the main scanning loop via run().
+        """
+        attempt = 0
+        max_backoff = 300  # 5 minutes max between retries
+        while self._running:
+            attempt += 1
+            backoff = min(60 * attempt, max_backoff)
+            logger.info(
+                f"TRIANGLE_ARB: Background pair graph rebuild scheduled in {backoff}s "
+                f"(attempt {attempt})"
+            )
+            await asyncio.sleep(backoff)
+            if not self._running:
+                return
+            try:
+                if await self._build_pair_graph():
+                    logger.info(
+                        "TRIANGLE_ARB: Background pair graph rebuild succeeded! "
+                        "Starting triangular arb scanner."
+                    )
+                    # Re-enter the main run loop now that the graph is built
+                    await self.run()
+                    return
+            except Exception as e:
+                logger.warning(f"TRIANGLE_ARB: Background rebuild attempt {attempt} failed: {e}")
+
     def _update_graph(self, tickers: Dict[str, dict]):
         """Update graph edges with latest prices."""
         self._pair_graph.clear()
@@ -1040,9 +1082,10 @@ class TriangularArbitrage:
 
         # Query fill rate for trades near the current threshold
         # "Marginal" = trades with expected profit in [current, current + 2.0 bps]
-        import sqlite3
         try:
-            conn = sqlite3.connect(self.tracker.db_path)
+            conn = sqlite3.connect(self.tracker.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.row_factory = sqlite3.Row
             marginal_range_bps = 2.0
             # expected_profit_usd is in USD; we need bps. Use net_spread_bps instead.
@@ -1207,7 +1250,9 @@ class TriangularArbitrage:
             return
 
         try:
-            conn = sqlite3.connect(self.tracker.db_path)
+            conn = sqlite3.connect(self.tracker.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT path, "

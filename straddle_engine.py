@@ -160,7 +160,9 @@ class StraddleEngine:
     # ------------------------------------------------------------------
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -724,7 +726,9 @@ class StraddleEngine:
         """Write live P&L for all open straddles to DB so dashboard can read it."""
         n = len(self.open_straddles)
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             for s in self.open_straddles:
                 conn.execute(
                     """UPDATE straddle_log SET
