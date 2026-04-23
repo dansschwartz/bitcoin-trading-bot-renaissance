@@ -10,5 +10,17 @@ __pycache__/
 *.pyc
 .DS_Store
 .idea/
-models/trained/*.pth
 config/polymarket_secrets.json
+
+# Virtual environment
+.venv/
+
+# Model binaries (large, should be downloaded or trained locally)
+*.pkl
+*.pth
+
+# Generated reports
+reports/
+
+# Jupyter notebooks (may contain large outputs)
+notebooks/
