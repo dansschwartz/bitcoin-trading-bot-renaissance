@@ -1272,6 +1272,17 @@ def build_feature_sequence(
     _pair_cache_key = pair_name or "unknown"
     _lgb_raw_feature_cache[_pair_cache_key] = feat_arr[-1].copy()
 
+    # ── Feature zero-rate logging (Finding 4) ────────────────────────────────
+    # Log how many features in the most recent bar are zero. If >30% are zero,
+    # the model is operating on incomplete data and predictions are unreliable.
+    zero_count = int((feat_arr[-1] == 0).sum())
+    total = feat_arr.shape[1]
+    if zero_count > total * 0.3:
+        logger.warning(
+            f"FEATURE HEALTH: {zero_count}/{total} features are zero for "
+            f"{_pair_cache_key} — predictions unreliable"
+        )
+
     # Per-window standardization (zero-mean, unit-variance per column)
     mean = feat_arr.mean(axis=0, keepdims=True)
     std = feat_arr.std(axis=0, keepdims=True)
