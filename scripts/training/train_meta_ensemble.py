@@ -267,7 +267,7 @@ def train_meta_ensemble(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", patience=5, factor=0.5, min_lr=1e-6
     )
-    criterion = DirectionalLoss(logit_scale=20.0, margin=0.10)
+    criterion = DirectionalLoss()  # v7 defaults: logit_scale=3.0, margin=0.25 (Finding 5 fix)
 
     # Create data loaders (meta-ensemble uses flat 88-dim input, not sequences)
     train_ds = TensorDataset(

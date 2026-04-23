@@ -123,7 +123,7 @@ def train_bidirectional_lstm(
 
     for epoch in range(epochs):
         dir_weight = min(dir_weight + dir_weight_step, DEFAULTS["directional_weight_max"])
-        criterion = DirectionalLoss(logit_scale=20.0, margin=0.10)
+        criterion = DirectionalLoss()  # v7 defaults: logit_scale=3.0, margin=0.25 (Finding 5 fix)
 
         train_loss = train_epoch(
             model, train_loader, optimizer, criterion, device,

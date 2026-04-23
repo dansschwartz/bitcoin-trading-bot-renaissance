@@ -146,7 +146,7 @@ def train_quantum_transformer(
     train_loader, val_loader = make_dataloaders(X_train, y_train, X_val, y_val, batch_size)
 
     # Training loop with collapse recovery
-    criterion = DirectionalLoss(logit_scale=20.0, margin=0.10)
+    criterion = DirectionalLoss()  # v7 defaults: logit_scale=3.0, margin=0.25 (Finding 5 fix)
     best_val_loss = float("inf")
     best_state = None
     patience_counter = 0

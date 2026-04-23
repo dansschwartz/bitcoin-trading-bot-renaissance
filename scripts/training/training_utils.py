@@ -371,7 +371,7 @@ def evaluate_on_dataset(
     """
     dataset = TensorDataset(torch.FloatTensor(X), torch.FloatTensor(y))
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    criterion = DirectionalLoss(logit_scale=20.0, margin=0.10)
+    criterion = DirectionalLoss()  # v7 defaults: logit_scale=3.0, margin=0.25 (Finding 5 fix)
     return validate_epoch(model, loader, criterion, device)
 
 
