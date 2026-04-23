@@ -164,6 +164,27 @@ class PerformanceTracker:
                 conn.execute(f"ALTER TABLE arb_trades ADD COLUMN {col} {coltype}")
             except sqlite3.OperationalError as e:
                 logger.warning(f"conn.execute failed: {e}")
+        # Balance snapshots table — forensic audit trail
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS balance_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                free REAL NOT NULL,
+                locked REAL NOT NULL,
+                total REAL NOT NULL,
+                usd_value REAL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_balance_snapshots_ts
+            ON balance_snapshots (timestamp)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_balance_snapshots_exchange
+            ON balance_snapshots (exchange, currency)
+        """)
         conn.commit()
         conn.close()
 
