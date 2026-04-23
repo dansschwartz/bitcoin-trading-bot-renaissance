@@ -842,7 +842,7 @@ class BotBuilder:
                 bot.signal_weights[k] = v
                 bot.logger.info(f"Injected missing ML weight: {k}={v}")
 
-        from renaissance_trading_bot import MacroDataCache
+        from bot.data_collection import MacroDataCache
         bot._macro_cache = MacroDataCache(logger=bot.logger)
 
     # ─────────────────────────────────────────────────────────

@@ -297,3 +297,95 @@ def get_performance_summary(bot: "RenaissanceTradingBot") -> Dict[str, Any]:
         summary['average_position_size'] = np.mean(position_sizes)
 
     return summary
+
+
+# ──────────────────────────────────────────────
+#  Signal Conversion Helpers (module-level)
+# ──────────────────────────────────────────────
+
+def signed_strength(signal: Any) -> float:
+    """Convert an IndicatorOutput into a signed strength value."""
+    if not signal:
+        return 0.0
+    direction = str(signal.signal).upper()
+    strength = abs(float(signal.strength))
+    if direction == "SELL":
+        return -strength
+    if direction == "BUY":
+        return strength
+    return 0.0
+
+
+def continuous_rsi_signal(signal: Any) -> float:
+    """Convert RSI to continuous signal: oversold(+1) <-> neutral(0) <-> overbought(-1)."""
+    if not signal:
+        return 0.0
+    rsi_value = float(signal.value) if signal.value is not None else 50.0
+    if np.isnan(rsi_value) or np.isinf(rsi_value):
+        return 0.0
+    return float(np.clip(-(rsi_value - 50.0) / 50.0, -1.0, 1.0))
+
+
+def continuous_macd_signal(signal: Any) -> float:
+    """Convert MACD histogram to continuous signal using metadata."""
+    if not signal or not signal.metadata:
+        return 0.0
+    hist = signal.metadata.get('histogram', 0.0)
+    if hist is None or (hasattr(hist, '__float__') and (np.isnan(float(hist)) or np.isinf(float(hist)))):
+        return 0.0
+    hist = float(hist)
+    signal_line = abs(float(signal.metadata.get('signal_line', 1.0) or 1.0))
+    if signal_line > 0:
+        normalized = hist / signal_line
+    else:
+        normalized = hist
+    return float(np.clip(normalized, -1.0, 1.0))
+
+
+def continuous_bollinger_signal(signal: Any) -> float:
+    """Convert Bollinger position to continuous signal: lower_band(+1) <-> mid(0) <-> upper_band(-1)."""
+    if not signal:
+        return 0.0
+    position = float(signal.value) if signal.value is not None else 0.5
+    if np.isnan(position) or np.isinf(position):
+        return 0.0
+    return float(np.clip(-(position - 0.5) * 2.0, -1.0, 1.0))
+
+
+def continuous_obv_signal(signal: Any) -> float:
+    """Convert OBV momentum to continuous signal using metadata instead of binary BUY/SELL."""
+    if not signal or not signal.metadata:
+        return signed_strength(signal)
+    obv_momentum = signal.metadata.get('obv_momentum', 0.0)
+    obv_change = signal.metadata.get('obv_change', 0.0)
+    divergence = signal.metadata.get('divergence', 0)
+    if obv_momentum is None:
+        obv_momentum = 0.0
+    if obv_change is None:
+        obv_change = 0.0
+    try:
+        obv_momentum = float(obv_momentum)
+        obv_change = float(obv_change)
+        divergence = float(divergence)
+    except (TypeError, ValueError):
+        return 0.0
+    if np.isnan(obv_momentum) or np.isinf(obv_momentum):
+        return 0.0
+    raw = obv_momentum * 3.0 + obv_change * 2.0 + divergence * 0.3
+    return float(np.clip(raw, -1.0, 1.0))
+
+
+def convert_ws_orderbook_to_snapshot(ws_ob: dict, last_price: float = 0.0) -> Any:
+    """Convert WebSocket order_book dict to OrderBookSnapshot."""
+    from microstructure_engine import OrderBookSnapshot, OrderBookLevel
+    bids_dict = ws_ob.get('bids', {})
+    asks_dict = ws_ob.get('asks', {})
+    bid_levels = [OrderBookLevel(price=p, size=s) for p, s in sorted(bids_dict.items(), reverse=True)[:20]]
+    ask_levels = [OrderBookLevel(price=p, size=s) for p, s in sorted(asks_dict.items())[:20]]
+    return OrderBookSnapshot(
+        timestamp=datetime.now(),
+        bids=bid_levels,
+        asks=ask_levels,
+        last_price=last_price,
+        last_size=0.0,
+    )
