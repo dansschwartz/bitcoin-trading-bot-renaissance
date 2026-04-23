@@ -1579,8 +1579,12 @@ def predict_with_models(
                 else:
                     pred = output
                 pred_val = float(pred[0, 0])  # Already tanh-bounded by model output layer
-                pred_val = _debiaser.debias(name, pred_val)  # Remove systematic bias
-                pred_val = _normalizer.normalize(name, pred_val)  # Council S3: z-score normalization
+                # Debiaser and normalizer DISABLED — they actively invert correct
+                # predictions after warmup (200 samples). Z-score normalization turns
+                # mildly bullish predictions into bearish ones.
+                # See docs/ML_ACCURACY_INVESTIGATION.md Finding 2.
+                # pred_val = _debiaser.debias(name, pred_val)
+                # pred_val = _normalizer.normalize(name, pred_val)
                 predictions[name] = pred_val
                 confidences[name] = min(abs(pred_val) + 0.5, 0.95)
         except Exception as e:
@@ -1597,8 +1601,9 @@ def predict_with_models(
         lgbm_pred, lgbm_conf = predict_lightgbm(
             models['lightgbm'], features, price_series, pair=pair
         )
-        lgbm_pred = _debiaser.debias('lightgbm', lgbm_pred)  # Remove systematic bias
-        lgbm_pred = _normalizer.normalize('lightgbm', lgbm_pred)  # Council S3: z-score normalization
+        # Debiaser/normalizer DISABLED (Finding 2 — inverts predictions after warmup)
+        # lgbm_pred = _debiaser.debias('lightgbm', lgbm_pred)
+        # lgbm_pred = _normalizer.normalize('lightgbm', lgbm_pred)
         predictions['lightgbm'] = lgbm_pred
         confidences['lightgbm'] = lgbm_conf
 
@@ -1632,9 +1637,11 @@ def predict_with_models(
                 base_preds = torch.FloatTensor([base_pred_list])  # (1, n_models)
                 meta_input = torch.cat([feat_vec, base_preds], dim=-1)  # (1, meta_dim + n_models)
                 pred, conf = meta_model(meta_input)
-                meta_pred_val = _debiaser.debias('meta_ensemble', float(pred[0, 0]))
-                meta_pred_val = _normalizer.normalize('meta_ensemble', meta_pred_val)  # Council S3: z-score
-                predictions['meta_ensemble'] = meta_pred_val  # Debiased + normalized
+                meta_pred_val = float(pred[0, 0])
+                # Debiaser/normalizer DISABLED (Finding 2 — inverts predictions after warmup)
+                # meta_pred_val = _debiaser.debias('meta_ensemble', meta_pred_val)
+                # meta_pred_val = _normalizer.normalize('meta_ensemble', meta_pred_val)
+                predictions['meta_ensemble'] = meta_pred_val
                 confidences['meta_ensemble'] = float(conf[0, 0])
         except Exception as e:
             logger.warning(f"Inference failed for meta_ensemble: {e}")
