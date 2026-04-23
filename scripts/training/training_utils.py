@@ -110,7 +110,8 @@ def generate_sequences(
 
             # Per-window standardization (same as build_feature_sequence)
             mean = window.mean(axis=0, keepdims=True)
-            std = window.std(axis=0, keepdims=True) + 1e-8
+            std = window.std(axis=0, keepdims=True)
+            std = np.maximum(std, 1e-4)  # Floor to prevent noise amplification in quiet markets (Finding 3)
             window = (window - mean) / std
 
             # Soft label: 6-bar forward return, scaled and clipped to [-1, 1]
