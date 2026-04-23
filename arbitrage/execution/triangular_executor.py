@@ -57,8 +57,9 @@ class TriExecutionResult:
 class TriangularExecutor:
     """Executes 3-leg triangular arbitrage on a single exchange."""
 
-    def __init__(self, mexc_client):
+    def __init__(self, mexc_client, maker_fill_timeout_s: float = 5.0):
         self.client = mexc_client
+        self._maker_fill_timeout_s = maker_fill_timeout_s
         self._trade_count = 0
         self._fill_count = 0
         self._total_profit = Decimal('0')

@@ -103,7 +103,8 @@ class TriangularArbitrage:
 
         # Dedicated N-leg executor (handles both 3-leg and 4-leg cycles)
         from ..execution.triangular_executor import TriangularExecutor
-        self.tri_executor = TriangularExecutor(mexc_client)
+        maker_timeout_ms = (config or {}).get('triangular', {}).get('maker_fill_timeout_ms', 5000)
+        self.tri_executor = TriangularExecutor(mexc_client, maker_fill_timeout_s=maker_timeout_ms / 1000.0)
         self.tracker = tracker
         self.velocity_tracker = None  # Set by orchestrator
         self.exhaust_capture = None  # Set by orchestrator
@@ -575,18 +576,6 @@ class TriangularArbitrage:
                                 self.tracker.record_triangular_trade(result, opportunity=opp)
                             except Exception as track_err:
                                 logger.debug(f"Triangular trade tracking error: {track_err}")
-
-                        # Record capital velocity for triangular trades
-                        if self.velocity_tracker and result.status == "filled":
-                            try:
-                                self.velocity_tracker.record_trade(
-                                    strategy="triangular",
-                                    trade_size_usd=float(result.start_amount),
-                                    hold_seconds=result.execution_time_ms / 1000.0,
-                                    profit_usd=float(result.profit_usd),
-                                )
-                            except Exception as e:
-                                logger.warning(f"self.velocity_tracker.record_trade failed: {e}")
 
                         # Record capital velocity for triangular trades
                         if self.velocity_tracker and result.status == "filled":
