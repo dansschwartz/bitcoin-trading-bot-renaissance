@@ -1,97 +1,164 @@
-# bitcoin-trading-bot-renaissance
+# Renaissance Trading Bot
 
-Renaissance-inspired BTC-USD trading bot with a single, stabilized golden path. The project is currently paper-trading only and wired for live market data.
+A Renaissance Technologies-inspired cryptocurrency trading bot that paper trades across multiple exchanges using statistical edge extraction, ML-driven regime detection, and multi-strategy signal fusion.
 
-**Golden Path (Unified Architecture)**
-- Entrypoint: `run_renaissance_bot.py`
-- Core Engine: `renaissance_trading_bot.py` (Now includes all "Enhanced" ML and Risk capabilities by default)
-- Config: `config/config.json`
-- Live market data: Coinbase Advanced Trade
-- Multi-Exchange: Parallel feeds from Kraken, KuCoin, Bitfinex for global volume profile.
-- ML Backend: PyTorch-powered (CNN-LSTM, N-BEATS, Transformer, VAE).
+**Status: Paper Trading Only** — The bot simulates trades against live market data. It does not execute real orders.
 
-**Quickstart**
-1. Copy `.env.example` to `.env` and fill in your credentials.
-2. Review `config/config.json` and adjust trading parameters.
-3. Run a single test cycle:
+## Architecture
+
+The system is built around a core orchestrator (`renaissance_trading_bot.py`, 2,149 lines) that delegates to 9 focused subsystems in the `bot/` package. It collects data from Binance (free, no auth required), generates signals through 20+ alpha sources, filters them through a multi-stage risk gateway, and simulates execution on MEXC at 0% maker fees.
+
+Key components:
+- **bot/** — 9 extracted modules handling signals, decisions, positions, data, lifecycle, and adaptive learning
+- **dashboard/** — React + FastAPI real-time dashboard at `localhost:8080` with 23 API routers
+- **arbitrage/** — Cross-exchange arbitrage engine (Binance, Coinbase, MEXC, Kraken)
+- **agents/** — Multi-agent orchestration framework for distributed trading logic
+- **ML Models** — HMM regime detection, VAE anomaly detection, CNN-LSTM/N-BEATS/Transformer ensemble
+
+For the full architecture breakdown, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Quickstart
+
+### Prerequisites
+- Python 3.11+
+- Node.js 18+ (for dashboard frontend)
+
+### Setup
 
 ```bash
+# Clone and enter the project
+cd bitcoin-trading-bot-renaissance
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Copy environment template and add your API keys
+cp .env.example .env
+
+# Review trading configuration
+# config/config.json — trading parameters, strategy flags, risk limits
+# config/config.example.json — safe template
+```
+
+### Run
+
+```bash
+# Single test cycle (verify everything works)
 python run_renaissance_bot.py --test
+
+# Paper trading (continuous)
+python run_renaissance_bot.py --run
+
+# Arbitrage module (standalone)
+python run_arbitrage.py
 ```
 
-**Replay/Backtest**
-Use `replay_backtest.py` with a CSV containing `timestamp, open, high, low, close, volume`:
+### Docker
 
 ```bash
-python replay_backtest.py --csv path/to/bars.csv
+make docker-build    # Build all service images
+make docker-up       # Start bot + dashboard + arbitrage (detached)
+make docker-down     # Stop all services
 ```
 
-**Configuration**
-- `config/config.json` is the canonical config used by the golden path.
-- `config/config.example.json` is a safe template.
-- `config/data_pipeline_config.json` is reserved for pipeline experiments.
+The `docker-compose.yml` orchestrates three services:
+1. **bot** — Main trading loop + ML inference
+2. **dashboard** — FastAPI web server at port 8080
+3. **arbitrage** — Cross-exchange arbitrage orchestrator
 
-The file contains:
-- `COINBASE_API_KEY`: Your Coinbase Advanced Trade API key.
-- `COINBASE_API_SECRET`: Your EC private key (signed JWT authentication).
-- `TWITTER_BEARER_TOKEN`: For real-time social sentiment analysis.
-- `REDDIT_CLIENT_ID / SECRET`: For deep subreddit sentiment tracking.
-- `NEWSAPI_KEY`: For global financial news analysis.
-- `WHALE_ALERT_KEY`: For tracking large on-chain transactions.
-- `GUAVY_API_KEY`: Primary source for crypto alternative data (replaces Twitter/Reddit/News).
+### Testing
 
-**Advanced Features (Opt-in)**
-- `regime_overlay`: Enables **Medallion-style Regime Prediction**. Uses a **Hidden Markov Model (HMM)** to predict market transitions, coupled with trend persistence and volatility acceleration scoring.
-- `risk_gateway`: Enables **Advanced Risk Management Fortress**. Now includes **VAE-Based Anomaly Detection** (Black Swan Shield) to block trades in "unseen" or chaotic market states.
-- `real_time_pipeline`: Enables Real-Time Pipeline (Step 12) for multi-exchange feed aggregation and parallel model processing. Powered by a **Unified PyTorch ML Backend** (CNN-LSTM, N-BEATS, Transformer, Bi-LSTM, VAE).
-- `step10_execution`: Integrates **Black-Litterman Portfolio Optimization** and a **Smart Execution Suite** (TWAP/VWAP/Sniper). Now includes a **Transaction Cost Optimizer (TCO)** with **VPIN (Liquidity Toxicity)** and spread awareness.
-- `multi_asset`: Support for parallel trading of **BTC-USD and ETH-USD**. Features **Cross-Asset Lead-Lag Alpha** and **Statistical Arbitrage** (Pairs Trading).
-- `persistence_analytics`: **SQLite Persistence Layer** stores every decision, trade, and ML prediction. Includes **Self-Reinforcing Learning Loops** that automatically label outcomes and fine-tune models in real-time.
-- `global_intelligence`: **Deep Alternative Data** (Reddit, News, Twitter, Whale Alert) and **High-Dimensional Discovery** (Fractal DTW, Market Entropy, Quantum Oscillator).
-- `evolutionary_ai`: **Genetic Weight Optimizer** evolves signal weights based on **Realized PnL** and market regime feedback.
-- `confluence_engine`: (New) **Non-Linear Meta-Learning**. Identifies a "Confluence of Edges" where combined signals (e.g., Order Flow + Technicals, or Fractal + Quantum) receive a non-linear boost based on institutional confluence rules. Includes divergence detection (VPIN + Bollinger) for mean reversion.
-- `basis_trading`: **Arbitrage & Carry**. Exploits the price difference between Spot and Futures markets and harvests funding rates for low-risk yield.
-- `deep_nlp`: **LLM Reasoning**. Connects a local Llama or GPT model to perform deep reasoning on news and social media, extracting institutional-grade context.
-- `market_making`: **Liquidity Provision**. Transitions from taker to maker, providing two-sided quotes, managing inventory skew, and capturing the bid-ask spread.
-- `institutional_dashboard`: **Consciousness UI**. Real-time web interface to visualize bot performance, market regimes, and the "Inner Thoughts" of the AI engine.
-- `meta_strategy`: **Adaptive Execution Mode**. Dynamically switches between **Taker (Renaissance)** and **Maker (Citadel)** modes based on VPIN toxicity and market regime.
-- `performance_attribution`: **Factor Analysis**. Decomposes P&L into Alpha, Beta, and specific factor exposures (Microstructure, Technical, Alternative) using realized outcome labeling.
-
-## 🛠️ Troubleshooting & Environment
-
-If you see "No Python Interpreter" in your IDE (PyCharm/VS Code):
-
-### 1. PyCharm Fix
-1. Go to **Settings** (Cmd + , on Mac).
-2. Navigate to **Project: bitcoin-trading-bot-renaissance** > **Python Interpreter**.
-3. Click **Add Interpreter** > **Add Local Interpreter**.
-4. Select **System Interpreter** and point it to your Python path (usually `/Users/danielschwartz/miniconda3/bin/python` or run `which python` in terminal to find it).
-
-### 2. VS Code Fix
-1. Open the Command Palette (`Cmd + Shift + P`).
-2. Type `Python: Select Interpreter`.
-3. Select the recommended version (e.g., Python 3.13.x).
-
-### 3. Verify via Terminal
-You can always run the bot directly from the terminal, which bypasses IDE configuration issues:
 ```bash
-python run_renaissance_bot.py --test
+make test            # Run all 87 tests (pytest, 60s timeout)
+make lint            # Check code with ruff
+make format          # Format code with ruff
 ```
 
----
+## Project Structure
 
-## 📚 Documentation
-For deep dives into the bot's design and logic, see:
-- **[ARCHITECTURE.md](ARCHITECTURE.md)**: High-level design, data flow, and institutional layers.
-- **[MODELS_GUIDE.md](MODELS_GUIDE.md)**: Mathematical foundations, ML models (HMM, VAE, CNN-LSTM), and confluence rules.
+```
+bitcoin-trading-bot-renaissance/
+├── run_renaissance_bot.py           # Main entry point
+├── renaissance_trading_bot.py       # Core orchestrator (2,149 lines)
+├── bot/                             # Extracted subsystems (9 modules)
+│   ├── builder.py                   # Component initialization (BotBuilder)
+│   ├── signals.py                   # Signal generation & weighted fusion
+│   ├── decision.py                  # Trading decisions with Kelly sizing
+│   ├── data_collection.py           # Market data fetching & bar aggregation
+│   ├── position_ops.py              # Position management & P&L
+│   ├── lifecycle.py                 # Startup, shutdown, background loops
+│   ├── cycle_ops.py                 # Per-cycle helpers, drawdown, exposure
+│   ├── adaptive.py                  # Adaptive weights, attribution, Kelly
+│   └── helpers.py                   # Logging setup, heartbeat, summaries
+├── dashboard/                       # Real-time web dashboard
+│   ├── server.py                    # FastAPI + Uvicorn backend
+│   ├── routers/                     # 23 API endpoint routers
+│   └── frontend/                    # React + TypeScript + Tailwind SPA
+├── arbitrage/                       # Cross-exchange arbitrage package
+├── agents/                          # Multi-agent orchestration framework
+├── core/                            # Shared data structures & utilities
+├── tests/                           # 87 unit & integration tests
+├── config/                          # config.json + config.example.json
+├── data/                            # SQLite database (trading.db)
+├── models/                          # Trained ML models (.pkl files)
+├── docs/                            # Technical documentation
+├── Dockerfile                       # Python 3.11 container
+├── docker-compose.yml               # 3-service stack
+├── Makefile                         # test, lint, format, docker targets
+└── requirements.txt                 # Python dependencies
+```
 
-**Self-Reinforcing Loop**
-The bot now implements a closed feedback loop:
-1. **Collect & Persist**: Saves market snapshots and ML predictions for every cycle.
-2. **Label**: Automatically calculates realized returns and labels decisions as correct/incorrect after a fixed horizon.
-3. **Fine-tune**: Periodically calibrates the ML Ensemble (meta-learner) and evolves signal weights using live performance data (Realized PnL). Includes **Alpha Decay Detection** to identify signals losing their edge.
+## Features
 
-**Experimental Modules**
-Created `check_readiness.py` to ensure all systems (API keys, Network, DB) are ready for live deployment.
+### Trading Engine
+- **Dynamic universe**: 70-90 Binance USDT pairs filtered by $2M+ daily volume, auto-refreshed
+- **4-tier scanning**: Top pairs scanned every cycle, lower tiers on rotating schedule
+- **20+ signal sources**: Technical indicators, microstructure, fractal patterns, quantum oscillator, ML ensemble
+- **Regime-aware**: HMM-based regime detection (trending, mean-reverting, volatile) adjusts strategy weights
+- **Risk gateway**: Multi-stage filter with VaR, CVaR, VAE anomaly detection, position limits
+- **Max 10 simultaneous positions** with Kelly criterion sizing
 
-See `EXPERIMENTAL.md` for everything not included in the golden path.
+### ML Pipeline
+- 7 ML models (CNN-LSTM, N-BEATS, Transformer, Bi-LSTM, LightGBM, VAE, HMM)
+- 6 root causes of sub-50% accuracy identified and fixed (see `docs/ML_ACCURACY_INVESTIGATION.md`)
+- Genetic weight optimizer evolves signal weights based on realized P&L
+- Adaptive learning with alpha decay detection
+
+### Dashboard (localhost:8080)
+- Real-time P&L, equity curve, and position tracking
+- Market regime visualization with confidence scores
+- Risk alerts and gateway log
+- Signal confluence and ML model status
+- Success criteria tracking card
+
+### Infrastructure
+- Docker containerization with docker-compose
+- 87 automated tests across bot, arbitrage, and ML modules
+- CI pipeline with GitHub Actions
+- ruff for linting and formatting
+
+## Configuration
+
+All trading parameters live in `config/config.json`:
+- Strategy feature flags (regime_overlay, risk_gateway, real_time_pipeline, etc.)
+- Risk limits (max drawdown, position size, exposure caps)
+- Exchange credentials (via `.env` file)
+- Scanning tiers and cycle intervals
+
+## Key Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, data flow, module responsibilities |
+| [CLAUDE.md](CLAUDE.md) | Autonomous operation manual for Claude Code sessions |
+| [docs/ML_ACCURACY_INVESTIGATION.md](docs/ML_ACCURACY_INVESTIGATION.md) | Forensic audit of ML model accuracy with 6 root causes |
+| [CHANGELOG.md](CHANGELOG.md) | All changes across 46 commits |
+| [EXPERIMENTAL.md](EXPERIMENTAL.md) | Features not in the golden path |
+
+## Paper Trading
+
+This bot is configured for **paper trading only**. It connects to live market data but simulates all order execution. The dashboard displays a `PAPER TRADING` badge at all times. Do not switch to live trading without thorough backtesting and risk review.
