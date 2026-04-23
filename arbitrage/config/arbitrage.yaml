@@ -116,7 +116,7 @@ triangular:
   max_single_trade_usd: 50          # Safe fallback if balance fetch fails
   max_trade_usd: 150                # Fallback only if balance fetch fails
   min_trade_usd: 15                 # Hard floor — $15 @ 5bps edge = breakeven (covers 5bps fee cost)
-  max_trade_pct: 0.40               # 20% of wallet per trade (dynamic sizing)
+  max_trade_pct: 0.40               # 40% of wallet per trade (dynamic sizing)
   abs_max_trade_usd: 2000           # Hard ceiling regardless of balance
   max_depth_fraction: 0.20          # Use at most 20% of thinnest leg's depth (raised from 15% to unblock thin books)
   min_depth_fraction: 0.05          # Skip if trade < 5% of book depth -- data-backed (0% fill rate below 5%)
