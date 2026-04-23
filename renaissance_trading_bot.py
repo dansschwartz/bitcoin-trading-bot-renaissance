@@ -708,112 +708,19 @@ class RenaissanceTradingBot:
         return _load(self, product_id, limit)
 
     def _setup_logging(self, config: Dict[str, Any]) -> logging.Logger:
-        """Setup comprehensive logging"""
-        log_cfg = config.get("logging", {})
-        log_file = log_cfg.get("file", "logs/renaissance_bot.log")
-        log_level = log_cfg.get("level", "INFO")
-
-        log_path = (Path(__file__).resolve().parent / log_file).resolve()
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Use force=True to override any handlers set by imports
-        logging.basicConfig(
-            level=getattr(logging, str(log_level).upper(), logging.INFO),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.handlers.RotatingFileHandler(
-                    log_path, maxBytes=50 * 1024 * 1024, backupCount=5
-                ),
-                logging.StreamHandler()
-            ],
-            force=True,
-        )
-
-        # Apply secret masking to all handlers
-        masking_filter = SecretMaskingFilter()
-        for handler in logging.getLogger().handlers:
-            handler.addFilter(masking_filter)
-
-        return logging.getLogger(__name__)
+        """Setup logging — delegates to bot.helpers."""
+        from bot.helpers import setup_logging
+        return setup_logging(self, config)
 
     def _load_config(self, config_path: Path) -> Dict[str, Any]:
-        """Load bot configuration from JSON file."""
-        default_config = {
-            "trading": {
-                "product_id": "BTC-USD",
-                "cycle_interval_seconds": 300,
-                "paper_trading": True,
-                "sandbox": True
-            },
-            "risk_management": {
-                "daily_loss_limit": 500,
-                "position_limit": 1000,
-                "min_confidence": 0.50
-            },
-            "signal_weights": {
-                "order_flow": 0.32,
-                "order_book": 0.21,
-                "volume": 0.14,
-                "macd": 0.105,
-                "rsi": 0.115,
-                "bollinger": 0.095,
-                "alternative": 0.045
-            },
-            "data": {
-                "candle_granularity": "ONE_MINUTE",
-                "candle_lookback_minutes": 120,
-                "order_book_depth": 10
-            },
-            "logging": {
-                "file": "logs/renaissance_bot.log",
-                "level": "INFO"
-            }
-        }
-
-        if not config_path.exists():
-            return default_config
-
-        try:
-            with config_path.open("r", encoding="utf-8") as handle:
-                loaded = json.load(handle)
-                return {**default_config, **loaded}
-        except Exception as exc:
-            print(f"Warning: failed to load config at {config_path}: {exc}")
-            return default_config
+        """Load config — delegates to bot.helpers."""
+        from bot.helpers import load_config
+        return load_config(self, config_path)
 
     def _validate_config(self, config: Dict[str, Any]):
-        """Validate critical config values at startup."""
-        errors = []
-
-        risk = config.get("risk_management", {})
-        dl = risk.get("daily_loss_limit", 500)
-        if not (0 < dl <= 100000):
-            errors.append(f"daily_loss_limit={dl} out of range (0, 100000]")
-        pl = risk.get("position_limit", 1000)
-        if not (0 < pl <= 1000000):
-            errors.append(f"position_limit={pl} out of range (0, 1000000]")
-        mc = risk.get("min_confidence", 0.65)
-        if not (0.0 < mc <= 1.0):
-            errors.append(f"min_confidence={mc} out of range (0, 1.0]")
-
-        trading = config.get("trading", {})
-        interval = trading.get("cycle_interval_seconds", 300)
-        if not (10 <= interval <= 3600):
-            errors.append(f"cycle_interval_seconds={interval} out of range [10, 3600]")
-
-        # Auto-normalize signal weights
-        weights = config.get("signal_weights", {})
-        if weights:
-            total = sum(float(v) for v in weights.values())
-            if total > 0 and abs(total - 1.0) > 0.01:
-                self.logger.warning(f"Signal weights sum to {total:.3f}, normalizing to 1.0")
-                for k in weights:
-                    weights[k] = float(weights[k]) / total
-
-        if errors:
-            for e in errors:
-                self.logger.error(f"CONFIG ERROR: {e}")
-            raise ValueError(f"Invalid configuration: {'; '.join(errors)}")
+        """Validate config — delegates to bot.helpers."""
+        from bot.helpers import validate_config
+        return validate_config(self, config)
 
     def _track_task(self, coro) -> asyncio.Task:
         """Create and track an asyncio task for graceful shutdown."""
@@ -841,20 +748,9 @@ class RenaissanceTradingBot:
     HEARTBEAT_FILE = Path("logs/heartbeat.json")
 
     def _write_heartbeat(self):
-        """Write heartbeat file for external monitoring."""
-        try:
-            self.HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
-            heartbeat = {
-                "alive": True,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "cycle_count": len(self.decision_history),
-                "killed": self._killed,
-                "paper_mode": self.coinbase_client.paper_trading,
-            }
-            with open(self.HEARTBEAT_FILE, 'w') as f:
-                json.dump(heartbeat, f)
-        except Exception as e:
-            self.logger.warning(f"Heartbeat file write failed: {e}")
+        """Write heartbeat — delegates to bot.helpers."""
+        from bot.helpers import write_heartbeat
+        return write_heartbeat(self)
 
     async def _log_ml_accuracy_summary(self) -> None:
         """Log per-model accuracy summary — delegates to bot.adaptive."""
@@ -3212,117 +3108,9 @@ class RenaissanceTradingBot:
             return TradingDecision('HOLD', 0.0, 0.0, {'error': str(e)}, datetime.now())
 
     def _log_consciousness_dashboard(self, product_id: str, decision: TradingDecision, rt_result: Optional[Dict[str, Any]]):
-        """Displays the bot's 'Inner Thoughts' and ML consensus in a rich format"""
-        self.logger.info(f"\n" + "="*60 + f"\n🧠 CONSCIOUSNESS DASHBOARD: {product_id}\n" + "="*60)
-        
-        # 1. Decision Summary
-        action_emoji = "🚀" if decision.action == "BUY" else "🔻" if decision.action == "SELL" else "⚖️"
-        mode = decision.reasoning.get('execution_mode', 'TAKER')
-        self.logger.info(f"ACTION: {action_emoji} {decision.action} | MODE: {mode} | CONFIDENCE: {decision.confidence:.2%} | SIZE: {decision.position_size:.2%}")
-        
-        # 2. Market Regime & Global Intelligence
-        regime = self.regime_overlay.get_current_regime() if hasattr(self.regime_overlay, 'get_current_regime') else "NORMAL"
-        boost = self.regime_overlay.get_confidence_boost()
-        self.logger.info(f"MARKET REGIME: {regime} | REGIME BOOST: {boost:+.4f}")
-        
-        # Whale & Lead-Lag Signals
-        whale = decision.reasoning.get('whale_signals', {})
-        w_pressure = whale.get('whale_pressure', 0.0)
-        w_count = whale.get('whale_count', 0)
-        w_emoji = "🐋" if abs(w_pressure) > 0.1 else "🌊"
-        
-        lead_lag = decision.reasoning.get('lead_lag_alpha', {})
-        corr = lead_lag.get('correlation', 0.0)
-        lag = lead_lag.get('lag_periods', 0)
-        ll_emoji = "🔗" if abs(corr) > 0.7 else "⛓️"
-        
-        self.logger.info(f"WHALE PRESSURE: {w_emoji} {w_pressure:+.4f} ({w_count} alerts) | LEAD-LAG: {ll_emoji} Corr:{corr:.2f} Lag:{lag}")
-        
-        # 2.5 Market Microstructure & Fractal Intelligence
-        ms_metrics = self.microstructure_engine.get_latest_metrics()
-        vpin = ms_metrics.vpin if ms_metrics else 0.5
-        v_emoji = "⚠️" if vpin > 0.7 else "⚖️"
-        
-        tech_signals = self._get_tech(product_id).get_latest_signals()
-        hurst = tech_signals.hurst_exponent if tech_signals else 0.5
-        h_emoji = "📈" if hurst > 0.6 else "📉" if hurst < 0.4 else "↔️"
-        h_status = "Trending" if hurst > 0.6 else "Mean-Rev" if hurst < 0.4 else "Random"
-        
-        self.logger.info(f"VPIN TOXICITY: {v_emoji} {vpin:.4f} | HURST EXP: {h_emoji} {hurst:.4f} ({h_status})")
-        
-        # 2.6 Statistical Arbitrage Signal
-        stat_arb = decision.reasoning.get('stat_arb', {})
-        sa_signal = stat_arb.get('signal', 0.0)
-        sa_z = stat_arb.get('z_score', 0.0)
-        sa_emoji = "🎯" if abs(sa_signal) > 0.3 else "⚖️"
-        self.logger.info(f"STAT ARB SIGNAL: {sa_emoji} {sa_signal:+.4f} (Z-Score: {sa_z:+.2f})")
-        
-        # 2.7 Volume Profile Signal
-        vp_signal = decision.reasoning.get('volume_profile_signal', 0.0)
-        vp_status = decision.reasoning.get('volume_profile_status', 'Unknown')
-        vp_emoji = "📊" if abs(vp_signal) > 0.3 else "⚖️"
-        self.logger.info(f"VOLUME PROFILE: {vp_emoji} {vp_signal:+.4f} ({vp_status})")
-        
-        # 2.8 High-Dimensional Intelligence (Fractal, Entropy, Quantum)
-        fractal = decision.reasoning.get('fractal_intelligence', {})
-        f_pattern = fractal.get('best_pattern', 'None')
-        f_sim = fractal.get('similarity', 0.0)
-        f_emoji = "🧬" if f_sim > 0.7 else "🧩"
-        
-        entropy = decision.reasoning.get('market_entropy', {})
-        e_pred = entropy.get('predictability', 0.5)
-        e_emoji = "🔮" if e_pred > 0.7 else "🌀"
-        
-        quantum = decision.reasoning.get('quantum_oscillator', {})
-        q_state = quantum.get('current_energy_state', 0)
-        q_prob = quantum.get('tunneling_probability', 0.0)
-        q_emoji = "⚛️" if q_prob > 0.8 else "🔋"
-        
-        self.logger.info(f"FRACTAL PATTERN: {f_emoji} {f_pattern} ({f_sim:.2%}) | ENTROPY PRED: {e_emoji} {e_pred:.4f}")
-        self.logger.info(f"QUANTUM STATE: {q_emoji} Level {q_state} | TUNNELING PROB: {q_prob:.2%}")
-        
-        # 3. ML Consensus (Step 12 Feature Fan-Out)
-        if rt_result and 'predictions' in rt_result:
-            self.logger.info("-"*60 + "\n🤖 ML FEATURE FAN-OUT CONSENSUS\n" + "-"*60)
-            preds = rt_result['predictions']
-            for model, val in preds.items():
-                m_emoji = "📈" if val > 0.1 else "📉" if val < -0.1 else "↔️"
-                self.logger.info(f"   {model:20} : {m_emoji} {val:+.4f}")
-            
-            # Aggregate Consensus
-            model_values = list(preds.values())
-            consensus = sum(model_values) / len(model_values) if model_values else 0
-            c_emoji = "🔥" if abs(consensus) > 0.5 else "✅"
-            self.logger.info(f"AGGREGATE CONSENSUS: {c_emoji} {consensus:+.4f}")
-        
-        # 4. Step 9 Risk Check
-        risk_check = decision.reasoning.get('risk_check', {})
-        self.logger.info("-"*60 + f"\n🛡️ RISK GATEWAY STATUS: {'ALLOWED' if decision.action != 'HOLD' or decision.reasoning.get('weighted_signal', 0) < 0.1 else 'BLOCKED'}\n" + "-"*60)
-        self.logger.info(f"Daily PnL: ${risk_check.get('daily_pnl', 0):.2f} / Limit: ${risk_check.get('daily_limit', 0):.2f}")
-        self.logger.info(
-            f"Drawdown: {self._current_drawdown_pct:.1%} from HWM ${self._high_watermark_usd:,.2f} | "
-            f"Weekly PnL: ${self._weekly_pnl:,.2f}"
-        )
-        
-        # 5. Persistence & Attribution (Step 13)
-        if self.db_enabled:
-            self.logger.info("-" * 60 + "\n💾 PERSISTENCE & ANALYTICS\n" + "-" * 60)
-            self.logger.info(f"Database: {self.db_manager.db_path} | STATUS: ACTIVE")
-            self.logger.info(f"Historical Decisions: {len(self.decision_history)}")
-
-        # 6. Global Breakout Intelligence
-        if self.breakout_candidates:
-            self.logger.info("-" * 60 + "\n🚀 GLOBAL BREAKOUT INTELLIGENCE\n" + "-" * 60)
-            for r in self.breakout_candidates[:5]:
-                b_emoji = "🔥" if r['breakout_score'] >= 80 else "✨"
-                self.logger.info(f"   {r['symbol']:15} : {b_emoji} Score {r['breakout_score']} | Vol Surge: {r['volume_surge']:.2f}x | {r['exchange']}")
-
-        self.logger.info("="*60 + "\n")
-
-    # DEPRECATED: Old breakout scan replaced by Phase 0 breakout_scanner in execute_trading_cycle
-    # async def _run_breakout_scan(self):
-    #     """Step 16+: Renaissance Global Scanner for breakout opportunities"""
-    #     pass
+        """Consciousness dashboard — delegates to bot.helpers."""
+        from bot.helpers import log_consciousness_dashboard
+        return log_consciousness_dashboard(self, product_id, decision, rt_result)
 
     # ──────────────────────────────────────────────
     #  Kill Switch
@@ -3461,85 +3249,6 @@ class RenaissanceTradingBot:
         return update_dynamic_thresholds(self, product_id, market_data)
 
     def get_performance_summary(self) -> Dict[str, Any]:
-        """Get performance summary of the Renaissance bot"""
-        if not self.decision_history:
-            return {"message": "No trading decisions yet"}
-
-        recent_decisions = self.decision_history[-20:]  # Last 20 decisions
-
-        summary = {
-            'total_decisions': len(self.decision_history),
-            'recent_decisions': len(recent_decisions),
-            'action_distribution': {},
-            'average_confidence': 0.0,
-            'average_position_size': 0.0,
-            'signal_weight_distribution': self.signal_weights
-        }
-
-        # Calculate distributions
-        actions = [d.action for d in recent_decisions]
-        confidences = [d.confidence for d in recent_decisions]
-        position_sizes = [d.position_size for d in recent_decisions]
-
-        for action in ['BUY', 'SELL', 'HOLD']:
-            summary['action_distribution'][action] = actions.count(action)
-
-        if confidences:
-            summary['average_confidence'] = np.mean(confidences)
-        if position_sizes:
-            summary['average_position_size'] = np.mean(position_sizes)
-
-        return summary
-
-class MicrostructureAnalyzer:
-    """Microstructure analysis component"""
-
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-
-    def analyze(self, data: Dict) -> Dict[str, float]:
-        return {'order_flow': 0.0, 'spread': 0.0, 'depth': 0.0}
-
-
-class TechnicalAnalyzer:
-    """Technical analysis component"""
-
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-
-    def analyze(self, data: Dict) -> Dict[str, float]:
-        return {'rsi': 0.0, 'macd': 0.0, 'bollinger': 0.0}
-
-
-class AlternativeDataAnalyzer:
-    """Alternative data analysis component"""
-
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-
-    def analyze(self, data: Dict) -> Dict[str, float]:
-        return {'sentiment': 0.0, 'social': 0.0, 'news': 0.0}
-
-# Example usage and testing
-if __name__ == "__main__":
-    async def main():
-        # Initialize Renaissance bot
-        bot = RenaissanceTradingBot()
-
-        # Run a few test cycles
-        print("Running Renaissance Trading Bot Test...")
-        for i in range(3):
-            print(f"\n--- Cycle {i+1} ---")
-            decision = await bot.execute_trading_cycle()
-            print(f"Decision: {decision.action}")
-            print(f"Confidence: {decision.confidence:.3f}")
-            print(f"Position Size: {decision.position_size:.3f}")
-
-            await asyncio.sleep(2)  # Short delay for testing
-
-        # Show performance summary
-        summary = bot.get_performance_summary()
-        print(f"\nPerformance Summary: {json.dumps(summary, indent=2)}")
-
-    # Run the test
-    asyncio.run(main())
+        """Performance summary — delegates to bot.helpers."""
+        from bot.helpers import get_performance_summary
+        return get_performance_summary(self)
