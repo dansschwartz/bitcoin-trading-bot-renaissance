@@ -187,7 +187,7 @@ def evaluate_existing_meta_ensemble(
         meta_X, meta_y = generate_meta_inputs(base_models, X_test_seq, y_test, device)
 
         # Evaluate
-        criterion = DirectionalLoss(0.3)
+        criterion = DirectionalLoss()  # v7 defaults: logit_scale=3.0, margin=0.25
         ds = TensorDataset(torch.FloatTensor(meta_X), torch.FloatTensor(meta_y))
         loader = DataLoader(ds, batch_size=128, shuffle=False)
 

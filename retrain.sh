@@ -28,7 +28,8 @@ set -e
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-BOT_DIR="$HOME/Downloads/bitcoin-trading-bot-renaissance"
+# Auto-detect: use SCRIPT_DIR if available, otherwise default
+BOT_DIR="${BOT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 MODELS_DIR="$BOT_DIR/models/trained"
 SCRIPTS_DIR="$BOT_DIR/scripts/training"
 
@@ -252,11 +253,14 @@ cmd_deploy() {
     # Copy new models from Drive
     log_info "Copying new models from Google Drive..."
     cp "$DRIVE_MODELS"/*.pth "$MODELS_DIR/" 2>/dev/null || true
+    cp "$DRIVE_MODELS"/*.pkl "$MODELS_DIR/" 2>/dev/null || true
+    cp "$DRIVE_MODELS"/*.txt "$MODELS_DIR/" 2>/dev/null || true
+    cp "$DRIVE_MODELS"/*_meta.json "$MODELS_DIR/" 2>/dev/null || true
     cp "$DRIVE_MODELS"/training_metadata.json "$MODELS_DIR/" 2>/dev/null || true
     cp "$DRIVE_MODELS"/training_report_*.json "$MODELS_DIR/" 2>/dev/null || true
     
     # Count what we got
-    MODEL_COUNT=$(ls "$MODELS_DIR"/*.pth 2>/dev/null | wc -l)
+    MODEL_COUNT=$(ls "$MODELS_DIR"/*.pth "$MODELS_DIR"/*.pkl 2>/dev/null | wc -l)
     log_ok "Deployed $MODEL_COUNT model files"
     
     # Show training metadata if available
@@ -555,7 +559,7 @@ create_colab_notebook() {
         "import shutil, glob\n",
         "\n",
         "# Copy all trained model files to Drive\n",
-        "model_files = glob.glob('models/trained/*.pth')\n",
+        "model_files = glob.glob('models/trained/*.pth') + glob.glob('models/trained/*.pkl')\n",
         "meta_files = glob.glob('models/trained/*.json')\n",
         "\n",
         "for f in model_files + meta_files:\n",

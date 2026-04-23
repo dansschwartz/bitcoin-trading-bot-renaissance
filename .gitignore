@@ -24,3 +24,5 @@ reports/
 
 # Jupyter notebooks (may contain large outputs)
 notebooks/
+# But keep the Colab retraining notebook (no large outputs committed)
+!notebooks/retrain_98dim_colab.ipynb
