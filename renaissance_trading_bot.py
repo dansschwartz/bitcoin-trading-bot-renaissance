@@ -834,27 +834,9 @@ class RenaissanceTradingBot:
         return await resolve_close_price(self, pos)
 
     async def _shutdown(self):
-        """Cancel background tasks and cleanup resources."""
-        self.logger.info("Shutting down - cancelling background tasks...")
-        # Stop cascade collector (thread-based, not asyncio)
-        if self.cascade_collector:
-            try:
-                self.cascade_collector.stop()
-            except Exception as e:
-                self.logger.warning(f"Cascade collector stop failed during shutdown: {e}")
-        # Stop sub-bar scanner
-        if self.sub_bar_scanner:
-            try:
-                await self.sub_bar_scanner.stop()
-            except Exception as e:
-                self.logger.warning(f"Sub-bar scanner stop failed during shutdown: {e}")
-        for task in self._background_tasks:
-            if not task.done():
-                task.cancel()
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
-        self._background_tasks.clear()
-        self.logger.info("Shutdown complete.")
+        """Cancel background tasks — delegates to bot.lifecycle."""
+        from bot.lifecycle import shutdown
+        return await shutdown(self)
 
     HEARTBEAT_FILE = Path("logs/heartbeat.json")
 
@@ -875,170 +857,19 @@ class RenaissanceTradingBot:
             self.logger.warning(f"Heartbeat file write failed: {e}")
 
     async def _log_ml_accuracy_summary(self) -> None:
-        """Council S2 P3: Log per-model accuracy summary from ml_predictions table.
-
-        Called every 100 cycles (~100 min). Queries the last 24h of evaluated predictions.
-        """
-        try:
-            with self.db_manager._get_connection() as conn:
-                cursor = conn.cursor()
-                # Per-model accuracy over last 24h
-                cursor.execute('''
-                    SELECT model_name,
-                           COUNT(*) as total,
-                           SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct
-                    FROM ml_predictions
-                    WHERE is_correct IS NOT NULL
-                      AND evaluated_at > datetime('now', '-24 hours')
-                    GROUP BY model_name
-                    ORDER BY total DESC
-                ''')
-                rows = cursor.fetchall()
-                if not rows:
-                    self.logger.info("ML ACCURACY (24h): No evaluated predictions yet")
-                    return
-
-                parts = []
-                total_all = 0
-                correct_all = 0
-                for model_name, total, correct in rows:
-                    acc = round(correct / max(total, 1) * 100, 1)
-                    parts.append(f"{model_name}={acc}% (n={total})")
-                    total_all += total
-                    correct_all += correct
-                    # Council S3: Degradation alert — flag models below 48% with 50+ samples
-                    if total >= 50 and acc < 48.0:
-                        self.logger.warning(
-                            f"ML MODEL DEGRADED: {model_name} accuracy={acc}% "
-                            f"(n={total}) — below 48% threshold"
-                        )
-
-                overall_acc = round(correct_all / max(total_all, 1) * 100, 1)
-                self.logger.info(
-                    f"ML ACCURACY (24h): {', '.join(parts)} | "
-                    f"Overall={overall_acc}% (n={total_all})"
-                )
-        except Exception as e:
-            self.logger.error(f"ML accuracy summary failed: {e}")
+        """Log per-model accuracy summary — delegates to bot.adaptive."""
+        from bot.adaptive import log_ml_accuracy_summary
+        return await log_ml_accuracy_summary(self)
 
     async def _log_kelly_calibration(self) -> None:
-        """Council S3: Log Kelly calibration — compare estimated vs actual win rates.
-
-        Called every 500 cycles (~8 hours at 60s interval).
-        Buckets closed positions by confidence and checks if estimated win probability
-        matches actual win rate. Results are stored in kelly_calibration_log table.
-        """
-        try:
-            with self.db_manager._get_connection() as conn:
-                cursor = conn.cursor()
-                # Get closed positions with confidence and outcome
-                cursor.execute('''
-                    SELECT d.confidence, op.realized_pnl
-                    FROM open_positions op
-                    JOIN decisions d ON d.product_id = op.product_id
-                        AND d.timestamp >= op.opened_at
-                        AND d.action != 'HOLD'
-                    WHERE op.status = 'CLOSED'
-                      AND op.realized_pnl IS NOT NULL
-                      AND d.confidence > 0
-                    ORDER BY op.closed_at DESC
-                    LIMIT 2000
-                ''')
-                rows = cursor.fetchall()
-                if len(rows) < 20:
-                    self.logger.info(f"KELLY CALIBRATION: Only {len(rows)} closed trades — need 20+")
-                    return
-
-                # Bucket by confidence
-                buckets = {}
-                for conf, pnl in rows:
-                    if conf <= 0.50:
-                        bucket = '0.00-0.50'
-                    elif conf <= 0.55:
-                        bucket = '0.50-0.55'
-                    elif conf <= 0.60:
-                        bucket = '0.55-0.60'
-                    elif conf <= 0.65:
-                        bucket = '0.60-0.65'
-                    elif conf <= 0.70:
-                        bucket = '0.65-0.70'
-                    else:
-                        bucket = '0.70-1.00'
-
-                    if bucket not in buckets:
-                        buckets[bucket] = {'wins': 0, 'total': 0, 'conf_sum': 0.0}
-                    buckets[bucket]['total'] += 1
-                    buckets[bucket]['conf_sum'] += conf
-                    if pnl > 0:
-                        buckets[bucket]['wins'] += 1
-
-                ts = datetime.now(timezone.utc).isoformat()
-                for bucket, data in sorted(buckets.items()):
-                    actual_wr = data['wins'] / max(data['total'], 1)
-                    avg_conf = data['conf_sum'] / max(data['total'], 1)
-                    # Estimated win prob from the Kelly formula: 0.48 + conf * 0.10, shrunk
-                    est_raw = 0.48 + avg_conf * 0.10
-                    est_wp = 0.5 + (min(est_raw, 0.65) - 0.5) * 0.55
-
-                    cursor.execute('''
-                        INSERT INTO kelly_calibration_log
-                        (timestamp, confidence_bucket, estimated_win_prob, actual_win_rate,
-                         sample_size, kelly_fraction, avg_position_size_pct)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''', (ts, bucket, round(est_wp, 4), round(actual_wr, 4),
-                          data['total'], None, None))
-
-                    self.logger.info(
-                        f"KELLY CALIBRATION: bucket={bucket} est={est_wp*100:.1f}% "
-                        f"actual={actual_wr*100:.1f}% (n={data['total']})"
-                    )
-                conn.commit()
-        except Exception as e:
-            self.logger.error(f"Kelly calibration logging failed: {e}")
+        """Log Kelly calibration — delegates to bot.adaptive."""
+        from bot.adaptive import log_kelly_calibration
+        return await log_kelly_calibration(self)
 
     async def _check_pipeline_health(self) -> None:
-        """Council S2 P1: Watchdog — check pipeline_heartbeat for stale components.
-
-        Fires a warning if any component hasn't reported in >15 minutes.
-        Called every 30 cycles (~30 min at 60s interval).
-        """
-        STALENESS_THRESHOLD_MINUTES = 15
-        try:
-            rows = await self.db_manager.get_pipeline_health()
-            if not rows:
-                self.logger.warning("PIPELINE WATCHDOG: No heartbeat rows yet — first cycle?")
-                return
-            now = datetime.now(timezone.utc)
-            for row in rows:
-                component = row.get('component', '?')
-                last_beat_str = row.get('last_beat_utc', '')
-                if not last_beat_str:
-                    continue
-                try:
-                    last_beat = datetime.fromisoformat(last_beat_str.replace('Z', '+00:00'))
-                    if last_beat.tzinfo is None:
-                        last_beat = last_beat.replace(tzinfo=timezone.utc)
-                    age_minutes = (now - last_beat).total_seconds() / 60.0
-                    if age_minutes > STALENESS_THRESHOLD_MINUTES:
-                        msg = (
-                            f"PIPELINE WATCHDOG ALERT: '{component}' stale for "
-                            f"{age_minutes:.0f}min (threshold={STALENESS_THRESHOLD_MINUTES}min)"
-                        )
-                        self.logger.error(msg)
-                        if self.monitoring_alert_manager:
-                            self._track_task(
-                                self.monitoring_alert_manager.send_system_event(
-                                    "pipeline_stale", msg
-                                )
-                            )
-                except (ValueError, TypeError) as _parse_err:
-                    self.logger.debug(f"Watchdog parse error for {component}: {_parse_err}")
-
-            self.logger.info(
-                f"PIPELINE WATCHDOG: {len(rows)} components checked, all within threshold"
-            )
-        except Exception as e:
-            self.logger.error(f"Pipeline watchdog check failed: {e}")
+        """Pipeline watchdog — delegates to bot.adaptive."""
+        from bot.adaptive import check_pipeline_health
+        return await check_pipeline_health(self)
 
     async def collect_all_data(self, product_id: str = "BTC-USD") -> Dict[str, Any]:
         """Collect data from all sources for a specific product."""
@@ -1082,167 +913,19 @@ class RenaissanceTradingBot:
         return await execute_smart_order(self, decision, market_data)
 
     async def _run_adaptive_learning_cycle(self):
-        """Step 15: Online model calibration and attribution analysis"""
-        # Specific log for verification
-        with open("logs/adaptive_learning.log", "a") as f:
-            f.write(f"{datetime.now(timezone.utc).isoformat()} - Adaptive Learning Cycle triggered.\n")
-            
-        self.logger.info("Adaptive Learning Cycle triggered.")
-        if not self.db_enabled:
-            return
-
-        try:
-            # 1. Fetch recent decisions
-            recent_decisions = await self.db_manager.get_recent_data('decisions', hours=24)
-            if len(recent_decisions) < 5:
-                self.logger.info("Insufficient data for adaptive learning. Need at least 5 decisions.")
-                return
-
-            self.logger.info(f"Starting Adaptive Learning Cycle with {len(recent_decisions)} data points.")
-
-            # 2. Run Genetic Weight Optimization (Step 14)
-            # Skip genetic optimization when weights are locked
-            if self.config.get('weight_lock', False):
-                self.logger.info("Weight lock enabled — skipping genetic optimization")
-            else:
-                optimized_weights = await self.genetic_optimizer.run_optimization_cycle(self.signal_weights)
-
-                if optimized_weights != self.signal_weights:
-                    self.logger.info("New optimized weights discovered via Evolution!")
-                    async with self._weights_lock:
-                        old_weights = self.signal_weights.copy()
-                        self.signal_weights = optimized_weights
-
-                    # Log the change
-                    for k, v in optimized_weights.items():
-                        diff = v - old_weights.get(k, 0)
-                        if abs(diff) > 0.001:
-                            self.logger.info(f"  {k}: {old_weights.get(k,0):.3f} -> {v:.3f} ({diff:+.3f})")
-
-                    # 3. Persist to config.json to close the loop
-                    self._save_optimized_weights(optimized_weights)
-            
-            # 4. Run Self-Reinforcing Learning Cycle (Step 19)
-            if self.real_time_pipeline.enabled:
-                await self.learning_engine.run_learning_cycle(
-                    self.real_time_pipeline.processor.models
-                )
-
-            # 5. Trigger meta-learner training if we have an Ensemble model
-            processor = self.real_time_pipeline.processor
-            if "Ensemble" in processor.models:
-                ensemble = processor.models["Ensemble"]
-                self.logger.info("Calibrating Quantum Ensemble meta-learner with recent experience.")
-
-            self.logger.info(f"Adaptive calibration complete. Analyzed {len(recent_decisions)} recent data points.")
-
-        except Exception as e:
-            self.logger.error(f"Adaptive learning cycle failed: {e}")
+        """Adaptive learning — delegates to bot.adaptive."""
+        from bot.adaptive import run_adaptive_learning_cycle
+        return await run_adaptive_learning_cycle(self)
 
     def _save_optimized_weights(self, weights: Dict[str, float]):
-        """Persist optimized weights back to config/config.json"""
-        try:
-            if not self.config_path.exists():
-                return
-
-            with open(self.config_path, 'r') as f:
-                config_data = json.load(f)
-
-            # Respect weight_lock — never overwrite locked weights
-            if config_data.get('weight_lock', False):
-                self.logger.info("Weight lock enabled — skipping weight persistence")
-                return
-
-            # Ensure ML weights survive genetic optimization
-            _ml_required = {'ml_ensemble': 0.20, 'ml_cnn': 0.0}
-            for k, v in _ml_required.items():
-                if k not in weights:
-                    weights[k] = v
-
-            config_data['signal_weights'] = weights
-
-            with open(self.config_path, 'w') as f:
-                json.dump(config_data, f, indent=4)
-
-            self.logger.info(f"Optimized weights persisted to {self.config_path}")
-
-        except Exception as e:
-            self.logger.error(f"Failed to persist optimized weights: {e}")
+        """Persist optimized weights — delegates to bot.adaptive."""
+        from bot.adaptive import save_optimized_weights
+        return save_optimized_weights(self, weights)
 
     async def _perform_attribution_analysis(self):
-        """Step 11/13: Comprehensive performance attribution with Factor Analysis"""
-        if not self.db_enabled:
-            return
-
-        try:
-            # 1. Fetch labels (Realized outcomes) from DB
-            # This uses the ground truth created in Step 19
-            labels = await self.db_manager.get_recent_data('labels', hours=72)
-            if not labels:
-                self.logger.info("Attribution Analysis: No recent labels available yet.")
-                return
-
-            self.logger.info(f"🏛️ RENAISSANCE ATTRIBUTION: Analyzing {len(labels)} realized outcomes.")
-
-            # 2. Prepare Factor Exposures from signal contributions
-            # We use the signal_contributions stored in the decisions table (via reasoning JSON)
-            decisions = await self.db_manager.get_recent_data('decisions', hours=72)
-            if not decisions:
-                self.logger.info("Attribution Analysis: No recent decisions available.")
-                return
-            
-            # Map labels to decisions
-            label_map = {l['decision_id']: l for l in labels}
-            
-            portfolio_returns = []
-            benchmark_returns = []
-            
-            # Use current signal weights to define factors
-            current_factors = list(self.signal_weights.keys())
-            factor_exposures = {k: [] for k in current_factors}
-            
-            for d in decisions:
-                if d['id'] in label_map:
-                    l = label_map[d['id']]
-                    # Portfolio return is based on decision and actual price change
-                    side_mult = 1.0 if d['action'] == 'BUY' else -1.0 if d['action'] == 'SELL' else 0.0
-                    portfolio_returns.append(l['ret_pct'] * side_mult)
-                    
-                    # Benchmark (Buy and Hold)
-                    benchmark_returns.append(l['ret_pct'])
-                    
-                    # Factors (Normalized contributions)
-                    reasoning = json.loads(d['reasoning'])
-                    contributions = reasoning.get('signal_contributions', {})
-                    for k in factor_exposures.keys():
-                        factor_exposures[k].append(contributions.get(k, 0.0))
-
-            if len(portfolio_returns) < 5:
-                self.logger.info("Attribution Analysis: Insufficient data samples for factor regression.")
-                return
-
-            # Execute Attribution
-            attribution = self.attribution_engine.analyze_performance_attribution(
-                pd.Series(portfolio_returns),
-                pd.Series(benchmark_returns),
-                factor_exposures,
-                {'factor_returns': pd.DataFrame()} # Market data can be enhanced later
-            )
-            
-            if 'error' not in attribution:
-                summary = attribution.get('performance_summary', {})
-                self.logger.info(f"✅ ATTRIBUTION COMPLETE: Alpha: {summary.get('alpha', 0):+.4f} | Beta: {summary.get('beta', 0):.4f}")
-                
-                # Identify Top Alpha Drivers
-                factor_attr = attribution.get('factor_attribution', {})
-                if factor_attr:
-                    # Sort factors by their contribution to return
-                    drivers = sorted(factor_attr.items(), key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)
-                    top_driver = drivers[0][0] if drivers else "None"
-                    self.logger.info(f"🚀 TOP ALPHA DRIVER: {top_driver}")
-            
-        except Exception as e:
-            self.logger.error(f"Performance attribution failed: {e}")
+        """Performance attribution — delegates to bot.adaptive."""
+        from bot.adaptive import perform_attribution_analysis
+        return await perform_attribution_analysis(self)
 
     def _fetch_account_balance(self) -> float:
         """Fetch current USD account balance — delegates to bot.position_ops."""
@@ -1250,28 +933,9 @@ class RenaissanceTradingBot:
         return fetch_account_balance(self)
 
     def _check_bar_liveness(self) -> None:
-        """Council S6: Check if bar pipeline is alive. Log CRITICAL if newest bar > 15min old."""
-        if not self.db_enabled:
-            return
-        try:
-            db_path = self.config.get('database', {}).get('path', 'data/renaissance_bot.db')
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            row = conn.execute("SELECT MAX(bar_end) FROM five_minute_bars").fetchone()
-            conn.close()
-            if row and row[0]:
-                max_bar_end = float(row[0])
-                age_seconds = time.time() - max_bar_end
-                if age_seconds > 900:  # 15 minutes = 3x expected 5-min interval
-                    self.logger.critical(
-                        f"BAR PIPELINE STALE: newest bar is {age_seconds/60:.0f}min old "
-                        f"(threshold: 15min). Data pipeline may be dead!"
-                    )
-                elif age_seconds > 600:  # 10 minutes = soft warning
-                    self.logger.warning(
-                        f"Bar pipeline lagging: newest bar is {age_seconds/60:.1f}min old"
-                    )
-        except Exception as e:
-            self.logger.debug(f"Bar liveness check failed: {e}")
+        """Bar pipeline liveness check — delegates to bot.adaptive."""
+        from bot.adaptive import check_bar_liveness
+        return check_bar_liveness(self)
 
     async def execute_trading_cycle(self) -> TradingDecision:
         """Execute one complete trading cycle across all products"""
@@ -3666,512 +3330,82 @@ class RenaissanceTradingBot:
     KILL_FILE = Path("KILL_SWITCH")
 
     def trigger_kill_switch(self, reason: str):
-        """Activate kill switch: close all positions, halt trading loop."""
-        self.logger.critical(f"KILL SWITCH ACTIVATED: {reason}")
-        self._killed = True
-        # Stop token spray exit loop
-        if self.token_spray:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(self.token_spray.stop_exit_loop())
-            except Exception as e:
-                self.logger.warning(f"Token spray exit loop stop failed during kill switch: {e}")
-        # Stop straddle exit loops (all assets)
-        for _s_asset, _s_engine in self.straddle_engines.items():
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(_s_engine.stop_exit_loop())
-            except Exception as e:
-                self.logger.warning(f"Straddle exit loop stop failed for {_s_asset} during kill switch: {e}")
-        try:
-            self.position_manager.set_emergency_stop(True, reason)
-        except Exception as e:
-            self.logger.error(f"Emergency stop failed: {e}")
-        # Fire alert asynchronously (best-effort)
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(
-                    self.alert_manager.send_alert("CRITICAL", "Kill Switch", reason)
-                )
-        except Exception as e:
-            self.logger.warning(f"Kill switch alert dispatch failed: {e}")
+        """Kill switch — delegates to bot.lifecycle."""
+        from bot.lifecycle import trigger_kill_switch
+        return trigger_kill_switch(self, reason)
 
     def _check_kill_file(self):
-        """Check for file-based kill switch (touch KILL_SWITCH to halt)."""
-        if self.KILL_FILE.exists():
-            reason = self.KILL_FILE.read_text().strip() or "Kill file detected"
-            self.trigger_kill_switch(reason)
+        """Check kill file — delegates to bot.lifecycle."""
+        from bot.lifecycle import check_kill_file
+        return check_kill_file(self)
 
-    # ──────────────────────────────────────────────
-    #  WebSocket Feed
-    # ──────────────────────────────────────────────
+    # ── Background Loops — delegates to bot.lifecycle ──
+
     async def _run_websocket_feed(self):
-        """Background WebSocket feed for real-time market data.
+        from bot.lifecycle import run_websocket_feed
+        return await run_websocket_feed(self)
 
-        Uses exponential backoff (5s -> 10s -> 20s ... capped at 300s) so
-        persistent Coinbase WebSocket failures don't flood the logs or
-        consume CPU in a tight reconnect loop.  This is a best-effort data
-        source; the bot works fine via REST polling when the WS is down.
-        """
-        backoff = 5
-        max_backoff = 300
-        while not self._killed:
-            try:
-                await self._ws_client.connect_websocket()
-                backoff = 5  # Reset backoff on successful connect
-                await self._ws_client.listen_for_messages(self._ws_queue)
-            except Exception as e:
-                self.logger.warning(
-                    f"Coinbase WebSocket error (retry in {backoff}s): {e}"
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-
-    # ──────────────────────────────────────────────
-    #  Multi-Exchange Arbitrage Engine
-    # ──────────────────────────────────────────────
     async def _run_arbitrage_engine(self):
-        """Run the arbitrage engine as a background task."""
-        try:
-            self.logger.info("Arbitrage engine starting...")
-            await self.arbitrage_orchestrator.start()
-        except asyncio.CancelledError:
-            self.logger.info("Arbitrage engine cancelled — shutting down")
-            await self.arbitrage_orchestrator.stop()
-        except Exception as e:
-            self.logger.error(f"Arbitrage engine error: {e}")
-            try:
-                await self.arbitrage_orchestrator.stop()
-            except Exception as e:
-                self.logger.warning(f"Arbitrage orchestrator stop failed after error: {e}")
+        from bot.lifecycle import run_arbitrage_engine
+        return await run_arbitrage_engine(self)
 
-    # ──────────────────────────────────────────────
-    #  BTC Price Relay (Binance WS → Reversal Strategy)
-    # ──────────────────────────────────────────────
     async def _run_btc_price_relay(self):
-        """Feed BTC price to reversal strategy every 10s from Binance WS."""
-        relay_count = 0
-        while True:
-            try:
-                await asyncio.sleep(10)
-                if not self._unified_price_feed:
-                    continue
-                btc = self._unified_price_feed.get_ticker("BTC/USDT")
-                if btc and btc.get("last_price"):
-                    price = float(btc["last_price"])
-                    if price > 0:
-                        self.reversal_strategy.update_btc_price(price)
-                        relay_count += 1
-                        if relay_count % 60 == 1:  # Log every ~10 minutes
-                            self.logger.debug(
-                                f"BTC price relay: ${price:,.2f} "
-                                f"(relay #{relay_count}, feed age {self._unified_price_feed.get_age_ms():.0f}ms)"
-                            )
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                self.logger.debug(f"BTC price relay error: {e}")
+        from bot.lifecycle import run_btc_price_relay
+        return await run_btc_price_relay(self)
 
-    # ──────────────────────────────────────────────
-    #  Strategy A Independent Loop (60s cycle)
-    # ──────────────────────────────────────────────
     async def _run_strategy_a_loop(self):
-        """Run Strategy A on its own 60s timer, decoupled from main pair scanning."""
-        cycle_count = 0
-        while True:
-            try:
-                await asyncio.sleep(60)
-                cycle_count += 1
-
-                # 1. Fetch fresh prices from Binance (cheap, ~200ms)
-                sa_prices = dict(self._last_prices) if hasattr(self, '_last_prices') else {}
-                sa_needed = {"BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT",
-                             "SOL-USD": "SOLUSDT", "XRP-USD": "XRPUSDT",
-                             "DOGE-USD": "DOGEUSDT"}
-                try:
-                    import requests as _sa_req
-                    _resp = _sa_req.get(
-                        "https://api.binance.com/api/v3/ticker/price",
-                        timeout=5,
-                    )
-                    if _resp.status_code == 200:
-                        _tickers = {t['symbol']: float(t['price']) for t in _resp.json()}
-                        for _pair, _sym in sa_needed.items():
-                            _px = _tickers.get(_sym, 0)
-                            if _px > 0:
-                                sa_prices[_pair] = _px
-                except Exception as e:
-                    self.logger.warning(f"Strategy A Binance price fetch failed: {e}")
-
-                # Need at least SOL price for any instrument
-                if "SOL-USD" not in sa_prices or sa_prices["SOL-USD"] <= 0:
-                    continue
-
-                # 2. Get regime
-                sa_regime = "unknown"
-                if self.regime_overlay and self.regime_overlay.enabled:
-                    sa_regime = self.regime_overlay.get_hmm_regime_label() or "unknown"
-
-                # 3. Get cached ML predictions (populated by main cycle)
-                if not hasattr(self, '_sa_ml_cache'):
-                    self._sa_ml_cache = {}
-
-                # 4. Cross-data for timing features
-                sa_cross = getattr(self, '_latest_cross_data', None)
-
-                # 5. Execute cycle
-                await self.polymarket_executor.execute_cycle(
-                    ml_predictions=self._sa_ml_cache,
-                    current_prices=sa_prices,
-                    current_regime=sa_regime,
-                    cross_data=sa_cross,
-                )
-
-                # 6. Check live resolutions
-                if self.polymarket_live_executor:
-                    try:
-                        self.polymarket_live_executor.check_live_resolutions()
-                    except Exception as e:
-                        self.logger.warning(f"Polymarket live resolution check failed: {e}")
-
-                if cycle_count % 10 == 1:
-                    self.logger.info(
-                        f"Strategy A loop: cycle #{cycle_count}, "
-                        f"prices={len(sa_prices)}, ml_cache={len(self._sa_ml_cache)}, "
-                        f"regime={sa_regime}"
-                    )
-
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                self.logger.warning(f"Strategy A loop error: {e}")
-                await asyncio.sleep(10)
+        from bot.lifecycle import run_strategy_a_loop
+        return await run_strategy_a_loop(self)
 
     # ──────────────────────────────────────────────
     #  Liquidation Cascade Detector (Module D)
-    # ──────────────────────────────────────────────
     async def _run_liquidation_detector(self):
-        """Run the liquidation cascade detector as a background task."""
-        try:
-            self.logger.info("Liquidation cascade detector starting...")
-            await self.liquidation_detector.start()
-        except asyncio.CancelledError:
-            self.logger.info("Liquidation detector cancelled — shutting down")
-            await self.liquidation_detector.stop()
-        except Exception as e:
-            self.logger.error(f"Liquidation detector error: {e}")
-            try:
-                await self.liquidation_detector.stop()
-            except Exception as e:
-                self.logger.warning(f"Liquidation detector stop failed after error: {e}")
+        from bot.lifecycle import run_liquidation_detector
+        return await run_liquidation_detector(self)
 
-    # ──────────────────────────────────────────────
-    #  Fast Mean Reversion Scanner
-    # ──────────────────────────────────────────────
     async def _run_fast_reversion_scanner(self):
-        """Run the fast mean reversion scanner as a background task."""
-        try:
-            await self.fast_reversion_scanner.run_loop()
-        except asyncio.CancelledError:
-            self.fast_reversion_scanner.stop()
-        except Exception as e:
-            self.logger.error(f"Fast reversion scanner error: {e}")
+        from bot.lifecycle import run_fast_reversion_scanner
+        return await run_fast_reversion_scanner(self)
 
-    # ──────────────────────────────────────────────
-    #  Sub-Bar Early Exit Scanner (10s loop)
-    # ──────────────────────────────────────────────
     async def _run_sub_bar_scanner(self):
-        """Run the sub-bar scanner as a background task."""
-        try:
-            async def _get_positions():
-                """Get open positions for sub-bar scanner."""
-                positions = []
-                with self.position_manager._lock:
-                    for pos in self.position_manager.positions.values():
-                        if pos.status.value == 'OPEN':
-                            # Look up predicted_magnitude from pending predictions
-                            pred = self._pending_predictions.get(pos.product_id, {})
-                            positions.append({
-                                'product_id': pos.product_id,
-                                'position_id': pos.position_id,
-                                'side': pos.side.value.upper(),
-                                'entry_price': float(pos.entry_price),
-                                'size_usd': float(pos.size * pos.entry_price),
-                                'open_timestamp': pos.entry_time.timestamp() if pos.entry_time else 0,
-                                'predicted_magnitude_bps': pred.get('predicted_magnitude_bps', 100.0),
-                            })
-                return positions
+        from bot.lifecycle import run_sub_bar_scanner
+        return await run_sub_bar_scanner(self)
 
-            async def _get_price(symbol: str) -> float:
-                """Get current price for a symbol."""
-                # Try cached prices from BinanceSpotProvider
-                try:
-                    if hasattr(self, 'binance_spot_provider') and self.binance_spot_provider:
-                        ticker = self.binance_spot_provider.get_cached_ticker(symbol)
-                        if ticker and ticker.get('last_price', 0) > 0:
-                            return float(ticker['last_price'])
-                except Exception as e:
-                    self.logger.warning(f"Binance spot provider price fetch failed for {symbol}: {e}")
-                # Fallback to position current_price
-                with self.position_manager._lock:
-                    for pos in self.position_manager.positions.values():
-                        if pos.product_id == symbol and pos.current_price > 0:
-                            return float(pos.current_price)
-                return 0.0
-
-            async def _exit_callback(product_id: str, reason: str, details: dict):
-                """Handle sub-bar exit trigger (only when observation_mode=False)."""
-                self.logger.warning(
-                    f"SUB-BAR EXIT: {product_id} trigger={reason} "
-                    f"pnl={details.get('pnl_bps', 0):.1f}bps"
-                )
-                try:
-                    with self.position_manager._lock:
-                        for pos in list(self.position_manager.positions.values()):
-                            if pos.product_id == product_id and pos.status.value == 'OPEN':
-                                ok, msg = self.position_manager.close_position(
-                                    pos.position_id, reason=f"sub_bar_{reason.lower()}"
-                                )
-                                if ok:
-                                    _cpx = await self._resolve_close_price(pos)
-                                    _side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
-                                    _rpnl = self._compute_realized_pnl(
-                                        pos.entry_price, _cpx, pos.size, _side
-                                    )
-                                    self._track_task(
-                                        self.db_manager.close_position_record(
-                                            pos.position_id,
-                                            close_price=float(_cpx),
-                                            realized_pnl=float(_rpnl),
-                                            exit_reason=f"sub_bar_{reason.lower()}",
-                                        )
-                                    )
-                                break
-                except Exception as e:
-                    self.logger.error(f"Sub-bar exit execution failed: {e}")
-
-            await self.sub_bar_scanner.start(
-                position_getter=_get_positions,
-                price_getter=_get_price,
-                exit_callback=_exit_callback,
-            )
-        except asyncio.CancelledError:
-            await self.sub_bar_scanner.stop()
-        except Exception as e:
-            self.logger.error(f"Sub-bar scanner error: {e}")
-
-    # ──────────────────────────────────────────────
-    #  Heartbeat Writer (Multi-Bot Coordination)
-    # ──────────────────────────────────────────────
     async def _run_heartbeat_writer(self, interval: float = 5.0):
-        """Run the heartbeat writer as a background task."""
-        try:
-            await self.heartbeat_writer.start(self, interval=interval)
-        except asyncio.CancelledError:
-            self.heartbeat_writer.stop()
-        except Exception as e:
-            self.logger.error(f"Heartbeat writer error: {e}")
-
-    # ──────────────────────────────────────────────
-    #  Phase 2 Observation Loops
-    # ──────────────────────────────────────────────
+        from bot.lifecycle import run_heartbeat_writer
+        return await run_heartbeat_writer(self, interval)
 
     async def _run_portfolio_drift_logger(self):
-        """Log target vs actual portfolio drift every 60s (observation mode — no corrections)."""
-        try:
-            while not self._killed:
-                try:
-                    engine = self.medallion_portfolio_engine
-                    drift = engine.compute_drift()
-                    if drift:
-                        pairs = ", ".join(f"{p}={d:+.0f}$" for p, d in drift.items())
-                        self.logger.info(f"PORTFOLIO DRIFT (obs): {pairs}")
-                except Exception as e:
-                    self.logger.debug(f"Portfolio drift logger error: {e}")
-                await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            self.logger.warning("Portfolio drift logger loop cancelled")
+        from bot.lifecycle import run_portfolio_drift_logger
+        return await run_portfolio_drift_logger(self)
 
     async def _run_insurance_scanner_loop(self):
-        """Scan for insurance premiums every 30 minutes (observation mode)."""
-        try:
-            while not self._killed:
-                for pair in self.product_ids[:3]:  # Top 3 products only
-                    try:
-                        result = self.insurance_scanner.get_all_premiums(pair)
-                        if result.get("any_premium_detected"):
-                            count = result.get("total_premiums_found", 0)
-                            rec = result.get("combined_recommendation", "none")
-                            self.logger.info(
-                                f"INSURANCE PREMIUM (obs): {pair} — {count} premiums detected, rec={rec}"
-                            )
-                    except Exception as e:
-                        self.logger.debug(f"Insurance scanner error for {pair}: {e}")
-                await asyncio.sleep(1800)  # 30 minutes
-        except asyncio.CancelledError:
-            self.logger.warning("Insurance scanner loop cancelled")
+        from bot.lifecycle import run_insurance_scanner_loop
+        return await run_insurance_scanner_loop(self)
 
     async def _run_daily_signal_review_loop(self):
-        """Run daily signal P&L review at midnight UTC."""
-        try:
-            while not self._killed:
-                now = datetime.now(timezone.utc)
-                # Sleep until next midnight UTC
-                tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
-                wait_seconds = (tomorrow - now).total_seconds()
-                await asyncio.sleep(wait_seconds)
-                if self._killed:
-                    break
-                try:
-                    summary = self.daily_signal_review.update_daily()
-                    if summary:
-                        for sig_type, stats in summary.items():
-                            status = stats.get("status", "active")
-                            pnl = stats.get("pnl", 0)
-                            self.logger.info(
-                                f"DAILY SIGNAL REVIEW: {sig_type} — P&L=${pnl:.2f}, status={status}"
-                            )
-                except Exception as e:
-                    self.logger.error(f"Daily signal review error: {e}")
-        except asyncio.CancelledError:
-            self.logger.warning("Daily signal review loop cancelled")
-
-    # ──────────────────────────────────────────────
-    #  Phase 2 Monitor Loops (BUG 6 fix — orphaned monitors)
-    # ──────────────────────────────────────────────
+        from bot.lifecycle import run_daily_signal_review_loop
+        return await run_daily_signal_review_loop(self)
 
     async def _run_beta_monitor_loop(self):
-        """Periodic beta computation (every 60 min, observation mode)."""
-        try:
-            while not self._killed:
-                try:
-                    report = self.beta_monitor.get_report()
-                    beta = report.get("current_beta", 0.0)
-                    status = report.get("current_status", "ok")
-                    trend = report.get("trend", "unknown")
-                    self.logger.info(
-                        f"BETA MONITOR (obs): beta={beta:+.4f} status={status} trend={trend}"
-                    )
-                    if self.beta_monitor.should_alert() and self.monitoring_alert_manager:
-                        hedge = self.beta_monitor.get_hedge_recommendation()
-                        self._track_task(self.monitoring_alert_manager.send_warning(
-                            f"Beta alert: {hedge.get('rationale', 'high beta deviation')}"
-                        ))
-                except Exception as e:
-                    self.logger.debug(f"Beta monitor loop error: {e}")
-                await asyncio.sleep(3600)  # 60 minutes
-        except asyncio.CancelledError:
-            self.logger.warning("Beta monitor loop cancelled")
+        from bot.lifecycle import run_beta_monitor_loop
+        return await run_beta_monitor_loop(self)
 
     async def _run_sharpe_monitor_loop(self):
-        """Periodic Sharpe health check (every 60 min, observation mode)."""
-        try:
-            while not self._killed:
-                try:
-                    report = self.sharpe_monitor_medallion.get_report()
-                    s7 = report.get("sharpe_7d", 0.0)
-                    s30 = report.get("sharpe_30d", 0.0)
-                    status = report.get("status", "unknown")
-                    mult = report.get("exposure_multiplier", 1.0)
-                    self.logger.info(
-                        f"SHARPE MONITOR (obs): 7d={s7:.2f} 30d={s30:.2f} "
-                        f"status={status} exposure_mult={mult:.2f}"
-                    )
-                except Exception as e:
-                    self.logger.debug(f"Sharpe monitor loop error: {e}")
-                await asyncio.sleep(3600)  # 60 minutes
-        except asyncio.CancelledError:
-            self.logger.warning("Sharpe monitor loop cancelled")
+        from bot.lifecycle import run_sharpe_monitor_loop
+        return await run_sharpe_monitor_loop(self)
 
     async def _run_capacity_monitor_loop(self):
-        """Periodic capacity analysis (every 60 min, observation mode)."""
-        try:
-            while not self._killed:
-                try:
-                    caps = self.capacity_monitor.get_all_capacities()
-                    constrained = [p for p, r in caps.items() if r.get("capacity_status") == "constrained"]
-                    warning = [p for p, r in caps.items() if r.get("capacity_status") == "warning"]
-                    self.logger.info(
-                        f"CAPACITY MONITOR (obs): {len(caps)} pairs analysed, "
-                        f"{len(constrained)} constrained, {len(warning)} warning"
-                    )
-                    if constrained and self.monitoring_alert_manager:
-                        self._track_task(self.monitoring_alert_manager.send_warning(
-                            f"Capacity constrained pairs: {', '.join(constrained)}"
-                        ))
-                except Exception as e:
-                    self.logger.debug(f"Capacity monitor loop error: {e}")
-                await asyncio.sleep(3600)  # 60 minutes
-        except asyncio.CancelledError:
-            self.logger.warning("Capacity monitor loop cancelled")
+        from bot.lifecycle import run_capacity_monitor_loop
+        return await run_capacity_monitor_loop(self)
 
     async def _run_regime_detector_loop(self):
-        """Periodic regime retraining + prediction (every 5 min, observation mode)."""
-        try:
-            while not self._killed:
-                try:
-                    if self.medallion_regime.needs_retrain():
-                        trained = self.medallion_regime.train()
-                        if trained:
-                            self.medallion_regime.save_model()
-                            self.logger.info("REGIME DETECTOR (obs): Model retrained and saved")
-                    pred = self.medallion_regime.predict_current_regime()
-                    regime = pred.get("regime_name", "unknown")
-                    conf = pred.get("confidence", 0.0)
-                    self.logger.info(
-                        f"REGIME DETECTOR (obs): regime={regime} confidence={conf:.2f}"
-                    )
-                except Exception as e:
-                    self.logger.debug(f"Regime detector loop error: {e}")
-                await asyncio.sleep(300)  # 5 minutes
-        except asyncio.CancelledError:
-            self.logger.warning("Regime detector loop cancelled")
-
-    # ──────────────────────────────────────────────
-    #  Unified Telegram Reporting (Gap 5 fix)
-    # ──────────────────────────────────────────────
+        from bot.lifecycle import run_regime_detector_loop
+        return await run_regime_detector_loop(self)
 
     async def _run_telegram_report_loop(self):
-        """Send a consolidated hourly status report via Telegram."""
-        try:
-            await asyncio.sleep(300)  # Wait 5 min after startup before first report
-            while not self._killed:
-                try:
-                    stats = {
-                        "uptime": str(datetime.now(timezone.utc) - self._start_time).split('.')[0],
-                        "trades_1h": 0,
-                        "pnl_1h": 0.0,
-                        "open_positions": len(self.position_manager.positions),
-                        "exchanges_healthy": "coinbase",
-                    }
-                    # Count recent trades from DB
-                    if self.db_enabled:
-                        try:
-                            import sqlite3
-                            cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-                            conn = sqlite3.connect(self.db_path, timeout=30.0)
-                            row = conn.execute(
-                                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN UPPER(side)='SELL' "
-                                "THEN size*price WHEN UPPER(side)='BUY' THEN -size*price ELSE 0 END), 0) "
-                                "FROM trades WHERE timestamp >= ? AND status != 'FAILED'",
-                                (cutoff,)
-                            ).fetchone()
-                            conn.close()
-                            if row:
-                                stats["trades_1h"] = row[0] or 0
-                                stats["pnl_1h"] = float(row[1] or 0)
-                        except Exception as e:
-                            self.logger.warning(f"Telegram report trade stats DB query failed: {e}")
-
-                    await self.monitoring_alert_manager._telegram.send_hourly_heartbeat(stats)
-                except Exception as e:
-                    self.logger.debug(f"Telegram report loop error: {e}")
-                await asyncio.sleep(3600)  # Every hour
-        except asyncio.CancelledError:
-            self.logger.warning("Telegram report loop cancelled")
+        from bot.lifecycle import run_telegram_report_loop
+        return await run_telegram_report_loop(self)
 
     # ──────────────────────────────────────────────
     #  State Recovery
@@ -4182,98 +3416,9 @@ class RenaissanceTradingBot:
         return await restore_state(self)
 
     def _prune_old_data(self) -> None:
-        """Prune old database rows and bound in-memory collections."""
-        try:
-            import sqlite3
-            db_path = self.db_manager.db_path if hasattr(self.db_manager, 'db_path') else "data/renaissance_bot.db"
-            conn = sqlite3.connect(db_path, timeout=30.0)
-
-            # Prune tables older than retention period
-            pruned = {}
-            prune_rules = [
-                ("polymarket_skip_log", "timestamp", "7 days"),
-                ("ml_predictions", "timestamp", "7 days"),
-                ("breakout_scans", "scan_time", "3 days"),
-                ("market_data", "timestamp", "3 days"),
-                ("five_minute_bars", "bar_end", None),  # Keep last 7 days by epoch
-            ]
-
-            for table, col, retention in prune_rules:
-                try:
-                    if retention:
-                        cur = conn.execute(
-                            f"DELETE FROM [{table}] WHERE [{col}] < datetime('now', '-{retention}')"
-                        )
-                    else:
-                        # Epoch-based: bar_end is Unix timestamp
-                        import time
-                        cutoff = time.time() - 7 * 86400
-                        cur = conn.execute(
-                            f"DELETE FROM [{table}] WHERE [{col}] < ?", (cutoff,)
-                        )
-                    if cur.rowcount > 0:
-                        pruned[table] = cur.rowcount
-                except Exception as e:
-                    self.logger.debug(f"Prune {table} skipped: {e}")
-
-            # ── Remove bars for pairs no longer in the active universe ──
-            # product_ids use "BTC-USD" format; bars may also be stored as "BTC/USDT".
-            # Build a set of base assets (e.g. {"BTC","ETH",...}) from the active universe
-            # and keep bars whose base asset matches any active pair.
-            if hasattr(self, 'product_ids') and self.product_ids:
-                active_bases = set()
-                for pid in self.product_ids:
-                    # "BTC-USD" → "BTC", "ETH/USDT" → "ETH"
-                    base = pid.split('-')[0].split('/')[0].upper()
-                    active_bases.add(base)
-
-                # Find distinct pairs currently stored in five_minute_bars
-                try:
-                    stored_pairs = [
-                        r[0] for r in conn.execute(
-                            "SELECT DISTINCT pair FROM five_minute_bars"
-                        ).fetchall()
-                    ]
-                    orphan_pairs = []
-                    for sp in stored_pairs:
-                        sp_base = sp.split('-')[0].split('/')[0].upper()
-                        if sp_base not in active_bases:
-                            orphan_pairs.append(sp)
-
-                    if orphan_pairs:
-                        placeholders = ','.join('?' * len(orphan_pairs))
-                        cur = conn.execute(
-                            f"DELETE FROM five_minute_bars WHERE pair IN ({placeholders})",
-                            orphan_pairs,
-                        )
-                        if cur.rowcount > 0:
-                            pruned['five_minute_bars_orphan'] = cur.rowcount
-                            self.logger.info(
-                                f"DB PRUNE: removed {cur.rowcount} bars for "
-                                f"{len(orphan_pairs)} orphan pairs no longer in "
-                                f"universe: {orphan_pairs}"
-                            )
-                except Exception as e:
-                    self.logger.debug(f"Orphan bar prune skipped: {e}")
-
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            conn.commit()
-            conn.close()
-
-            if pruned:
-                self.logger.info(f"DB PRUNE: {pruned}")
-
-            # Bound in-memory collections
-            if hasattr(self, '_tech_indicators') and len(self._tech_indicators) > 200:
-                # Keep only pairs we've seen recently
-                active = set(self.product_ids) if hasattr(self, 'product_ids') else set()
-                stale = [k for k in self._tech_indicators if k not in active]
-                for k in stale[:50]:  # Remove 50 at a time
-                    del self._tech_indicators[k]
-                self.logger.debug(f"Evicted {len(stale[:50])} stale tech indicator instances")
-
-        except Exception as e:
-            self.logger.warning(f"Prune error: {e}")
+        """Prune old data — delegates to bot.lifecycle."""
+        from bot.lifecycle import prune_old_data
+        return prune_old_data(self)
 
     async def _get_spray_prices(self, pairs: List[str]) -> Dict[str, float]:
         """Fetch current prices for token spray exit checks — delegates to bot.position_ops."""
@@ -4291,495 +3436,29 @@ class RenaissanceTradingBot:
         return await deduplicate_positions_on_startup(self)
 
     async def run_continuous_trading(self, cycle_interval: int = 300):
-        """Run continuous Renaissance trading (default 5-minute cycles)"""
-        self.logger.info(f"Starting continuous Renaissance trading with {cycle_interval}s cycles")
-
-        # ── Module A: Graceful Shutdown Handler ──
-        if self.state_manager and RECOVERY_AVAILABLE:
-            try:
-                loop = asyncio.get_event_loop()
-                self.shutdown_handler = GracefulShutdownHandler(
-                    state_manager=self.state_manager,
-                    coinbase_client=self.coinbase_client,
-                    alert_manager=self.monitoring_alert_manager,
-                    drain_timeout_seconds=30.0,
-                )
-                self.shutdown_handler.install(loop=loop)
-                await self.state_manager.aset_system_state(SystemState.STARTING, "bot starting")
-                self.logger.info("Graceful shutdown handlers installed")
-            except Exception as e:
-                self.logger.warning(f"Graceful shutdown setup failed: {e}")
-                # Fallback to basic signal handlers
-                def _handle_shutdown(signum, frame):
-                    self.trigger_kill_switch(f"Signal {signum} received")
-                signal.signal(signal.SIGINT, _handle_shutdown)
-                signal.signal(signal.SIGTERM, _handle_shutdown)
-        else:
-            # Fallback signal handlers when recovery module is not available
-            def _handle_shutdown(signum, frame):
-                self.trigger_kill_switch(f"Signal {signum} received")
-            signal.signal(signal.SIGINT, _handle_shutdown)
-            signal.signal(signal.SIGTERM, _handle_shutdown)
-
-        # Restore positions from DB so anti-stacking logic works across restarts.
-        # In paper mode: restore positions but reset daily PnL (balances reset each start).
-        paper_mode = self.config.get("trading", {}).get("paper_trading", True)
-        if not paper_mode:
-            await self._restore_state()
-        else:
-            # Restore positions only (for anti-stacking), reset PnL
-            try:
-                open_positions = await self.db_manager.get_open_positions()
-                restored = 0
-                for row in open_positions:
-                    from position_manager import Position, PositionSide, PositionStatus
-                    pos = Position(
-                        position_id=row['position_id'],
-                        product_id=row['product_id'],
-                        side=PositionSide(row['side']),
-                        size=row['size'],
-                        entry_price=row['entry_price'],
-                        current_price=row['entry_price'],
-                        stop_loss_price=row.get('stop_loss_price'),
-                        take_profit_price=row.get('take_profit_price'),
-                        status=PositionStatus.OPEN,
-                        entry_time=datetime.fromisoformat(row['opened_at']),
-                    )
-                    self.position_manager.positions[pos.position_id] = pos
-                    restored += 1
-                self.logger.info(f"Paper mode: restored {restored} positions from DB (anti-stacking)")
-            except Exception as e:
-                self.logger.warning(f"Paper mode position restore failed: {e}")
-            self.position_manager.daily_pnl = 0.0
-            self.daily_pnl = 0.0
-
-        # ── Startup deduplication: close duplicate/opposing positions from DB ──
-        await self._deduplicate_positions_on_startup()
-
-        # ── Start Token Spray exit loop ──
-        if self.token_spray:
-            await self.token_spray.start_exit_loop(self._get_spray_prices)
-
-        # ── Start Straddle exit loops (all assets) ──
-        for _s_asset, _s_engine in self.straddle_engines.items():
-            await _s_engine.start_exit_loop(self._get_straddle_price)
-
-        # ── Start Oracle 4H prediction loop ──
-        if self.oracle:
-            try:
-                self.oracle.predict_now()
-                self.logger.info("Oracle: initial prediction completed")
-            except Exception as _e:
-                self.logger.warning(f"Oracle initial prediction failed: {_e}")
-            asyncio.create_task(self.oracle.run_forever())
-
-        # ── Start Oracle Trading Engine loop ──
-        if self.oracle_trader:
-            asyncio.create_task(self.oracle_trader.run_forever())
-
-        # ── Prune old data to reduce DB size and memory pressure ──
-        self._prune_old_data()
-
-        # ── One-time: reset ML evaluations to use corrected 1-bar horizon method ──
-        # The old evaluation compared prediction-time vs "latest" price (variable horizon).
-        # The corrected method compares prediction-time vs 1-bar-later price (fixed 5min horizon).
-        _db_path = self.db_manager.db_path if hasattr(self.db_manager, 'db_path') else "data/renaissance_bot.db"
-        _reset_flag_file = os.path.join(os.path.dirname(_db_path), '.ml_eval_1bar_reset_done')
-        if not os.path.exists(_reset_flag_file):
-            try:
-                import sqlite3 as _sq
-                _conn = _sq.connect(_db_path)
-                _reset_count = _conn.execute(
-                    "SELECT COUNT(*) FROM ml_predictions WHERE evaluated_at IS NOT NULL"
-                ).fetchone()[0]
-                if _reset_count > 0:
-                    _conn.execute("""
-                        UPDATE ml_predictions
-                        SET is_correct = NULL, actual_return_1bar = NULL,
-                            actual_direction = NULL, evaluated_at = NULL,
-                            price_at_evaluation = NULL
-                    """)
-                    _conn.commit()
-                    self.logger.info(
-                        f"ML EVAL RESET: Cleared {_reset_count} old evaluations — "
-                        f"will re-evaluate with corrected 1-bar horizon method"
-                    )
-                _conn.close()
-                with open(_reset_flag_file, 'w') as _f:
-                    _f.write('done')
-            except Exception as _e:
-                self.logger.debug(f"ML eval reset check: {_e}")
-
-        # ── Module A: Set RUNNING state ──
-        if self.state_manager:
-            try:
-                await self.state_manager.aset_system_state(SystemState.RUNNING, "trading loop started")
-            except Exception as e:
-                self.logger.warning(f"State manager set RUNNING state failed: {e}")
-
-        # ── Module C: Startup alert ──
-        if self.monitoring_alert_manager:
-            try:
-                await self.monitoring_alert_manager.send_system_event(
-                    "Bot Started",
-                    f"Renaissance bot starting with {len(self.product_ids)} products, "
-                    f"{'paper' if paper_mode else 'live'} mode"
-                )
-            except Exception as e:
-                self.logger.warning(f"Startup monitoring alert failed: {e}")
-
-        # ── Build dynamic trading universe from Binance ──
-        self.logger.info("Building dynamic trading universe from Binance...")
-        await self._build_and_apply_universe()
-        if self._universe_built:
-            # Re-send startup alert with actual pair count
-            if self.monitoring_alert_manager:
-                try:
-                    await self.monitoring_alert_manager.send_system_event(
-                        "Universe Built",
-                        f"Dynamic universe: {len(self.product_ids)} pairs from Binance"
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Universe built monitoring alert failed: {e}")
-
-            # ── Council #1: Gap-fill missing bars from Binance on startup ──
-            try:
-                await asyncio.wait_for(self._gap_fill_bars_on_startup(), timeout=120)
-            except asyncio.TimeoutError:
-                self.logger.warning("GAP-FILL: Timed out after 120s — continuing startup")
-            except Exception as e:
-                self.logger.warning(f"GAP-FILL: Failed — {e}")
-
-        # ── Council S6: Batch-evaluate unevaluated ML predictions on startup ──
-        if self.db_enabled:
-            try:
-                batch_count = await self.db_manager.batch_evaluate_ml_outcomes()
-                if batch_count > 0:
-                    self.logger.info(f"Startup ML batch eval: {batch_count} predictions evaluated")
-            except Exception as e:
-                self.logger.warning(f"Startup ML batch eval failed: {e}")
-
-        # Start real-time pipeline if enabled
-        if self.real_time_pipeline.enabled:
-            await self.real_time_pipeline.start()
-
-        # Start Ghost Runner Loop (Step 18)
-        self._track_task(self.ghost_runner.start_ghost_loop(interval=cycle_interval * 2))
-
-        # Start WebSocket feed for real-time data
-        if self._ws_client:
-            self._track_task(self._run_websocket_feed())
-
-        # Start Multi-Exchange Arbitrage Engine (runs independently alongside main loop)
-        if self.arbitrage_orchestrator:
-            self.logger.info("Launching arbitrage engine...")
-            self._track_task(self._run_arbitrage_engine())
-
-        # DISABLED: Old Polymarket strategies — all replaced by spread capture
-        # Strategy A, Live Executor, Reversal, Simple UP — all disabled
-
-        # ── 0x8dxd Spread Capture — favorite + underdog strategy ──
-        if self.rtds and self.spread_capture:
-            self.logger.info("Launching RTDS WebSocket in dedicated thread (Binance + Chainlink prices)...")
-            self.rtds.start_in_thread()
-            self.logger.info(f"Launching Spread Capture Engine (0x8dxd strategy, {len(SC_ASSETS)} assets, 5m+15m)...")
-            sc_task = self._track_task(self.spread_capture.run())
-            def _sc_done(t, log=self.logger):
-                if t.cancelled():
-                    log.warning("Spread capture task was CANCELLED")
-                elif t.exception():
-                    log.error(f"Spread capture task DIED: {t.exception()!r}", exc_info=t.exception())
-                else:
-                    log.info("Spread capture task finished normally")
-            sc_task.add_done_callback(_sc_done)
-
-        # ── Module D: Start Liquidation Cascade Detector ──
-        if self.liquidation_detector:
-            self.logger.info("Launching liquidation cascade detector...")
-            self._track_task(self._run_liquidation_detector())
-
-        # ── Cascade Data Collector — DISABLED (backtest showed no lead-lag edge) ──
-        # if self.cascade_collector:
-        #     self.cascade_collector.start()
-        #     self.logger.info("Cascade data collector started (30s poll)")
-
-        # ── Fast Mean Reversion Scanner (1s eval) ──
-        if self.fast_reversion_scanner:
-            self.logger.info("Launching fast mean reversion scanner (1s eval)...")
-            self._track_task(self._run_fast_reversion_scanner())
-
-        # ── Sub-Bar Early Exit Scanner (10s eval) ──
-        if self.sub_bar_scanner:
-            self.logger.info("Launching sub-bar scanner (10s early exit monitor)...")
-            self._track_task(self._run_sub_bar_scanner())
-
-        # ── Heartbeat Writer (multi-bot coordination) ──
-        if self.heartbeat_writer:
-            hb_interval = self.config.get("orchestrator", {}).get(
-                "heartbeat_interval_seconds", 5
-            )
-            self.logger.info(f"Launching heartbeat writer (every {hb_interval}s)...")
-            self._track_task(self._run_heartbeat_writer(hb_interval))
-
-        # ── Phase 2 Observation Loops ──
-        if self.medallion_portfolio_engine:
-            self.logger.info("Launching medallion portfolio drift logger (observation mode)...")
-            self._track_task(self._run_portfolio_drift_logger())
-
-        if self.insurance_scanner:
-            self.logger.info("Launching insurance premium scanner (every 30 min)...")
-            self._track_task(self._run_insurance_scanner_loop())
-
-        if self.daily_signal_review:
-            self.logger.info("Launching daily signal review (midnight UTC)...")
-            self._track_task(self._run_daily_signal_review_loop())
-
-        # ── Phase 2 Monitor Loops (BUG 6 fix) ──
-        if self.beta_monitor:
-            self.logger.info("Launching beta monitor loop (every 60 min, observation mode)...")
-            self._track_task(self._run_beta_monitor_loop())
-
-        if self.sharpe_monitor_medallion:
-            self.logger.info("Launching sharpe monitor loop (every 60 min, observation mode)...")
-            self._track_task(self._run_sharpe_monitor_loop())
-
-        if self.capacity_monitor:
-            self.logger.info("Launching capacity monitor loop (every 60 min, observation mode)...")
-            self._track_task(self._run_capacity_monitor_loop())
-
-        if self.medallion_regime:
-            self.logger.info("Launching regime detector loop (every 5 min, observation mode)...")
-            self._track_task(self._run_regime_detector_loop())
-
-        # ── Doc 15: Agent weekly research loop + deployment loop ──
-        if self.agent_coordinator:
-            self.logger.info("Launching agent weekly research check loop...")
-            self._track_task(self.agent_coordinator.run_weekly_check_loop())
-            self.logger.info("Launching agent deployment loop...")
-            self._track_task(self.agent_coordinator.run_deployment_loop())
-
-        # ── Gap 5 fix: Unified Telegram Reporting ──
-        if self.monitoring_alert_manager:
-            self.logger.info("Launching unified Telegram hourly report loop...")
-            self._track_task(self._run_telegram_report_loop())
-
-        while not self._killed:
-            try:
-                # Check file-based kill switch
-                self._check_kill_file()
-                if self._killed:
-                    break
-
-                # Execute trading cycle
-                decision = await self.execute_trading_cycle()
-
-                self.logger.info(f"{'LIVE' if not self.coinbase_client.paper_trading else 'PAPER'} TRADE: "
-                               f"{decision.action} - "
-                               f"Confidence: {decision.confidence:.3f} - "
-                               f"Position Size: {decision.position_size:.3f}")
-
-                # Write heartbeat after each successful cycle
-                self._write_heartbeat()
-                # Recovery module heartbeat (file-based for watchdog)
-                if self.state_manager:
-                    try:
-                        await self.state_manager.asend_heartbeat()
-                    except Exception as e:
-                        self.logger.warning(f"State manager heartbeat send failed: {e}")
-
-                # Wait for next cycle
-                await asyncio.sleep(cycle_interval)
-
-            except KeyboardInterrupt:
-                self.trigger_kill_switch("KeyboardInterrupt")
-                break
-            except Exception as e:
-                self.logger.error(f"Unexpected error in trading loop: {e}")
-                await asyncio.sleep(60)
-
-        self.logger.info("Trading loop exited. Shutting down background tasks...")
-        await self._shutdown()
+        """Run continuous trading — delegates to bot.lifecycle."""
+        from bot.lifecycle import run_continuous_trading
+        return await run_continuous_trading(self, cycle_interval)
 
     def _compute_adaptive_weights(self, product_id: str, base_weights: Dict[str, float]) -> Dict[str, float]:
-        """
-        Adaptive Weight Engine — Renaissance-style Bayesian signal weight updating.
-
-        Uses the signal scorecard (measured accuracy per signal) to adjust weights:
-        - Signals with >55% accuracy get upweighted
-        - Signals with <48% accuracy get downweighted
-        - Signals with too few samples keep config weights (prior)
-        - Blend between config (prior) and measured (posterior) ramps up as data accumulates
-
-        Returns adjusted weights dict (does NOT mutate self.signal_weights).
-        """
-        sc = self._signal_scorecard.get(product_id, {})
-        if not sc:
-            return base_weights
-
-        # Aggregate across all products for more data
-        agg_sc: Dict[str, Dict[str, int]] = {}
-        for pid, signals in self._signal_scorecard.items():
-            for sig_name, stats in signals.items():
-                entry = agg_sc.setdefault(sig_name, {"correct": 0, "total": 0})
-                entry["correct"] += stats["correct"]
-                entry["total"] += stats["total"]
-
-        # Find signals with enough data
-        eligible = {}
-        max_total = 0
-        for sig_name, stats in agg_sc.items():
-            if stats["total"] >= self._adaptive_min_samples:
-                accuracy = stats["correct"] / stats["total"]
-                eligible[sig_name] = accuracy
-                max_total = max(max_total, stats["total"])
-
-        if not eligible:
-            return base_weights
-
-        # Ramp blend factor: 0 at min_samples, 0.5 at 100+ samples
-        blend = min(0.5, (max_total - self._adaptive_min_samples) / 170.0)
-        self._adaptive_weight_blend = blend
-
-        # Compute accuracy-derived weights
-        # Transform accuracy to weight multiplier:
-        # 50% (random) → 0.5x, 55% → 1.0x, 60% → 1.5x, 65%+ → 2.0x
-        # <48% (anti-predictive) → 0.1x
-        multipliers = {}
-        for sig_name in base_weights:
-            if sig_name in eligible:
-                acc = eligible[sig_name]
-                if acc < 0.48:
-                    multipliers[sig_name] = 0.1  # actively wrong — near zero
-                elif acc < 0.52:
-                    multipliers[sig_name] = 0.5  # noise
-                elif acc < 0.55:
-                    multipliers[sig_name] = 0.8  # weak
-                elif acc < 0.60:
-                    multipliers[sig_name] = 1.2  # good
-                elif acc < 0.65:
-                    multipliers[sig_name] = 1.5  # strong
-                else:
-                    multipliers[sig_name] = 2.0  # excellent
-            else:
-                multipliers[sig_name] = 1.0  # no data → keep as-is
-
-        # Blend: final = (1 - blend) * config_weight + blend * (config_weight * multiplier)
-        # Simplifies to: final = config_weight * (1 - blend + blend * multiplier)
-        adapted = {}
-        for sig_name, w in base_weights.items():
-            m = multipliers.get(sig_name, 1.0)
-            adapted[sig_name] = w * (1.0 - blend + blend * m)
-
-        # Renormalize so weights sum to 1.0
-        total = sum(adapted.values())
-        if total > 0:
-            adapted = {k: v / total for k, v in adapted.items()}
-
-        return adapted
+        """Adaptive weights — delegates to bot.adaptive."""
+        from bot.adaptive import compute_adaptive_weights
+        return compute_adaptive_weights(self, product_id, base_weights)
 
     def _get_measured_edge(self, product_id: str) -> Optional[float]:
-        """
-        Compute realized edge from signal scorecard + ML prediction accuracy.
-        Council S3 #1/#5: Blends scorecard edge with DB-measured ML accuracy.
-        Returns None if insufficient data, else a float [0, 0.15].
-        """
-        # Source 1: Signal scorecard (in-memory, per-signal)
-        scorecard_edge = None
-        sc = self._signal_scorecard.get(product_id, {})
-        if sc:
-            total_correct = sum(s["correct"] for s in sc.values())
-            total_total = sum(s["total"] for s in sc.values())
-            if total_total >= 20:
-                accuracy = total_correct / total_total
-                scorecard_edge = max(0.0, accuracy - 0.5)
-
-        # Source 2: ML prediction accuracy (DB-backed, refreshed every 10 cycles)
-        ml_edge = None
-        ml_info = self._ml_accuracy_cache.get(product_id)
-        if ml_info and ml_info['n'] >= self._ml_eval_min_predictions:
-            ml_edge = max(0.0, ml_info['accuracy'] - 0.5)
-
-        # Blend sources
-        if scorecard_edge is not None and ml_edge is not None:
-            edge = (self._ml_eval_blend_measured * ml_edge +
-                    self._ml_eval_blend_model * scorecard_edge)
-        elif ml_edge is not None:
-            edge = ml_edge
-        elif scorecard_edge is not None:
-            edge = scorecard_edge
-        else:
-            return None
-
-        return min(edge, 0.15)
+        """Measured edge — delegates to bot.adaptive."""
+        from bot.adaptive import get_measured_edge
+        return get_measured_edge(self, product_id)
 
     def _refresh_ml_accuracy_cache(self) -> None:
-        """Council S3 #1/#5: Query ML prediction accuracy per pair from DB."""
-        try:
-            import sqlite3
-            db_path = getattr(self.db_manager, 'db_path', None) or 'data/renaissance_bot.db'
-            conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
-            rows = conn.execute('''
-                SELECT product_id,
-                       COUNT(*) as n,
-                       SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct
-                FROM ml_predictions
-                WHERE is_correct IS NOT NULL
-                  AND is_correct >= 0
-                  AND model_name IN ('meta_ensemble', 'MetaEnsemble')
-                  AND timestamp > datetime('now', '-7 days')
-                GROUP BY product_id
-            ''').fetchall()
-            conn.close()
-            for pid, n, correct in rows:
-                acc = correct / n if n > 0 else 0.0
-                self._ml_accuracy_cache[pid] = {
-                    'accuracy': acc, 'n': n, 'edge': max(0.0, acc - 0.5)
-                }
-            if rows:
-                total_n = sum(r[1] for r in rows)
-                total_c = sum(r[2] for r in rows)
-                agg_acc = total_c / total_n if total_n > 0 else 0.0
-                self.logger.info(
-                    f"ML ACCURACY CACHE refreshed: {len(rows)} pairs, "
-                    f"{total_n} predictions, {agg_acc:.1%} overall accuracy"
-                )
-            else:
-                self.logger.info("ML ACCURACY CACHE: no evaluated MetaEnsemble predictions found")
-        except Exception as e:
-            self.logger.warning(f"ML accuracy cache refresh failed: {e}")
-
-    # _get_polymarket_scanner_data() removed — Strategy A now discovers markets directly
+        """ML accuracy cache — delegates to bot.adaptive."""
+        from bot.adaptive import refresh_ml_accuracy_cache
+        return refresh_ml_accuracy_cache(self)
 
     def _update_dynamic_thresholds(self, product_id: str, market_data: Dict[str, Any]):
-        """Adjusts BUY/SELL thresholds based on volatility and confidence (Step 8)"""
-        if not self.adaptive_thresholds:
-            return
-
-        try:
-            # Use technical indicators volatility regime
-            latest_tech = self._get_tech(product_id).get_latest_signals()
-            vol_regime = latest_tech.volatility_regime if latest_tech else None
-            
-            # Base thresholds — from config (default 0.06 after backtest analysis).
-            # Backtest proved: only |prediction| > 0.06 has >53% accuracy.
-            base_buy = float(self.config.get('trading', {}).get('buy_threshold', 0.06))
-            base_sell = float(self.config.get('trading', {}).get('sell_threshold', -0.06))
-            self.buy_threshold = base_buy
-            self.sell_threshold = base_sell
-
-            # Adjust based on volatility (scale from higher base)
-            if vol_regime == "high_volatility" or vol_regime == "extreme_volatility":
-                # Increase thresholds in high volatility to avoid fakeouts
-                self.buy_threshold = base_buy * 1.5
-                self.sell_threshold = base_sell * 1.5
-            elif vol_regime == "low_volatility":
-                # Decrease thresholds in low volatility to catch smaller moves
-                self.buy_threshold = base_buy * 0.7
-                self.sell_threshold = base_sell * 0.7
-                
-            self.logger.info(f"Dynamic Thresholds updated: Buy {self.buy_threshold:.2f}, Sell {self.sell_threshold:.2f} (Regime: {vol_regime})")
-        except Exception as e:
-            self.logger.error(f"Failed to update dynamic thresholds: {e}")
+        """Dynamic thresholds — delegates to bot.adaptive."""
+        from bot.adaptive import update_dynamic_thresholds
+        return update_dynamic_thresholds(self, product_id, market_data)
 
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get performance summary of the Renaissance bot"""
