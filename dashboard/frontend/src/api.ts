@@ -38,6 +38,11 @@ export const api = {
   status: () => get<SystemStatus>('/api/system/status'),
   config: () => get<SystemConfig>('/api/system/config'),
   health: () => get<{ status: string }>('/api/health'),
+  successCriteria: () => get<{ checks: { id: string; label: string; passed: boolean }[]; passed: number; total: number }>('/api/system/success-criteria'),
+  activityFeed: (limit = 50, action = 'ALL', asset = '') =>
+    get<{ type: string; timestamp: string; asset: string; action: string; detail: string; regime: string | null; vae_loss: number | null }[]>(
+      `/api/system/activity?limit=${limit}&action=${action}${asset ? `&asset=${asset}` : ''}`
+    ),
 
   // Decisions
   recentDecisions: (limit = 100) => get<Decision[]>(`/api/decisions/recent?limit=${limit}`),

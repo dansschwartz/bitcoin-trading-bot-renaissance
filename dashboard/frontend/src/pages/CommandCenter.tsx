@@ -5,6 +5,8 @@ import EquityCurve from '../components/charts/EquityCurve';
 import PriceChart from '../components/charts/PriceChart';
 import SystemHealthBar from '../components/panels/SystemHealthBar';
 import AssetSummaryPanel from '../components/panels/AssetSummaryPanel';
+import SuccessCriteriaPanel from '../components/panels/SuccessCriteriaPanel';
+import ActivityFeedPanel from '../components/panels/ActivityFeedPanel';
 import { api } from '../api';
 
 // ─── Types for strategy data ─────────────────────────────────────────────────
@@ -237,8 +239,14 @@ export default function CommandCenter() {
       {/* Oracle Signal Bar */}
       <OracleBar signals={oracleSignals} />
 
-      {/* Asset Exposure Summary */}
-      <AssetSummaryPanel />
+      {/* Success Criteria + Asset Exposure */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <SuccessCriteriaPanel />
+        <AssetSummaryPanel />
+      </div>
+
+      {/* Activity Feed */}
+      <ActivityFeedPanel />
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

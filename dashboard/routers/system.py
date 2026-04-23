@@ -79,3 +79,25 @@ async def price_history(request: Request, product_id: str, limit: int = 200):
     # Reverse to chronological order (DB returns newest first)
     rows.reverse()
     return rows
+
+
+@router.get("/success-criteria")
+async def success_criteria(request: Request):
+    """Evaluate all CLAUDE.md success criteria and return pass/fail for each."""
+    db = request.app.state.dashboard_config.db_path
+    cfg = request.app.state.dashboard_config
+    thresholds = cfg.dashboard.get("alerts", {})
+    return db_queries.get_success_criteria(db, thresholds)
+
+
+@router.get("/activity")
+async def activity_feed(request: Request, limit: int = 50, action: str = "ALL",
+                        asset: str = ""):
+    """Recent activity feed: decisions + position events, with optional filtering."""
+    db = request.app.state.dashboard_config.db_path
+    return db_queries.get_activity_feed(
+        db,
+        limit=min(limit, 200),
+        action_filter=action if action != "ALL" else None,
+        asset_filter=asset if asset else None,
+    )
