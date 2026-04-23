@@ -83,6 +83,15 @@ N_DERIVATIVES_FEATURES = 7  # funding_rate_z, oi_change_pct, long_short_ratio,
 # Feature audit tracking — logs once per pair per process lifetime
 _feature_audit_logged: set = set()
 
+# Cache for raw (pre-standardization) features for LightGBM inference.
+# build_feature_sequence stores the last bar's raw features here so
+# predict_lightgbm can use them instead of the standardized version.
+# See docs/ML_ACCURACY_INVESTIGATION.md Finding 1.
+_lgb_raw_feature_cache: Dict[str, np.ndarray] = {}
+
+# Momentum horizons matching training (train_lightgbm.py MOMENTUM_BARS)
+_LGB_MOMENTUM_BARS = [1, 3, 6, 12, 24, 72]
+
 # ── Cross-asset lead signal configuration ─────────────────────────────────────
 
 _LEAD_SIGNALS_STATIC = {
@@ -1258,9 +1267,15 @@ def build_feature_sequence(
     # Take last seq_len rows
     feat_arr = feat_df.tail(seq_len).values.astype(np.float32)
 
+    # Cache raw (pre-standardization) last bar for LightGBM (Finding 1 fix).
+    # LightGBM was trained on raw features, not per-window standardized ones.
+    _pair_cache_key = pair_name or "unknown"
+    _lgb_raw_feature_cache[_pair_cache_key] = feat_arr[-1].copy()
+
     # Per-window standardization (zero-mean, unit-variance per column)
     mean = feat_arr.mean(axis=0, keepdims=True)
-    std = feat_arr.std(axis=0, keepdims=True) + 1e-8
+    std = feat_arr.std(axis=0, keepdims=True)
+    std = np.maximum(std, 1e-4)  # Floor to prevent noise amplification (Finding 3 fix)
     feat_arr = (feat_arr - mean) / std
 
     # Pad or truncate to exactly INPUT_DIM
@@ -1577,10 +1592,10 @@ def predict_with_models(
     if _pair_excluded:
         logger.info(f"MODEL_ROUTING: Excluded {_pair_excluded} for {pair}")
 
-    # Run LightGBM if loaded (non-PyTorch, uses flattened features + momentum)
+    # Run LightGBM if loaded (uses raw features + momentum, not standardized)
     if 'lightgbm' in models:
         lgbm_pred, lgbm_conf = predict_lightgbm(
-            models['lightgbm'], features, price_series
+            models['lightgbm'], features, price_series, pair=pair
         )
         lgbm_pred = _debiaser.debias('lightgbm', lgbm_pred)  # Remove systematic bias
         lgbm_pred = _normalizer.normalize('lightgbm', lgbm_pred)  # Council S3: z-score normalization
@@ -1749,33 +1764,66 @@ def load_lightgbm_model(base_dir: str = '.') -> Optional[object]:
     return None
 
 
-def _prepare_lgb_features(features: np.ndarray) -> np.ndarray:
-    """Convert (seq_len, INPUT_DIM) sequence to (1, INPUT_DIM*3) for LightGBM.
+def _prepare_lgb_features(
+    raw_bar: np.ndarray,
+    price_series: Optional[np.ndarray],
+) -> np.ndarray:
+    """Build (1, 104) feature vector matching LightGBM training format exactly.
 
-    Concatenates:
-    - Last timestep features (most recent market state)
-    - Mean across window (trend context)
-    - Std across window (volatility context)
+    Training (train_lightgbm.py) uses:
+      - 98 RAW features from build_full_feature_matrix (no standardization)
+      - 6 momentum returns: current_close / past_close - 1.0
+        for horizons [1, 3, 6, 12, 24, 72] bars back
 
-    This matches the training pipeline's prepare_lgb_features().
+    This was previously mismatched: inference used [last, mean, std] = 294
+    standardized features while training used 104 raw features.
+    See docs/ML_ACCURACY_INVESTIGATION.md Finding 1.
+
+    Args:
+        raw_bar: (INPUT_DIM,) raw features for the most recent bar
+        price_series: Close prices array for momentum computation
     """
-    last = features[-1, :]           # (INPUT_DIM,) — most recent bar
-    mean = features.mean(axis=0)     # (INPUT_DIM,) — window average
-    std = features.std(axis=0)       # (INPUT_DIM,) — window volatility
-    return np.concatenate([last, mean, std]).reshape(1, -1)  # (1, INPUT_DIM*3)
+    # 1. Raw feature vector (98 features, matching training)
+    bar_features = raw_bar[:INPUT_DIM]  # (INPUT_DIM,)
+
+    # 2. Momentum returns matching training MOMENTUM_BARS = [1, 3, 6, 12, 24, 72]
+    momentum_feats = []
+    if price_series is not None and len(price_series) > 0:
+        current_close = float(price_series[-1])
+        for h in _LGB_MOMENTUM_BARS:
+            if current_close > 0 and len(price_series) > h:
+                past_close = float(price_series[-(h + 1)])
+                if past_close > 0:
+                    momentum_feats.append(current_close / past_close - 1.0)
+                else:
+                    momentum_feats.append(0.0)
+            else:
+                momentum_feats.append(0.0)
+    else:
+        momentum_feats = [0.0] * len(_LGB_MOMENTUM_BARS)
+
+    # Concatenate: 98 raw + 6 momentum = 104 features (matches training)
+    row = np.concatenate([bar_features, np.array(momentum_feats, dtype=np.float32)])
+    return row.reshape(1, -1)  # (1, 104)
 
 
 def predict_lightgbm(
     model: object,
     features: Optional[np.ndarray],
     price_series: Optional[np.ndarray] = None,
+    pair: Optional[str] = None,
 ) -> Tuple[float, float]:
     """Run inference on LightGBM model.
+
+    Uses raw (pre-standardization) features + momentum returns to match the
+    training format exactly (98 raw + 6 momentum = 104 features).
+    See docs/ML_ACCURACY_INVESTIGATION.md Finding 1.
 
     Args:
         model: LightGBM model from load_lightgbm_model()
         features: (seq_len, INPUT_DIM) array from build_feature_sequence()
-        price_series: Unused (kept for API compatibility)
+        price_series: Close prices for momentum computation
+        pair: Pair name for raw feature cache lookup
 
     Returns:
         (prediction, confidence) where:
@@ -1786,8 +1834,16 @@ def predict_lightgbm(
         return 0.0, 0.0
 
     try:
-        # Flatten sequence to LightGBM format: [last, mean, std]
-        lgb_input = _prepare_lgb_features(features)  # (1, INPUT_DIM*3)
+        # Use raw (pre-standardization) features from cache if available.
+        # LightGBM was trained on raw features, not per-window standardized.
+        _cache_key = pair or "unknown"
+        raw_bar = _lgb_raw_feature_cache.get(_cache_key)
+        if raw_bar is None:
+            # Fallback: use last bar from standardized features (not ideal but functional)
+            raw_bar = features[-1, :]
+            logger.debug(f"LightGBM: raw feature cache miss for {_cache_key}, using standardized fallback")
+
+        lgb_input = _prepare_lgb_features(raw_bar, price_series)  # (1, 104)
         lgb_input = np.nan_to_num(lgb_input, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Auto-detect input format: if model expects more features than we have,
