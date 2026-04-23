@@ -22,63 +22,62 @@
 - database_manager.py
 
 **Experimental Or Legacy (Not in Golden Path)**
-- bitcoin_baruta.py
-- cnn_lstm_model.py
-- cnn_lstm_revolutionary.py
-- cnn_lstm_revolutionary_FIXED.py
-- confidence_calculator.py
-- consciousness_engine.py
 - data_validator.py
-- database_manager.py
-- deploy_advanced_renaissance.py
-- enhanced_data_pipeline.py
-- enhanced_decision_framework.py
-- enhanced_renaissance_bot.py
-- ensemble_predictor.py
 - execution_algorithm_suite.py
-- feature_pipeline.py
-- import_fix_guide.py
-- indicators.py
-- integration_test_STEP7.py
-- integration_test_STEP8.py
-- integration_test_STEP9.py
-- integration_test_STEP10.py
 - liquidity_risk_manager.py
 - logger.py
-- main_no_pandas.py
-- market_mictostructure_analyzer.py
-- microstructure_init_patch.py
-- missing_components.py
 - ml_config.py
 - ml_enhanced_signal_fusion.py
 - ml_integration_bridge.py
-- ml_integration_bridge_fixed.py
-- ml_pattern_engine.py
-- nbeats_forecaster.py
-- nbeats_revolutionary.py
-- neural_network_prediction_engine.py
-- order_book_collector.py
 - order_logic.py
-- pattern_confidence.py
 - performance_attribution_engine.py
-- portfolio_risk_analyzer.py
-- position_sizing.py
-- price_data_collector.py
-- real_time_rebalancing_manager.py
-- real_time_risk_monitor.py
-- renaissance_ai_integration.py
-- renaissance_dynamic_risk_budget_manager.py
-- renaissance_integration.py
-- renaissance_portfolio_optimizer.py
-- renaissance_risk_manager.py
-- renaissance_technical_indicators.py
 - slippage_protection_system.py
-- start_enhanced_pipeline.py
-- step1_ensemble_weighting.py
 - stress_test_engine.py
 - tail_risk_protector.py
-- test_advanced_system.py
-- test_renaissance_system.py
-- threshold_manager.py
 - trade_logger.py
 - transaction_cost_minimizer.py
+
+**Deleted (previously listed here, removed as dead code)**
+- confidence_calculator.py — unused, deleted 2026-04-22
+- enhanced_data_pipeline.py — unused legacy pipeline, deleted 2026-04-22
+- enhanced_decision_framework.py — unused legacy framework, deleted 2026-04-22
+- inventory_manager.py — unused, deleted 2026-04-22
+- order_book_collector.py — unused, deleted 2026-04-22
+- step1_ensemble_weighting.py — unused early ensemble optimizer, deleted 2026-04-22
+- threshold_manager.py — unused legacy threshold manager, deleted 2026-04-22
+- tests/integration_test_STEP{7,8,9,10,11}.py — dead tests for deleted modules, deleted 2026-04-22
+- bitcoin_baruta.py — deleted in prior cleanup
+- cnn_lstm_model.py — deleted in prior cleanup
+- cnn_lstm_revolutionary.py — deleted in prior cleanup
+- cnn_lstm_revolutionary_FIXED.py — deleted in prior cleanup
+- consciousness_engine.py — deleted in prior cleanup
+- deploy_advanced_renaissance.py — deleted in prior cleanup
+- enhanced_renaissance_bot.py — deleted in prior cleanup
+- ensemble_predictor.py — deleted in prior cleanup
+- feature_pipeline.py — deleted in prior cleanup
+- import_fix_guide.py — deleted in prior cleanup
+- indicators.py — deleted in prior cleanup
+- main_no_pandas.py — deleted in prior cleanup
+- market_mictostructure_analyzer.py — deleted in prior cleanup
+- microstructure_init_patch.py — deleted in prior cleanup
+- missing_components.py — deleted in prior cleanup
+- ml_integration_bridge_fixed.py — deleted in prior cleanup
+- ml_pattern_engine.py — deleted in prior cleanup
+- nbeats_forecaster.py — deleted in prior cleanup
+- nbeats_revolutionary.py — deleted in prior cleanup
+- neural_network_prediction_engine.py — deleted in prior cleanup
+- pattern_confidence.py — deleted in prior cleanup
+- portfolio_risk_analyzer.py — deleted in prior cleanup
+- position_sizing.py — deleted in prior cleanup
+- price_data_collector.py — deleted in prior cleanup
+- real_time_rebalancing_manager.py — deleted in prior cleanup
+- real_time_risk_monitor.py — deleted in prior cleanup
+- renaissance_ai_integration.py — deleted in prior cleanup
+- renaissance_dynamic_risk_budget_manager.py — deleted in prior cleanup
+- renaissance_integration.py — deleted in prior cleanup
+- renaissance_portfolio_optimizer.py — deleted in prior cleanup
+- renaissance_risk_manager.py — deleted in prior cleanup
+- renaissance_technical_indicators.py — deleted in prior cleanup
+- start_enhanced_pipeline.py — deleted in prior cleanup
+- test_advanced_system.py — deleted in prior cleanup
+- test_renaissance_system.py — deleted in prior cleanup
