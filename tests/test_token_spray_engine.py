@@ -21,7 +21,7 @@ import sqlite3
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from token_spray_engine import (
+from strategies.token_spray_engine import (
     TokenSprayEngine,
     SprayToken,
     Wallet,

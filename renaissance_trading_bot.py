@@ -72,7 +72,7 @@ from data_providers.binance_spot_provider import BinanceSpotProvider, to_binance
 from genetic_optimizer import GeneticWeightOptimizer
 from cross_asset_engine import CrossAssetCorrelationEngine
 from data_providers.whale_activity_monitor import WhaleActivityMonitor
-from breakout_scanner import BreakoutScanner, BreakoutSignal
+from strategies.breakout_scanner import BreakoutScanner, BreakoutSignal
 try:
     from breakout_strategy import BreakoutStrategy
     BREAKOUT_STRATEGY_AVAILABLE = True
@@ -116,10 +116,10 @@ from quantum_oscillator_engine import QuantumOscillatorEngine
 from ghost_runner import GhostRunner
 from self_reinforcing_learning import SelfReinforcingLearningEngine
 from confluence_engine import ConfluenceEngine
-from basis_trading_engine import BasisTradingEngine
+from strategies.basis_trading_engine import BasisTradingEngine
 from deep_nlp_bridge import DeepNLPBridge
-from market_making_engine import MarketMakingEngine
-from meta_strategy_selector import MetaStrategySelector
+from strategies.market_making_engine import MarketMakingEngine
+from strategies.meta_strategy_selector import MetaStrategySelector
 from institutional_dashboard import InstitutionalDashboard
 from dashboard.event_emitter import DashboardEventEmitter
 from position_sizer import RenaissancePositionSizer

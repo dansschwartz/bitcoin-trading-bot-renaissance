@@ -21,7 +21,7 @@ import os
 from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 
-from straddle_engine import (
+from strategies.straddle_engine import (
     StraddleEngine,
     StraddleFleetController,
     Straddle,
