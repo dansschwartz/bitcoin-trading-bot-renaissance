@@ -539,10 +539,17 @@ class TriangularArbitrage:
                         self._staleness_skips += 1
                         continue
 
-                    # Pre-flight freshness check: verify edge still exists
-                    if not await self._preflight_freshness_check(opp):
-                        self._staleness_filter.record_failure(path_key)
-                        continue
+                    # Pre-flight freshness check: skip for wide edges (>10bps buffer)
+                    # Wide edges can absorb price drift — preflight adds 200-500ms latency
+                    edge_buffer = float(opp.profit_bps) - self._round_trip_cost_bps
+                    if edge_buffer < 10.0:
+                        # Thin edge — verify freshness before trading
+                        if not await self._preflight_freshness_check(opp):
+                            self._staleness_filter.record_failure(path_key)
+                            continue
+                    else:
+                        # Wide edge (10+ bps buffer) — skip preflight, go straight to execution
+                        self._preflight_stats['passed'] += 1
 
                     # Capital budget checks
                     if not self._check_capital_budget():
@@ -633,10 +640,15 @@ class TriangularArbitrage:
                         self._staleness_skips += 1
                         continue
 
-                    # Pre-flight freshness check for 4-leg
-                    if not await self._preflight_freshness_check(opp):
-                        self._staleness_filter.record_failure(path_key)
-                        continue
+                    # Pre-flight freshness check for 4-leg — skip for wide edges
+                    quad_cost_bps = self._round_trip_cost_bps * (len(opp.path) / 3.0)
+                    edge_buffer = float(opp.profit_bps) - quad_cost_bps
+                    if edge_buffer < 10.0:
+                        if not await self._preflight_freshness_check(opp):
+                            self._staleness_filter.record_failure(path_key)
+                            continue
+                    else:
+                        self._preflight_stats['passed'] += 1
 
                     # Capital budget checks
                     if not self._check_capital_budget():
