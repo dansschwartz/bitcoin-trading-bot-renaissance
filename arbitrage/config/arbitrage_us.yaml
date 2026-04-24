@@ -157,6 +157,9 @@ auto_rebalance:
   target_usdt_per_exchange: 20     # Top up to this level
   max_single_rebalance_usd: 15    # Cap per rebalance trade
   cooldown_minutes: 60             # Don't rebalance same asset within 1 hour
+  max_budget_per_cycle: 50         # Hard cap: max $50 total seed buying per cycle
+  max_per_token: 30                # Hard cap: max $30 per individual token purchase
+  approved_tokens_only: true       # Only buy tokens that appear in the pair list
   seed_assets:                     # Assets to pre-position for wide-spread arb
     - {symbol: ZEC, amount_usd: 5}
     - {symbol: TFUEL, amount_usd: 3}
@@ -167,6 +170,7 @@ risk:
   max_total_exposure_usd: 500
   max_one_sided_usd: 100
   max_daily_loss_usd: 25                # Stop if losing $25 — protect capital
+  min_usdt_reserve: 300                  # Hard floor — never spend below $300 USDT
   max_funding_position_usd: 2000
   max_trades_per_hour: 2000
   max_consecutive_losses: 10

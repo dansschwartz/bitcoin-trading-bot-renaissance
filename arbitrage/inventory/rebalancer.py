@@ -37,7 +37,8 @@ class SpotRebalancer:
     below configured thresholds. Records balance snapshots to DB.
     """
 
-    def __init__(self, clients: Dict[str, object], config: Optional[dict] = None):
+    def __init__(self, clients: Dict[str, object], config: Optional[dict] = None,
+                 approved_tokens: Optional[List[str]] = None):
         self._clients = clients
         cfg = config or {}
         self._enabled = cfg.get('enabled', False)
@@ -46,6 +47,13 @@ class SpotRebalancer:
         self._max_rebalance = Decimal(str(cfg.get('max_single_rebalance_usd', 15)))
         self._cooldown_minutes = cfg.get('cooldown_minutes', 60)
         self._seed_assets: List[dict] = cfg.get('seed_assets', [])
+
+        # Capital guard controls
+        self.capital_guard = None  # Set by orchestrator
+        self._max_budget_per_cycle = float(cfg.get('max_budget_per_cycle', 50))
+        self._max_per_token = float(cfg.get('max_per_token', 30))
+        self._approved_tokens_only = cfg.get('approved_tokens_only', True)
+        self._approved_tokens: set = set(approved_tokens or [])
 
         # Dynamic seed tracking: assets promoted from inventory misses
         self._dynamic_seeds: Dict[str, dict] = {}
@@ -140,6 +148,7 @@ class SpotRebalancer:
 
         trades: List[RebalanceTrade] = []
         now = time.time()
+        cycle_spent = 0.0  # Track total USD spent this cycle
 
         for exchange_name, client in self._clients.items():
             try:
@@ -181,6 +190,43 @@ class SpotRebalancer:
                     if not symbol:
                         continue
 
+                    # Approved tokens check
+                    if self._approved_tokens_only and self._approved_tokens:
+                        if symbol not in self._approved_tokens:
+                            logger.debug(
+                                f"REBALANCER: {symbol} not in approved tokens — skipping"
+                            )
+                            continue
+
+                    # Per-token cap
+                    if float(target_usd) > self._max_per_token:
+                        target_usd = Decimal(str(self._max_per_token))
+
+                    # Per-cycle budget cap
+                    if cycle_spent >= self._max_budget_per_cycle:
+                        logger.info(
+                            f"REBALANCER: cycle budget ${self._max_budget_per_cycle:.0f} exhausted "
+                            f"(spent ${cycle_spent:.2f}) — stopping seed buys"
+                        )
+                        break
+
+                    remaining_budget = self._max_budget_per_cycle - cycle_spent
+                    if float(target_usd) > remaining_budget:
+                        target_usd = Decimal(str(remaining_budget))
+
+                    # Capital guard check
+                    if self.capital_guard:
+                        allowed, cur_bal = await self.capital_guard.can_spend(
+                            client, float(target_usd)
+                        )
+                        if not allowed:
+                            logger.warning(
+                                f"REBALANCER: CapitalGuard blocked {symbol} "
+                                f"seed buy (${float(target_usd):.2f}), "
+                                f"USDT=${cur_bal:.2f}"
+                            )
+                            continue
+
                     # Cooldown check
                     cooldown_key = f"{exchange_name}:{symbol}"
                     last = self._last_rebalance.get(cooldown_key, 0)
@@ -193,6 +239,9 @@ class SpotRebalancer:
                     # Skip if we have enough (rough USD estimate)
                     if current_free > 0:
                         continue  # Has some — don't rebalance
+
+                    # Track spending for cycle budget enforcement
+                    cycle_spent += float(target_usd)
 
             except Exception as e:
                 logger.debug(f"Rebalancer check error for {exchange_name}: {e}")

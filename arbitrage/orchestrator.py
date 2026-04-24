@@ -60,6 +60,7 @@ from arbitrage.analytics.exhaust_capture import ExhaustCapture
 from arbitrage.pairs.discovery import MexcPairDiscovery
 from arbitrage.pairs.pair_manager import ExpandedPairManager
 from arbitrage.capital_allocator import CapitalAllocator
+from arbitrage.capital_guard import CapitalGuard
 from arbitrage.feeds.unified_price_feed import BinanceUnifiedPriceFeed, HybridTickerProvider
 from arbitrage.relay.server import OrderBookRelayServer
 from arbitrage.relay.client import OrderBookRelayClient
@@ -220,7 +221,15 @@ class ArbitrageOrchestrator:
         rebal_clients = {"mexc": self.mexc}
         if self.binance_us:
             rebal_clients["binance_us"] = self.binance_us
-        self.rebalancer = SpotRebalancer(clients=rebal_clients, config=rebal_cfg)
+        # Build approved token list from configured pairs
+        approved_tokens = set()
+        for pair in pairs:
+            base = pair.split('/')[0] if '/' in pair else pair
+            approved_tokens.add(base)
+        self.rebalancer = SpotRebalancer(
+            clients=rebal_clients, config=rebal_cfg,
+            approved_tokens=list(approved_tokens),
+        )
 
         # Hedged Market Maker
         mm_cfg = self.config.get("hedged_market_maker", {})
@@ -341,6 +350,20 @@ class ArbitrageOrchestrator:
                 return {"USDT": 0.0, "USDC": 0.0}
 
         self.capital_allocator = CapitalAllocator(_balance_getter)
+
+        # Capital guard — hard USDT reserve enforcement
+        self.capital_guard = CapitalGuard(config=self.config)
+
+        # Wire capital guard into all trade-executing subsystems
+        self.executor.capital_guard = self.capital_guard
+        self.rebalancer.capital_guard = self.capital_guard
+        self.triangular_arb.capital_guard = self.capital_guard
+        self.triangular_arb.tri_executor.capital_guard = self.capital_guard
+        if self.triangular_arb_bybit:
+            self.triangular_arb_bybit.capital_guard = self.capital_guard
+            self.triangular_arb_bybit.tri_executor.capital_guard = self.capital_guard
+        if self.hedged_mm:
+            self.hedged_mm.capital_guard = self.capital_guard
 
         # Wire allocator into modules
         self.triangular_arb.capital_allocator = self.capital_allocator
@@ -1188,6 +1211,10 @@ class ArbitrageOrchestrator:
         except Exception:
             capital_alloc_stats = {}
         try:
+            capital_guard_stats = self.capital_guard.get_stats()
+        except Exception:
+            capital_guard_stats = {}
+        try:
             price_feed_stats = self.price_feed.get_health()
         except Exception:
             price_feed_stats = {}
@@ -1231,6 +1258,7 @@ class ArbitrageOrchestrator:
             "edge_decay": edge_decay_stats,
             "strategy_allocation": allocator_stats,
             "capital_allocation": capital_alloc_stats,
+            "capital_guard": capital_guard_stats,
             "price_feed": price_feed_stats,
             "ticker_provider": ticker_provider_stats,
             "dynamic_seeds": dynamic_seeds_stats,

@@ -88,6 +88,7 @@ class ArbitrageExecutor:
         self._depth_rejects = 0
         self._freshness_rejects = 0
         self.exhaust_capture = None  # Set by orchestrator for data exhaust
+        self.capital_guard = None   # Set by orchestrator for USDT reserve enforcement
 
     # ── Pre-execution gates ────────────────────────────────────────
 
@@ -207,6 +208,15 @@ class ArbitrageExecutor:
 
         buy_client = self.clients[signal.buy_exchange]
         sell_client = self.clients[signal.sell_exchange]
+
+        # Capital guard: check USDT reserve before spending
+        if self.capital_guard:
+            trade_value = float(signal.recommended_quantity * signal.buy_price)
+            allowed, cur_bal = await self.capital_guard.can_spend(buy_client, trade_value)
+            if not allowed:
+                return ExecutionResult(
+                    trade_id=trade_id, status="capital_guard_blocked", signal=signal
+                )
 
         # Verify inventory — reduce quantity to available balance if needed
         base, quote = signal.symbol.split('/')

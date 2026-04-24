@@ -112,6 +112,9 @@ class HedgedMarketMaker:
         self.adverse_removal_pct = config.get('adverse_removal_pct', 0.30)
         self.check_interval = config.get('check_interval_seconds', 0.5)
 
+        # Capital guard — set by orchestrator
+        self.capital_guard = None
+
         # Heartbeat
         self._heartbeat_interval = 300  # 5 minutes
         self._last_heartbeat = 0
@@ -915,6 +918,18 @@ class HedgedMarketMaker:
         # Skip API-blocked pairs
         if token in self._api_blocked:
             return
+
+        # Capital guard check before posting buy orders (ties up USDT/USDC)
+        if self.capital_guard and state.buy_order_id is None:
+            allowed, cur_bal = await self.capital_guard.can_spend(
+                self.client, state.order_size_usd
+            )
+            if not allowed:
+                logger.warning(
+                    f"MM CAPITAL GUARD: blocked {token} maker orders "
+                    f"(${state.order_size_usd:.0f}), USDT=${cur_bal:.2f}"
+                )
+                return
 
         try:
             # Use direct REST API (faster + avoids ccxt timeout issues)

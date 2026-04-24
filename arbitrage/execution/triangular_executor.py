@@ -65,6 +65,7 @@ class TriangularExecutor:
         self._total_profit = Decimal('0')
         self._completed: List[TriExecutionResult] = []
         self._precision_cache: Dict[str, Tuple[int, int]] = {}  # symbol -> (price_prec, qty_prec)
+        self.capital_guard = None  # Set by orchestrator via triangular_arb
 
     async def execute(self, path, start_currency: str,
                       trade_usd: Decimal,
@@ -87,9 +88,20 @@ class TriangularExecutor:
             edge_thresholds: Custom edge scaling thresholds
         """
         trade_id = f"tri_{start_currency}_{int(time.time() * 1000)}"
-        self._trade_count += 1
         start_time = time.monotonic()
 
+        # Capital guard: check USDT reserve before committing capital
+        if self.capital_guard:
+            allowed, cur_bal = await self.capital_guard.can_spend(
+                self.client, float(trade_usd)
+            )
+            if not allowed:
+                return self._build_result(
+                    trade_id, "capital_guard_blocked", [], trade_usd,
+                    Decimal('0'), start_time,
+                )
+
+        self._trade_count += 1
         legs: List[TriLegResult] = []
 
         # Convert USD amount to start_currency if not already USD-pegged
