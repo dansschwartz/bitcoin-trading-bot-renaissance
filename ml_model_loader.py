@@ -92,6 +92,29 @@ _lgb_raw_feature_cache: Dict[str, np.ndarray] = {}
 # Momentum horizons matching training (train_lightgbm.py MOMENTUM_BARS)
 _LGB_MOMENTUM_BARS = [1, 3, 6, 12, 24, 72]
 
+# Cached LightGBM metadata — loaded once, used to auto-detect feature format
+_lgb_meta_cache: Optional[Dict[str, Any]] = None
+
+def _get_lgb_meta(base_dir: str = '.') -> Dict[str, Any]:
+    """Load and cache LightGBM model metadata from lightgbm_meta.json."""
+    global _lgb_meta_cache
+    if _lgb_meta_cache is not None:
+        return _lgb_meta_cache
+    import json as _json
+    meta_path = os.path.join(base_dir, 'models', 'trained', 'lightgbm_meta.json')
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, 'r') as f:
+                _lgb_meta_cache = _json.load(f)
+                logger.info(f"LightGBM meta loaded: feature_prep={_lgb_meta_cache.get('feature_prep')}, "
+                            f"n_features={_lgb_meta_cache.get('n_features')}")
+        except Exception as e:
+            logger.warning(f"Failed to load LightGBM meta: {e}")
+            _lgb_meta_cache = {}
+    else:
+        _lgb_meta_cache = {}
+    return _lgb_meta_cache
+
 # ── Cross-asset lead signal configuration ─────────────────────────────────────
 
 _LEAD_SIGNALS_STATIC = {
@@ -1810,26 +1833,39 @@ def load_lightgbm_model(base_dir: str = '.') -> Optional[object]:
 def _prepare_lgb_features(
     raw_bar: np.ndarray,
     price_series: Optional[np.ndarray],
+    standardized_features: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Build (1, 104) feature vector matching LightGBM training format exactly.
+    """Build feature vector matching the deployed LightGBM model's training format.
 
-    Training (train_lightgbm.py) uses:
-      - 98 RAW features from build_full_feature_matrix (no standardization)
-      - 6 momentum returns: current_close / past_close - 1.0
-        for horizons [1, 3, 6, 12, 24, 72] bars back
-
-    This was previously mismatched: inference used [last, mean, std] = 294
-    standardized features while training used 104 raw features.
-    See docs/ML_ACCURACY_INVESTIGATION.md Finding 1.
+    Auto-detects format from lightgbm_meta.json:
+      - feature_prep="last_mean_std" → [last, mean, std] of standardized features = 294
+      - Otherwise → 98 raw + 6 momentum = 104 (Finding 1 format)
 
     Args:
         raw_bar: (INPUT_DIM,) raw features for the most recent bar
         price_series: Close prices array for momentum computation
+        standardized_features: (seq_len, INPUT_DIM) standardized feature matrix
+            from build_feature_sequence. Used for last_mean_std format.
     """
-    # 1. Raw feature vector (98 features, matching training)
+    meta = _get_lgb_meta()
+
+    # ── New format: [last, mean, std] of standardized features ──────────────
+    if meta.get('feature_prep') == 'last_mean_std' and standardized_features is not None:
+        n_expected = meta.get('n_features', 294)
+        last = standardized_features[-1, :]       # (INPUT_DIM,)
+        mean = standardized_features.mean(axis=0)  # (INPUT_DIM,)
+        std = standardized_features.std(axis=0)    # (INPUT_DIM,)
+        row = np.concatenate([last, mean, std]).astype(np.float32)
+        # Pad or truncate to match expected feature count
+        if len(row) < n_expected:
+            row = np.concatenate([row, np.zeros(n_expected - len(row), dtype=np.float32)])
+        elif len(row) > n_expected:
+            row = row[:n_expected]
+        return row.reshape(1, -1)  # (1, n_expected)
+
+    # ── Legacy format: 98 raw + 6 momentum = 104 (Finding 1) ───────────────
     bar_features = raw_bar[:INPUT_DIM]  # (INPUT_DIM,)
 
-    # 2. Momentum returns matching training MOMENTUM_BARS = [1, 3, 6, 12, 24, 72]
     momentum_feats = []
     if price_series is not None and len(price_series) > 0:
         current_close = float(price_series[-1])
@@ -1845,7 +1881,6 @@ def _prepare_lgb_features(
     else:
         momentum_feats = [0.0] * len(_LGB_MOMENTUM_BARS)
 
-    # Concatenate: 98 raw + 6 momentum = 104 features (matches training)
     row = np.concatenate([bar_features, np.array(momentum_feats, dtype=np.float32)])
     return row.reshape(1, -1)  # (1, 104)
 
@@ -1858,13 +1893,13 @@ def predict_lightgbm(
 ) -> Tuple[float, float]:
     """Run inference on LightGBM model.
 
-    Uses raw (pre-standardization) features + momentum returns to match the
-    training format exactly (98 raw + 6 momentum = 104 features).
-    See docs/ML_ACCURACY_INVESTIGATION.md Finding 1.
+    Auto-detects feature format from lightgbm_meta.json:
+      - feature_prep="last_mean_std" → uses standardized [last, mean, std] = 294 features
+      - Otherwise → uses raw + momentum = 104 features (Finding 1 format)
 
     Args:
         model: LightGBM model from load_lightgbm_model()
-        features: (seq_len, INPUT_DIM) array from build_feature_sequence()
+        features: (seq_len, INPUT_DIM) standardized array from build_feature_sequence()
         price_series: Close prices for momentum computation
         pair: Pair name for raw feature cache lookup
 
@@ -1878,19 +1913,19 @@ def predict_lightgbm(
 
     try:
         # Use raw (pre-standardization) features from cache if available.
-        # LightGBM was trained on raw features, not per-window standardized.
+        # Needed for the legacy 104-feature format.
         _cache_key = pair or "unknown"
         raw_bar = _lgb_raw_feature_cache.get(_cache_key)
         if raw_bar is None:
-            # Fallback: use last bar from standardized features (not ideal but functional)
             raw_bar = features[-1, :]
             logger.debug(f"LightGBM: raw feature cache miss for {_cache_key}, using standardized fallback")
 
-        lgb_input = _prepare_lgb_features(raw_bar, price_series)  # (1, 104)
+        # Pass both raw and standardized features — _prepare_lgb_features
+        # auto-selects format based on model metadata.
+        lgb_input = _prepare_lgb_features(raw_bar, price_series, standardized_features=features)
         lgb_input = np.nan_to_num(lgb_input, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Auto-detect input format: if model expects more features than we have,
-        # pad with zeros; if fewer, truncate (handles legacy vs new format)
+        # Safety: pad/truncate if model expects a different feature count
         expected_features = None
         if hasattr(model, 'num_feature'):
             expected_features = model.num_feature()
