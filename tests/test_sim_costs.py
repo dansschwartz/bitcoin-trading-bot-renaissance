@@ -1,7 +1,7 @@
 """Tests for SimTransactionCostModel."""
 import unittest
 import numpy as np
-from sim_transaction_costs import SimTransactionCostModel
+from simulation.sim_transaction_costs import SimTransactionCostModel
 
 
 class TestSimTransactionCosts(unittest.TestCase):

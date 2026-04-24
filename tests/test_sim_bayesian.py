@@ -1,8 +1,8 @@
 """Tests for SimBayesianUncertainty."""
 import unittest
 import numpy as np
-from sim_bayesian_uncertainty import SimBayesianUncertainty
-from sim_model_gbm import GBMSimulator
+from simulation.sim_bayesian_uncertainty import SimBayesianUncertainty
+from simulation.sim_model_gbm import GBMSimulator
 
 
 class TestSimBayesian(unittest.TestCase):

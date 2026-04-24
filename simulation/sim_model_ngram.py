@@ -9,7 +9,7 @@ import numpy as np
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
-from sim_models_base import SimulationModel
+from simulation.sim_models_base import SimulationModel
 
 
 class NGramSimulator(SimulationModel):

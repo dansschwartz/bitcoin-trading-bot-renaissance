@@ -8,7 +8,7 @@ import logging
 import numpy as np
 from typing import Any, Dict, Optional
 
-from sim_config import TradeCost
+from simulation.sim_config import TradeCost
 
 
 class SimTransactionCostModel:

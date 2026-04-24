@@ -1,7 +1,7 @@
 """Tests for SimValidationSuite."""
 import unittest
 import numpy as np
-from sim_validation import SimValidationSuite
+from simulation.sim_validation import SimValidationSuite
 
 
 class TestSimValidation(unittest.TestCase):

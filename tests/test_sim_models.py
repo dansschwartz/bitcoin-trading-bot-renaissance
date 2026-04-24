@@ -2,11 +2,11 @@
 import unittest
 import numpy as np
 
-from sim_model_monte_carlo import MonteCarloSimulator
-from sim_model_gbm import GBMSimulator
-from sim_model_heston import HestonSimulator
-from sim_model_hmm_regime import HMMRegimeSimulator
-from sim_model_ngram import NGramSimulator
+from simulation.sim_model_monte_carlo import MonteCarloSimulator
+from simulation.sim_model_gbm import GBMSimulator
+from simulation.sim_model_heston import HestonSimulator
+from simulation.sim_model_hmm_regime import HMMRegimeSimulator
+from simulation.sim_model_ngram import NGramSimulator
 
 
 class SimModelTestBase:

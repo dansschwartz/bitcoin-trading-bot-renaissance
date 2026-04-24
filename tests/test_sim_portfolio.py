@@ -2,8 +2,8 @@
 import unittest
 import numpy as np
 import pandas as pd
-from sim_portfolio import SimPortfolioSimulator
-from sim_model_gbm import GBMSimulator
+from simulation.sim_portfolio import SimPortfolioSimulator
+from simulation.sim_model_gbm import GBMSimulator
 
 
 class TestSimPortfolio(unittest.TestCase):

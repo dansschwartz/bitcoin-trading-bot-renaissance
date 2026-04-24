@@ -18,7 +18,7 @@ try:
 except ImportError:
     CCXT_AVAILABLE = False
 
-from sim_config import DEFAULT_CONFIG
+from simulation.sim_config import DEFAULT_CONFIG
 
 
 class SimDataIngest:

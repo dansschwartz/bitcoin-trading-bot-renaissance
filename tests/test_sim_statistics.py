@@ -1,7 +1,7 @@
 """Tests for SimStatistics."""
 import unittest
 import numpy as np
-from sim_statistics import SimStatistics
+from simulation.sim_statistics import SimStatistics
 
 
 class TestSimStatistics(unittest.TestCase):

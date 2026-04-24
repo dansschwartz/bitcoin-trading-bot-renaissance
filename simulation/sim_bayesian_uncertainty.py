@@ -7,8 +7,8 @@ import logging
 import numpy as np
 from typing import Any, Dict, List, Optional
 
-from sim_config import ParameterDistribution
-from sim_models_base import SimulationModel
+from simulation.sim_config import ParameterDistribution
+from simulation.sim_models_base import SimulationModel
 
 
 class SimBayesianUncertainty:

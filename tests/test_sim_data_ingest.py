@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 import pandas as pd
-from sim_data_ingest import SimDataIngest
+from simulation.sim_data_ingest import SimDataIngest
 
 
 class TestSimDataIngest(unittest.TestCase):

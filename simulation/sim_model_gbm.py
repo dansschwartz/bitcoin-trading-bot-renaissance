@@ -4,7 +4,7 @@ import logging
 import numpy as np
 from typing import Any, Dict, Optional
 
-from sim_models_base import SimulationModel
+from simulation.sim_models_base import SimulationModel
 
 
 class GBMSimulator(SimulationModel):

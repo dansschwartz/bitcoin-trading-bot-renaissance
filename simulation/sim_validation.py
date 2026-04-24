@@ -4,7 +4,7 @@ import logging
 import numpy as np
 from typing import Any, Dict, Optional
 
-from sim_config import ValidationScore
+from simulation.sim_config import ValidationScore
 
 try:
     from scipy import stats as sp_stats

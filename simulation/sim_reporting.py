@@ -8,7 +8,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from sim_config import (
+from simulation.sim_config import (
     BacktestResult, SimulationResult, ValidationScore, DEFAULT_CONFIG,
 )
 

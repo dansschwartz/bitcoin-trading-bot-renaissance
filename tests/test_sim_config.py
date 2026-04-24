@@ -1,7 +1,7 @@
 """Tests for sim_config dataclasses and defaults."""
 import unittest
 import numpy as np
-from sim_config import (
+from simulation.sim_config import (
     AssetConfig, SimulationResult, BacktestResult, ValidationScore,
     TradeCost, ParameterDistribution, Trade, DEFAULT_CONFIG, merge_config,
 )

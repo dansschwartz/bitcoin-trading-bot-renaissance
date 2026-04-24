@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from typing import Any, Dict, List, Optional
 
-from sim_models_base import SimulationModel
+from simulation.sim_models_base import SimulationModel
 
 try:
     from hmmlearn.hmm import GaussianHMM

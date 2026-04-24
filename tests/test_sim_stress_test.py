@@ -1,7 +1,7 @@
 """Tests for SimStressTest."""
 import unittest
 import numpy as np
-from sim_stress_test import SimStressTest
+from simulation.sim_stress_test import SimStressTest
 
 
 class TestSimStressTest(unittest.TestCase):

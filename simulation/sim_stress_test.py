@@ -4,7 +4,7 @@ import logging
 import numpy as np
 from typing import Any, Dict, Optional
 
-from sim_config import DEFAULT_CONFIG
+from simulation.sim_config import DEFAULT_CONFIG
 
 
 class SimStressTest:

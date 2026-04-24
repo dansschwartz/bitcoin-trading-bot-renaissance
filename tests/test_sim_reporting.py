@@ -4,8 +4,8 @@ import os
 import tempfile
 import unittest
 import numpy as np
-from sim_config import SimulationResult, ValidationScore, BacktestResult
-from sim_reporting import SimReporter
+from simulation.sim_config import SimulationResult, ValidationScore, BacktestResult
+from simulation.sim_reporting import SimReporter
 
 
 class TestSimReporter(unittest.TestCase):

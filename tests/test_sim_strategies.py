@@ -1,7 +1,7 @@
 """Tests for SimMeanReversionStrategy, SimContrarianScanner, SimBacktestEngine."""
 import unittest
 import numpy as np
-from sim_strategies import (
+from simulation.sim_strategies import (
     SimMeanReversionStrategy, SimContrarianScanner, SimBacktestEngine,
 )
 
