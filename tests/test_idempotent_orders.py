@@ -4,7 +4,7 @@ import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
-from position_manager import (
+from risk_management.position_manager import (
     EnhancedPositionManager,
     RiskLimits,
 )

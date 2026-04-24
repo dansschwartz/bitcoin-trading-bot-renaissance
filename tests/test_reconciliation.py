@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 
-from position_manager import (
+from risk_management.position_manager import (
     EnhancedPositionManager,
     RiskLimits,
     Position,

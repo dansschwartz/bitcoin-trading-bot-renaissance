@@ -6,7 +6,7 @@ import unittest
 import pandas as pd
 import numpy as np
 from regime_overlay import RegimeOverlay
-from risk_gateway import RiskGateway
+from risk_management.risk_gateway import RiskGateway
 
 class TestAdapters(unittest.TestCase):
     def setUp(self):

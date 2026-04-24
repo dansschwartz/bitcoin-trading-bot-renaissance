@@ -21,8 +21,8 @@ import time
 
 # Import all Renaissance components
 from enhanced_config_manager import EnhancedConfigManager
-from microstructure_engine import MicrostructureEngine, MicrostructureMetrics
-from enhanced_technical_indicators import EnhancedTechnicalIndicators, IndicatorOutput
+from analysis.microstructure_engine import MicrostructureEngine, MicrostructureMetrics
+from analysis.enhanced_technical_indicators import EnhancedTechnicalIndicators, IndicatorOutput
 from data_providers.market_data_provider import LiveMarketDataProvider
 from data_providers.derivatives_data_provider import DerivativesDataProvider
 from renaissance_signal_fusion import RenaissanceSignalFusion
@@ -46,13 +46,13 @@ from data_providers.alternative_data_engine import AlternativeDataEngine, Altern
 #   advanced_regime_detector.py    → AdvancedRegimeDetector  (5-state HMM engine)
 #   medallion_regime_predictor.py  → MedallionRegimePredictor (3-state, hmm_forecast field)
 from regime_overlay import RegimeOverlay
-from risk_gateway import RiskGateway
+from risk_management.risk_gateway import RiskGateway
 from real_time_pipeline import RealTimePipeline
 
 # Step 10 Experimental Suite
 # from renaissance_portfolio_optimizer import RenaissancePortfolioOptimizer
 from execution_algorithm_suite import ExecutionAlgorithmSuite
-from slippage_protection_system import SlippageProtectionSystem
+from risk_management.slippage_protection_system import SlippageProtectionSystem
 
 # Persistence & Attribution
 from database_manager import DatabaseManager
@@ -60,7 +60,7 @@ from performance_attribution_engine import PerformanceAttributionEngine
 
 # Order Execution & Position Management
 from data_providers.coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
-from position_manager import EnhancedPositionManager, RiskLimits, PositionStatus
+from risk_management.position_manager import EnhancedPositionManager, RiskLimits, PositionStatus
 # Legacy AlertManager (Slack webhook, always on) — lightweight fallback.
 # The canonical alert system is monitoring.alert_manager.AlertManager (Telegram + persistence).
 from alert_manager import AlertManager
@@ -70,7 +70,7 @@ from data_providers.binance_spot_provider import BinanceSpotProvider, to_binance
 
 # Step 14 & 16 & Deep Alternative
 from genetic_optimizer import GeneticWeightOptimizer
-from cross_asset_engine import CrossAssetCorrelationEngine
+from analysis.cross_asset_engine import CrossAssetCorrelationEngine
 from data_providers.whale_activity_monitor import WhaleActivityMonitor
 from strategies.breakout_scanner import BreakoutScanner, BreakoutSignal
 try:
@@ -109,20 +109,20 @@ try:
     SUB_BAR_SCANNER_AVAILABLE = True
 except ImportError:
     SUB_BAR_SCANNER_AVAILABLE = False
-from volume_profile_engine import VolumeProfileEngine
-from fractal_intelligence import FractalIntelligenceEngine
-from market_entropy_engine import MarketEntropyEngine
-from quantum_oscillator_engine import QuantumOscillatorEngine
+from analysis.volume_profile_engine import VolumeProfileEngine
+from analysis.fractal_intelligence import FractalIntelligenceEngine
+from analysis.market_entropy_engine import MarketEntropyEngine
+from analysis.quantum_oscillator_engine import QuantumOscillatorEngine
 from ghost_runner import GhostRunner
 from self_reinforcing_learning import SelfReinforcingLearningEngine
-from confluence_engine import ConfluenceEngine
+from analysis.confluence_engine import ConfluenceEngine
 from strategies.basis_trading_engine import BasisTradingEngine
-from deep_nlp_bridge import DeepNLPBridge
+from analysis.deep_nlp_bridge import DeepNLPBridge
 from strategies.market_making_engine import MarketMakingEngine
 from strategies.meta_strategy_selector import MetaStrategySelector
 from institutional_dashboard import InstitutionalDashboard
 from dashboard.event_emitter import DashboardEventEmitter
-from position_sizer import RenaissancePositionSizer
+from risk_management.position_sizer import RenaissancePositionSizer
 from random_baseline import RandomEntryBaseline
 
 from renaissance_types import SignalType, OrderType, MLSignalPackage, TradingDecision
@@ -130,9 +130,9 @@ from ml.ml_integration_bridge import MLIntegrationBridge
 from decision_audit_logger import DecisionAuditLogger
 
 # Renaissance Medallion-Style Engines
-from advanced_mean_reversion_engine import AdvancedMeanReversionEngine
-from correlation_network_engine import CorrelationNetworkEngine
-from garch_volatility_engine import GARCHVolatilityEngine
+from analysis.advanced_mean_reversion_engine import AdvancedMeanReversionEngine
+from analysis.correlation_network_engine import CorrelationNetworkEngine
+from analysis.garch_volatility_engine import GARCHVolatilityEngine
 from data_providers.historical_data_cache import HistoricalDataCache
 
 # Production Orchestrator (optional)

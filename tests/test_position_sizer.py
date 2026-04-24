@@ -20,7 +20,7 @@ import pytest
 import math
 from unittest.mock import MagicMock
 
-from position_sizer import RenaissancePositionSizer, SizingResult
+from risk_management.position_sizer import RenaissancePositionSizer, SizingResult
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

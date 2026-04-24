@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from risk_gateway import RiskGateway
+from risk_management.risk_gateway import RiskGateway
 
 
 class TestKillFile(unittest.TestCase):
