@@ -880,7 +880,8 @@ class MEXCClient(ExchangeClient):
                             self._api_secret.encode(), poll_query.encode(), hashlib.sha256
                         ).hexdigest()
                         poll_url = f"https://api.mexc.com/api/v3/order?{poll_query}&signature={poll_sig}"
-                        async with session.get(poll_url, headers=headers) as poll_resp:
+                        poll_headers = {"X-MEXC-APIKEY": self._api_key, "Content-Type": "application/json"}
+                        async with session.get(poll_url, headers=poll_headers) as poll_resp:
                             if poll_resp.status == 200:
                                 poll_data = await poll_resp.json()
                                 poll_status = poll_data.get('status', '').upper()
