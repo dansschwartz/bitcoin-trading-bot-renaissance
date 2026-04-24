@@ -1,0 +1,9 @@
+{
+  "input_dim": 98,
+  "n_features": 294,
+  "feature_prep": "last_mean_std",
+  "objective": "binary",
+  "best_iteration": 136,
+  "val_acc": 0.5142157001214654,
+  "test_acc": 0.5087385874641629
+}

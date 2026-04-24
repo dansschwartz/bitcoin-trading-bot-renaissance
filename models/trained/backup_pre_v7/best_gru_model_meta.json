@@ -1,0 +1,13 @@
+{
+  "model": "gru",
+  "last_trained": "2026-02-16T15:58:36.570361+00:00",
+  "epochs_trained": 5,
+  "val_loss": 0.9980670499558352,
+  "val_dir_acc": 0.5473869266421608,
+  "test_loss": 1.0013164697271404,
+  "test_dir_acc": 0.5233005044439106,
+  "train_samples": 35775,
+  "val_samples": 6257,
+  "test_samples": 8326,
+  "device": "cpu"
+}
