@@ -304,15 +304,18 @@ class ArbitrageExecutor:
             except Exception as e:
                 logger.warning(f"pairs.get failed: {e}")
 
-        # LAYER 4: Order type — MAKER_EXCHANGES use LIMIT_MAKER (0% fee), others use IOC
+        # LAYER 4: Order type — use IOC (taker) for cross-exchange to guarantee fills.
+        # LIMIT_MAKER (0% fee) is cheaper but doesn't fill fast enough for arb.
+        # At 22 bps edge, 5 bps taker fee still leaves 17 bps profit.
+        # MEXC doesn't support IOC — use MARKET for guaranteed instant fill.
         buy_order = OrderRequest(
             exchange=signal.buy_exchange,
             symbol=signal.symbol,
             side=OrderSide.BUY,
-            order_type=OrderType.LIMIT_MAKER if signal.buy_exchange in self.MAKER_EXCHANGES else OrderType.LIMIT,
+            order_type=OrderType.MARKET if signal.buy_exchange == "mexc" else OrderType.LIMIT,
             quantity=buy_qty,
-            price=buy_price,
-            time_in_force=TimeInForce.GTX if signal.buy_exchange in self.MAKER_EXCHANGES else TimeInForce.IOC,
+            price=None if signal.buy_exchange == "mexc" else buy_price,
+            time_in_force=None if signal.buy_exchange == "mexc" else TimeInForce.IOC,
             client_order_id=f"{trade_id}_buy",
         )
 
@@ -320,10 +323,10 @@ class ArbitrageExecutor:
             exchange=signal.sell_exchange,
             symbol=signal.symbol,
             side=OrderSide.SELL,
-            order_type=OrderType.LIMIT_MAKER if signal.sell_exchange in self.MAKER_EXCHANGES else OrderType.LIMIT,
+            order_type=OrderType.MARKET if signal.sell_exchange == "mexc" else OrderType.LIMIT,
             quantity=sell_qty,
-            price=sell_price,
-            time_in_force=TimeInForce.GTX if signal.sell_exchange in self.MAKER_EXCHANGES else TimeInForce.IOC,
+            price=None if signal.sell_exchange == "mexc" else sell_price,
+            time_in_force=None if signal.sell_exchange == "mexc" else TimeInForce.IOC,
             client_order_id=f"{trade_id}_sell",
         )
 
