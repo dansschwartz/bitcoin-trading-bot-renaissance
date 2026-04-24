@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader, TensorDataset
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from ml_model_loader import (
+from ml.ml_model_loader import (
     INPUT_DIM, TrainedQuantumTransformer, TrainedBidirectionalLSTM,
     TrainedDilatedCNN, TrainedCNN, TrainedGRU, build_full_feature_matrix,
 )

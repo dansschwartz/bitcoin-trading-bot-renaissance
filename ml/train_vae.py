@@ -25,8 +25,8 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from vae_anomaly_detector import VariationalAutoEncoder
-from ml_model_loader import build_feature_sequence, build_full_feature_matrix, INPUT_DIM as ML_INPUT_DIM
+from ml.vae_anomaly_detector import VariationalAutoEncoder
+from ml.ml_model_loader import build_feature_sequence, build_full_feature_matrix, INPUT_DIM as ML_INPUT_DIM
 
 logging.basicConfig(
     level=logging.INFO,

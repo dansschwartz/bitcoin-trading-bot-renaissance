@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from unittest.mock import patch, MagicMock
 
-from ml_model_loader import (
+from ml.ml_model_loader import (
     INPUT_DIM,
     INPUT_DIM_LEGACY,
     DISABLED_MODELS,

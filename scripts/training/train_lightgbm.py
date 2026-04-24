@@ -31,7 +31,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from ml_model_loader import build_full_feature_matrix, INPUT_DIM
+from ml.ml_model_loader import build_full_feature_matrix, INPUT_DIM
 from scripts.training.training_utils import (
     load_derivatives_csvs,
     load_training_csvs,

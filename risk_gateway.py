@@ -10,8 +10,8 @@ import numpy as np
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 from renaissance_engine_core import RiskManager as RenaissanceRiskManager
-from vae_anomaly_detector import VariationalAutoEncoder
-from ml_model_loader import INPUT_DIM as ML_INPUT_DIM
+from ml.vae_anomaly_detector import VariationalAutoEncoder
+from ml.ml_model_loader import INPUT_DIM as ML_INPUT_DIM
 
 VAE_WEIGHTS_PATH = "models/trained/vae_anomaly_detector.pth"
 

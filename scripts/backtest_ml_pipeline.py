@@ -48,7 +48,7 @@ logging.getLogger("torch").setLevel(logging.WARNING)
 import torch
 
 # Import from project
-from ml_model_loader import (
+from ml.ml_model_loader import (
     INPUT_DIM,
     build_feature_sequence,
     build_full_feature_matrix,

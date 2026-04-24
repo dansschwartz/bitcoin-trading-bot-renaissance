@@ -126,7 +126,7 @@ from position_sizer import RenaissancePositionSizer
 from random_baseline import RandomEntryBaseline
 
 from renaissance_types import SignalType, OrderType, MLSignalPackage, TradingDecision
-from ml_integration_bridge import MLIntegrationBridge
+from ml.ml_integration_bridge import MLIntegrationBridge
 from decision_audit_logger import DecisionAuditLogger
 
 # Renaissance Medallion-Style Engines
