@@ -18,7 +18,7 @@ except ImportError:
     PANDAS_AVAILABLE = False
 
 from renaissance_trading_bot import RenaissanceTradingBot
-from enhanced_technical_indicators import PriceData
+from analysis.enhanced_technical_indicators import PriceData
 
 
 @dataclass

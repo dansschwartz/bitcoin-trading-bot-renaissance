@@ -1,7 +1,7 @@
 """Tests for AdvancedMeanReversionEngine."""
 import unittest
 import numpy as np
-from advanced_mean_reversion_engine import (
+from analysis.advanced_mean_reversion_engine import (
     AdvancedMeanReversionEngine, PairState, MeanReversionPortfolio,
 )
 

@@ -20,7 +20,7 @@ from renaissance_trading_bot import (
     _continuous_obv_signal,
     _signed_strength,
 )
-from enhanced_technical_indicators import IndicatorOutput
+from analysis.enhanced_technical_indicators import IndicatorOutput
 
 
 # ---------------------------------------------------------------------------

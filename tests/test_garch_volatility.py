@@ -1,7 +1,7 @@
 """Tests for GARCHVolatilityEngine."""
 import unittest
 import numpy as np
-from garch_volatility_engine import GARCHVolatilityEngine
+from analysis.garch_volatility_engine import GARCHVolatilityEngine
 
 
 class TestGARCHVolatilityEngine(unittest.TestCase):

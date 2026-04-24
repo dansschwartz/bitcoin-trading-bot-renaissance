@@ -53,7 +53,7 @@ import sqlite3
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional
-from enhanced_technical_indicators import EnhancedTechnicalIndicators as RenaissanceTechnicalIndicators
+from analysis.enhanced_technical_indicators import EnhancedTechnicalIndicators as RenaissanceTechnicalIndicators
 from medallion_regime_predictor import MedallionRegimePredictor
 
 # Advanced HMM suite (new)

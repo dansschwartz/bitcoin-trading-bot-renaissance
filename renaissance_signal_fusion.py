@@ -10,8 +10,8 @@ import logging
 from typing import Dict, Any, Tuple
 from datetime import datetime
 
-from microstructure_engine import MicrostructureEngine
-from enhanced_technical_indicators import EnhancedTechnicalIndicators
+from analysis.microstructure_engine import MicrostructureEngine
+from analysis.enhanced_technical_indicators import EnhancedTechnicalIndicators
 from enhanced_config_manager import EnhancedConfigManager
 
 logger = logging.getLogger(__name__)

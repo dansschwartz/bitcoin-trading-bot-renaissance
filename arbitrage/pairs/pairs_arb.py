@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from advanced_mean_reversion_engine import AdvancedMeanReversionEngine, PairState
+from analysis.advanced_mean_reversion_engine import AdvancedMeanReversionEngine, PairState
 
 logger = logging.getLogger("arb.pairs")
 

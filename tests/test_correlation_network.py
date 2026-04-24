@@ -1,7 +1,7 @@
 """Tests for CorrelationNetworkEngine."""
 import unittest
 import numpy as np
-from correlation_network_engine import CorrelationNetworkEngine
+from analysis.correlation_network_engine import CorrelationNetworkEngine
 
 
 class TestCorrelationNetwork(unittest.TestCase):
