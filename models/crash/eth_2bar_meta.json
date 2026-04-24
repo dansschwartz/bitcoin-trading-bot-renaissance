@@ -66,6 +66,8 @@
   "n_features": 51,
   "deploy": true,
   "trained_at": "2026-03-01 16:05:58",
+  "loss_function": "lightgbm_binary",
+  "note": "Not retrained in v7 cycle (2026-04-24). Uses LightGBM binary objective, not DirectionalLoss.",
   "top_features": [
     {
       "name": "vwap_distance",

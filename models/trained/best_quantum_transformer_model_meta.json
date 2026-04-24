@@ -1,13 +1,25 @@
 {
   "model": "quantum_transformer",
-  "last_trained": "2026-02-16T15:13:32.316029+00:00",
-  "epochs_trained": 5,
-  "val_loss": 0.9982033152969516,
-  "val_dir_acc": 0.539875339619626,
-  "test_loss": 1.0010955658825962,
-  "test_dir_acc": 0.5157338457842902,
+  "last_trained": "2026-04-24T00:00:00Z",
+  "epochs_trained": 100,
+  "val_loss": null,
+  "val_dir_acc": null,
+  "test_loss": null,
+  "test_dir_acc": null,
   "train_samples": 35775,
   "val_samples": 6257,
   "test_samples": 8326,
-  "device": "cpu"
+  "device": "cuda",
+  "training_loss_version": "v7",
+  "training_loss_params": {
+    "logit_scale": 3.0,
+    "margin": 0.25
+  },
+  "note": "Retrained with corrected DirectionalLoss v7 parameters (logit_scale=3.0, margin=0.25). Previous v6 training (2026-02-16) used incorrect defaults. Accuracy fields nulled pending live evaluation.",
+  "previous_training": {
+    "date": "2026-02-16T15:13:32.316029+00:00",
+    "loss_version": "v6",
+    "epochs": 5,
+    "test_dir_acc": 0.5157338457842902
+  }
 }
