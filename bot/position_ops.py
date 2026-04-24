@@ -54,7 +54,7 @@ async def resolve_close_price(bot: "RenaissanceTradingBot", pos) -> float:
       3. Live Binance ticker fetch
       4. pos.entry_price (last resort — better than 0)
     """
-    from binance_spot_provider import to_binance_symbol
+    from data_providers.binance_spot_provider import to_binance_symbol
 
     _cpx = getattr(pos, 'current_price', 0.0) or 0.0
 
@@ -454,7 +454,7 @@ async def deduplicate_positions_on_startup(bot: "RenaissanceTradingBot") -> None
     1. If multiple same-side positions exist for a product, keep the newest, close the rest.
     2. If opposing positions exist for a product (LONG + SHORT), close both and go flat.
     """
-    from position_manager import PositionSide, PositionStatus
+    from risk_management.position_manager import PositionSide, PositionStatus
 
     # Group open positions by product_id
     by_product: Dict[str, List] = defaultdict(list)
@@ -539,7 +539,7 @@ async def restore_state(bot: "RenaissanceTradingBot") -> None:
         restored = 0
         net_position = 0.0
         for row in open_positions:
-            from position_manager import Position, PositionSide, PositionStatus
+            from risk_management.position_manager import Position, PositionSide, PositionStatus
             pos = Position(
                 position_id=row['position_id'],
                 product_id=row['product_id'],

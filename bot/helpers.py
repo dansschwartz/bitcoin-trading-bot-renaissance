@@ -377,7 +377,7 @@ def continuous_obv_signal(signal: Any) -> float:
 
 def convert_ws_orderbook_to_snapshot(ws_ob: dict, last_price: float = 0.0) -> Any:
     """Convert WebSocket order_book dict to OrderBookSnapshot."""
-    from microstructure_engine import OrderBookSnapshot, OrderBookLevel
+    from analysis.microstructure_engine import OrderBookSnapshot, OrderBookLevel
     bids_dict = ws_ob.get('bids', {})
     asks_dict = ws_ob.get('asks', {})
     bid_levels = [OrderBookLevel(price=p, size=s) for p, s in sorted(bids_dict.items(), reverse=True)[:20]]

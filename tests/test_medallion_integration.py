@@ -136,7 +136,7 @@ class TestAllModulesInitialize(unittest.TestCase):
         self.assertIsNotNone(obj)
 
     def test_medallion_signal_analogs_init(self):
-        from medallion_signal_analogs import MedallionSignalAnalogs
+        from analysis.medallion_signal_analogs import MedallionSignalAnalogs
         cfg = self.config.get("medallion_analogs", {})
         obj = MedallionSignalAnalogs(cfg, logger=MagicMock())
         self.assertIsNotNone(obj)

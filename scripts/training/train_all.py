@@ -64,7 +64,7 @@ def _train_vae(epochs: int, results: dict, pair_dfs=None) -> None:
 
         # Import VAE training function from existing train_vae.py
         sys.path.insert(0, PROJECT_ROOT)
-        from train_vae import generate_training_samples, train_vae as _train_vae_fn
+        from ml.train_vae import generate_training_samples, train_vae as _train_vae_fn
         import torch
 
         samples = generate_training_samples(pair_dfs)

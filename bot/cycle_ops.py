@@ -108,7 +108,7 @@ async def apply_drawdown_controls(bot: "RenaissanceTradingBot", account_balance:
 async def preload_candle_history(bot: "RenaissanceTradingBot") -> None:
     """Preload 300 candles per pair to eliminate cold-start. Called once on first cycle."""
     import asyncio
-    from binance_spot_provider import to_binance_symbol
+    from data_providers.binance_spot_provider import to_binance_symbol
 
     preload_pairs = list(bot.product_ids)
     for pid in preload_pairs:
@@ -132,7 +132,7 @@ async def preload_candle_history(bot: "RenaissanceTradingBot") -> None:
                     bot.logger.info(f"Preloaded {len(raw_candles_cb)} candles for {pid} (Coinbase)")
                 continue
 
-            from enhanced_technical_indicators import PriceData
+            from analysis.enhanced_technical_indicators import PriceData
             pid_tech = bot._get_tech(pid)
             for c in raw_candles:
                 pd_obj = PriceData(

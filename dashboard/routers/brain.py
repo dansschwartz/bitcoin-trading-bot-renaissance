@@ -105,7 +105,7 @@ async def confluence_status(request: Request):
             signals = reasoning.get("signal_contributions", {})
             if signals:
                 # Run confluence engine against latest signals
-                from confluence_engine import ConfluenceEngine
+                from analysis.confluence_engine import ConfluenceEngine
                 ce = ConfluenceEngine()
                 result = ce.calculate_confluence_boost(signals)
                 result["source"] = "db_fallback"
@@ -151,7 +151,7 @@ async def crash_model_status(request: Request):
 
     # Fallback: load model metadata directly
     try:
-        from crash_model_loader import CrashModelLoader
+        from ml.crash_model_loader import CrashModelLoader
         loader = CrashModelLoader()
         return {
             "status": "static",

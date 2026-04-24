@@ -509,7 +509,7 @@ def retrain_weekly(
     backup_model(VAE_CONFIG["file"])
 
     try:
-        from train_vae import generate_training_samples, train_vae as _train_vae_fn
+        from ml.train_vae import generate_training_samples, train_vae as _train_vae_fn
         import torch as _torch
 
         vae_pair_dfs = load_training_csvs()

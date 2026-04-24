@@ -131,7 +131,7 @@ async def generate_signals(bot: Any, market_data: Dict[str, Any]) -> Dict[str, f
         try:
             _recent = market_data.get('recent_trades', []) or []
             if _recent:
-                from microstructure_engine import TradeData as MSTradeData
+                from analysis.microstructure_engine import TradeData as MSTradeData
                 for t in _recent[-20:]:  # last 20 trades
                     if isinstance(t, dict) and t.get('price', 0) > 0:
                         bot.microstructure_engine.update_trade(MSTradeData(

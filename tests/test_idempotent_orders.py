@@ -81,7 +81,7 @@ class TestIdempotentOrders(unittest.TestCase):
     def test_uuid_format_in_coinbase_client(self):
         """Verify coinbase_client default client_order_id is UUID format."""
         # Import and check the default path
-        from coinbase_client import EnhancedCoinbaseClient
+        from data_providers.coinbase_client import EnhancedCoinbaseClient
         # The default in create_order uses uuid.uuid4()
         # We just verify uuid module is importable and used
         test_id = str(uuid.uuid4())

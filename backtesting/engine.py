@@ -45,13 +45,13 @@ if str(_PROJECT_ROOT) not in sys.path:
 # ---------------------------------------------------------------------------
 _NATIVE_INDICATORS = False
 try:
-    from enhanced_technical_indicators import (
+    from analysis.enhanced_technical_indicators import (
         EnhancedTechnicalIndicators,
         PriceData,
     )
     _NATIVE_INDICATORS = True
 except Exception as e:
-    logger.warning(f"Failed: from enhanced_technical_indicators import (: {e}")
+    logger.warning(f"Failed: from analysis.enhanced_technical_indicators import (: {e}")
 
 logger = logging.getLogger("backtesting.engine")
 

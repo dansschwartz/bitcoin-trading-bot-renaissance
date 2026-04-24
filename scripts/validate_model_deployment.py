@@ -169,7 +169,7 @@ def _detect_model_input_dim(model: Any) -> int:
         return model._input_dim
 
     try:
-        from ml_model_loader import _detect_input_dim
+        from ml.ml_model_loader import _detect_input_dim
         return _detect_input_dim(model)
     except (ImportError, Exception) as e:
         logger.warning(f"Failed to detect input dim via ml_model_loader: {e}")
@@ -194,7 +194,7 @@ def validate_pytorch_model(
 ) -> None:
     """Load a PyTorch model and run dummy inference."""
     try:
-        from ml_model_loader import load_trained_models
+        from ml.ml_model_loader import load_trained_models
     except ImportError as exc:
         result.load_error = f"import error: {exc}"
         return
@@ -262,7 +262,7 @@ def validate_lightgbm_model(
 ) -> None:
     """Load and validate the LightGBM model."""
     try:
-        from ml_model_loader import load_lightgbm_model, predict_lightgbm
+        from ml.ml_model_loader import load_lightgbm_model, predict_lightgbm
     except ImportError as exc:
         result.load_error = f"import error: {exc}"
         return

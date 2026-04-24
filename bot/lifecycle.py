@@ -762,7 +762,7 @@ async def run_continuous_trading(bot: "RenaissanceTradingBot", cycle_interval: i
             open_positions = await bot.db_manager.get_open_positions()
             restored = 0
             for row in open_positions:
-                from position_manager import Position, PositionSide, PositionStatus
+                from risk_management.position_manager import Position, PositionSide, PositionStatus
                 pos = Position(
                     position_id=row['position_id'],
                     product_id=row['product_id'],

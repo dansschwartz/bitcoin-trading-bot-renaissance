@@ -28,7 +28,7 @@ def make_trading_decision(
 ) -> Any:
     """Make final trading decision with Renaissance methodology + Kelly position sizing."""
     from renaissance_types import TradingDecision
-    from position_manager import PositionStatus
+    from risk_management.position_manager import PositionStatus
 
     # ── COST PRE-SCREEN: "The edge must exceed the vig" — Medallion Principle ──
     try:

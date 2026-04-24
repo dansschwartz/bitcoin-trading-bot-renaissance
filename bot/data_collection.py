@@ -140,7 +140,7 @@ async def gap_fill_bars_on_startup(bot: "RenaissanceTradingBot") -> None:
     For each pair, find the latest bar in DB and fetch any missing bars
     up to now from Binance API (max 1000 bars per pair).
     """
-    from binance_spot_provider import to_binance_symbol
+    from data_providers.binance_spot_provider import to_binance_symbol
 
     if not bot.bar_aggregator or not bot._universe_built:
         return
@@ -370,8 +370,8 @@ async def collect_from_binance(bot: "RenaissanceTradingBot", product_id: str) ->
 
     Returns a market_data dict compatible with the existing pipeline.
     """
-    from binance_spot_provider import to_binance_symbol
-    from enhanced_technical_indicators import EnhancedTechnicalIndicators
+    from data_providers.binance_spot_provider import to_binance_symbol
+    from analysis.enhanced_technical_indicators import EnhancedTechnicalIndicators
 
     binance_sym = bot._pair_binance_symbols.get(product_id)
     if not binance_sym:
@@ -388,7 +388,7 @@ async def collect_from_binance(bot: "RenaissanceTradingBot", product_id: str) ->
         # Fetch latest candle for tech indicator feed
         candles = await bot.binance_spot.fetch_candles(binance_sym, '5m', 2)
         if candles:
-            from enhanced_technical_indicators import PriceData
+            from analysis.enhanced_technical_indicators import PriceData
             latest = candles[-1]
             price_data = PriceData(
                 timestamp=datetime.utcfromtimestamp(latest['timestamp']),
@@ -409,7 +409,7 @@ async def collect_from_binance(bot: "RenaissanceTradingBot", product_id: str) ->
         try:
             ob = await bot.binance_spot.fetch_orderbook(binance_sym, 20)
             if ob and ob.get('bids') and ob.get('asks'):
-                from microstructure_engine import OrderBookSnapshot, OrderBookLevel
+                from analysis.microstructure_engine import OrderBookSnapshot, OrderBookLevel
                 bids = [OrderBookLevel(price=p, size=s) for p, s in ob['bids']]
                 asks = [OrderBookLevel(price=p, size=s) for p, s in ob['asks']]
                 order_book_snapshot = OrderBookSnapshot(
@@ -455,7 +455,7 @@ async def collect_from_binance(bot: "RenaissanceTradingBot", product_id: str) ->
 
 def get_tech(bot: "RenaissanceTradingBot", product_id: str):
     """Get per-asset technical indicators instance (creates on-demand for new assets)."""
-    from enhanced_technical_indicators import EnhancedTechnicalIndicators
+    from analysis.enhanced_technical_indicators import EnhancedTechnicalIndicators
     if product_id not in bot._tech_indicators:
         bot._tech_indicators[product_id] = EnhancedTechnicalIndicators()
     return bot._tech_indicators[product_id]
@@ -485,7 +485,7 @@ def load_price_df_from_db(bot: "RenaissanceTradingBot", product_id: str, limit: 
 def load_candles_from_db(bot: "RenaissanceTradingBot", product_id: str, limit: int = 200) -> List:
     """Load historical bars from five_minute_bars as PriceData objects for tech indicator bootstrap."""
     try:
-        from enhanced_technical_indicators import PriceData
+        from analysis.enhanced_technical_indicators import PriceData
         db_path = bot.config.get('database', {}).get('path', 'data/renaissance_bot.db')
         conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
         rows = conn.execute(

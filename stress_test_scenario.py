@@ -84,7 +84,7 @@ class BlackSwanSimulator:
             # For this test, we override the bot's data provider or signals
             
             # 1. Update Technical Indicators
-            from enhanced_technical_indicators import PriceData
+            from analysis.enhanced_technical_indicators import PriceData
             self.bot.technical_indicators.update_price_data(PriceData(
                 timestamp=datetime.now(timezone.utc),
                 open=price, 

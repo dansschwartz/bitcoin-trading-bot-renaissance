@@ -483,7 +483,7 @@ class TestAntiStacking:
 
     def test_blocks_duplicate_long(self):
         """Should block BUY when already has LONG position on same asset."""
-        from position_manager import PositionStatus, PositionSide
+        from risk_management.position_manager import PositionStatus, PositionSide
 
         bot = _make_bot(min_confidence=0.20)
         bot.scan_cycle_count = 100

@@ -20,7 +20,7 @@ import logging
 # Import Step 9 integration components
 try:
     from real_time_risk_monitor import RealTimeRiskMonitor
-    from liquidity_risk_manager import LiquidityRiskManager
+    from risk_management.liquidity_risk_manager import LiquidityRiskManager
 except ImportError:
     logging.warning("Step 9 components not found - running in standalone mode")
 

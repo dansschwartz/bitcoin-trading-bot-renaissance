@@ -111,7 +111,7 @@ def build_lightgbm_features(
         # Build feature names on first pair (from actual feature computation)
         if feature_names is None:
             try:
-                from ml_model_loader import (
+                from ml.ml_model_loader import (
                     _compute_single_pair_features,
                     _build_cross_features,
                     _build_derivatives_features,

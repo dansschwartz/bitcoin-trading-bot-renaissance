@@ -74,7 +74,7 @@ from analysis.cross_asset_engine import CrossAssetCorrelationEngine
 from data_providers.whale_activity_monitor import WhaleActivityMonitor
 from strategies.breakout_scanner import BreakoutScanner, BreakoutSignal
 try:
-    from breakout_strategy import BreakoutStrategy
+    from strategies.breakout_strategy import BreakoutStrategy
     BREAKOUT_STRATEGY_AVAILABLE = True
 except ImportError as _bs_err:
     BREAKOUT_STRATEGY_AVAILABLE = False
@@ -214,7 +214,7 @@ except ImportError:
     HEALTH_MONITOR_AVAILABLE = False
 
 try:
-    from medallion_signal_analogs import MedallionSignalAnalogs
+    from analysis.medallion_signal_analogs import MedallionSignalAnalogs
     MEDALLION_ANALOGS_AVAILABLE = True
 except ImportError:
     MEDALLION_ANALOGS_AVAILABLE = False
@@ -1005,7 +1005,7 @@ class RenaissanceTradingBot:
                             _bo_sym = product_id.split('-')[0] + 'USDT'
                             _bo_candles = await self.binance_spot.fetch_candles(_bo_sym, '5m', 200)
                             if _bo_candles:
-                                from enhanced_technical_indicators import PriceData
+                                from analysis.enhanced_technical_indicators import PriceData
                                 for c in _bo_candles:
                                     pd_obj = PriceData(
                                         timestamp=datetime.utcfromtimestamp(c['timestamp']),
