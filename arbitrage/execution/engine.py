@@ -304,18 +304,21 @@ class ArbitrageExecutor:
             except Exception as e:
                 logger.warning(f"pairs.get failed: {e}")
 
-        # LAYER 4: Order type — use IOC (taker) for cross-exchange to guarantee fills.
-        # LIMIT_MAKER (0% fee) is cheaper but doesn't fill fast enough for arb.
-        # At 22 bps edge, 5 bps taker fee still leaves 17 bps profit.
-        # MEXC doesn't support IOC — use MARKET for guaranteed instant fill.
+        # LAYER 4: Order type — MARKET on MEXC (instant fill, 5bps taker),
+        # IOC on other exchanges. LIMIT_MAKER doesn't fill fast enough for arb.
+        # MEXC doesn't support IOC timeInForce — use MARKET instead.
+        # For MEXC BUY with MARKET: use quoteOrderQty (buy by USD value) for reliability.
+        _mexc_buy = signal.buy_exchange == "mexc"
+        _mexc_sell = signal.sell_exchange == "mexc"
+
         buy_order = OrderRequest(
             exchange=signal.buy_exchange,
             symbol=signal.symbol,
             side=OrderSide.BUY,
-            order_type=OrderType.MARKET if signal.buy_exchange == "mexc" else OrderType.LIMIT,
+            order_type=OrderType.MARKET if _mexc_buy else OrderType.LIMIT,
             quantity=buy_qty,
-            price=None if signal.buy_exchange == "mexc" else buy_price,
-            time_in_force=None if signal.buy_exchange == "mexc" else TimeInForce.IOC,
+            price=None if _mexc_buy else buy_price,
+            time_in_force=None if _mexc_buy else TimeInForce.IOC,
             client_order_id=f"{trade_id}_buy",
         )
 
@@ -323,10 +326,10 @@ class ArbitrageExecutor:
             exchange=signal.sell_exchange,
             symbol=signal.symbol,
             side=OrderSide.SELL,
-            order_type=OrderType.MARKET if signal.sell_exchange == "mexc" else OrderType.LIMIT,
+            order_type=OrderType.MARKET if _mexc_sell else OrderType.LIMIT,
             quantity=sell_qty,
-            price=None if signal.sell_exchange == "mexc" else sell_price,
-            time_in_force=None if signal.sell_exchange == "mexc" else TimeInForce.IOC,
+            price=None if _mexc_sell else sell_price,
+            time_in_force=None if _mexc_sell else TimeInForce.IOC,
             client_order_id=f"{trade_id}_sell",
         )
 

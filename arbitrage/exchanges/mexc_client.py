@@ -865,6 +865,42 @@ class MEXCClient(ExchangeClient):
                     else:
                         fee_amount = cost * taker_rate             # fee in quote
 
+                # MARKET orders on MEXC may return status=NEW with 0 fills initially.
+                # Poll once to get actual fill status.
+                if order_type == "MARKET" and filled_qty == 0 and order_id:
+                    await asyncio.sleep(0.5)  # Brief wait for MEXC to process
+                    try:
+                        poll_params = {
+                            'symbol': symbol_raw,
+                            'orderId': order_id,
+                            'timestamp': str(int(time.time() * 1000)),
+                        }
+                        poll_query = '&'.join(f"{k}={v}" for k, v in sorted(poll_params.items()))
+                        poll_sig = hmac.new(
+                            self._api_secret.encode(), poll_query.encode(), hashlib.sha256
+                        ).hexdigest()
+                        poll_url = f"https://api.mexc.com/api/v3/order?{poll_query}&signature={poll_sig}"
+                        async with session.get(poll_url, headers=headers) as poll_resp:
+                            if poll_resp.status == 200:
+                                poll_data = await poll_resp.json()
+                                poll_status = poll_data.get('status', '').upper()
+                                poll_filled = Decimal(str(poll_data.get('executedQty', '0') or '0'))
+                                poll_cost = Decimal(str(poll_data.get('cummulativeQuoteQty', '0') or '0'))
+                                if poll_filled > 0:
+                                    filled_qty = poll_filled
+                                    cost = poll_cost
+                                    avg_price = cost / filled_qty if filled_qty > 0 else None
+                                    status = status_map.get(poll_status, OrderStatus.FILLED)
+                                    if order.side == OrderSide.BUY:
+                                        fee_amount = filled_qty * Decimal('0.0005')
+                                    else:
+                                        fee_amount = cost * Decimal('0.0005')
+                                    logger.info(
+                                        f"MARKET POLL FILLED: {order.symbol} "
+                                        f"filled={float(filled_qty)} cost=${float(cost):.2f}")
+                    except Exception as e:
+                        logger.warning(f"MARKET poll failed: {e}")
+
                 logger.info(
                     f"DIRECT ORDER RESULT: {order.symbol} "
                     f"status={status_str} orderId={order_id} "
