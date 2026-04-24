@@ -10,7 +10,7 @@ import logging
 import os
 import time
 
-from coinbase_client import create_client_from_config, EnhancedCoinbaseClient
+from data_providers.coinbase_client import create_client_from_config, EnhancedCoinbaseClient
 from microstructure_engine import OrderBookSnapshot, OrderBookLevel
 from enhanced_technical_indicators import PriceData
 

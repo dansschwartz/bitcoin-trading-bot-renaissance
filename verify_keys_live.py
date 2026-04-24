@@ -4,8 +4,8 @@ import logging
 import json
 from pathlib import Path
 from dotenv import load_dotenv
-from coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
-from whale_activity_monitor import WhaleActivityMonitor
+from data_providers.coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
+from data_providers.whale_activity_monitor import WhaleActivityMonitor
 
 async def test_api_keys():
     load_dotenv()

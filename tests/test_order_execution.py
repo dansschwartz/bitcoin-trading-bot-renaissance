@@ -1,7 +1,7 @@
 """Unit tests for order execution routing (paper vs real) and circuit breaker."""
 
 import unittest
-from coinbase_client import (
+from data_providers.coinbase_client import (
     EnhancedCoinbaseClient,
     CoinbaseCredentials,
     CircuitBreaker,

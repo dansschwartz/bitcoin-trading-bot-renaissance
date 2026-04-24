@@ -23,10 +23,10 @@ import time
 from enhanced_config_manager import EnhancedConfigManager
 from microstructure_engine import MicrostructureEngine, MicrostructureMetrics
 from enhanced_technical_indicators import EnhancedTechnicalIndicators, IndicatorOutput
-from market_data_provider import LiveMarketDataProvider
-from derivatives_data_provider import DerivativesDataProvider
+from data_providers.market_data_provider import LiveMarketDataProvider
+from data_providers.derivatives_data_provider import DerivativesDataProvider
 from renaissance_signal_fusion import RenaissanceSignalFusion
-from alternative_data_engine import AlternativeDataEngine, AlternativeSignal
+from data_providers.alternative_data_engine import AlternativeDataEngine, AlternativeSignal
 
 # ── Regime Detection Hierarchy ──
 # PRIMARY (drives all trading decisions):
@@ -59,19 +59,19 @@ from database_manager import DatabaseManager
 from performance_attribution_engine import PerformanceAttributionEngine
 
 # Order Execution & Position Management
-from coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
+from data_providers.coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
 from position_manager import EnhancedPositionManager, RiskLimits, PositionStatus
 # Legacy AlertManager (Slack webhook, always on) — lightweight fallback.
 # The canonical alert system is monitoring.alert_manager.AlertManager (Telegram + persistence).
 from alert_manager import AlertManager
-from coinbase_advanced_client import CoinbaseAdvancedClient
+from data_providers.coinbase_advanced_client import CoinbaseAdvancedClient
 from logger import SecretMaskingFilter
-from binance_spot_provider import BinanceSpotProvider, to_binance_symbol, from_binance_symbol
+from data_providers.binance_spot_provider import BinanceSpotProvider, to_binance_symbol, from_binance_symbol
 
 # Step 14 & 16 & Deep Alternative
 from genetic_optimizer import GeneticWeightOptimizer
 from cross_asset_engine import CrossAssetCorrelationEngine
-from whale_activity_monitor import WhaleActivityMonitor
+from data_providers.whale_activity_monitor import WhaleActivityMonitor
 from breakout_scanner import BreakoutScanner, BreakoutSignal
 try:
     from breakout_strategy import BreakoutStrategy
@@ -133,7 +133,7 @@ from decision_audit_logger import DecisionAuditLogger
 from advanced_mean_reversion_engine import AdvancedMeanReversionEngine
 from correlation_network_engine import CorrelationNetworkEngine
 from garch_volatility_engine import GARCHVolatilityEngine
-from historical_data_cache import HistoricalDataCache
+from data_providers.historical_data_cache import HistoricalDataCache
 
 # Production Orchestrator (optional)
 try:

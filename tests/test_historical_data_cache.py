@@ -3,7 +3,7 @@ import unittest
 import tempfile
 import os
 import numpy as np
-from historical_data_cache import HistoricalDataCache
+from data_providers.historical_data_cache import HistoricalDataCache
 import logging
 
 
