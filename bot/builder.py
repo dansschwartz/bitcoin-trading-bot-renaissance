@@ -86,12 +86,12 @@ class BotBuilder:
     def build_data_layer(bot: 'RenaissanceTradingBot') -> None:
         """Initialize data providers and market data components."""
         from enhanced_config_manager import EnhancedConfigManager
-        from microstructure_engine import MicrostructureEngine
-        from enhanced_technical_indicators import EnhancedTechnicalIndicators
-        from market_data_provider import LiveMarketDataProvider
-        from derivatives_data_provider import DerivativesDataProvider
+        from analysis.microstructure_engine import MicrostructureEngine
+        from analysis.enhanced_technical_indicators import EnhancedTechnicalIndicators
+        from data_providers.market_data_provider import LiveMarketDataProvider
+        from data_providers.derivatives_data_provider import DerivativesDataProvider
         from renaissance_signal_fusion import RenaissanceSignalFusion
-        from alternative_data_engine import AlternativeDataEngine
+        from data_providers.alternative_data_engine import AlternativeDataEngine
         from renaissance_engine_core import SignalFusion
 
         bot.product_ids = bot.config.get("trading", {}).get("product_ids", ["BTC-USD"])
@@ -116,26 +116,26 @@ class BotBuilder:
     @staticmethod
     def build_signal_layer(bot: 'RenaissanceTradingBot') -> None:
         """Initialize signal generation components."""
-        from volume_profile_engine import VolumeProfileEngine
-        from fractal_intelligence import FractalIntelligenceEngine
-        from market_entropy_engine import MarketEntropyEngine
-        from quantum_oscillator_engine import QuantumOscillatorEngine
+        from analysis.volume_profile_engine import VolumeProfileEngine
+        from analysis.fractal_intelligence import FractalIntelligenceEngine
+        from analysis.market_entropy_engine import MarketEntropyEngine
+        from analysis.quantum_oscillator_engine import QuantumOscillatorEngine
         from ghost_runner import GhostRunner
         from self_reinforcing_learning import SelfReinforcingLearningEngine
-        from confluence_engine import ConfluenceEngine
-        from basis_trading_engine import BasisTradingEngine
-        from deep_nlp_bridge import DeepNLPBridge
-        from market_making_engine import MarketMakingEngine
-        from meta_strategy_selector import MetaStrategySelector
+        from analysis.confluence_engine import ConfluenceEngine
+        from strategies.basis_trading_engine import BasisTradingEngine
+        from analysis.deep_nlp_bridge import DeepNLPBridge
+        from strategies.market_making_engine import MarketMakingEngine
+        from strategies.meta_strategy_selector import MetaStrategySelector
         from genetic_optimizer import GeneticWeightOptimizer
-        from cross_asset_engine import CrossAssetCorrelationEngine
-        from whale_activity_monitor import WhaleActivityMonitor
-        from breakout_scanner import BreakoutScanner, BreakoutSignal
-        from advanced_mean_reversion_engine import AdvancedMeanReversionEngine
-        from correlation_network_engine import CorrelationNetworkEngine
-        from garch_volatility_engine import GARCHVolatilityEngine
-        from historical_data_cache import HistoricalDataCache
-        from statistical_arbitrage_engine import StatisticalArbitrageEngine
+        from analysis.cross_asset_engine import CrossAssetCorrelationEngine
+        from data_providers.whale_activity_monitor import WhaleActivityMonitor
+        from strategies.breakout_scanner import BreakoutScanner, BreakoutSignal
+        from analysis.advanced_mean_reversion_engine import AdvancedMeanReversionEngine
+        from analysis.correlation_network_engine import CorrelationNetworkEngine
+        from analysis.garch_volatility_engine import GARCHVolatilityEngine
+        from data_providers.historical_data_cache import HistoricalDataCache
+        from analysis.statistical_arbitrage_engine import StatisticalArbitrageEngine
         from random_baseline import RandomEntryBaseline
 
         db_cfg = bot.config.get("database", {"path": "data/renaissance_bot.db", "enabled": True})
@@ -190,7 +190,7 @@ class BotBuilder:
         bot.breakout_strategy = None
         if _flag('BREAKOUT_STRATEGY_AVAILABLE'):
             try:
-                from breakout_strategy import BreakoutStrategy
+                from strategies.breakout_strategy import BreakoutStrategy
                 _bst_db = db_path
                 _bst_cfg = bot.config.get("breakout_strategy", {})
                 bot.breakout_strategy = BreakoutStrategy(db_path=_bst_db, config=_bst_cfg, logger=bot.logger)
@@ -232,7 +232,7 @@ class BotBuilder:
 
         # Medallion signal analogs
         if _flag('MEDALLION_ANALOGS_AVAILABLE'):
-            from medallion_signal_analogs import MedallionSignalAnalogs
+            from analysis.medallion_signal_analogs import MedallionSignalAnalogs
             analog_cfg = bot.config.get('medallion_analogs', {})
             bot.medallion_analogs = MedallionSignalAnalogs(analog_cfg, logger=bot.logger)
         else:
@@ -265,7 +265,7 @@ class BotBuilder:
     def build_risk_layer(bot: 'RenaissanceTradingBot') -> None:
         """Initialize risk management components."""
         from regime.regime_overlay import RegimeOverlay
-        from risk_gateway import RiskGateway
+        from risk_management.risk_gateway import RiskGateway
         from real_time_pipeline import RealTimePipeline
         from renaissance_engine_core import RiskManager
 
@@ -294,10 +294,10 @@ class BotBuilder:
     def build_execution_layer(bot: 'RenaissanceTradingBot') -> None:
         """Initialize execution and position management components."""
         from execution_algorithm_suite import ExecutionAlgorithmSuite
-        from slippage_protection_system import SlippageProtectionSystem
-        from coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
-        from position_manager import EnhancedPositionManager, RiskLimits
-        from position_sizer import RenaissancePositionSizer
+        from risk_management.slippage_protection_system import SlippageProtectionSystem
+        from data_providers.coinbase_client import EnhancedCoinbaseClient, CoinbaseCredentials
+        from risk_management.position_manager import EnhancedPositionManager, RiskLimits
+        from risk_management.position_sizer import RenaissancePositionSizer
         from alert_manager import AlertManager
 
         bot.execution_suite = ExecutionAlgorithmSuite()
@@ -361,7 +361,7 @@ class BotBuilder:
         # WebSocket feed
         bot._ws_queue: queue.Queue = queue.Queue(maxsize=1000)
         try:
-            from coinbase_advanced_client import CoinbaseAdvancedClient
+            from data_providers.coinbase_advanced_client import CoinbaseAdvancedClient
             ws_config = {
                 'api_key': os.environ.get(cb_config.get("api_key_env", "CB_API_KEY"), ""),
                 'api_secret': os.environ.get(cb_config.get("api_secret_env", "CB_API_SECRET"), ""),
@@ -393,7 +393,7 @@ class BotBuilder:
     @staticmethod
     def build_ml_layer(bot: 'RenaissanceTradingBot') -> None:
         """Initialize ML models and integration bridge."""
-        from ml_integration_bridge import MLIntegrationBridge
+        from ml.ml_integration_bridge import MLIntegrationBridge
 
         bot.ml_enabled = bot.config.get("ml_integration", {}).get("enabled", True)
         bot.ml_bridge = MLIntegrationBridge(bot.config)
@@ -785,7 +785,7 @@ class BotBuilder:
     @staticmethod
     def build_universe_layer(bot: 'RenaissanceTradingBot') -> None:
         """Initialize Binance spot provider and dynamic universe state."""
-        from binance_spot_provider import BinanceSpotProvider
+        from data_providers.binance_spot_provider import BinanceSpotProvider
 
         bot.binance_spot = BinanceSpotProvider(logger=bot.logger)
 
@@ -942,7 +942,7 @@ class BotBuilder:
         spray_config = bot.config.get('token_spray', {})
         if spray_config.get('enabled', False):
             try:
-                from token_spray_engine import TokenSprayEngine
+                from strategies.token_spray_engine import TokenSprayEngine
                 bot.token_spray = TokenSprayEngine(config=spray_config, db_path=db_path, logger=bot.logger)
             except Exception as _spray_err:
                 bot.logger.warning(f"TokenSprayEngine init failed: {_spray_err}")
@@ -954,7 +954,7 @@ class BotBuilder:
         straddles_config = bot.config.get('straddles', {})
         if straddles_config.get('enabled', False):
             try:
-                from straddle_engine import StraddleEngine, StraddleFleetController
+                from strategies.straddle_engine import StraddleEngine, StraddleFleetController
                 bot.straddle_fleet = StraddleFleetController(
                     fleet_daily_loss_limit=float(straddles_config.get('fleet_daily_loss_limit', 1500)),
                     fleet_max_deployed=float(straddles_config.get('fleet_max_deployed', 15000)),
@@ -979,7 +979,7 @@ class BotBuilder:
             old_straddle_config = bot.config.get('straddle', {})
             if old_straddle_config.get('enabled', False):
                 try:
-                    from straddle_engine import StraddleEngine
+                    from strategies.straddle_engine import StraddleEngine
                     bot.straddle_engine = StraddleEngine(
                         config=old_straddle_config, db_path=db_path, logger=bot.logger,
                     )
