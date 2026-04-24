@@ -11,8 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from macro_regime_detector import MacroRegime
-from crypto_regime_detector import CryptoRegime
+from regime.macro_regime_detector import MacroRegime
+from regime.crypto_regime_detector import CryptoRegime
 
 
 @dataclass

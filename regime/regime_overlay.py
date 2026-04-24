@@ -54,11 +54,11 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional
 from analysis.enhanced_technical_indicators import EnhancedTechnicalIndicators as RenaissanceTechnicalIndicators
-from medallion_regime_predictor import MedallionRegimePredictor
+from regime.medallion_regime_predictor import MedallionRegimePredictor
 
 # Advanced HMM suite (new)
 try:
-    from advanced_regime_detector import (
+    from regime.advanced_regime_detector import (
         AdvancedRegimeDetector, RegimeState, MarketRegime,
         REGIME_ALPHA_WEIGHTS, ALPHA_TO_SIGNAL_MAP,
     )

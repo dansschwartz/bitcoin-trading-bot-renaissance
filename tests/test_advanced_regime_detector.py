@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 import pandas as pd
-from advanced_regime_detector import (
+from regime.advanced_regime_detector import (
     AdvancedRegimeDetector, MarketRegime, RegimeState,
     REGIME_ALPHA_WEIGHTS, ALPHA_TO_SIGNAL_MAP,
 )

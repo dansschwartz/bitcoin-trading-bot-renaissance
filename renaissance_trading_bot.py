@@ -45,7 +45,7 @@ from data_providers.alternative_data_engine import AlternativeDataEngine, Altern
 # INTERNAL (consumed inside RegimeOverlay, not called from this file):
 #   advanced_regime_detector.py    → AdvancedRegimeDetector  (5-state HMM engine)
 #   medallion_regime_predictor.py  → MedallionRegimePredictor (3-state, hmm_forecast field)
-from regime_overlay import RegimeOverlay
+from regime.regime_overlay import RegimeOverlay
 from risk_management.risk_gateway import RiskGateway
 from real_time_pipeline import RealTimePipeline
 
@@ -341,9 +341,9 @@ except ImportError:
 # These detectors log alongside RegimeOverlay but do NOT influence trading decisions.
 # ModelRouter is in Phase 1 (observation mode): logs regime-to-model mapping, does not enforce.
 try:
-    from macro_regime_detector import MacroRegimeDetector, MacroRegime
-    from crypto_regime_detector import CryptoRegimeDetector, CryptoRegime
-    from model_router import ModelRouter
+    from regime.macro_regime_detector import MacroRegimeDetector, MacroRegime
+    from regime.crypto_regime_detector import CryptoRegimeDetector, CryptoRegime
+    from regime.model_router import ModelRouter
     HIERARCHICAL_REGIME_AVAILABLE = True
 except ImportError as _hr_err:
     HIERARCHICAL_REGIME_AVAILABLE = False

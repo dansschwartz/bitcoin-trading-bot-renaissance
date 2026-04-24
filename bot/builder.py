@@ -264,7 +264,7 @@ class BotBuilder:
     @staticmethod
     def build_risk_layer(bot: 'RenaissanceTradingBot') -> None:
         """Initialize risk management components."""
-        from regime_overlay import RegimeOverlay
+        from regime.regime_overlay import RegimeOverlay
         from risk_gateway import RiskGateway
         from real_time_pipeline import RealTimePipeline
         from renaissance_engine_core import RiskManager
@@ -580,9 +580,9 @@ class BotBuilder:
         bot._crypto_regime_detector = None
         bot._model_router = None
         if _flag('HIERARCHICAL_REGIME_AVAILABLE'):
-            from macro_regime_detector import MacroRegimeDetector
-            from crypto_regime_detector import CryptoRegimeDetector
-            from model_router import ModelRouter
+            from regime.macro_regime_detector import MacroRegimeDetector
+            from regime.crypto_regime_detector import CryptoRegimeDetector
+            from regime.model_router import ModelRouter
             bot._macro_regime_detector = MacroRegimeDetector(logger=bot.logger)
             bot._crypto_regime_detector = CryptoRegimeDetector(logger=bot.logger)
             bot._model_router = ModelRouter(observation_mode=True, logger=bot.logger)
