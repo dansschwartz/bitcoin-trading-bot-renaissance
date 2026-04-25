@@ -470,7 +470,7 @@ class ArbitrageOrchestrator:
         # Start MEXC User Data Stream (private WS for instant fill confirmations)
         ws_cfg = self.config.get('websocket', {})
         use_ws_fills = ws_cfg.get('use_ws_fill_stream', True)
-        if not paper:
+        if not self._paper_trading:
             try:
                 await self.mexc.start_user_data_stream(use_ws_fills=use_ws_fills)
                 logger.info("MEXC User Data Stream started (WS fill confirmations)")
