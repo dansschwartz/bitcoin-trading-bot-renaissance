@@ -869,7 +869,7 @@ class MEXCClient(ExchangeClient):
     # --- listenKey management ---
 
     async def _create_listen_key(self) -> Optional[str]:
-        """Create a new listenKey via POST /api/v3/userDataStream."""
+        """Create a new listenKey via POST /api/v3/userDataStream (signed)."""
         url = "https://api.mexc.com/api/v3/userDataStream"
         session = self._http_session
         if not session:
@@ -878,7 +878,12 @@ class MEXCClient(ExchangeClient):
 
         for attempt in range(3):
             try:
-                async with session.post(url, headers={
+                ts = str(int(time.time() * 1000))
+                query = f"timestamp={ts}"
+                sig = hmac.new(
+                    self._api_secret.encode(), query.encode(), hashlib.sha256
+                ).hexdigest()
+                async with session.post(f"{url}?{query}&signature={sig}", headers={
                     "X-MEXC-APIKEY": self._api_key,
                     "Content-Type": "application/json",
                 }) as resp:
@@ -908,10 +913,15 @@ class MEXCClient(ExchangeClient):
         if not session:
             return
 
-        async with session.put(url, headers={
+        ts = str(int(time.time() * 1000))
+        query = f"listenKey={self._listen_key}&timestamp={ts}"
+        sig = hmac.new(
+            self._api_secret.encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        async with session.put(f"{url}?{query}&signature={sig}", headers={
             "X-MEXC-APIKEY": self._api_key,
             "Content-Type": "application/json",
-        }, params={"listenKey": self._listen_key}) as resp:
+        }) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"listenKey refresh failed ({resp.status}): {text}")
@@ -927,9 +937,14 @@ class MEXCClient(ExchangeClient):
             return
 
         try:
-            async with session.delete(url, headers={
+            ts = str(int(time.time() * 1000))
+            query = f"listenKey={self._listen_key}&timestamp={ts}"
+            sig = hmac.new(
+                self._api_secret.encode(), query.encode(), hashlib.sha256
+            ).hexdigest()
+            async with session.delete(f"{url}?{query}&signature={sig}", headers={
                 "X-MEXC-APIKEY": self._api_key,
-            }, params={"listenKey": self._listen_key}) as resp:
+            }) as resp:
                 if resp.status == 200:
                     logger.debug("listenKey deleted")
                 else:
