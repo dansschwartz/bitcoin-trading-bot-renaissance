@@ -21,6 +21,8 @@ websocket:
   max_connection_age_hours: 23
   max_reconnect_attempts: 3
   rest_fallback_duration_seconds: 60
+  use_ws_fill_stream: true           # Subscribe to MEXC User Data Stream for instant fill confirmations
+  ws_fill_timeout_ms: 2000           # Timeout for WS fill confirmation before REST poll fallback
 
 pairs:
   phase_1:                              # Large-cap — tight spreads, high liquidity

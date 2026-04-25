@@ -24,6 +24,8 @@ websocket:
   binance_us_depth_levels: 20
   binance_us_depth_update_speed_ms: 100
   rest_fallback_duration_seconds: 60
+  use_ws_fill_stream: true           # Subscribe to MEXC User Data Stream for instant fill confirmations
+  ws_fill_timeout_ms: 2000           # Timeout for WS fill confirmation before REST poll fallback
 
 # Top MEXC <-> Binance US overlapping pairs by 24h volume
 pairs:

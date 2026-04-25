@@ -43,6 +43,10 @@ WS_MAX_RECONNECT = 3        # attempts before REST fallback
 WS_FALLBACK_DURATION = 180  # seconds of REST fallback before retrying WS
 WS_DEPTH_LEVELS = 20
 
+# User Data Stream constants
+WS_USER_DATA_LISTEN_KEY_REFRESH = 30 * 60   # Refresh listenKey every 30 min (valid for 60 min)
+WS_USER_DATA_PING_INTERVAL = 20             # seconds — keep private WS alive
+
 
 class _WSBlockedError(Exception):
     """Raised when MEXC WS subscriptions are geo-blocked."""
@@ -68,6 +72,15 @@ class MEXCClient(ExchangeClient):
         self._ws_ticker_running = False
         self._ws_ticker_task: Optional[asyncio.Task] = None
         self._ws_ticker_callback: Optional[Callable] = None
+        # User Data Stream (private WS for instant fill confirmations)
+        self._ws_user_data_running = False
+        self._ws_user_data_task: Optional[asyncio.Task] = None
+        self._listen_key: Optional[str] = None
+        self._listen_key_expires: float = 0.0
+        # Maps order_id → asyncio.Future[dict] for WS fill notifications
+        self._ws_fill_futures: Dict[str, asyncio.Future] = {}
+        self._ws_fill_stream_ready = False
+        self._use_ws_fill_stream = True  # Config-controlled; set via start_user_data_stream()
         # Volume limiter (set by orchestrator for fill rate degradation)
         self.volume_limiter = None
         # Shared aiohttp session for REST calls (reuses TCP connections)
@@ -163,8 +176,22 @@ class MEXCClient(ExchangeClient):
 
     async def disconnect(self) -> None:
         self._ws_running = False
+        self._ws_user_data_running = False
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()
+        if self._ws_user_data_task and not self._ws_user_data_task.done():
+            self._ws_user_data_task.cancel()
+        # Cancel all pending fill futures
+        for fut in self._ws_fill_futures.values():
+            if not fut.done():
+                fut.cancel()
+        self._ws_fill_futures.clear()
+        # Delete listenKey
+        if self._listen_key:
+            try:
+                await self._delete_listen_key()
+            except Exception:
+                pass
         if self._ticker_session:
             await self._ticker_session.close()
             self._ticker_session = None
@@ -607,6 +634,310 @@ class MEXCClient(ExchangeClient):
             return float('inf')
         return (time.time() - self._ws_ticker_last_update) * 1000
 
+    # ========== User Data Stream (Private WS — Fill Confirmations) ==========
+
+    async def start_user_data_stream(self, use_ws_fills: bool = True) -> None:
+        """Start the authenticated User Data WebSocket stream.
+
+        This subscribes to spot@private.orders.v3.api and
+        spot@private.deals.v3.api for instant fill notifications,
+        eliminating the need for REST polling after MARKET orders.
+
+        Args:
+            use_ws_fills: If True, MARKET order fill detection uses WS
+                          instead of REST polling (saves ~500ms per order).
+        """
+        self._use_ws_fill_stream = use_ws_fills
+        if self._ws_user_data_running:
+            return
+        if not self._api_key or not self._api_secret:
+            logger.warning("Cannot start User Data Stream: no API credentials")
+            return
+        if self.paper_trading:
+            logger.info("User Data Stream skipped (paper trading mode)")
+            return
+        self._ws_user_data_running = True
+        self._ws_user_data_task = asyncio.create_task(self._ws_user_data_loop())
+        logger.info("User Data Stream starting (WS fill confirmations enabled)")
+
+    async def _ws_user_data_loop(self) -> None:
+        """Outer loop: reconnection state machine for user data stream."""
+        reconnect_attempts = 0
+        while self._ws_user_data_running:
+            try:
+                await self._ws_user_data_connect()
+                reconnect_attempts = 0
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                reconnect_attempts += 1
+                backoff = min(2 ** reconnect_attempts, 60)
+                logger.warning(
+                    f"User Data WS disconnected: {e} — "
+                    f"reconnecting in {backoff}s (attempt {reconnect_attempts})"
+                )
+                self._ws_fill_stream_ready = False
+                await asyncio.sleep(backoff)
+
+    async def _ws_user_data_connect(self) -> None:
+        """Single lifecycle of a User Data WebSocket session.
+
+        1. Obtain/refresh listenKey via REST.
+        2. Connect to wss://wbs-api.mexc.com/ws?listenKey=<key>
+        3. Subscribe to private order + deal channels.
+        4. Run ping loop + listenKey refresh loop concurrently.
+        5. Dispatch order/deal messages to fill futures.
+        """
+        # Obtain listenKey
+        listen_key = await self._create_listen_key()
+        if not listen_key:
+            raise RuntimeError("Failed to create listenKey")
+        self._listen_key = listen_key
+        self._listen_key_expires = time.monotonic() + 55 * 60  # Refresh before 60 min
+
+        ws_url = f"{WS_ENDPOINT}?listenKey={listen_key}"
+        connect_time = time.monotonic()
+        max_age_sec = WS_MAX_AGE_HOURS * 3600
+
+        async with websockets.connect(
+            ws_url,
+            ping_interval=None,
+            close_timeout=5,
+            open_timeout=30,
+        ) as ws:
+            logger.info("User Data WebSocket connected")
+
+            # Subscribe to private channels
+            sub_msg = {
+                "method": "SUBSCRIPTION",
+                "params": [
+                    "spot@private.orders.v3.api",
+                    "spot@private.deals.v3.api",
+                ],
+            }
+            await ws.send(json.dumps(sub_msg))
+
+            self._ws_fill_stream_ready = True
+            logger.info("User Data Stream ready — fill confirmations via WS")
+
+            # Concurrent tasks: ping, listenKey refresh, message processing
+            ping_task = asyncio.create_task(
+                self._ws_user_data_ping_loop(ws)
+            )
+            refresh_task = asyncio.create_task(
+                self._ws_listen_key_refresh_loop()
+            )
+            try:
+                async for raw in ws:
+                    if not self._ws_user_data_running:
+                        break
+                    if time.monotonic() - connect_time > max_age_sec:
+                        logger.info("User Data WS max age reached, reconnecting")
+                        break
+                    try:
+                        self._ws_handle_user_data(raw)
+                    except Exception as e:
+                        logger.debug(f"User Data WS parse error: {e}")
+            finally:
+                self._ws_fill_stream_ready = False
+                ping_task.cancel()
+                refresh_task.cancel()
+
+    async def _ws_user_data_ping_loop(self, ws) -> None:
+        """Send PING every 20 seconds to keep user data WS alive."""
+        try:
+            while self._ws_user_data_running:
+                await asyncio.sleep(WS_USER_DATA_PING_INTERVAL)
+                await ws.send(json.dumps({"method": "PING"}))
+        except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
+            pass
+
+    async def _ws_listen_key_refresh_loop(self) -> None:
+        """Refresh listenKey every 30 minutes (expires at 60 min)."""
+        try:
+            while self._ws_user_data_running:
+                await asyncio.sleep(WS_USER_DATA_LISTEN_KEY_REFRESH)
+                try:
+                    await self._refresh_listen_key()
+                    logger.debug("listenKey refreshed successfully")
+                except Exception as e:
+                    logger.warning(f"listenKey refresh failed: {e}")
+        except asyncio.CancelledError:
+            pass
+
+    def _ws_handle_user_data(self, raw: str) -> None:
+        """Parse user data WS message and resolve fill futures."""
+        msg = json.loads(raw)
+        if isinstance(msg, dict):
+            msg_text = msg.get("msg", "")
+            if msg_text == "PONG" or msg.get("id") is not None:
+                return
+
+        channel = msg.get("c", "")
+        data = msg.get("d", {})
+
+        if "private.orders" in channel:
+            self._handle_order_update(data)
+        elif "private.deals" in channel:
+            self._handle_deal_update(data)
+
+    def _handle_order_update(self, data: dict) -> None:
+        """Handle order status update from WS.
+
+        MEXC spot@private.orders.v3.api fields:
+          i: orderId, S: side (1=BUY,2=SELL), o: orderType,
+          s: symbol, p: price, q: quantity, X: status,
+          ap: avgPrice, A: cumulativeAmount, z: cumulativeQuantity,
+          n: commission, N: commissionAsset, V: volume, O: createTime
+        """
+        order_id = str(data.get("i", ""))
+        status = str(data.get("X", "")).upper()
+
+        if not order_id:
+            return
+
+        # Build fill info dict
+        fill_info = {
+            "order_id": order_id,
+            "symbol_raw": data.get("s", ""),
+            "status": status,
+            "side": "BUY" if data.get("S") == 1 else "SELL",
+            "filled_qty": data.get("z", "0"),
+            "cumulative_quote_qty": data.get("A", "0"),
+            "avg_price": data.get("ap", "0"),
+            "commission": data.get("n", "0"),
+            "commission_asset": data.get("N", ""),
+        }
+
+        # Resolve any waiting future for this order
+        if status in ("FILLED", "PARTIALLY_FILLED", "CANCELED", "CANCELLED"):
+            fut = self._ws_fill_futures.get(order_id)
+            if fut and not fut.done():
+                fut.set_result(fill_info)
+                logger.debug(
+                    f"WS FILL resolved: orderId={order_id} status={status} "
+                    f"filled={fill_info['filled_qty']}"
+                )
+
+    def _handle_deal_update(self, data: dict) -> None:
+        """Handle trade/deal notification from WS.
+
+        spot@private.deals.v3.api provides per-fill granularity.
+        We primarily use the order channel for fill status, but log deals
+        for audit trail and fee tracking.
+        """
+        order_id = str(data.get("i", ""))
+        trade_id = str(data.get("t", ""))
+        price = data.get("p", "0")
+        qty = data.get("v", data.get("q", "0"))  # 'v' or 'q' depending on API version
+        commission = data.get("n", "0")
+        commission_asset = data.get("N", "")
+        is_buyer = data.get("S", 1) == 1
+
+        logger.debug(
+            f"WS DEAL: orderId={order_id} tradeId={trade_id} "
+            f"{'BUY' if is_buyer else 'SELL'} price={price} qty={qty} "
+            f"fee={commission} {commission_asset}"
+        )
+
+    async def await_fill_ws(
+        self, order_id: str, timeout_s: float = 3.0
+    ) -> Optional[dict]:
+        """Wait for a fill notification via the User Data WebSocket stream.
+
+        Creates an asyncio.Future for the given order_id, which gets resolved
+        when _handle_order_update receives a terminal status (FILLED, CANCELED, etc.).
+
+        Returns the fill info dict, or None on timeout.
+        """
+        if not self._ws_fill_stream_ready:
+            return None
+
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._ws_fill_futures[order_id] = fut
+
+        try:
+            result = await asyncio.wait_for(fut, timeout=timeout_s)
+            return result
+        except asyncio.TimeoutError:
+            logger.debug(f"WS fill await timed out for orderId={order_id}")
+            return None
+        finally:
+            self._ws_fill_futures.pop(order_id, None)
+
+    # --- listenKey management ---
+
+    async def _create_listen_key(self) -> Optional[str]:
+        """Create a new listenKey via POST /api/v3/userDataStream."""
+        url = "https://api.mexc.com/api/v3/userDataStream"
+        session = self._http_session
+        if not session:
+            logger.error("No HTTP session for listenKey creation")
+            return None
+
+        for attempt in range(3):
+            try:
+                async with session.post(url, headers={
+                    "X-MEXC-APIKEY": self._api_key,
+                    "Content-Type": "application/json",
+                }) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        key = data.get("listenKey", "")
+                        if key:
+                            logger.info(f"listenKey created: {key[:8]}...")
+                            return key
+                    else:
+                        text = await resp.text()
+                        logger.warning(
+                            f"listenKey creation failed ({resp.status}): {text}"
+                        )
+            except Exception as e:
+                logger.warning(f"listenKey creation attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2)
+        return None
+
+    async def _refresh_listen_key(self) -> None:
+        """Keep listenKey alive via PUT /api/v3/userDataStream."""
+        if not self._listen_key:
+            return
+        url = "https://api.mexc.com/api/v3/userDataStream"
+        session = self._http_session
+        if not session:
+            return
+
+        async with session.put(url, headers={
+            "X-MEXC-APIKEY": self._api_key,
+            "Content-Type": "application/json",
+        }, params={"listenKey": self._listen_key}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"listenKey refresh failed ({resp.status}): {text}")
+        self._listen_key_expires = time.monotonic() + 55 * 60
+
+    async def _delete_listen_key(self) -> None:
+        """Delete listenKey via DELETE /api/v3/userDataStream."""
+        if not self._listen_key:
+            return
+        url = "https://api.mexc.com/api/v3/userDataStream"
+        session = self._http_session
+        if not session:
+            return
+
+        try:
+            async with session.delete(url, headers={
+                "X-MEXC-APIKEY": self._api_key,
+            }, params={"listenKey": self._listen_key}) as resp:
+                if resp.status == 200:
+                    logger.debug("listenKey deleted")
+                else:
+                    logger.debug(f"listenKey delete returned {resp.status}")
+        except Exception as e:
+            logger.debug(f"listenKey delete failed: {e}")
+        self._listen_key = None
+
     # ========== Symbol Conversion ==========
 
     def _normalized_to_mexc_sym(self, symbol: str) -> str:
@@ -720,6 +1051,30 @@ class MEXCClient(ExchangeClient):
                 current_rate=Decimal('0'), predicted_rate=None,
                 next_funding_time=datetime.utcnow(), timestamp=datetime.utcnow(),
             )
+
+    def register_fill_future(self, order_id: str) -> Optional[asyncio.Future]:
+        """Pre-register a Future for WS fill notification before placing the order.
+
+        Call this BEFORE place_order() so the WS handler can resolve the future
+        even if the fill arrives before await_fill_ws() is called.
+        Returns the Future if WS stream is active, None otherwise.
+        """
+        if not self._ws_fill_stream_ready:
+            return None
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._ws_fill_futures[order_id] = fut
+        return fut
+
+    def get_fill_stream_status(self) -> dict:
+        """Return status of the WS fill stream for monitoring."""
+        return {
+            "ws_fill_stream_ready": self._ws_fill_stream_ready,
+            "use_ws_fill_stream": self._use_ws_fill_stream,
+            "listen_key_active": self._listen_key is not None,
+            "pending_fill_futures": len(self._ws_fill_futures),
+            "user_data_stream_running": self._ws_user_data_running,
+        }
 
     # --- Trading ---
 
@@ -866,41 +1221,64 @@ class MEXCClient(ExchangeClient):
                         fee_amount = cost * taker_rate             # fee in quote
 
                 # MARKET orders on MEXC may return status=NEW with 0 fills initially.
-                # Poll once to get actual fill status.
+                # Strategy: try WS fill stream first (instant), fall back to REST poll.
                 if order_type == "MARKET" and filled_qty == 0 and order_id:
-                    await asyncio.sleep(0.5)  # Brief wait for MEXC to process
-                    try:
-                        poll_params = {
-                            'symbol': symbol_raw,
-                            'orderId': order_id,
-                            'timestamp': str(int(time.time() * 1000)),
-                        }
-                        poll_query = '&'.join(f"{k}={v}" for k, v in sorted(poll_params.items()))
-                        poll_sig = hmac.new(
-                            self._api_secret.encode(), poll_query.encode(), hashlib.sha256
-                        ).hexdigest()
-                        poll_url = f"https://api.mexc.com/api/v3/order?{poll_query}&signature={poll_sig}"
-                        poll_headers = {"X-MEXC-APIKEY": self._api_key, "Content-Type": "application/json"}
-                        async with session.get(poll_url, headers=poll_headers) as poll_resp:
-                            if poll_resp.status == 200:
-                                poll_data = await poll_resp.json()
-                                poll_status = poll_data.get('status', '').upper()
-                                poll_filled = Decimal(str(poll_data.get('executedQty', '0') or '0'))
-                                poll_cost = Decimal(str(poll_data.get('cummulativeQuoteQty', '0') or '0'))
-                                if poll_filled > 0:
-                                    filled_qty = poll_filled
-                                    cost = poll_cost
-                                    avg_price = cost / filled_qty if filled_qty > 0 else None
-                                    status = status_map.get(poll_status, OrderStatus.FILLED)
-                                    if order.side == OrderSide.BUY:
-                                        fee_amount = filled_qty * Decimal('0.0005')
-                                    else:
-                                        fee_amount = cost * Decimal('0.0005')
-                                    logger.info(
-                                        f"MARKET POLL FILLED: {order.symbol} "
-                                        f"filled={float(filled_qty)} cost=${float(cost):.2f}")
-                    except Exception as e:
-                        logger.warning(f"MARKET poll failed: {e}")
+                    ws_resolved = False
+                    if self._ws_fill_stream_ready and self._use_ws_fill_stream:
+                        # Wait for fill via WebSocket (typically <50ms)
+                        fill_info = await self.await_fill_ws(order_id, timeout_s=2.0)
+                        if fill_info and fill_info.get("status") in ("FILLED", "PARTIALLY_FILLED"):
+                            ws_filled = Decimal(str(fill_info.get("filled_qty", "0") or "0"))
+                            ws_cost = Decimal(str(fill_info.get("cumulative_quote_qty", "0") or "0"))
+                            if ws_filled > 0:
+                                filled_qty = ws_filled
+                                cost = ws_cost
+                                avg_price = cost / filled_qty if filled_qty > 0 else None
+                                status = status_map.get(fill_info["status"], OrderStatus.FILLED)
+                                if order.side == OrderSide.BUY:
+                                    fee_amount = filled_qty * Decimal('0.0005')
+                                else:
+                                    fee_amount = cost * Decimal('0.0005')
+                                ws_resolved = True
+                                logger.info(
+                                    f"WS FILL CONFIRMED: {order.symbol} "
+                                    f"filled={float(filled_qty)} cost=${float(cost):.2f}")
+
+                    if not ws_resolved:
+                        # Fallback: REST poll after 500ms
+                        await asyncio.sleep(0.5)
+                        try:
+                            poll_params = {
+                                'symbol': symbol_raw,
+                                'orderId': order_id,
+                                'timestamp': str(int(time.time() * 1000)),
+                            }
+                            poll_query = '&'.join(f"{k}={v}" for k, v in sorted(poll_params.items()))
+                            poll_sig = hmac.new(
+                                self._api_secret.encode(), poll_query.encode(), hashlib.sha256
+                            ).hexdigest()
+                            poll_url = f"https://api.mexc.com/api/v3/order?{poll_query}&signature={poll_sig}"
+                            poll_headers = {"X-MEXC-APIKEY": self._api_key, "Content-Type": "application/json"}
+                            async with session.get(poll_url, headers=poll_headers) as poll_resp:
+                                if poll_resp.status == 200:
+                                    poll_data = await poll_resp.json()
+                                    poll_status = poll_data.get('status', '').upper()
+                                    poll_filled = Decimal(str(poll_data.get('executedQty', '0') or '0'))
+                                    poll_cost = Decimal(str(poll_data.get('cummulativeQuoteQty', '0') or '0'))
+                                    if poll_filled > 0:
+                                        filled_qty = poll_filled
+                                        cost = poll_cost
+                                        avg_price = cost / filled_qty if filled_qty > 0 else None
+                                        status = status_map.get(poll_status, OrderStatus.FILLED)
+                                        if order.side == OrderSide.BUY:
+                                            fee_amount = filled_qty * Decimal('0.0005')
+                                        else:
+                                            fee_amount = cost * Decimal('0.0005')
+                                        logger.info(
+                                            f"REST POLL FILLED: {order.symbol} "
+                                            f"filled={float(filled_qty)} cost=${float(cost):.2f}")
+                        except Exception as e:
+                            logger.warning(f"MARKET poll failed: {e}")
 
                 logger.info(
                     f"DIRECT ORDER RESULT: {order.symbol} "

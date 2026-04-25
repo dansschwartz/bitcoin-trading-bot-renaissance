@@ -467,6 +467,16 @@ class ArbitrageOrchestrator:
         except Exception as e:
             logger.warning(f"MEXC all-ticker WS failed (tri arb will use REST fallback): {e}")
 
+        # Start MEXC User Data Stream (private WS for instant fill confirmations)
+        ws_cfg = self.config.get('websocket', {})
+        use_ws_fills = ws_cfg.get('use_ws_fill_stream', True)
+        if not paper:
+            try:
+                await self.mexc.start_user_data_stream(use_ws_fills=use_ws_fills)
+                logger.info("MEXC User Data Stream started (WS fill confirmations)")
+            except Exception as e:
+                logger.warning(f"MEXC User Data Stream failed (using REST poll fallback): {e}")
+
         # Contract verification cache (try to populate, degrade gracefully)
         try:
             await self.contract_verifier.refresh_cache()
@@ -1234,6 +1244,10 @@ class ArbitrageOrchestrator:
             relay_client_stats = self.relay_client.get_status() if self.relay_client else {}
         except Exception:
             relay_client_stats = {}
+        try:
+            ws_fill_stream_stats = self.mexc.get_fill_stream_status()
+        except Exception:
+            ws_fill_stream_stats = {}
         return {
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
@@ -1264,6 +1278,7 @@ class ArbitrageOrchestrator:
             "dynamic_seeds": dynamic_seeds_stats,
             "relay_server": relay_server_stats,
             "relay_client": relay_client_stats,
+            "ws_fill_stream": ws_fill_stream_stats,
         }
 
     def _log_final_summary(self):

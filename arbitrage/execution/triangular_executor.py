@@ -298,6 +298,16 @@ class TriangularExecutor:
                     client_order_id=f"{trade_id}_leg{leg_num}",
                 )
 
+            # Pre-register WS fill future for maker legs so the fill
+            # notification is captured even before we call await_fill_ws().
+            # For taker legs (IOC), fills come back in the REST response.
+            _ws_fill_registered = False
+            if not is_taker_leg and hasattr(self.client, 'register_fill_future'):
+                # We don't have the order_id yet — register by client_order_id
+                # is not supported, so we register after the order is placed
+                # (the fill future registration happens inside _wait_and_cancel).
+                pass
+
             leg_start = time.monotonic()
             try:
                 result = await asyncio.wait_for(
@@ -305,6 +315,16 @@ class TriangularExecutor:
                     timeout=15.0,
                 )
                 leg_ms = (time.monotonic() - leg_start) * 1000
+
+                # Register WS fill future immediately after order placement
+                # (before we enter _wait_and_cancel) so WS can capture fills
+                # that arrive between order response and our await call.
+                if (not is_taker_leg
+                    and result.status == OrderStatus.OPEN
+                    and result.order_id
+                    and hasattr(self.client, 'register_fill_future')):
+                    self.client.register_fill_future(result.order_id)
+                    _ws_fill_registered = True
             except asyncio.TimeoutError:
                 logger.error(f"TRI LEG {leg_num} TIMEOUT: {symbol} {side}")
                 # Cancel any outstanding order to prevent stranded assets
@@ -526,25 +546,88 @@ class TriangularExecutor:
 
 
     async def _wait_and_cancel(self, symbol: str, order_id: str, trade_id: str, leg_num: int, max_wait: float = 5.0) -> "OrderResult":
-        """Poll an OPEN order for fills, then cancel if still open. Returns final status."""
-        poll_interval = 1.0
-        elapsed = 0.0
+        """Wait for an OPEN order to fill, then cancel if still open.
+
+        Uses WebSocket fill stream for instant notification when available
+        (typically <50ms), falling back to REST polling (1s intervals).
+        """
         last_result = None
-        while elapsed < max_wait:
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
-            try:
-                last_result = await asyncio.wait_for(
-                    self.client.get_order_status(symbol, order_id),
-                    timeout=5.0,
-                )
-                if last_result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
-                    logger.info(f"TRI LEG {leg_num} filled after {elapsed:.0f}s wait: {last_result.status.value}")
-                    return last_result
-                if last_result.status in (OrderStatus.CANCELLED,):
-                    return last_result
-            except Exception as e:
-                logger.debug(f"Order status poll failed: {e}")
+
+        # Strategy 1: WS fill stream (instant notification)
+        ws_available = (
+            hasattr(self.client, 'await_fill_ws')
+            and hasattr(self.client, '_ws_fill_stream_ready')
+            and self.client._ws_fill_stream_ready
+        )
+
+        if ws_available:
+            # Wait for fill via WS with full timeout — no REST polling needed
+            fill_info = await self.client.await_fill_ws(order_id, timeout_s=max_wait)
+            if fill_info:
+                ws_status = fill_info.get("status", "").upper()
+                if ws_status in ("FILLED", "PARTIALLY_FILLED"):
+                    # Confirm via REST to get accurate fill data
+                    try:
+                        last_result = await asyncio.wait_for(
+                            self.client.get_order_status(symbol, order_id),
+                            timeout=3.0,
+                        )
+                        if last_result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                            logger.info(
+                                f"TRI LEG {leg_num} WS FILL detected in <{max_wait:.0f}s: "
+                                f"{last_result.status.value}"
+                            )
+                            return last_result
+                    except Exception as e:
+                        logger.debug(f"Post-WS status confirm failed: {e}")
+                        # Build result from WS data
+                        ws_filled = Decimal(str(fill_info.get("filled_qty", "0") or "0"))
+                        ws_cost = Decimal(str(fill_info.get("cumulative_quote_qty", "0") or "0"))
+                        ws_avg = ws_cost / ws_filled if ws_filled > 0 else None
+                        return OrderResult(
+                            exchange="mexc", symbol=symbol, order_id=order_id,
+                            client_order_id=None,
+                            status=OrderStatus.FILLED if ws_status == "FILLED" else OrderStatus.PARTIALLY_FILLED,
+                            side=OrderSide.BUY if fill_info.get("side") == "BUY" else OrderSide.SELL,
+                            order_type=OrderType.LIMIT,
+                            requested_quantity=Decimal('0'),
+                            filled_quantity=ws_filled,
+                            average_fill_price=ws_avg,
+                            fee_amount=Decimal('0'),
+                            fee_currency="USDT",
+                            timestamp=datetime.utcnow(),
+                            raw_response=fill_info,
+                        )
+                elif ws_status in ("CANCELED", "CANCELLED"):
+                    return OrderResult(
+                        exchange="mexc", symbol=symbol, order_id=order_id,
+                        client_order_id=None, status=OrderStatus.CANCELLED,
+                        side=OrderSide.BUY, order_type=OrderType.LIMIT,
+                        requested_quantity=Decimal('0'), filled_quantity=Decimal('0'),
+                        average_fill_price=None, fee_amount=Decimal('0'),
+                        fee_currency="USDT", timestamp=datetime.utcnow(),
+                        raw_response=fill_info,
+                    )
+            # WS timed out — fall through to cancel logic below
+        else:
+            # Strategy 2: REST polling fallback
+            poll_interval = 1.0
+            elapsed = 0.0
+            while elapsed < max_wait:
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+                try:
+                    last_result = await asyncio.wait_for(
+                        self.client.get_order_status(symbol, order_id),
+                        timeout=5.0,
+                    )
+                    if last_result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                        logger.info(f"TRI LEG {leg_num} filled after {elapsed:.0f}s REST poll: {last_result.status.value}")
+                        return last_result
+                    if last_result.status in (OrderStatus.CANCELLED,):
+                        return last_result
+                except Exception as e:
+                    logger.debug(f"Order status poll failed: {e}")
 
         # Still open after max_wait — cancel with retry
         logger.warning(f"TRI LEG {leg_num} still OPEN after {max_wait:.0f}s — cancelling order {order_id}")
